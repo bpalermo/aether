@@ -323,17 +323,17 @@ func TestEffectiveHostnames_MultiGatewayUnion(t *testing.T) {
 	assert.ElementsMatch(t, []string{"api.example.com", "api.other.com"}, got, "multi-Gateway union of intersections")
 }
 
-// TestEffectiveHostnames_APIPalermoDev is the api.palermo.dev regression guard:
-// a route declaring "api.palermo.dev" attached to a Gateway with listener
-// "*.palermo.dev" must yield effective host "api.palermo.dev" (never "*").
-func TestEffectiveHostnames_APIPalermoDev(t *testing.T) {
-	gws := []gatewayv1.Gateway{makeGateway("aether-ingress", "edge", "*.palermo.dev")}
+// TestEffectiveHostnames_APIExampleCom is the api.example.com regression guard:
+// a route declaring "api.example.com" attached to a Gateway with listener
+// "*.example.com" must yield effective host "api.example.com" (never "*").
+func TestEffectiveHostnames_APIExampleCom(t *testing.T) {
+	gws := []gatewayv1.Gateway{makeGateway("aether-ingress", "edge", "*.example.com")}
 	m := BuildGatewayListenerHostnames(gws)
 	gwKeys := []string{"aether-ingress/edge"}
 
-	got := EffectiveHostnames([]string{"api.palermo.dev"}, gwKeys, m)
+	got := EffectiveHostnames([]string{"api.example.com"}, gwKeys, m)
 	require.Len(t, got, 1)
-	assert.Equal(t, "api.palermo.dev", got[0], "api.palermo.dev regression: must not become *")
+	assert.Equal(t, "api.example.com", got[0], "api.example.com regression: must not become *")
 }
 
 // --- Wildcard hostname intersection (HTTPRouteListenerHostnameMatching /

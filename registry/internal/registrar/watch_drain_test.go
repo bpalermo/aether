@@ -200,7 +200,7 @@ func TestWatchLoop_ServerDrainGoawayIsNotAnError(t *testing.T) {
 	require.Equal(t, true, drain["server_drain"])
 
 	// Pin the classifier against real grpc-go output rather than a hand-written
-	// string: this is the status message the agent saw on talos-main (#718).
+	// string: this is the status message the agent saw on the reference cluster (#718).
 	gotErr, ok := drain["error"].(string)
 	require.True(t, ok, "the INFO line must carry the same error attr the ERROR line did; got %v", drain)
 	require.Contains(t, gotErr, "rpc error: code = Unavailable")

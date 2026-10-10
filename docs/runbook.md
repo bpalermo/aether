@@ -3520,7 +3520,7 @@ Deployment once: its image is now written by digest
 is not rolled: its pod template is unchanged. No selector changed.
 
 Before and after the upgrade (the prober's namespace; `aether-test` on
-talos-main):
+the reference cluster):
 
 ```bash
 NS=aether-test
@@ -3755,7 +3755,7 @@ kubectl get pods -A --field-selector status.phase!=Running,status.phase!=Succeed
 
 **Verdict.** All nodes comfortably under the line and nothing `Terminating` →
 roll. A node over it → either move the tenant workload off first (the platform
-did exactly this on 2026-09-19, spreading the o11y stack and taking w01 from
+did exactly this on 2026-09-19, spreading the observability stack and taking node A from
 88 % to 66 %), or accept that that node's DaemonSet pods may sit `Pending` and
 watch them specifically. A pod stuck `Terminating` → resolve it first via
 §8 "A pod is stuck `Terminating`"; do not start a roll on top of it.
@@ -3891,7 +3891,7 @@ The netns key is still stamped (the access log's `source_netns` reads it).
 While the listeners stamped both keys, **rolling back below `0.92.28` was
 safe**: a proxy whose listeners stamp both keys matches correctly against
 clusters from *either* side of release two. This issue needed exactly that once
-— release one was rolled back on talos-main on 2026-09-19. That safety ended
+— release one was rolled back on the reference cluster on 2026-09-19. That safety ended
 with #1165 (next section). Verification and the runtime failure signature are
 under *"#815 release two"* in §8.
 
@@ -4028,7 +4028,7 @@ and #979 merged on 2026-09-29; the re-soak of the merged build:
   - There was no Envoy crash across 6 hot restarts per node.
 - **The new-ServiceAccount steps, wedge gates, stateless-reset gate and L4 gates were all at zero.** h3 costs 1.18× h2 per request.
 - **The 9 liveness errors are a new race (#1085).**
-  - In the TRIPLE, main-worker-05's agent was down while its proxy forked a successor.
+  - In the TRIPLE, node E's agent was down while its proxy forked a successor.
   - The successor's CDS and LDS initial fetches timed out (15 s each), and Envoy started workers with no listeners.
   - The parent then drained, so `127.0.0.1:18081` refused new connections for 1.6 s.
   - A successor that logs `initial fetch timed out for …Listener` next to `starting workers` is this case.
@@ -4099,7 +4099,7 @@ new pair `observed east-west QUIC pair (ODCDS); building its twin cluster=…`.
 `I × S`, where `S` is the node's eligible dependency-set services (the line no
 longer carries a service count since #979), and on a real fleet much less (rev242,
 with an allow-list of 2: 118 possible, 2 used; without the allow-list the ceiling on
-talos-main is 8–14 SAs × ~19 services ≈ 150–270 per node, the pairs actually dialled
+the reference cluster is 8–14 SAs × ~19 services ≈ 150–270 per node, the pairs actually dialled
 stay the same).
 
 **What a healthy node reads.** `observed_pairs` ≈ the (source ServiceAccount,
@@ -4335,7 +4335,7 @@ it:
   silent on an unchanged resource. The per-name subscription then waited out its 15 s
   initial-fetch timeout and Envoy logged `cm odcds: cluster quic:… not found during
   on-demand discovery`, which fails any request still waiting on the name. That was
-  main-worker-03 at 15:45:04.7, 15 s after its loader's first request. The agent now
+  node C at 15:45:04.7, 15 s after its loader's first request. The agent now
   re-sends a subscribed twin it already sent (`cache.SnapshotCache.CreateDeltaWatch`).
 
 The invariant, with #1035/#1036: for a well-formed twin name of an eligible
@@ -4415,7 +4415,7 @@ pool key has carried the source identity instead of the downstream connection si
 
 The inbound QUIC listener reads with UDP GRO (`prefer_gro: true`, off by Envoy default
 for listeners). It writes with Envoy's automatic GSO batch writer, which is used when
-the kernel has `UDP_SEGMENT` (Linux ≥ 4.18; talos 6.18). A kernel without UDP GRO
+the kernel has `UDP_SEGMENT` (Linux ≥ 4.18; Talos 6.18). A kernel without UDP GRO
 logs `GRO requested but not supported by the OS` once per listener and reads without
 it. That warning costs performance, never correctness.
 
@@ -4473,7 +4473,7 @@ mesh-wide — it is not an escape hatch.
 **Symptom.** The first pod of a ServiceAccount that is new on a node gets
 `503` with response flag `NC` (no cluster) for ~15 s on every request to every
 QUIC destination, then recovers on its own. Other callers on the node
-are unaffected; h2 destinations are unaffected. On talos (rev242) it was 1,060
+are unaffected; h2 destinations are unaffected. On the reference cluster (rev242) it was 1,060
 client-visible 503/NC in 11 s when the soak's load generators started.
 
 Since #1020 every twin is a late twin, because it is built on the pair's first
@@ -4581,7 +4581,7 @@ carry:
 
 | label | value | set by |
 |---|---|---|
-| `node` | the **Kubernetes node** the prober pod runs on (`main-worker-03`): the **source** of the probe, never where it went | the collector, from the resource's `k8s.node.name` (chart env `OTEL_RESOURCE_ATTRIBUTES`, downward API `spec.nodeName`) |
+| `node` | the **Kubernetes node** the prober pod runs on (`node-c`): the **source** of the probe, never where it went | the collector, from the resource's `k8s.node.name` (chart env `OTEL_RESOURCE_ATTRIBUTES`, downward API `spec.nodeName`) |
 | `pod` | the prober pod (`prober-h2mzs`) | the prober, as a datapoint attribute |
 | `tier` | `liveness`, `reachability`, `mesh_dns` | the prober |
 | `target` | the probed name (`egress`, `echo.aether-test.aether.internal:18081`, …): what was asked for, not the endpoint that would have answered | the prober |
@@ -4605,11 +4605,11 @@ failure line below, not a label. In series from before #1252, part of the mesh_d
 
 **Until #1041, `node` held the POD name** (`node="prober-h2mzs"`). The prober's resource
 carried `host.name`, and for a pod that is not hostNetwork that is the pod name. The
-talos collector's `transform/promote` set `node` from `host.name` before it looked at
+reference-cluster collector's `transform/promote` set `node` from `host.name` before it looked at
 `k8s.node.name`. A pod that had since been rolled away could not be placed on a node
 (#1040). Two changes fix this: the prober no longer sets `host.name`, and the
 collector now prefers `k8s.node.name`
-(bpalermo/k8s-talos-main#128). Series from before the
+(the platform's GitOps repository). Series from before the
 fix still show a pod name in `node`. For any window that spans the change, group by
 `pod`, which exists only on series from after the fix, or translate the old values with
 `kubectl -n aether-test get pods -o wide` while those pods still exist.
@@ -4634,7 +4634,7 @@ for a dead pod's frozen burst. Guard `on (node, pod)` instead.
 stdout: a fixed marker, then one JSON object:
 
 ```
-AETHER_PROBE_FAIL {"t":"2026-09-28T04:37:52.114Z","tier":"mesh_dns","target":"echo.aether-test.aether.internal:18081","result":"timeout","err":"Get \"http://echo.aether-test.aether.internal:18081/\": context deadline exceeded","elapsed_ms":2000.4,"phase":"first_byte","reused":false,"conn_ms":412.6,"dns_ms":0.9,"connect_ms":411.5,"tls_ms":-1,"write_ms":0.1,"ttfb_ms":1587.6,"dial":"10.96.14.7:18081","remote":"10.96.14.7:18081","local":"10.244.3.114:49292","trace_id":"9fa32b3befe77ea2253e8831d3472fa8","pod":"prober-h2mzs","node":"main-worker-01","n":1,"truncated":false}
+AETHER_PROBE_FAIL {"t":"2026-09-28T04:37:52.114Z","tier":"mesh_dns","target":"echo.aether-test.aether.internal:18081","result":"timeout","err":"Get \"http://echo.aether-test.aether.internal:18081/\": context deadline exceeded","elapsed_ms":2000.4,"phase":"first_byte","reused":false,"conn_ms":412.6,"dns_ms":0.9,"connect_ms":411.5,"tls_ms":-1,"write_ms":0.1,"ttfb_ms":1587.6,"dial":"10.96.0.7:18081","remote":"10.96.0.7:18081","local":"10.0.3.114:49292","trace_id":"9fa32b3befe77ea2253e8831d3472fa8","pod":"prober-h2mzs","node":"node-a","n":1,"truncated":false}
 ```
 
 - `t` is the client-side timestamp. Line it up against the proxy's hot-restart
@@ -4693,8 +4693,8 @@ differ in the 16 that follow, and a search for the header exactly as the prober 
 finds nothing. Two rows of one mesh_dns probe, read from a test cluster on 2026-10-08:
 
 ```
-reporter=source       node_name=main-worker-01  traceparent=00-7562d29beca08c9375101ae165a94196-5fe29c53fe07c4da-00  downstream_remote_address=10.244.3.114:47098  upstream_host=10.244.4.106:18008
-reporter=destination  node_name=main-worker-02  traceparent=00-7562d29beca08c9375101ae165a94196-64629e6a312a85b9-00  upstream_host=127.0.0.1:8080
+reporter=source       node_name=node-a  traceparent=00-7562d29beca08c9375101ae165a94196-5fe29c53fe07c4da-00  downstream_remote_address=10.0.3.114:47098  upstream_host=10.0.4.106:18008
+reporter=destination  node_name=node-b  traceparent=00-7562d29beca08c9375101ae165a94196-64629e6a312a85b9-00  upstream_host=127.0.0.1:8080
 ```
 
 - The `reporter:source` row is the prober's own node proxy. Its `upstream_host` is the
@@ -4723,7 +4723,7 @@ them, and `truncated:true` marks the 20th). Later failures in that minute are on
 counted, and when the minute closes they produce ONE summary line under the same marker:
 
 ```
-AETHER_PROBE_FAIL {"t":"…","tier":"mesh_dns","result":"timeout","suppressed":122,"window_s":60,"window_start":"…","pod":"prober-h2mzs","node":"main-worker-01"}
+AETHER_PROBE_FAIL {"t":"…","tier":"mesh_dns","result":"timeout","suppressed":122,"window_s":60,"window_start":"…","pod":"prober-h2mzs","node":"node-a"}
 ```
 
 A summary's `t` is when it was written, and the failures it counts lie between
@@ -4885,7 +4885,7 @@ gone, and the instant read returns nothing at all rather than the exit it record
 mesh-dns is every managed pod's resolver, so a CFS-throttled period on it is added
 to the DNS latency of every lookup in flight on that node. Until chart 2.4.8 it ran
 with a `25m` request and a `100m` limit and was throttled in 8.7 % of 100 ms periods
-at steady state (talos w05, #1253) while *averaging* ~24.5m: its CPU comes in bursts,
+at steady state (node E of the reference cluster, #1253) while *averaging* ~24.5m: its CPU comes in bursts,
 and a burst that spends the period's 10 ms of quota parks the daemon until the next
 period. Since #1253 it has a `50m` request and **no CPU limit** by default, with
 `GOMAXPROCS=2` pinned in the chart (`agent.meshDnsDaemon.goMaxProcs`).
@@ -5018,7 +5018,7 @@ request = limit = `100m` CPU. Since #1335 it keeps the `100m` request and has **
 limit**.
 
 **The throttling could not be read from metrics, and it will not be for any
-sub-second init container.** On talos-main (2026-10-07, cAdvisor scraped every ~60 s
+sub-second init container.** On the reference cluster (2026-10-07, cAdvisor scraped every ~60 s
 for the `aether-.*` namespaces) there is no `container_cpu_cfs_*` and no
 `container_cpu_usage_seconds_total` series for `container="cni-install"` at all — nor
 for the proxy pod's `install-supervisor` — in the 45 h cAdvisor had been scraped,
@@ -5070,7 +5070,7 @@ kubectl get ds -n aether-system aether-agent \
 The other init containers, checked in the same pass: the proxy pod's
 `install-supervisor` rendered **no `resources` at all** until chart 2.4.13 (no limit,
 so nothing to throttle, but also no request: it ran at the minimum CFS weight and was
-invisible to request accounting; ≤ 1 s wall on talos-main). Since #1344 it has a
+invisible to request accounting; ≤ 1 s wall on the reference cluster). Since #1344 it has a
 `100m` / `32Mi` request, a `64Mi` memory limit and no CPU limit
 (`proxy.supervisor.resources`); the self-copy it does costs about 50 ms of CPU and
 peaks at 14 MB RSS (a workstation build of the binary, `/usr/bin/time -v`). The
@@ -5088,9 +5088,9 @@ kubectl get ds -n aether-system aether-proxy \
 ### Edge Envoy worker count
 
 Until chart 2.4.13 the edge `envoy` container was started without `--concurrency`, so
-it ran one worker per node core (4 on talos-main) for about 12m of CPU on average.
+it ran one worker per node core (4 on the reference cluster) for about 12m of CPU on average.
 Since #1344 the chart passes `--concurrency` from `edge.concurrency` (default `2`, the
-node proxies' count on talos-main; `0` omits the flag). Unlike `proxy.concurrency`,
+node proxies' count on the reference cluster; `0` omits the flag). Unlike `proxy.concurrency`,
 changing it is an ordinary rolling update of the edge Deployment: there is no hot
 restart and nothing shared between the old and the new replica.
 
@@ -5136,8 +5136,8 @@ address for the whole node, so whoever answers it may be another proxy pod's Env
 successor that took the admin over the hot-restart protocol, or a *fresh* Envoy the new
 pod started after its successor crashed. Before #1127 the old pod drained whatever
 answered. On 2026-10-01 that was the new pod's fresh epoch-0 Envoy, which then added no
-listeners for pods created on the node until the next handoff (about 12 min on w01 and
-w03). Now every supervisor starts its Envoys with `--admin-address-path
+listeners for pods created on the node until the next handoff (about 12 min on node A and
+node C). Now every supervisor starts its Envoys with `--admin-address-path
 <ready-marker dir>/envoy-admin-address.<pod>.<nonce>`, a per-supervisor nonce that
 `/server_info` echoes as `command_line_options.admin_address_path`. The drain is sent only
 when `/server_info` returns that nonce **and** an epoch whose child this supervisor still
@@ -5298,7 +5298,7 @@ running, and the DaemonSet deletes an idle pod. So during a rolling upgrade:
 **Symptom (chart <= 2.4.8).** `ext_authz` errors on a node right after its proxy pod was
 replaced: `envoy_http_<stat_prefix>_ext_authz_error_total` goes up by a few, and with
 `failureMode: DENY` those requests got a 403. The prober's `AetherAuthzCanaryErrors` fires
-on it. It is worst on the first roll onto a new sidecar image. On talos-main on 2026-10-05
+on it. It is worst on the first roll onto a new sidecar image. On the reference cluster on 2026-10-05
 (OPA 1.21.1, chart 2.4.8) the `authz` container started 7–13 s after `proxy` in every new
 pod, because the kubelet starts regular containers in order without waiting and the new
 image had to be pulled (10.4 s on worker-01). The new Envoy hot-restarted and took the
@@ -5360,7 +5360,7 @@ does not mean the stat is filtered:
 
 - Envoy's OTLP stats sink exports a counter only after it was first incremented. So
   `ok`, `denied` and `error` exist only for nodes whose proxy has run a check with that
-  result. On talos-main that is the node carrying the canary. The first sample appears at
+  result. On the reference cluster that is the node carrying the canary. The first sample appears at
   its value, and `increase()` reads 0 for that first jump. An alert on these needs the
   "present now, absent 10 minutes ago" arm next to `increase()`:
   `sum(m unless m offset 10m) > 0`.
@@ -5593,7 +5593,7 @@ and every child wait for a parent reply (stats, listen-socket hand-off, admin sh
 keeps draining the forwarded datagrams and is bounded, so neither main thread can park
 on the other. It also covers the `duplicateParentListenSocket` (LDS add inside the
 window) case the stats-only workaround could not. On kind the forced fault wedged 0 of 8
-restarts with it; talos rev252 ran the e2e with the workaround off.
+restarts with it; the reference cluster's rev252 ran the e2e with the workaround off.
 
 **The workaround**, `proxy.hotRestart.skipParentStats`, is now **off** by default (it was
 on from #1056 until the patch landed). It passes Envoy `--skip-hot-restart-parent-stats`,
@@ -5649,7 +5649,7 @@ in the **same pod** (DaemonSet pods are `restartPolicy: Always`), so its `restar
 goes up by one and its `lastState.terminated.exitCode` is 1. Nothing re-execs in place,
 and the DaemonSet does not replace the pod. The kind reproduction shows `restartCount 1`.
 Only a pod that is already terminating (it has a `deletionTimestamp`) does not get its
-container restarted. The talos reading of `restartCount 0` after #1050 is therefore not
+container restarted. The reference-cluster reading of `restartCount 0` after #1050 is therefore not
 what this code does. Read the count by container name, not by index. Before chart 2.4.9
 `containerStatuses` held `authz` and `proxy` sorted by name, so with the ext_authz sidecar
 enabled `[0]` was `authz`. Since #1275 `authz` is a native sidecar and is listed under
@@ -5675,15 +5675,15 @@ admin keeps answering, `child_silent` stays 0).
 What the 2026-10-01 soak established:
 
 - **It is node-local and not specific to the handoff.** The same shape recurs at
-  0.5–1 s on main-worker-04 and main-worker-05, dozens of times in 8 h, including in the
+  0.5–1 s on node D and node E, dozens of times in 8 h, including in the
   no-roll window. The shape is destination-side h3 requests whose `upstream_service_time`
-  to the local app is about 1 s on every pod at once. It is almost never seen on w01–w03.
+  to the local app is about 1 s on every pod at once. It is almost never seen on nodes A–C.
   Envoy's worker watchdog (`envoy_server_worker_<n>_watchdog_miss_total`, ≥ 200 ms
-  without a loop iteration) moved only on w04 and w05. A handoff is the tail of that
+  without a loop iteration) moved only on node D and node E. A handoff is the tail of that
   distribution.
-- **The successor's workers are the ones that stall.** At w04's 02:16 roll, workers 0
+- **The successor's workers are the ones that stall.** At node D's 02:16 roll, workers 0
   and 3 of the new epoch missed the watchdog between 02:16:45 and :50, which is the
-  stall. A request a w04 source received at 46.618 reached its w02 destination at
+  stall. A request a node D source received at 46.618 reached its node B destination at
   49.099, 2.5 s later, and was then served in 6 ms. The new epoch's h3 connects took
   250 ms–2.5 s for 40% of them, against ≤ 100 ms for most of the parent's.
 - **It is not CPU the profiler can see.** Pyroscope (on-CPU only) shows both Envoys at
@@ -5844,14 +5844,14 @@ How to tell which class you have, and where to go from there:
 
 ### Sizing nodes for a proxy hot restart
 
-The measurements in this section come from talos-main (5 workers, 4 cores each, arm64)
+The measurements in this section come from the reference cluster (5 workers, 4 cores each, arm64)
 on 2026-10-01 and 2026-10-02. They are readings from that cluster under the soak load,
 not constants. Take the method, then measure your own nodes.
 
 **What a handoff costs.** For the length of a hot restart two Envoy processes run on
 the node: the successor's init (about 3–15 s, gated on xDS) plus
 `proxy.hotRestart.parentShutdownTime` (15 s by default), during which the parent drains.
-On talos-main a handoff cost about 10–13 CPU-seconds of Envoy CPU on top of steady
+On the reference cluster a handoff cost about 10–13 CPU-seconds of Envoy CPU on top of steady
 state, and up to about 1.9 cores in the 5 s after the successor started its workers,
 on a proxy that used 0.8–0.9 core in steady state. Rule of thumb: **keep about one core
 of headroom on each node for the roughly 20 s of a handoff.**
@@ -5895,12 +5895,12 @@ them with the commands in §7 "Pre-flight: node headroom before a roll (#812)".
 **What to size.**
 
 - **Workload CPU requests.** The scheduler places pods by request, not by use. Pods with
-  token requests (the talos test services request `10m`) are packed onto whichever node
-  shows room, and on talos-main one node ended up with about 4× the steady-state
+  token requests (the reference-cluster test services request `10m`) are packed onto whichever node
+  shows room, and on the reference cluster one node ended up with about 4× the steady-state
   starvation of its peers. Give workloads requests that reflect what they actually use,
   so the scheduler spreads them.
 - **`proxy.resources.requests.cpu`** (chart default `500m`). Raising it to `800m` on
-  talos-main cut steady-state starvation on the two hot nodes by 26–35%. It buys
+  the reference cluster cut steady-state starvation on the two hot nodes by 26–35%. It buys
   cgroup weight (the proxy wins more of a contended CPU), not capacity: the stall during
   a handoff was unchanged within noise. The proxy has no CPU limit on purpose, and
   should not get one. Remember that during a DaemonSet roll the surge pod's request and
@@ -5910,13 +5910,13 @@ them with the commands in §7 "Pre-flight: node headroom before a roll (#812)".
   jobs) use exactly the headroom a handoff needs. Move them to a quieter node, or keep
   them off the nodes that carry the mesh's busiest services.
 - **`proxy.hotRestart.drainTime`** (default `10s`). Do not stretch it to spread the cost.
-  At `30s` on talos-main the peak was no lower, there were more starved seconds, Envoy
+  At `30s` on the reference cluster the peak was no lower, there were more starved seconds, Envoy
   spent about 40% more CPU per handoff, and rolls took 70% longer. Keep the default.
 - **`proxy.concurrency`** (default `0`: Envoy's own default, one worker per core unless
   the container has a CPU limit or a restricted CPU mask, see below). In an A/B, 2 workers
   instead of 4 cut handoff starvation per thread by about 27% and steady-state
   starvation by 57–81%. **Do not change it on a live mesh** until both prerequisites
-  are deployed. On talos-main a 4→2 change crashed successors (`Mismatched worker
+  are deployed. On the reference cluster a 4→2 change crashed successors (`Mismatched worker
   index` in `HotRestartingChild::onForwardedUdpPacket`,
   [#1126](https://github.com/bpalermo/aether/issues/1126)), and the old pods'
   self-drain drained the new pods' Envoys
@@ -6044,7 +6044,7 @@ generation that held the connection.
 
 ```logsql
 # Which generation served, or failed, the requests of a roll window on one node
-log_name:aether_access_logs AND reporter:destination AND node_name:"main-worker-04" AND _time:[<start>, <end>]
+log_name:aether_access_logs AND reporter:destination AND node_name:"node-d" AND _time:[<start>, <end>]
   | stats by (proxy_epoch, response_code, response_flags) count()
 
 # Requests that paid for a new inbound connection and a slow handshake
@@ -6109,7 +6109,7 @@ nsenter --net="/proc/${PID}/ns/net" nstat -az UdpRcvbufErrors
 Both are cumulative as well, but they are read by you at two instants, so the
 difference is the window's drops.
 
-Nothing in this repository or in the talos-main alert rules uses the Envoy stat
+Nothing in this repository or in the reference-cluster alert rules uses the Envoy stat
 today. A larger receive buffer is not the fix for drops during a starved
 handoff: see #1332 (it removes the drops and changes neither the slow requests
 nor the failures) and "Sizing nodes for a proxy hot restart" above.
@@ -6136,7 +6136,7 @@ outlasts the 15 s parent-shutdown window.
 
 - `proxy.hotRestart.drainStrategy` (default **`gradual`**; `immediate` is an opt-in)
   passes Envoy `--drain-strategy`. `immediate` puts a GOAWAY on every response from the
-  start of the drain, but on talos-main (2026-09-28) it made the #1054 resets **worse**
+  start of the drain, but on the reference cluster (2026-09-28) it made the #1054 resets **worse**
   (4/8/0 per roll vs 1–3 per run under gradual): more parent connections close inside
   the drain window, and those closes are what sources then see reset. It is also
   server-wide (h2 and h3 reconnections bunch at drain start; LDS and pod-termination
@@ -6252,8 +6252,8 @@ were of this kind:
 
 | source | source agent | drain mark (destination) | requests | proxy reconnected |
 |---|---|---|---|---|
-| main-worker-02 (proxy also rolling, parent epoch serving) | down 05:41:08, serving xDS 05:41:20.51 | 05:41:20.14 (w05) | 05:41:23.92, 24.04 | child CDS 05:41:22.51 |
-| main-worker-04 | down 05:41:24.45, new pod 05:41:33.16, serving xDS 05:41:39.93 | 05:41:36.42 (w02) | 05:41:39.78–39.97 | **05:41:48.34**, 8.4 s after the agent was serving |
+| Node B (proxy also rolling, parent epoch serving) | down 05:41:08, serving xDS 05:41:20.51 | 05:41:20.14 (node E) | 05:41:23.92, 24.04 | child CDS 05:41:22.51 |
+| Node D | down 05:41:24.45, new pod 05:41:33.16, serving xDS 05:41:39.93 | 05:41:36.42 (node B) | 05:41:39.78–39.97 | **05:41:48.34**, 8.4 s after the agent was serving |
 
 The 8.4 s is Envoy's xDS reconnect backoff: fully jittered exponential, 500 ms base,
 30 s cap (`xds_manager_impl.cc` `SubscriptionFactory::RetryInitialDelayMs` /
@@ -6277,12 +6277,12 @@ restarts, for 1–9.6 s each, and once cost 56 × 503. The 30 s default mostly h
 reconnecting late. The agent now opens its xDS socket only once the snapshot carries
 every local certificate (bounded at 5 s; `local workloads' client certificates
 delivered; serving the complete snapshot`, or a WARN with `awaiting_client_cert` on
-timeout). On talos-main the certificates already arrive before the registry load
+timeout). On the reference cluster the certificates already arrive before the registry load
 finishes (all five TRIPLE agents on 2026-10-01: 0.3–2.6 s before), so the wait costs
 nothing there.
 
 **What it does not cover:** the agent's own outage. A drain mark that lands while the
-source agent is down is heard only once the new agent serves xDS: on w04 that was
+source agent is down is heard only once the new agent serves xDS: on node D that was
 15.5 s after the old agent stopped (8.7 s pod replacement, then 6.8 s to identity,
 the registrar watch and the first registry load). The two-phase drain gives the
 destination only its preStop window, so a source agent restart that overlaps a
@@ -6403,7 +6403,7 @@ How the expression above works:
 - `count_values without () ("revision", aether_registrar_snapshot_revision)`
   turns each replica's revision into a `revision` label. `without ()` keeps all
   of the series' labels, so the expression does not depend on the name of the
-  replica label (`node` carries the pod name on talos-main).
+  replica label (`node` carries the pod name on the reference cluster).
 - Multiplying the hash gauge by that (`ignoring (revision) group_left
   (revision)`) gives one series per replica: value = hash, labelled with the
   replica's revision. A replica with no revision has no match and drops out.
@@ -6420,7 +6420,7 @@ How the expression above works:
 hash in one callback from one read of the snapshot, so the pair in an export
 always belongs to the same contents. The OTel SDK stamps each instrument's data
 point separately (`timestamp()` of two registrar gauges differed by at most 4 ms
-over 24 h on talos-main), both travel in one OTLP request, the collector's batch
+over 24 h on the reference cluster), both travel in one OTLP request, the collector's batch
 processor does not split a request, and Prometheus's OTLP receiver commits a
 request as one append. The expression matches the two metrics on labels, so it
 needs none of that to be exact. A pipeline that did deliver them separately
@@ -6441,7 +6441,7 @@ The alert is `AetherRegistrarSnapshotDiverged`
 (`docs/observability/registrar-alerts.yml`, `for: 3m`). Its promtool tests are
 `docs/observability/registrar-alerts_test.yml` (`bazel test
 //:observability_rules_test`), and more in the GitOps repo
-(`clusters/talos-main/prometheus/rules_test.yaml`).
+(`clusters/<cluster>/prometheus/rules_test.yaml`).
 
 **A replica is its pod, and a pod that is gone must not be compared (#1560).**
 Since chart 2.5.3 the registrar's series carry `instance`, its pod name, so the
@@ -6905,7 +6905,7 @@ not-yet-upgraded cluster until both are done.
 Symptom: the proxy container restarts with a SIGBUS or SIGSEGV whose backtrace ends in
 `quic::QuicConnection::OnCanWrite` / `CanWrite` (or a QUIC alarm), shortly after a
 CDS push removed a `quic:` twin while requests were still in flight on it. Seen on
-talos-main w01 when the pre-#1073 fetch-window prune removed held twins.
+node A of the reference cluster when the pre-#1073 fetch-window prune removed held twins.
 
 Cause: the per-cluster `PersistentQuicInfoImpl` (connection helper and clock, alarm
 factory, QUIC config) was owned by the worker's thread-local `ClusterEntry`, while the
@@ -7057,7 +7057,7 @@ so those three go NotReady the instant they are known to lack an identity.
 That asymmetry is a fix, not an inconsistency. On the rev210 upgrade roll
 (2026-09-07 20:03:45Z) the registrar carried the agent's 2 m dwell, so a registrar Pod
 was Ready — and in its Service's endpoints — before it had an SVID, and an agent on
-`main-worker-01` that dialled it logged
+`node-a` that dialled it logged
 `transport: authentication handshake failed: x509svid: could not get X509 bundle`.
 
 The `--spire-wait-warn-after` flag is a **logging** threshold only; since #740 PR 4 it no
@@ -7081,8 +7081,8 @@ NotReady is the point: stop scheduling pods onto a node that cannot give them an
 identity. Since #740 the agent's own taint remover **holds** that taint while any
 readiness gate is failing, instead of clearing it 50ms after the guard arms it — so
 **spire-server, spire-agent and the SPIFFE CSI driver must tolerate the taint**
-(`spire.waitWarnAfter`'s note in `values.yaml`; applied on talos-main in
-k8s-talos-main #45). Without those tolerations the outage fences out its own cure.
+(`spire.waitWarnAfter`'s note in `values.yaml`; applied on the reference cluster in
+the platform's GitOps repository). Without those tolerations the outage fences out its own cure.
 
 **The node keeps serving.** While the agent has no SVID it does NOT open the xDS socket
 — it logs `holding xDS until this agent has an SVID; Envoy keeps its current
@@ -7124,7 +7124,7 @@ connection catching up, not the registrar, so do not go reading registrar logs f
 Reserve that for `registrar has no identity yet; retrying`, which is only ever logged
 once this agent's identity has been settled for more than a few seconds. On the rev211
 deploy roll (2026-09-07 20:47Z) both lines read `registrar has no identity yet`, and
-`main-worker-02` published an endpoint-less snapshot and logged **316** prober
+`node-b` published an endpoint-less snapshot and logged **316** prober
 `http_error` in ~30s while both registrar replicas had been Ready for 43 seconds. The
 wait is bounded by the same 15s budget as before, so a registrar that is genuinely
 unreachable still ends at `registry unavailable for initial snapshot; starting with
@@ -8075,7 +8075,7 @@ TCPRoute-weighted chains, the any-port shim, TLSRoute SNI chains and the scoped-
   the UDP capture listener (no per-datagram log), and the inbound side.
 - **A separate stream** because the shapes differ: no method, path, authority, status or
   request id. It deliberately carries **no `reporter`** attribute. The collector's
-  identity counters (`aether_access_log_*`, k8s-talos-main otel-collector values) select
+  identity counters (`aether_access_log_*`, the otel-collector values in the platform's GitOps repository) select
   on `reporter`, because `log_name` is a resource attribute their transform cannot see,
   and an L4 record must not enter the HTTP request counters.
 - **Fields:** `pod_name`, `pod_namespace`, `source_netns`, `source_spiffe_id` (the source),
@@ -8126,7 +8126,7 @@ section are that harness's).
 
 Fixing (a) alone **hides** (b): the leaked connection would then leave through the
 right endpoint's ORIGINAL_DST from a pod IP and succeed silently, and this counter would
-go quiet for the wrong reason. So (b) is proven on talos first, with (a) still in place.
+go quiet for the wrong reason. So (b) is proven on the reference cluster first, with (a) still in place.
 
 **The proof signal: TCP-floor connections on pods that serve no raw-TCP port.** The
 inbound listener's DEFAULT chain is the TCP floor (`in_tcp_<namespace>_<pod>`, stat prefix
@@ -8176,7 +8176,7 @@ whole join in one record (see "L4 hops" above): the source pod, the dialled VIP:
 the chosen `tcp:` cluster, the intended `upstream_host` and the rejection. Before it,
 the join was three counters: the `verify_san` +1 on node N, a new or incremented
 `in_tcp_<namespace>_<pod>` series for a pod on N, and that pod's `inbound_ssl_connection_error`
-climbing in the same minute (the 2026-09-27 16:37Z w04 event in #1007 is the worked
+climbing in the same minute (the 2026-09-27 16:37Z node D event in #1007 is the worked
 example).
 
 **Reading it.**
@@ -8184,7 +8184,7 @@ example).
 | build | expected |
 |---|---|
 | rev242 and earlier (no thread-self patch) — the negative control | non-zero on the prober and on every workload of the soak (its HTTP services, load generators, dialers and echo servers); ~1 burst per node per hour; `verify_san` ticks on `tcp-echo`/`mixed-svc` (23 over the rev242 soak) |
-| rev243 (unpatched, 1h47m generation, 2026-09-27 22:53Z–09-28 00:39Z) | 6 stray floor connections, all on `prober` pods (w05 2, w03 3, w04 1), and 1 `verify_san` on w03 `tcp-echo` |
+| rev243 (unpatched, 1h47m generation, 2026-09-27 22:53Z–09-28 00:39Z) | 6 stray floor connections, all on `prober` pods (node E 2, node C 3, node D 1), and 1 `verify_san` on node C `tcp-echo` |
 | first proxy with the #1022 patch, #1007 still unfixed | **no new series and no increments** after every node's proxy has rolled onto it (series from older generations age out with them) |
 
 A landing that persists on the patched proxy **refutes** #1022 as the (only) cause:
@@ -8564,7 +8564,7 @@ unpublish); it finishes once the plugin is back.
 The CNI plugin binary exports no telemetry of its own. Until #1166 it linked the
 OTel SDK and the OTLP exporters (18 of its 37 modules, 3.2 MB of its 18.7 MB) and
 flushed them before every exit, which cost every pod ADD/DEL ~6 ms with a reachable
-collector and **2 s** with an unreachable one — the #950 state talos-main was in for
+collector and **2 s** with an unreachable one — the #950 state the reference cluster was in for
 weeks. Nothing queried its spans. What only the plugin can see now reaches the
 collector through the agent:
 
@@ -8615,7 +8615,7 @@ certificate to present), in edge mode, or for a pod with no netns.
 > put both clusters behind the single `/healthz/health_<namespace>_<pod>` path. The agent
 > could then only see their conjunction, so "the application is fine but the
 > mesh inbound never came up" was indistinguishable from "the application died".
-> On 2026-09-19 main-worker-03 published inbound listeners with an EMPTY trust
+> On 2026-09-19 node C published inbound listeners with an EMPTY trust
 > domain, the conjunction went 503, and four **already-serving** endpoints were
 > demoted and never re-promoted. A signal meant to gate a *first* promotion had
 > become a permanent trap.
@@ -8683,7 +8683,7 @@ form is `spiffe://aether.internal/ns/…`.
 # Any proxy subscribing to a trust-domain-less secret. Should be EMPTY, always.
 {__name__=~"envoy_sds_spiffe_ns_.*"}
 
-# The specific shape seen on main-worker-03, 2026-09-19:
+# The specific shape seen on node C, 2026-09-19:
 envoy_sds_spiffe_ns_aether_test_sa_.*_init_fetch_timeout_total == 1
 # with update_attempt == 1 and NO update_success.
 ```
@@ -8700,7 +8700,7 @@ inbound chain bound to a foreign identity   bound_spiffe_id=spiffe:///ns/aether-
 listener-regeneration paths sample the cache's copy *before* blocking on
 `listenerMu`, while `LoadListenersFromStorage` published the listener map
 *before* recording the trust domain. A reconciler that started inside that
-window (~700 ms on main-worker-03) read `""`, waited out the load on the lock,
+window (~700 ms on node C) read `""`, waited out the load on the lock,
 and then rewrote every per-pod listener with the malformed name.
 
 **It cannot recur by construction**, and every layer is asserted by a test:
@@ -8769,7 +8769,7 @@ Ranked causes, most to least common:
 enabled means those pods have **no** `/healthz/inboundready_<namespace>_<pod>` path and are
 being judged on the application probe alone. That is a safe degradation, not an
 outage — but it means the premature-promotion hole is open again, so it is worth
-an alert. main-worker-05 ran a whole agent lifetime like that on 2026-09-19 with
+an alert. Node E ran a whole agent lifetime like that on 2026-09-19 with
 no signal whatsoever; the agent now says which precondition is missing at
 startup and on every change, and the probes are reconciled on every snapshot
 rather than off one-shot triggers, so a missed event can no longer strand them.
@@ -8815,7 +8815,7 @@ Without it, a pod that sends in its first seconds gets `503 UF`
 once the pending queue overflows): the Broker API subscription is open, but
 SPIRE delivers the initial SVID only after its registration entry is created
 and synced to the node's spire-agent — `processed SVID update svids=0` twice,
-then `svids=1 update=initial` 7.46 s after the subscribe on talos-main
+then `svids=1 update=initial` 7.46 s after the subscribe on the reference cluster
 (2026-09-28, #1053). Why not block the CNI ADD instead: that makes SPIRE a hard
 dependency of sandbox creation, and the ADD races SPIRE's own pod-list
 attestation. Gating the app container keeps the sandbox SPIRE-independent.
@@ -8875,7 +8875,7 @@ sends no EDS request for a name the old cluster already watches, so no CLA
 arrives), and the warming→active swap destroyed the old `ClusterEntry` on every
 worker, which `drainConnPools()`-es **every upstream pool on the node**. The
 next request to every endpoint then paid a fresh TCP + mTLS handshake. Measured
-on talos-main (rev220 and again on rev224): one new pod → 20–24 clusters warming
+on the reference cluster (rev220 and again on rev224): one new pod → 20–24 clusters warming
 for 15 s; two new pods on one node → 30 clusters for 30 s; nodes with no new pod
 → 0. That handshake storm is the latency excursion after a service roll, and it
 cost an 8 h soak its largest error episode.
@@ -8957,7 +8957,7 @@ identity's counter on a service cluster is the no-match counter**:
 #    ingest moves "total" to the end; envoy_cluster_total_match_count does not exist;
 #  - on a node agent the "node identity" is the AGENT'S OWN SVID,
 #    spiffe://<td>/ns/<agent-namespace>/sa/<agent-serviceaccount>
-#    (spiffe://aether.internal/ns/aether-system/sa/aether-agent on talos-main) —
+#    (spiffe://aether.internal/ns/aether-system/sa/aether-agent on the reference cluster) —
 #    NOT spiffe://<td>/node/<node>. A `/node/` selector matches nothing and reads
 #    as a clean zero. Take the value from the agent log line `served node SVID`.
 #
@@ -9261,7 +9261,7 @@ climbs → `sds.<name>.init_fetch_timeout` → `/config_dump?resource=dynamic_wa
 Two live Envoy epochs both export; when the parent's series goes away the summed
 GAUGE (`cert_active`) drops to the child's alone while the COUNTER
 (`cert_requested`) keeps the merged total, because StatMerger transfers gauges
-absolute and counters as deltas. On rev228 that produced a w05 reading of
+absolute and counters as deltas. On rev228 that produced a node E reading of
 `requested=55, active=28` that looked like 27 secret removals and was not.
 Check `envoy_server_live` and `envoy_server_hot_restart_epoch` before reading
 anything into the pair.
@@ -9281,7 +9281,7 @@ throughout.
 
 #### THE ALERT THIS BREAKS — cross-repo
 
-`AetherClusterIdentityNoMatch` (k8s-talos-main, GitOps #109) queries
+`AetherClusterIdentityNoMatch` (the platform's GitOps repository) queries
 
 ```promql
 sum by (node, aether_cluster) (increase(envoy_cluster_match_count_total{

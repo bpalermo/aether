@@ -1,7 +1,7 @@
 # Gateway API conformance — rev19: FIX B regressed, Core still 32/33 (2026-06-26)
 
 A nineteenth run of the upstream Kubernetes **Gateway API conformance suite**
-(`sigs.k8s.io/gateway-api/conformance` @ **v1.5.1**) against **talos-main**, now at
+(`sigs.k8s.io/gateway-api/conformance` @ **v1.5.1**) against **the reference cluster**, now at
 aether **0.51.0 (rev 101)**, image/commit **`9b7ddd5`** (#373). This run targeted the
 expected **GATEWAY-HTTP-Core-complete** confirmation: rev18 was 39 PASS / 4 FAIL
 (Core 32/1, Extended 7/3), and `#373` shipped **FIX B** (empty-remainder
@@ -11,7 +11,7 @@ the `HTTPRouteHostnameIntersection` `very.specific.com:1234` Core case.
 
 Aether was **not** modified or redeployed. All `gateway-conformance-*` namespaces
 and per-Gateway LoadBalancer Services were cleaned up afterward (admin on, Phase 2
-on). `api.palermo.dev` verified **200** (LB `192.168.100.101`, HTTP→HTTPS **301**)
+on). `api.example.com` verified **200** (LB `203.0.113.101`, HTTP→HTTPS **301**)
 both before and after the run — no production-shape regression.
 
 ## TL;DR — flat vs rev18, both expected flips did NOT happen

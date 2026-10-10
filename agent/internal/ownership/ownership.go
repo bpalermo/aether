@@ -4,7 +4,7 @@
 // (cni.sock), and writing the node-local state files. A delete-then-create roll
 // guarantees that by having no overlap at all, and pays for it with the whole
 // pod replacement and startup inside the window the proxy has no ADS stream
-// (#1123: 7.6-15.8 s on talos). A surge roll (maxSurge: 1) starts the new agent
+// (#1123: 7.6-15.8 s on the reference cluster). A surge roll (maxSurge: 1) starts the new agent
 // BESIDE the old one, so "who owns the node" needs an answer that is not the
 // pod lifecycle:
 //

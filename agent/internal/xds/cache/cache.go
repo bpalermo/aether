@@ -483,7 +483,7 @@ type SnapshotCache struct {
 	// every builder has to read it at the moment it uses it; making that read
 	// lock-free removes the only reason a caller ever had to hoist it above the
 	// lock it then writes under. That hoist is what caused the 2026-09-19
-	// main-worker-03 outage: regenerateAllHTTPListeners read the (still empty)
+	// node C outage: regenerateAllHTTPListeners read the (still empty)
 	// trust domain BEFORE blocking on listenerMu, and rewrote every inbound
 	// listener with `spiffe:///ns/…` once it got the lock — chains Envoy could
 	// never resolve a secret for. See setTrustDomain / currentTrustDomain.
@@ -672,7 +672,7 @@ type listenerEntry struct {
 	//
 	// Rebuilt by recomputeInboundReadyClusters, which runs on every snapshot
 	// generation and is a no-op for an entry already rendered from the current
-	// identity. That is the fix for main-worker-05 (2026-09-19), where the two
+	// identity. That is the fix for node E (2026-09-19), where the two
 	// one-shot triggers the field originally had — a bulk listener load and the
 	// single firstServe SetNodeIdentity call — both fired while one precondition
 	// was still missing, and nothing ever re-ran them: the gate was silently

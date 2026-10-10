@@ -83,7 +83,7 @@ limits share the http2/quic caps.
   wires the GatewayClass. Fold in the timeouts.
 - **M3 — HTTP/3:** QUIC UDP listener on the HTTPS port + alt-svc + Service UDP port,
   gated on `http3.enabled`. `envoy --mode validate` the QUIC listener.
-- **M4 — e2e (talos):** hardening (use_remote_address → real client IP, request_timeout
+- **M4 — e2e (the reference cluster):** hardening (use_remote_address → real client IP, request_timeout
   408, underscore reject), a per-Gateway override taking effect (one Gateway
   requestTimeout=1s → 408 while the default doesn't), HTTP/3 (curl --http3), geoip
   composition; Gateway API conformance re-run. **e2e is the exit gate.**

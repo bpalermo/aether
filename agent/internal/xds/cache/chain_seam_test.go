@@ -53,7 +53,7 @@ func TestCaptureVhosts_ServiceChainFilter(t *testing.T) {
 
 // TestOutboundVhost_ServiceChainFilter (M4 outbound parity): the chain filter must be
 // enabled at the service's OUTBOUND vhost too — the outbound route table serves the
-// same GAMMA/chain config as cap_http (2026-07-05 talos finding: requests riding the
+// same GAMMA/chain config as cap_http (2026-07-05 reference-cluster finding: requests riding the
 // outbound listener missed the filter; only capture vhosts were decorated).
 func TestOutboundVhost_ServiceChainFilter(t *testing.T) {
 	c := newTestCache("node-1")
@@ -188,7 +188,7 @@ func TestInboundFilter_Seam(t *testing.T) {
 // bring its OWN chain entry into the inbound HCM — rbac needs no sidecar, so nothing
 // else puts envoy.filters.http.rbac into the union. Without the entry the TPFC
 // references an absent filter and Envoy rejects the listener (the #470 class again:
-// found live on talos — ENFORCE never took effect, rogue stayed 200).
+// found live on the reference cluster — ENFORCE never took effect, rogue stayed 200).
 func TestInboundFilter_RBAC_NoSidecar(t *testing.T) {
 	c := newTestCache("node-1")
 	// NO SetAuthzSidecar: rbac must stand alone.

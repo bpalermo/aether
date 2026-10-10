@@ -161,7 +161,7 @@ func (c *SnapshotCache) CloseQUICStream(ctx context.Context, streamID int64) int
 //
 // A twin the proxy merely HOLDS (initial_resource_versions without a
 // subscription) admits nothing: it is whatever an older agent generation
-// built. #1032 admitted those too (RestoreQUICTwin), which on the first talos
+// built. #1032 admitted those too (RestoreQUICTwin), which on the first reference-cluster
 // deploy (rev245) persisted every SAs x destinations twin as a pair.
 func (c *SnapshotCache) ResumeQUICSubscriptions(ctx context.Context, streamID int64, names []string) int {
 	added, parked := 0, 0
@@ -503,7 +503,7 @@ func (c *SnapshotCache) SetQUICIdleTimeout(d time.Duration) {
 // has elapsed (issues #1033, #1073). Called from the refresher's prune tick.
 //
 // Why it exists: the #1032 agent admitted a pair for every twin the proxy
-// re-stated on a fresh stream, so the first talos deploy persisted the whole
+// re-stated on a fresh stream, so the first reference-cluster deploy persisted the whole
 // SAs x destinations fan-out on every node, and pairs prune otherwise only on
 // removal evidence (source left the node, destination left the dependency
 // set). This drains that, and anything else persisted without evidence.

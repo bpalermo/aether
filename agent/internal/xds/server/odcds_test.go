@@ -150,8 +150,8 @@ func TestOnDemandObserver_TracksLiveSubscriptionsForTTLExemption(t *testing.T) {
 // name it is still "waiting for server" on appears in neither
 // initial_resource_versions nor resource_names_subscribe (markStreamFresh
 // clears the pending-add set), and the on_demand filter dedupes every later
-// re-subscribe. On talos (rev194, 2026-09-05) that was 14.05s of 503s on w01
-// and 14.67s on w03 with the agent logging nothing, ending only when Envoy's
+// re-subscribe. On the reference cluster (rev194, 2026-09-05) that was 14.05s of 503s on node A
+// and 14.67s on node C with the agent logging nothing, ending only when Envoy's
 // init-fetch timeout reset its subscription state.
 //
 // The clusters the proxy reports it HOLDS are the evidence: the first request

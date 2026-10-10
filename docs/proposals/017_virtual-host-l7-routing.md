@@ -154,7 +154,7 @@ aliased:
   avoids clashing with Envoy's `routev3.VirtualHost`) + `SetVirtualHosts`.
 - Reconciler watches `VirtualHost` instead of `EdgeRoute`.
 - The `secret` provider / SDS / TLS code is untouched.
-- The live talos EdgeRoute (svc-1 + wildcard, from #244) is migrated to a
+- The live reference-cluster EdgeRoute (svc-1 + wildcard, from #244) is migrated to a
   VirtualHost as part of the e2e.
 
 ## Verification
@@ -163,18 +163,18 @@ aliased:
   correct clusters; multi-route ordering preserved; wildcard host accepted; TLS
   secret-name union; webhook rejects a cross-manifest duplicate FQDN and admits a
   wildcard-vs-specific pair; runtime dedup keeps-first on a forced collision.
-- **e2e on talos-main** (publish, then deploy from the published chart per
+- **e2e on the reference cluster** (publish, then deploy from the published chart per
   [[feedback_no_manual_publish]]; edge LB IP is MetalLB, not laptop-routable —
   drive from in-cluster):
-  1. Ensure the `*.palermo.dev` `kubernetes.io/tls` Secret is in the edge's
+  1. Ensure the `*.example.com` `kubernetes.io/tls` Secret is in the edge's
      watched namespace.
-  2. Apply a `VirtualHost api.palermo.dev` with 2–3 path routes to existing test
+  2. Apply a `VirtualHost api.example.com` with 2–3 path routes to existing test
      services (echo / svc-1 / svc-2) under that Secret; deploy edge with
      `tls.enabled`.
-  3. In-cluster `curl --resolve api.palermo.dev:443:<edge-LB-IP> https://api.palermo.dev/<path>`
+  3. In-cluster `curl --resolve api.example.com:443:<edge-LB-IP> https://api.example.com/<path>`
      → each path hits the right service; `openssl s_client -servername` shows the
-     Let's Encrypt `*.palermo.dev` cert; upstream XFCC SAN = the edge identity.
-  4. Apply a second VirtualHost reusing `api.palermo.dev` → **rejected by the
+     Let's Encrypt `*.example.com` cert; upstream XFCC SAN = the edge identity.
+  4. Apply a second VirtualHost reusing `api.example.com` → **rejected by the
      webhook**.
   5. Rotate the cert → new serial without an edge pod roll.
 

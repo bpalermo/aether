@@ -168,7 +168,7 @@ node only after its registration entry has been loaded into the SPIRE server's
 entry cache (`cache_reload_interval`) *and* pulled by the node's spire-agent
 (`sync_interval`); both default to 5 s. Every mesh pod waits that long in `Init`,
 because the controller injects the `aether-identity-ready` init container that
-holds the app containers until the SVID exists (#1053/#1055): talos-main measured
+holds the app containers until the SVID exists (#1053/#1055): the reference cluster measured
 the initial SVID 7.46 s after the subscribe with the defaults. With the
 `spiffe/spire` chart (0.30.2) both knobs sit behind `experimental.enabled`:
 

@@ -20,7 +20,7 @@ import (
 // Snapshot.ConstructVersionMap, which deterministically marshals and sha256s
 // EVERY resource -- from inside SetSnapshot (respondDeltaWatches) or
 // CreateDeltaWatch, i.e. while holding the cache mutex the ADS stream
-// goroutine needs for every request it handles. On the 200m talos agent that
+// goroutine needs for every request it handles. On the 200m reference-cluster agent that
 // was ~93% of a build and 200-870 ms of wall clock per snapshot, during which
 // ODCDS answers, EDS subscriptions and drains all queued (#1086, #1103).
 //

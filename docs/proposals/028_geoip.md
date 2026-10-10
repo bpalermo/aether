@@ -62,7 +62,7 @@ edge:
 - **M1:** chart (values, volumes, geoipupdate preset) + edge codegen (strip + filter
   + dual xff threading) + envoy-validate fixture using MaxMind's free test mmdbs +
   seam tests (spoofed x-geo-* never survives: hit, miss, and geoip-disabled cases).
-- **M2 (e2e, talos):** real edge + test mmdb + `useXff` path: inject a test-DB IP
+- **M2 (e2e, the reference cluster):** real edge + test mmdb + `useXff` path: inject a test-DB IP
   via X-Forwarded-For through the LB → backend sees x-geo-country; HTTPRoute
   header-match geo-routes; spoof case (private source, forged header) never reaches
   the backend.

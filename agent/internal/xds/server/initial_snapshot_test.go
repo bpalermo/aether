@@ -30,7 +30,7 @@ import (
 // latch is ALREADY satisfied — WaitReady returns at once, as a one-shot latch
 // closed earlier does — while reads keep failing until servingAt with the
 // handshake error a connection that has not caught up gives back. That is
-// exactly the state main-worker-02's agent was in for the ~1.1s between
+// exactly the state node B's agent was in for the ~1.1s between
 // acquiring its SVID and its watch stream connecting.
 type lateRegistry struct {
 	*mockRegistry
@@ -176,7 +176,7 @@ func endpointAddresses(t *testing.T, c *cache.SnapshotCache) []string {
 }
 
 // TestPreListen_WaitsForRegistryEndpoints is issue #740's PR 5. On the rev211
-// deploy roll (2026-09-07 20:47:28Z) main-worker-02's agent acquired its SVID
+// deploy roll (2026-09-07 20:47:28Z) node B's agent acquired its SVID
 // and published the initial snapshot 0.4s later, while its registrar client was
 // still recovering from the handshakes it had failed before identity existed.
 // The registry read failed, the snapshot went out with no cross-node endpoints,
@@ -250,7 +250,7 @@ func snapshotGeneration(t *testing.T, version string) string {
 // TestPreListen_UnreachableRegistryFallsBackLocalOnly is the bound on all of the
 // above: waiting is not stalling. A registry that never comes up costs the
 // budget and then the pre-existing local-only fallback, because a stalled agent
-// takes down the node's CNI ADD/DEL and xDS entirely (talos-main, 2026-06-10).
+// takes down the node's CNI ADD/DEL and xDS entirely (the reference cluster, 2026-06-10).
 func TestPreListen_UnreachableRegistryFallsBackLocalOnly(t *testing.T) {
 	const budget = 300 * time.Millisecond
 	reg := newDeadRegistry()

@@ -53,7 +53,7 @@ var (
 // upgrade — leaves a fresh proxy with nothing to report and a fresh agent with
 // nothing observed, so on a node with no local replica of an upstream the
 // first requests take the cold ODCDS path: ~one bucket of 503s (+57/+65
-// prober http_error, ~5s) per such node per roll on talos (rev195,
+// prober http_error, ~5s) per such node per roll on the reference cluster (rev195,
 // 2026-09-05). Declared upstreams never pay this because an annotation
 // survives the restart; this makes an observation survive it too.
 //

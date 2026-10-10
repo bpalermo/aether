@@ -1,6 +1,6 @@
 # Profiling symbols: why flame graphs go blank after a release
 
-Continuous profiling on `talos-main` comes from the **OpenTelemetry eBPF profiler**,
+Continuous profiling on the reference cluster comes from the **OpenTelemetry eBPF profiler**,
 which reports native stack frames by **GNU build ID** and nothing else. Pyroscope can
 only turn those frames into function names if a *debuginfo* blob carrying the **same**
 build ID has been uploaded to it.
@@ -85,7 +85,7 @@ the flag was lost.
 If the ID you read is not in `debuginfo list`, that component's frames will not
 symbolise.
 
-> **`--platform linux/arm64` is not optional.** Every node on `talos-main` is arm64, and
+> **`--platform linux/arm64` is not optional.** Every node on the reference cluster is arm64, and
 > the images are multi-arch. Omitting it silently gives you the amd64 binary, whose build
 > ID differs completely (`897d73e8…` vs `da9ce3fa…` for the same image) — so you will
 > compare the wrong ID, or worse, upload symbols that match nothing and appear to have
@@ -128,7 +128,7 @@ by `k8s_container_name` — a selector on the container name matches nothing.
 Nobody, by hand — this is automated **outside this repo**, in the GitOps cluster
 repository:
 
-> `bpalermo/k8s-talos-main` → `clusters/talos-main/pyroscope-debuginfo/`
+> the platform's GitOps repository → `clusters/<cluster>/pyroscope-debuginfo/`
 
 An hourly CronJob in the `o11y` namespace reconciles Pyroscope's debuginfo store against
 the image digests **actually running** in `aether-system` and `aether-ingress`. It
@@ -177,7 +177,7 @@ name; anything else in an image is an explicit `tars_layer` entry in that image'
 
 The two readiness probers are the newest rows. `proxy-ready` (#673) ships inside the
 **agent** image, because the initContainer that copies it onto the proxy pod already runs
-that image; its `targets.tsv` row landed on 2026-09-05 (GitOps #39). `mesh-dns-ready`
+that image; its `targets.tsv` row landed there on 2026-09-05. `mesh-dns-ready`
 (#683, #688) ships inside the **mesh-dns** image, which its own DaemonSet already runs;
 its row is being added by a follow-up GitOps PR. Both are stdlib-only and tiny (~1.7 MB),
 but they are separate ELFs with their own build IDs, so an unlisted prober profiles as
@@ -222,7 +222,7 @@ moved at rev197 (`6342923f…` → `80542d6b…`) — an expected one-off upload
 
 A new component only gets symbolised profiles once it is added there:
 
-1. Add a row to `clusters/talos-main/pyroscope-debuginfo/targets.tsv`:
+1. Add a row to `clusters/<cluster>/pyroscope-debuginfo/targets.tsv`:
    `<image>` ⇥ `<artifact>` ⇥ `<tar-relative path>` ⇥ `executable-full` ⇥ `true`
    (the path has **no leading slash**, and `<artifact>` must be unique in that file).
 2. Make sure the workload runs in a namespace the job discovers (`aether-system` or
@@ -236,4 +236,4 @@ The next hourly tick picks it up.
 
 - Alert rules: group `debuginfo-sync` in the cluster repo's `prometheus/values.yaml`.
 - [`README.md`](./README.md) — the mesh-DNS alerting rules and how alerts are delivered
-  on `talos-main` (helm values, not a `PrometheusRule` CRD).
+  on the reference cluster (helm values, not a `PrometheusRule` CRD).

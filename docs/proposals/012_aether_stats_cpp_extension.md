@@ -102,7 +102,7 @@ config_->scope_.counterFromStatNameWithTags(config_->requests_total_, tags).inc(
 > `stats_flush_interval` — 5s by default), so the child inherits ≤5s of the
 > parent's traffic, and the OTLP sink exports `counter.value()` as CUMULATIVE
 > from *this process's* start. The series therefore restarts near zero on every
-> roll (measured on talos-main 2026-09-05; plain
+> roll (measured on the reference cluster 2026-09-05; plain
 > `envoy_cluster_upstream_cx_total` resets in the same buckets). Since #45674 the
 > **labels** survive natively — only the value is per-generation. Rule for every
 > dashboard, alert and query: **never read a raw counter value; use

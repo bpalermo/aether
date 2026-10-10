@@ -942,7 +942,7 @@ under stat prefix `cap_tcp_anyport_<svc>`, so a client still dialing an
 unregistered port of a pure-TCP service keeps working and is **counted**
 (`tcp.cap_tcp_anyport_<svc>.downstream_cx_total`). The agent logs one WARN per
 service per hour naming the count. What makes this gate fail: a non-zero
-counter on talos over a full release — that blocks Phase 4 and names the
+counter on the reference cluster over a full release — that blocks Phase 4 and names the
 client.
 
 **18082 is not the feature.** It gives every service one redirect-all-free TCP
@@ -965,7 +965,7 @@ can see the protocol.
 
 ### Phase 4 — remove the portless floor chain
 
-One release after Phase 2, if `cap_tcp_anyport_*` stayed at zero on talos for
+One release after Phase 2, if `cap_tcp_anyport_*` stayed at zero on the reference cluster for
 the whole release: delete the shim. If it did not, the counter names the
 service and the release notes name the spelling; the shim stays another
 release. This is the only step in the plan that changes what an existing
@@ -1138,10 +1138,10 @@ decoration (#853).
    kube-proxy mode or CNI that DROPs instead of REJECTing for an endpoint-less
    Service port; then the dial hangs, the test times out, and the assumption
    this risk rests on is shown false on that platform. The gate is run on kind
-   (iptables) and the talos roll (nftables kube-proxy) both.
+   (iptables) and the reference-cluster roll (nftables kube-proxy) both.
 10. **The portless shim silently keeps a client alive that Phase 4 will break.**
     Gate: the `cap_tcp_anyport_*` counter, exported per service, with the
-    Phase 4 PR required to quote its talos value for the preceding release. What
+    Phase 4 PR required to quote its reference-cluster value for the preceding release. What
     makes it fail: a non-zero value — the PR is blocked and the client is named.
 
 ## Testing and validation
@@ -1208,7 +1208,7 @@ client pod, under **both** capture modes:
 SPIRE on (the floor is mTLS-only; #877). Backend: both etcd and kubernetes,
 since the point of Phase 0/2 is that they agree.
 
-**talos**: Release A rolled alone first — the prober and k6 stay flat, and a
+**The reference cluster**: Release A rolled alone first — the prober and k6 stay flat, and a
 raw-TCP dial to `:18082` from a mesh pod returns `ECONNREFUSED` (the Risk 9
 gate, on nftables kube-proxy). Then Release B under the external prober (100%
 bar), with `listener_modified` watched for the drain risk and

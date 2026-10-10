@@ -7,7 +7,7 @@
 # REGULAR container: the kubelet started it after `proxy` without waiting, so
 # when its image had to be pulled the new Envoy took the node's listeners with
 # nothing behind the authz socket, and every check in that window was an
-# ext_authz error — a 403 under failureMode DENY (talos-main, 2026-10-05: 7–13 s
+# ext_authz error — a 403 under failureMode DENY (the reference cluster, 2026-10-05: 7–13 s
 # per node on the first roll onto OPA 1.21.1). Since 2.4.9 it is a NATIVE sidecar
 # (init container, restartPolicy: Always, startupProbe on the socket): `proxy`
 # starts only once authz accepts, and authz is stopped only after `proxy` exits.

@@ -20,7 +20,7 @@ import (
 	"google.golang.org/protobuf/proto"
 )
 
-// The 2026-09-19 main-worker-03 outage (issue #815, PR #819) in one sentence:
+// The 2026-09-19 node C outage (issue #815, PR #819) in one sentence:
 // a listener-regeneration path read the cache's trust domain BEFORE blocking on
 // listenerMu, so it rewrote every inbound chain from a value that was still
 // empty, producing `spiffe:///ns/<ns>/sa/<sa>` SDS names the agent never serves.
@@ -101,7 +101,7 @@ func inboundSecretNames(t *testing.T, c *SnapshotCache, node string) []string {
 }
 
 // TestRegenerationDuringTrustDomainWindowKeepsIdentities reproduces the LOSING
-// INTERLEAVING measured on main-worker-03.
+// INTERLEAVING measured on node C.
 //
 // The state it recreates is the one LoadListenersFromStorage used to publish:
 // a full per-pod listener map together with an EMPTY cache trust domain

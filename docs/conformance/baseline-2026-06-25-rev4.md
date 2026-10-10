@@ -1,7 +1,7 @@
 # Gateway API conformance — re-run rev4 (2026-06-25)
 
 A fourth run of the upstream Kubernetes **Gateway API conformance suite**
-(`sigs.k8s.io/gateway-api/conformance` @ **v1.5.1**) against **talos-main**, now
+(`sigs.k8s.io/gateway-api/conformance` @ **v1.5.1**) against **the reference cluster**, now
 at aether **0.49.0** (rev 81). This re-run measures the **delta** from the
 [rev3 baseline](./baseline-2026-06-25-rev3.md) (0.45.0, rev 72) after the rest of
 **proposal 021** and the status/redirect work landed:
@@ -23,8 +23,8 @@ at aether **0.49.0** (rev 81). This re-run measures the **delta** from the
 Aether was **not** modified or redeployed for this run. All
 `gateway-conformance-*` namespaces **and** their per-Gateway LoadBalancer
 Services were cleaned up afterward (verified: only the production edge
-`aether-edge-gw-aether-ingress-aether-edge` = `192.168.100.101` remains; the
-MetalLB pool `192.168.100.50-254` is not exhausted).
+`aether-edge-gw-aether-ingress-aether-edge` = `203.0.113.101` remains; the
+MetalLB pool `203.0.113.50-254` is not exhausted).
 
 ## TL;DR
 
@@ -90,9 +90,9 @@ of retry-heavy negative status tests.
    from the production edge `.101`:
 
    ```
-   aether-edge-gw-gateway-conformance-infra-same-namespace        192.168.100.50
-   aether-edge-gw-gateway-conformance-infra-all-namespaces        192.168.100.51
-   aether-edge-gw-gateway-conformance-infra-backend-namespaces    192.168.100.52
+   aether-edge-gw-gateway-conformance-infra-same-namespace        203.0.113.50
+   aether-edge-gw-gateway-conformance-infra-all-namespaces        203.0.113.51
+   aether-edge-gw-gateway-conformance-infra-backend-namespaces    203.0.113.52
    ```
 
    This is exactly the rev3 P0 bridge — the shared-address tax is gone.
@@ -212,5 +212,5 @@ full ~40-min GATEWAY pass.
 
 **Cleanup verified after the run:** zero `gateway-conformance-*` namespaces; the
 only `aether.io/edge-gateway` Service remaining is the production edge
-`aether-edge-gw-aether-ingress-aether-edge` (`192.168.100.101`); no orphan
+`aether-edge-gw-aether-ingress-aether-edge` (`203.0.113.101`); no orphan
 MetalLB pool IPs.

@@ -7,7 +7,7 @@
 ## Context
 
 After validating proxy hot restart (Strategies A and B, `docs/proposals/001`) with a
-12,000-request zero-drop e2e across three fleet restarts on talos-main, this audit
+12,000-request zero-drop e2e across three fleet restarts on the reference cluster, this audit
 walks the agent code paths that run concurrently — xDS snapshot generation, the
 registry refresher, the SPIRE bridge, the CNI pod lifecycle, the liveness loop, and
 the hot-restart supervisor — looking for races. Findings are ordered by severity.

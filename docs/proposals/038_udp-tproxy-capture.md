@@ -221,7 +221,7 @@ confirmed 20 sockets bound with it. Failure is loud, not silent: a missing
 capability throws at bind and the listener is rejected. `NET_ADMIN` is already
 granted on the proxy container.
 
-### Phase 0: settled (2026-09-25, `main-worker-04`, kernel 6.18.34-talos)
+### Phase 0: settled (2026-09-25, one node, kernel 6.18.34-talos)
 
 **A transparent socket created inside a pod netns via `setns` and read from
 another netns DOES observe the pre-TPROXY destination.** Phase 1 is unblocked.
@@ -389,7 +389,7 @@ identity-bearing class (R2):
   about 650.
 
   **A pair is admitted only on evidence that a request routed to its twin
-  (#1033).** The first talos deploy of #1032 (rev245) showed
+  (#1033).** The first reference-cluster deploy of #1032 (rev245) showed
   `observed_pairs == local_identities × 2` on every node: the running proxy
   re-stated the twins the previous agent had built up front, in the fresh
   stream's `initial_resource_versions`, and the agent admitted and persisted each
@@ -467,7 +467,7 @@ identity-bearing class (R2):
     9 % (0.870 → 0.795 ms) and both proxies 5 %. The same harness puts h3 at
     ~1.9× h2 on loopback, at either pace. GSO needs nothing: for a QUIC listener Envoy
     already installs the GSO batch writer when the kernel has `UDP_SEGMENT`
-    (talos 6.18 does), and the automatic, explicit-GSO and explicit-non-GSO
+    (Talos 6.18 does), and the automatic, explicit-GSO and explicit-non-GSO
     writers measured within 1.5 % of each other. A mesh RPC's response is one
     or two packets, so there is nothing to batch. The upstream side has no knob:
     client sockets already read with GRO, and the pin's only client packet
@@ -566,7 +566,7 @@ over a tested path. The full assessment is on #916.
   selector would have to run before the chain is installed on a per-connection
   `SSL` instead of the shared `SSL_CTX`. That is a new envoyproxy/envoy change,
   unsized. If landed, Phase 4b collapses back to one cluster and the #842
-  invariance returns for QUIC too. **Bruno's call**; the plan does not depend on
+  invariance returns for QUIC too. **The maintainer's call**; the plan does not depend on
   it, and per-source clusters are correct in the meantime. Recorded so the
   per-source-cluster shape is read as a workaround with a known exit, not a
   design.
@@ -671,7 +671,7 @@ over a tested path. The full assessment is on #916.
 ## Plan
 
 Each PR is independently revertable and merges on green (`ci` + `proxy`,
-squash). Talos validation where a PR changes what every pod does; a soak after
+squash). Reference-cluster validation where a PR changes what every pod does; a soak after
 each phase's default flips. Sizes are relative: S = one sitting, M = a day,
 L = several with a spike.
 
@@ -702,7 +702,7 @@ before a UDPRoute exists, and equally deliberate.
 | PR | scope | size | gate |
 |---|---|---|---|
 | 3a | `e2e/l4routes.sh` T3 grows a second UDPRoute-backed service on the same node and asserts **selection**: each service's datagrams reach its own backend. Run first with the mode `redirect` and **seen red** (second service dropped, as today), then with `tproxy` green. | M | red-then-green on kind |
-| 3b | Flip `--capture-udp-mode` to `tproxy`. Chart bump. Deploy to talos-main; 8h soak with the UDP workload in the churn set. Then delete the 18081/udp REDIRECT one release later. | S + soak | soak PASS |
+| 3b | Flip `--capture-udp-mode` to `tproxy`. Chart bump. Deploy to the reference cluster; 8h soak with the UDP workload in the churn set. Then delete the 18081/udp REDIRECT one release later. | S + soak | soak PASS |
 
 ### Phase 4 — east-west QUIC (planned behind a flag; unconditional since #979, merged 2026-09-29)
 

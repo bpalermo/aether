@@ -3,7 +3,7 @@
 # state-changing admin request to ANOTHER pod's Envoy on the node-shared admin
 # address.
 #
-# The incident (2026-10-01 4->2 worker rollout, w01/w03): the surge successor's
+# The incident (2026-10-01 4->2 worker rollout, nodes A and C): the surge successor's
 # Envoy (epoch N+1) took the old Envoy's admin over the hot-restart protocol and
 # then crashed (#1126). The new pod's supervisor started a FRESH Envoy at epoch
 # 0, which bound 127.0.0.1:9901 (proxy pods are hostNetwork: one address per

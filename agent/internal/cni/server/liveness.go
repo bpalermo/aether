@@ -321,7 +321,7 @@ func livenessPrev(state *livenessState, key string, eds bool) registryv1.Service
 //	                                   subject to the demote streak
 //
 // The second-to-last row is what #819 got wrong: it ANDed the two probes, so an
-// already-serving pod whose inbound listener was broken (main-worker-03's empty
+// already-serving pod whose inbound listener was broken (node C's empty
 // trust domain) was demoted and never re-promoted, with no signal at all.
 //
 // Returns true when the pod is being HELD by the inbound-readiness probe —

@@ -23,7 +23,7 @@ import (
 
 // The liveness half of the #815 re-land. #819 ANDed the application probe and
 // the inbound-readiness probe behind one gateway path, so the agent could only
-// see their conjunction. On main-worker-03 the pods' inbound listeners were
+// see their conjunction. On node C the pods' inbound listeners were
 // broken (an empty trust domain named an SDS secret nobody serves), the
 // conjunction went 503, and four ALREADY-SERVING endpoints were demoted
 // HEALTHY→UNHEALTHY and never re-promoted — a permanent outage from a signal
@@ -90,7 +90,7 @@ func gateServer(t *testing.T, store storage.Storage[*cniv1.CNIPod], reg *recordi
 	return newTestCNIServer(nil, store, reg, cache.NewSnapshotCache("n", slog.New(slog.DiscardHandler)), sock)
 }
 
-// TestGateNeverDemotesAnAlreadyServingEndpoint is the main-worker-03
+// TestGateNeverDemotesAnAlreadyServingEndpoint is the node C
 // regression: the application is healthy, the inbound-readiness probe has NEVER
 // passed in this epoch, and the endpoint has already served. That combination
 // must keep the endpoint HEALTHY — permanently stranding it is the failure this

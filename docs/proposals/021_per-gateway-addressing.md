@@ -29,7 +29,7 @@ per-Gateway-Deployment model held in reserve for hard isolation/scale.
 - **Multi-tenant.** Different teams' Gateways should be isolatable by address (and blast
   radius), not all funnelled through one shared IP.
 - **Where we are.** One edge Deployment behind one `LoadBalancer` Service
-  (`192.168.100.101`); the proxy binds the union of all Gateways' listeners; Gateways get
+  (`203.0.113.101`); the proxy binds the union of all Gateways' listeners; Gateways get
   no `status.addresses`.
 
 ## Current shape — the constraints that drive the design
@@ -42,7 +42,7 @@ per-Gateway-Deployment model held in reserve for hard isolation/scale.
 - The edge already maps a Gateway listener's external port to a bind/container port (it
   fronts `:80`/`:443` on container ports today). Per-Gateway internal-port allocation is
   an extension of that existing mapping, not a new mechanism.
-- **MetalLB** has one auto-assign pool (`192.168.100.50–254`) — ample addresses for a
+- **MetalLB** has one auto-assign pool (`203.0.113.50–254`) — ample addresses for a
   Service-per-Gateway approach.
 
 ## Design — phased

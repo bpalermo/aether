@@ -408,7 +408,7 @@ func equalAny(a, b *anypb.Any) bool {
 // (GAMMA rules or service chain filters, local or imported): the default-disabled
 // HCM entries are embedded in the listeners, and typed_per_filter_config can only
 // re-enable a filter already present in the chain — a stale chain silently disables
-// the feature (2026-07-05 talos finding: the outbound HCM never carried the union).
+// the feature (2026-07-05 reference-cluster finding: the outbound HCM never carried the union).
 func (c *SnapshotCache) regenerateAllHTTPListeners() {
 	// Node-global union, built once for the whole loop (see extensionHTTPFilters):
 	// the rebuilt union is exactly what this regeneration exists to propagate.
@@ -451,7 +451,7 @@ func (c *SnapshotCache) rebuildIdentityDerived(ctx context.Context) {
 // capture listener in place. Caller holds listenerMu for writing.
 //
 // THE TRUST DOMAIN IS READ HERE, INSIDE THE LOCK, ON PURPOSE. Reading it before
-// acquiring listenerMu is what broke main-worker-03 on 2026-09-19: the value was
+// acquiring listenerMu is what broke node C on 2026-09-19: the value was
 // sampled while a concurrent LoadListenersFromStorage had not yet recorded it,
 // the caller then blocked on listenerMu for the ~700 ms that load took, and
 // rewrote all 15 per-pod listeners with `spiffe:///ns/…` server-certificate

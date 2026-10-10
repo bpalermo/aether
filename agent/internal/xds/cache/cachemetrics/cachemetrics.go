@@ -509,7 +509,7 @@ func (m *Metrics) seedAnomalyCounters() {
 	// indistinguishable from "zero" to a grading query. Seeding makes a live zero
 	// visible and lets increase()/rate() work from process start.
 	//
-	// This list has now been forgotten twice: observed on talos-main rev200,
+	// This list has now been forgotten twice: observed on the reference cluster rev200,
 	// neither #638 series existed; observed again on rev231 (#882), the #873
 	// counter was registered here without being seeded and so had no series at
 	// all while the log half of #874 worked fine.

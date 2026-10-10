@@ -32,7 +32,7 @@ flat, service-first prefix; the cluster lives only in the serialized value:
 
 This is fine for a single shared etcd, but it has a latent multi-region hazard:
 pod CIDRs overlap across clusters, so replicating region A's
-`…/endpoints/10.244.1.5` into region B's flat tree would **clobber** B's own pod
+`…/endpoints/10.0.1.5` into region B's flat tree would **clobber** B's own pod
 at the same IP. Origin is not in the key, so the partitions aren't disjoint.
 
 ### The directive

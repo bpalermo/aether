@@ -231,7 +231,7 @@ func TestProbeDialAddr(t *testing.T) {
 	tests := []struct {
 		name, listen, want string
 	}{
-		{name: "concrete host is dialled as-is", listen: "192.168.0.61:18054", want: "192.168.0.61:18054"},
+		{name: "concrete host is dialled as-is", listen: "192.0.2.61:18054", want: "192.0.2.61:18054"},
 		{name: "ipv4 wildcard goes to loopback", listen: "0.0.0.0:18054", want: "127.0.0.1:18054"},
 		{name: "ipv6 wildcard goes to ipv6 loopback", listen: "[::]:18054", want: "[::1]:18054"},
 		{name: "bare port goes to loopback", listen: ":18054", want: "127.0.0.1:18054"},

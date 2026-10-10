@@ -205,8 +205,8 @@ func (o *onDemandObserver) observeQUICTwin(streamID int64, name string) {
 // its first snapshot, and a reconnecting Envoy will not re-ask for them — a name
 // it is still "waiting for server" on is in neither initial_resource_versions
 // nor resource_names_subscribe, and its on_demand filter dedupes every later
-// re-subscribe. On talos (rev194, 2026-09-05) that cost 14.05s of 503s on w01
-// and 14.67s on w03, ending only when Envoy's init-fetch timeout reset the
+// re-subscribe. On the reference cluster (rev194, 2026-09-05) that cost 14.05s of 503s on node A
+// and 14.67s on node C, ending only when Envoy's init-fetch timeout reset the
 // subscription state. The held inventory is the proxy telling the agent, in the
 // protocol, which clusters it is still running on; the agent simply has to read
 // it.

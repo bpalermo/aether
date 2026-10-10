@@ -1,6 +1,6 @@
 # Registry Backend Evolution: from Kubernetes to Cloud Map to DynamoDB to etcd Watch
 
-**Status:** Current backend on talos-main = **etcd with watch-driven sync**.
+**Status:** Current backend on the reference cluster = **etcd with watch-driven sync**.
 Supported backends: `kubernetes`, `etcd` (Cloud Map removed in #150, DynamoDB in
 #760).
 **Date:** 2026-06-13 (DynamoDB removal appended 2026-09-12)
@@ -80,7 +80,7 @@ invisible (the rev-68 regression fix) — and its **global tables** are a strong
 multi-region, multi-active substrate for the multi-cluster directive (registrar
 per cluster, none authoritative, cluster-scoped reconciliation).
 
-talos-main ran on DynamoDB with full e2e green. But the cross-replica skew
+The reference cluster ran on DynamoDB with full e2e green. But the cross-replica skew
 remained, because the **propagation channel was a 5-second poll**
 (`ListAllEndpoints` on a ticker): replica B learned A's writes up to ~5–6 s
 late, producing the last-old-exit residue (~3 dropped requests per service roll
@@ -116,7 +116,7 @@ every axis that matters here:
 | resume | from revision (compaction-bounded) | 24 h trim |
 | endpoint | same client | separate Streams endpoint |
 
-We switched talos-main to the etcd backend (validating backend *parity* first —
+We switched the reference cluster to the etcd backend (validating backend *parity* first —
 it still polled), then implemented the watch: the etcd backend now satisfies
 `registry.ChangeNotifier` via `clientv3.Watch` over the key prefix, and the
 registrar `Syncer` reacts to change signals (200 ms debounce to coalesce roll
@@ -143,7 +143,7 @@ because the propagation requirement had moved past it and nobody ran it.
 - **The multi-region case had already been decided against it.** The 2026-06-13
   directive (see *Multi-region: etcd, not DynamoDB global tables* below) ruled
   out global tables, which was DynamoDB's remaining distinguishing argument.
-- **Nobody ran it.** talos-main has been on etcd since rev 47; the chart default
+- **Nobody ran it.** The reference cluster has been on etcd since rev 47; the chart default
   is the zero-infra `kubernetes` backend.
 - **It was the single largest block of third-party code in the module.** Removing
   it deleted the AWS SDK (5 direct + ~14 indirect modules), smithy-go,
@@ -283,7 +283,7 @@ cross-replica propagation eliminated even those.
 - **Backend = a propagation-channel decision.** Cloud Map failed on *control*
   (async health race), DynamoDB succeeded on *durability/managed/multi-region*
   but its CDC could not close the skew, etcd's native `Watch` closes it directly.
-- **Current:** talos-main on etcd + watch (poll backstop); Kubernetes is the
+- **Current:** the reference cluster on etcd + watch (poll backstop); Kubernetes is the
   zero-dependency option. Those two are the only supported backends.
 - **Guidance:** **etcd is the chosen substrate single- and multi-region** —
   single-region/intra-cluster via `Watch`; multi-region via per-region etcd +

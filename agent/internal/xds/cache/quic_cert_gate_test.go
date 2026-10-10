@@ -15,7 +15,7 @@ import (
 
 // The #1049 gates, at the cache.
 //
-// rev248 phase C (talos, 2026-09-28 15:44Z): k6 loader pods of ServiceAccount
+// rev248 phase C (the reference cluster, 2026-09-28 15:44Z): k6 loader pods of ServiceAccount
 // aether-test/default landed on every node at 15:44:46.0-46.1 and their first
 // requests routed to the `quic:` twins of svc-1/svc-2. The agent published
 // every twin within 10 ms of the need for it (a dormant pair republished by

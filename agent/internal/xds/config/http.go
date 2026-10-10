@@ -16,7 +16,7 @@ import (
 // reclaims its upstream connection is this idle timeout. Envoy's default is
 // 1 HOUR: under non-keepalive downstream traffic that plateaus at
 // rate×3600 leaked mTLS connections per proxy (observed: ~41k active upstream
-// conns and 3.2 GiB heap within minutes on talos-main). 30s caps the orphan
+// conns and 3.2 GiB heap within minutes on the reference cluster). 30s caps the orphan
 // window; for live downstream connections an idle upstream is simply
 // re-established on the next request.
 const UpstreamIdleTimeout = 30 * time.Second
@@ -79,7 +79,7 @@ const DefaultQUICTwinIdleTimeout = 8 * time.Second
 //
 // WHY 8 s AND NOT LESS (aether#1093). The idle deadline cannot tell a dead
 // peer from a peer, or a local worker, that is merely not being scheduled,
-// and talos-main has recurring node-local stalls of Envoy worker threads
+// and the reference cluster has recurring node-local stalls of Envoy worker threads
 // (requests delayed 1-3.3 s, episodes of 5-7 s, outside rolls too; #1093).
 //   - A DESTINATION worker stalled for >= the idle timeout cannot ACK the
 //     PINGs, so every in-flight twin request to it fails 503 where today it
@@ -159,7 +159,7 @@ const (
 // WHY 8 s (aether#1093), the same budget and reason as
 // QUICTwinNetworkIdleTimeout. A DESTINATION worker stalled for >= the timeout
 // cannot ACK the PING, so in-flight h2 requests to it would fail 503 where today
-// they complete late; talos-main has node-local worker stalls of 5-7 s. A
+// they complete late; the reference cluster has node-local worker stalls of 5-7 s. A
 // SOURCE worker stall is safe for h2 (unlike QUIC's silent-application case):
 // a live peer ACKs the PING within an RTT, so the ACK is already queued in the
 // socket when the stalled worker wakes, and libevent runs fd events before

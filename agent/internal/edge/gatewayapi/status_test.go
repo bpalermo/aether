@@ -436,7 +436,7 @@ func TestReconcile_GatewayStatusAddresses(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{Name: "aether-edge", Namespace: "aether-ingress"},
 		Spec:       corev1.ServiceSpec{Type: corev1.ServiceTypeLoadBalancer},
 		Status: corev1.ServiceStatus{LoadBalancer: corev1.LoadBalancerStatus{
-			Ingress: []corev1.LoadBalancerIngress{{IP: "192.168.100.101"}},
+			Ingress: []corev1.LoadBalancerIngress{{IP: "203.0.113.101"}},
 		}},
 	}
 
@@ -458,7 +458,7 @@ func TestReconcile_GatewayStatusAddresses(t *testing.T) {
 	require.Len(t, gotGW.Status.Addresses, 1)
 	require.NotNil(t, gotGW.Status.Addresses[0].Type)
 	assert.Equal(t, gatewayv1.IPAddressType, *gotGW.Status.Addresses[0].Type)
-	assert.Equal(t, "192.168.100.101", gotGW.Status.Addresses[0].Value)
+	assert.Equal(t, "203.0.113.101", gotGW.Status.Addresses[0].Value)
 }
 
 // TestReconcile_GatewayStatusAddresses_NoLBIP: when the edge LoadBalancer Service
@@ -602,7 +602,7 @@ func TestWriteGatewayStatus_RetriesOnConflict(t *testing.T) {
 	}}
 	acceptedTop := gatewaystatus.Condition{Type: string(gatewayv1.GatewayConditionAccepted), Status: metav1.ConditionTrue, Reason: string(gatewayv1.GatewayReasonAccepted)}
 	programmedTop := gatewaystatus.Condition{Type: string(gatewayv1.GatewayConditionProgrammed), Status: metav1.ConditionTrue, Reason: string(gatewayv1.GatewayReasonProgrammed)}
-	addrs := []gatewayv1.GatewayStatusAddress{{Type: ptr(gatewayv1.IPAddressType), Value: "192.168.100.50"}}
+	addrs := []gatewayv1.GatewayStatusAddress{{Type: ptr(gatewayv1.IPAddressType), Value: "203.0.113.50"}}
 
 	key := types.NamespacedName{Namespace: "ns", Name: "edge"}
 	require.NoError(t, r.writeGatewayStatus(context.Background(), key, inputs, acceptedTop, programmedTop, addrs))
@@ -613,7 +613,7 @@ func TestWriteGatewayStatus_RetriesOnConflict(t *testing.T) {
 	got := &gatewayv1.Gateway{}
 	require.NoError(t, c.Get(context.Background(), key, got))
 	require.Len(t, got.Status.Addresses, 1)
-	assert.Equal(t, "192.168.100.50", got.Status.Addresses[0].Value)
+	assert.Equal(t, "203.0.113.50", got.Status.Addresses[0].Value)
 	prog := meta.FindStatusCondition(got.Status.Conditions, string(gatewayv1.GatewayConditionProgrammed))
 	require.NotNil(t, prog)
 	assert.Equal(t, metav1.ConditionTrue, prog.Status)

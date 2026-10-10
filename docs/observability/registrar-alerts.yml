@@ -19,8 +19,8 @@
 #     alerting_rules.yml:
 #       groups: [...]
 # See README.md in this directory. Deployed from
-# bpalermo/k8s-talos-main -> clusters/talos-main/prometheus/values.yaml, where
-# promtool unit tests (clusters/talos-main/prometheus/rules_test.yaml) run this
+# the platform's GitOps repository -> clusters/<cluster>/prometheus/values.yaml, where
+# promtool unit tests (clusters/<cluster>/prometheus/rules_test.yaml) run this
 # expression in CI. registrar-alerts_test.yml beside this file is its promtool
 # unit test in this repository: `bazel test //:observability_rules_test` runs
 # it, and `promtool check rules` on this file, with the promtool the build pins.
@@ -95,7 +95,7 @@ groups:
       # Timestamps. The registrar observes revision and hash in one callback from
       # one read of the snapshot, so the pair in one export is always consistent.
       # The OTel SDK stamps each instrument separately (they differ by up to a few
-      # milliseconds on talos-main), and both travel in one OTLP request, which
+      # milliseconds on the reference cluster), and both travel in one OTLP request, which
       # the collector's batch processor does not split and Prometheus commits as
       # one append. The expression matches on labels, not on timestamps, so the
       # stamps do not matter. If a pipeline ever did deliver the two metrics

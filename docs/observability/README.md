@@ -92,7 +92,7 @@ by construction; `aether_agent_cni_conflist_reasserts_total` is the only evidenc
 strip happened at all.
 
 These expressions have **promtool unit tests** in the GitOps repo
-(`clusters/talos-main/prometheus/rules_test.yaml`, run by CI), including a node whose
+(`clusters/<cluster>/prometheus/rules_test.yaml`, run by CI), including a node whose
 `chained` series is omitted entirely — the case `absent()` misses.
 
 ## Registrar snapshot divergence (`registrar-alerts.yml`)
@@ -344,7 +344,7 @@ That one needs nothing from the pipeline except that it is **not dropped**.
 
 ## Installing
 
-There is **no Prometheus operator** on `talos-main` (no `PrometheusRule` CRD) and the
+There is **no Prometheus operator** on the reference cluster (no `PrometheusRule` CRD) and the
 Grafana install has **no alerting sidecar** — only dashboard and datasource sidecars.
 So these rules are delivered through the Prometheus helm values:
 
@@ -379,19 +379,18 @@ Do **not** `helm upgrade` by hand: those values are reconciled by Flux (see belo
 ## Alert delivery (Alertmanager -> Slack + GitHub issue)
 
 **This file is the source of truth for the rules; it is not where they are deployed
-from.** talos-main is GitOps-managed by Flux, so nothing here is applied by hand — the
-rules and the delivery path both live in
-[`bpalermo/k8s-talos-main`](https://github.com/bpalermo/k8s-talos-main):
+from.** The reference cluster is GitOps-managed by Flux, so nothing here is applied by hand — the
+rules and the delivery path both live in the platform's GitOps repository:
 
 | what | where |
 |---|---|
-| alert rule groups | `clusters/talos-main/prometheus/values.yaml` → `serverFiles.alerting_rules.yml` |
+| alert rule groups | `clusters/<cluster>/prometheus/values.yaml` → `serverFiles.alerting_rules.yml` |
 | Alertmanager routing + `github-slack` receiver | same file → `alertmanager.config` |
-| Slack webhook URL | SOPS Secret `alertmanager-slack` (ns `prometheus`), mounted as a **file** via `extraSecretMounts` → `global.slack_api_url_file` (Alertmanager cannot interpolate env vars, and `alertmanager.config` renders into a plaintext ConfigMap) |
-| GitHub receiver Deployment | `clusters/talos-main/alertmanager-github-receiver/` |
-| GitHub PAT | SOPS-encrypted `secret.sops.yaml` in that dir (AWS KMS + PGP) |
+| Slack webhook URL | an encrypted Secret, mounted as a **file** via `extraSecretMounts` → `global.slack_api_url_file` (Alertmanager cannot interpolate env vars, and `alertmanager.config` renders into a plaintext ConfigMap) |
+| GitHub receiver Deployment | `clusters/<cluster>/alertmanager-github-receiver/` |
+| GitHub token | an encrypted Secret in that directory |
 
-One receiver, two legs. **Slack (`#alerts`) is the pager**: GitHub issues created with
+One receiver, two legs. **Slack is the pager**: GitHub issues created with
 your own PAT are self-authored, and GitHub does not notify you about your own actions —
 issues alone reach nobody. **The GitHub issue is the durable record**: a firing alert
 opens an issue on this repo labelled `alert`, and closes it on resolve. Issues are keyed
@@ -407,9 +406,9 @@ Things that are easy to get wrong, already handled there:
   to a real receiver. (If you re-introduce an always-firing rule, remove rule before
   route on teardown — the reverse ordering once briefly filed one.) A real dead-man's
   switch needs an external sink and is still an open item.
-- **`measurementlab/alertmanager-github-receiver` cannot run on talos-main.** It is the
+- **`measurementlab/alertmanager-github-receiver` cannot run on the reference cluster.** It is the
   receiver everyone cites, but it is published **amd64-only** (neither `latest` nor
-  `v0.11` is a multi-arch index) while every talos-main node is **arm64**. We use
+  `v0.11` is a multi-arch index) while every reference-cluster node is **arm64**. We use
   `ghcr.io/pfnet-research/alertmanager-to-github`, which ships a genuine multi-arch
   index, pinned by digest.
 

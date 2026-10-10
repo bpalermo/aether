@@ -132,7 +132,7 @@ const (
 // the listeners stop accepting on a schedule instead of all at once.
 //
 // This is the thing a bare SIGTERM is NOT. Envoy's SIGTERM handler exits the
-// server outright: measured on talos-main during the rev214 validation, `caught
+// server outright: measured on the reference cluster during the rev214 validation, `caught
 // ENVOY_SIGTERM` to `exiting` took 0.74s and 0.33s, taking every connection on
 // the node with it (issue #795).
 const adminDrainPath = "/drain_listeners?graceful"
@@ -198,7 +198,7 @@ func (s *Supervisor) drainListeners(ctx context.Context) bool {
 //
 // The fast client is used ONLY by /ready in the verified steady state, where
 // the question is just "is the admin still answering LIVE". Measured on
-// talos-main: cx_total == rq_total == 1/s/node with cx_active 0 and
+// the reference cluster: cx_total == rq_total == 1/s/node with cx_active 0 and
 // destroy_remote 100% — every probe was paying for a fresh TCP connection
 // because the JSON decoder left the body short of EOF, so Go never pooled it
 // (#646). One pinned connection replaces all of them.

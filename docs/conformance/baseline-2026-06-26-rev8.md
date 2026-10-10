@@ -1,7 +1,7 @@
 # Gateway API conformance — rev8: route-config dump pins the suite 404 (2026-06-26)
 
 An eighth run of the upstream Kubernetes **Gateway API conformance suite**
-(`sigs.k8s.io/gateway-api/conformance` @ **v1.5.1**) against **talos-main**, now at
+(`sigs.k8s.io/gateway-api/conformance` @ **v1.5.1**) against **the reference cluster**, now at
 aether **0.51.0 (rev 87)**, image/commit **`e96b8b1`**. Unlike rev2–rev7, this run's
 purpose was **not** the score — it was to capture the **definitive diagnostic** the
 prior six revs deferred: with the edge Envoy **admin now enabled** (`#345`,
@@ -256,7 +256,7 @@ $ kubectl get ns | grep conformance                       → none
 $ kubectl get gateway -A | grep conformance               → none
 $ kubectl get svc -n aether-ingress -l aether.io/edge-gateway
 NAME                                        EXTERNAL-IP
-aether-edge-gw-aether-ingress-aether-edge   192.168.100.101   ← production edge only
+aether-edge-gw-aether-ingress-aether-edge   203.0.113.101   ← production edge only
 ```
 
 No aether MetalLB pool IPs leaked — the only `aether.io/edge-gateway` Service is the

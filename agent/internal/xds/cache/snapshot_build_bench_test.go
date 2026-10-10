@@ -26,7 +26,7 @@ import (
 // Issue #1105: what one snapshot build costs at a realistic node shape, and how
 // much of it the ADS stream waits out behind the snapshot-cache mutex.
 //
-// The shape is a busy talos worker: 50 local pods (10 ServiceAccounts), 100
+// The shape is a busy reference-cluster worker: 50 local pods (10 ServiceAccounts), 100
 // in-scope mesh Services with 3 endpoints each, one SVID per pod, capture with
 // redirect-all on, and 10 QUIC twins. Every xDS type has an open delta watch,
 // as on a live node: go-control-plane only builds a snapshot's version map

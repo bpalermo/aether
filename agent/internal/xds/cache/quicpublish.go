@@ -13,7 +13,7 @@ import (
 // flight (see quicPublisher).
 //
 // A k6 loader's first requests to 7-10 QUIC destinations reached the agent's
-// ODCDS handler within ~110 ms on talos (2026-10-01, main-worker-05), against
+// ODCDS handler within ~110 ms on the reference cluster (2026-10-01, node E), against
 // an on_demand budget of 2 s that the admission, the snapshot, the CDS push
 // and the twin's warming (EDS + SDS) all have to fit in.
 const defaultQUICPublishWindow = 10 * time.Millisecond
@@ -25,13 +25,13 @@ const defaultQUICPublishWindow = 10 * time.Millisecond
 // generateSnapshot. They all serialized on snapshotMu, and the first one to
 // get the lock already carried every pair recorded so far -- admission
 // records the pair synchronously -- so the rest rebuilt and re-set an
-// identical snapshot, one after another. On talos each of those costs ~55 ms
+// identical snapshot, one after another. On the reference cluster each of those costs ~55 ms
 // of CPU in go-control-plane's version-map hashing alone (proto marshal +
 // sha256 of every resource, in SetSnapshot under the cache's own mutex) on an
 // agent capped at 200m, i.e. 200-870 ms of wall clock each; the ADS stream
 // goroutine needs that same mutex for every request it handles, including the
 // EDS subscription the new twin must be answered on before Envoy can warm it.
-// Six admissions on main-worker-05 were followed by eight snapshot builds in
+// Six admissions on node E were followed by eight snapshot builds in
 // 4.4 s, the last four rebuilding an unchanged shape, and the four twins
 // delivered at 30.14Z were still warming when their on_demand timeouts fired
 // at 30.645-30.738Z: 51 x 503 NC cluster_not_found.

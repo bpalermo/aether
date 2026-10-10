@@ -1,13 +1,13 @@
 # Proposal 039: A CSI Driver as the UDS Carrier
 
-**Status:** **Implemented** — Phases 1–2 shipped; Phase 3 (talos) complete except
+**Status:** **Implemented** — Phases 1–2 shipped; Phase 3 (the reference cluster) complete except
 the node-reboot validation, tracked in #1106. Phase 1 (#1090, merged 2026-09-30,
 `a07dea6`) is the `csi.aether.io` node plugin, its `uds-csi` image, the built-in
 kubelet registration and the chart wiring. Phase 2 (#1092, merged 2026-09-30,
 `75caf0f`) is the breaking cut-over: chart `2.0.0`, crds `1.1.0`, udsecho `2.0.0` —
 the CSI volume is the only UDS carrier, and the `emptyDir` resolver,
 `--kubelet-pods-dir`, the proxy's kubelet-pods mount and `proxy.udsWorkloads` are
-gone; `udsCsi.enabled` defaults on. Phase 3 deployed it on talos-main as chart
+gone; `udsCsi.enabled` defaults on. Phase 3 deployed it on the reference cluster as chart
 `2.0.0` on 2026-09-30 and soaked it on 2026-10-01 (*Phase 3 as built*).
 *Phase 1/2/3 as built* (under *Plan*) list only where the build departs from the
 design text.
@@ -136,7 +136,7 @@ connection. Envoy's `Pipe` has no no-follow option. `/proc/<pid>/root/…` does 
 confine anything: absolute symlinks and `..` escape to the caller's root, which is
 the whole reason `openat2(RESOLVE_IN_ROOT)` exists.
 
-**What does close it is a mount flag.** `MS_NOSYMFOLLOW` (Linux ≥ 5.10; talos runs
+**What does close it is a mount flag.** `MS_NOSYMFOLLOW` (Linux ≥ 5.10; Talos runs
 6.18) makes path resolution return `ELOOP` for any symlink that *resides on* that
 mount, and that includes the final component of a `connect(2)`. It is a property of
 the filesystem the socket lives on, and today aether does not own that filesystem.
@@ -178,9 +178,9 @@ behaviour change for 034 users, and it is why the interim is only a stopgap.
 Non-goals: cross-node sockets; per-port sockets (still one socket per pod, as in 034);
 and scheduler awareness of the driver (see *What CSI does not buy*).
 
-## Precedent: how csi.spiffe.io does it (read from talos-main)
+## Precedent: how csi.spiffe.io does it (read from the reference cluster)
 
-`kubectl --context talos-main` (read-only) shows the driver that already sits next to
+`kubectl --context <context>` (read-only) shows the driver that already sits next to
 aether and feeds both the agent and the proxy:
 
 - **CSIDriver** `csi.spiffe.io`: `attachRequired: false`, `podInfoOnMount: true`,
@@ -202,7 +202,7 @@ aether and feeds both the agent and the proxy:
   kubelet-supplied `target_path`. Nothing more happens: there is no state and no API
   access.
 
-So the pattern demonstrably works on talos: read-only rootfs, `/var/lib/kubelet` on
+So the pattern demonstrably works on Talos: read-only rootfs, `/var/lib/kubelet` on
 EPHEMERAL, and Bidirectional propagation from a privileged container. The workload
 side (`volumes: [{csi: {driver: csi.spiffe.io, readOnly: true}}]`) is already in
 aether's own proxy and agent pods.
@@ -320,7 +320,7 @@ removal, socket removal on shutdown), and a kind e2e asserting that the node's
 `CSINode` lists `csi.aether.io` and still lists it after a `uds-csi` roll.
 
 The UDS carrier has **no SPIRE dependency**: it works with `spire.enabled: false`.
-The `node-driver-registrar` that the SPIFFE CSI driver runs on talos belongs to the
+The `node-driver-registrar` that the SPIFFE CSI driver runs on the reference cluster belongs to the
 SPIRE chart and is unrelated to this driver; nothing here reuses or waits on it.
 
 **CSI services** (`container-storage-interface/spec` v1, a new direct require):
@@ -521,7 +521,7 @@ unmounted directory fails `ENOENT` exactly like a dead app.)
    lands in exactly the reboot and power-blip windows that the incident history says
    are where aether hurts.
 2. **Demand is close to zero today.** The known UDS workloads are the e2e `udsecho`
-   and the talos soak's echo. A CSI driver, ~~a registrar sidecar image~~ (gone
+   and the reference-cluster soak's echo. A CSI driver, ~~a registrar sidecar image~~ (gone
    since 2026-09-30), a CSIDriver
    object, a new CNIPod field, a migration, and a deprecation window is a lot of
    machinery for that. It is justified by fixing a security class, not by features.
@@ -580,7 +580,7 @@ unmounted directory fails `ENOENT` exactly like a dead app.)
 | **0 — settle the finding** | **not run** (#1083 closed as superseded, 2026-10-01) | Not run: the owner built the structural fix (Phases 1–2) without the reproduction. What prevents the attack now is in *The finding that motivated it*. The draft's plan, kept as history: ~~0a: `e2e/uds.sh` gains a `hostile` leg, where a `udsecho` variant swaps `app.sock` for a symlink to `/run/aether/cni.sock` (and, SPIRE on, to the workload socket) and calls itself with `protocol: grpc`. The assertion is that the gRPC reaches the agent. The leg must be seen failing (attack works) before any fix, so it is not a vacuous gate. 0b, only if 0a confirms: supervisor `mount_setattr(AT_RECURSIVE, NOSYMFOLLOW)` on its kubelet-pods view, the agent refuses `medium: Memory` UDS volumes, and `udsWorkloads.enabled` defaults to `false` (chart bump, release note). The 0a leg then asserts `ELOOP`/no delivery.~~ | ~~0a result decides the proposal's fate~~ — superseded; the `nosymfollow` / no-follow assertion lives in `e2e/uds-csi.sh` instead |
 | **1 — the driver** | 1a, 1b | 1a: `agent/cmd/uds-csi` + `agent/internal/udscsi/` (Identity/Node services, per-pod tmpfs `root:<fsGroup>` `2770` + bind, `InvalidArgument` on a missing `fsGroup`, idempotency, unit tests against a fake mounter, and a root-only mount test in the kernel-gate CI lane the TPROXY work added), plus the built-in kubelet registration server (the `pluginregistration` proto copied into `api/aether/kubelet/pluginregistration/v1/`, unit-tested against a fake kubelet registration client; no `node-driver-registrar`). 1b: chart (`uds-csi-daemonset.yaml` with the single `uds-csi` container, `CSIDriver` with `fsGroupPolicy: File`, values, Chart.yaml bump), the `quay.io/aethermesh/uds-csi` image, `deps_test`. **Before 1b's first publish the owner pre-creates the `aethermesh/uds-csi` quay repository** (public, robot write): the push robot cannot create repositories (proposal 040). Inert until a pod declares the volume. | driver registers on kind: `CSINode` lists `csi.aether.io`, and still does after a `uds-csi` roll; `FailedMount` on bad requests, including a pod with no `fsGroup` |
 | **2 — the CSI volume becomes the only carrier (BREAKING)** | 2 | `CNIPod.uds_csi_volume = 12` via `enhanceCNIPod`; `udspath.ResolveCSI` **replaces** the `kubernetes.io~empty-dir` resolver (the emptyDir shape, `--kubelet-pods-dir`, the proxy's `/var/lib/kubelet/pods` mount and `proxy.udsWorkloads` are deleted in the same PR — chart major bump, release note); `--uds-csi-root`; `resolve_failures{reason}` counter (seeded at 0 so it is never "no series"); the `EndpointPolicy` webhook computes the 54-byte CSI budget (for a policy the webhook cannot see the pod, so it keeps a conservative budget and the agent stays fail-closed, as today); podmutate **rejects** an `emptyDir` carrier with a message naming the CSI volume, and may reject a `csi.aether.io` volume on a pod with no `securityContext.fsGroup` at admission, earlier than the plugin's `FailedMount`; `e2e/udsecho` and `e2e/soak/udsecho` switch their volume source in the same PR. | `e2e/uds.sh` runs every existing leg on the CSI carrier; the hostile leg passes with no kubelet-pods mount on the proxy at all; an `emptyDir` carrier is rejected at admission (seen red on the old build) |
-| **3 — talos** | — (deploy + soak; #1112 for the soak harness, #1106 for the remainder) | Migrate the soak's UDS echo to the CSI volume in the same `helm upgrade` (the old carrier stops resolving the moment the agent rolls, so the workload and the chart move together); validate across an **agent roll, a uds-csi roll, a proxy roll and a node reboot**: mounts persist across a plugin roll, republish is idempotent after reboot, Terminating pods drain while the plugin rolls. One 8 h soak with the UDS leg on the CSI carrier. 034 Phase 2 is built on the CSI carrier only. **Done:** deployed as chart `2.0.0` on 2026-09-30T23:42Z in one `helm upgrade` with the udsecho migration; first 8 h soak 2026-10-01 green on every CSI check through agent and proxy rolls; plugin roll under load 2026-10-01T17:44Z PASS (see *Phase 3 as built*). **Open:** the node reboot (#1106). | soak grade — CSI checks green; node reboot pending (#1106) |
+| **3 — the reference cluster** | — (deploy + soak; #1112 for the soak harness, #1106 for the remainder) | Migrate the soak's UDS echo to the CSI volume in the same `helm upgrade` (the old carrier stops resolving the moment the agent rolls, so the workload and the chart move together); validate across an **agent roll, a uds-csi roll, a proxy roll and a node reboot**: mounts persist across a plugin roll, republish is idempotent after reboot, Terminating pods drain while the plugin rolls. One 8 h soak with the UDS leg on the CSI carrier. 034 Phase 2 is built on the CSI carrier only. **Done:** deployed as chart `2.0.0` on 2026-09-30T23:42Z in one `helm upgrade` with the udsecho migration; first 8 h soak 2026-10-01 green on every CSI check through agent and proxy rolls; plugin roll under load 2026-10-01T17:44Z PASS (see *Phase 3 as built*). **Open:** the node reboot (#1106). | soak grade — CSI checks green; node reboot pending (#1106) |
 
 ### Phase 1 as built
 
@@ -695,17 +695,17 @@ Where the build departs from the design text:
   and `volume_not_declared` (that TCP service keeps serving). The (e) drift
   target now mounts an unused `csi.aether.io` volume, since a policy naming an
   undeclared volume no longer reaches the data plane. `charts/udsecho` (the
-  talos soak's UDS workloads; the proposal's ~~`e2e/soak/udsecho`~~) switched in
+  reference-cluster soak's UDS workloads; the proposal's ~~`e2e/soak/udsecho`~~) switched in
   the same PR. The Phase 0 hostile leg is not part of this PR, and was never
   built (#1083 closed as superseded); `e2e/uds-csi.sh`'s planted-symlink
   assertion covers the mechanism on the CSI carrier.
 
 ### Phase 3 as built
 
-Phase 3 is talos-main, not a PR. Status 2026-10-01: complete except the node
+Phase 3 is the reference cluster, not a PR. Status 2026-10-01: complete except the node
 reboot.
 
-- **Deploy.** Chart `2.0.0` (`75caf0f`) went to talos-main on
+- **Deploy.** Chart `2.0.0` (`75caf0f`) went to the reference cluster on
   2026-09-30T23:42Z in **one** `helm upgrade` together with the udsecho
   migration (`uds-echo` / `uds-cr-echo` onto `csi: {driver: csi.aether.io}`
   with an `fsGroup`), as the row requires.
@@ -716,7 +716,7 @@ reboot.
   `aether_agent_uds_resolve_failures_total` 0 for all 8 reasons on all 5 nodes
   (40 series present, so the zero is not an absent series).
 - **Plugin roll under load, 2026-10-01T17:44Z**, via the one-off
-  `churn.sh --context talos-main --uds-csi-once` step added by #1112:
+  `churn.sh --context <context> --uds-csi-once` step added by #1112:
   `rollout restart ds/aether-uds-csi` with a `uds-echo` pod deleted while its
   node's plugin was down:
 
@@ -767,7 +767,7 @@ unaffected.
   and the gate should not grow for a niche feature. It should be re-evaluated after
   the Phase 3 reboot test, which is still open (#1106).
 - **Q4 — Terminating-while-plugin-down.** How long does a UDS pod stay Terminating
-  across a plugin roll on talos, and does anything in aether (the ghost sweep, the
+  across a plugin roll on the reference cluster, and does anything in aether (the ghost sweep, the
   #641 eviction path) misread a long Terminating as a stale pod? This should be
   measured in Phase 3, not assumed. **Measured for a plugin roll (2026-10-01):**
   a `uds-echo` pod deleted while its node's plugin was down finished Terminating

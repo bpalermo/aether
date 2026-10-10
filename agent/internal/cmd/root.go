@@ -709,7 +709,7 @@ func setupNodeGating(m ctrl.Manager, reasserter *cniconflist.Reasserter, spireSo
 	// guard re-arms on 30s of NotReady, so a hard-from-t=0 gate would turn a
 	// brief SPIRE hiccup into a fleet-wide taint. That is survivable only
 	// because spire-server, spire-agent and the SPIFFE CSI driver now TOLERATE
-	// aether.io/agent-not-ready (k8s-talos-main #45, 2026-09-07); before they
+	// aether.io/agent-not-ready (the platform's GitOps repository, 2026-09-07); before they
 	// did, the outage could have fenced out its own cure, which is why SPIRE was
 	// kept out of the taint gate. It no longer is. See commonspire.NotReadyDwell.
 	// Nil (SPIRE disabled) registers no check at all.

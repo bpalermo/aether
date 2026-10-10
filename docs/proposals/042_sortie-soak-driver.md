@@ -11,17 +11,17 @@ sortie b71b37e, and moved to sortie 94cf103 on 2026-10-07, which fixed every
 defect the first version had to work around ("What sortie 94cf103 retired").
 One new sortie defect was found on the way: it waits without limit for an engine
 whose node has gone silent ("Risks", 5).
-Phase 1, the short e2e on talos-main, ran twice on 2026-10-07 ("Verified on
-talos-main"): the driver works there, and it needs a client queue, which the
+Phase 1, the short e2e on the reference cluster, ran twice on 2026-10-07 ("Verified on
+the reference cluster"): the driver works there, and it needs a client queue, which the
 plan now carries by default ("The client queue").
 The harness then moved to sortie 9fcbb81 (2026-10-07, "What sortie 9fcbb81
 changed"): that defect is fixed, a request still in flight when a run ends is
 counted, a stage that was not run is marked as such, the report carries
 latency and timestamps, and each execution's result is also written as it
-finishes. With 9fcbb81 the short e2e passed on talos-main (run 4, 2026-10-08,
+finishes. With 9fcbb81 the short e2e passed on the reference cluster (run 4, 2026-10-08,
 8 of 8) and the **first 8-hour soak** ran the same day: the sortie gate passed
 with 9,180,000 of 9,180,000 requests answered `2xx` under 35 rollouts
-("Verified on talos-main").
+("Verified on the reference cluster").
 The harness then moved to sortie f0750ec (2026-10-08, "What sortie f0750ec
 changed"): a stage refused at the execution cap is marked by a field, and a
 driver that wakes past a backend's deadline takes the answer that is waiting.
@@ -30,7 +30,7 @@ The harness then moved to sortie 96e6bfb (2026-10-08, "What sortie 96e6bfb
 changed"): nothing the harness reads or passes changed; the engine has a fix
 for a data race between executions that start together, and an image no longer
 gets a new digest from a commit that did not change it.
-Proven on kind; **neither f0750ec nor 96e6bfb has run on talos-main yet**.
+Proven on kind; **neither f0750ec nor 96e6bfb has run on the reference cluster yet**.
 **Author:** Bruno Palermo
 **Date:** 2026-10-06
 **Related:** #1323 (the kickoff lived outside the repository and had two
@@ -64,7 +64,7 @@ Three things about the k6 setup are worth not carrying over:
   which class" visible at all, and a classifier in the script maps k6's error
   numbering onto classes (it was wrong from #846 to #887).
 - **Launching it is not in the repository.** The kickoff, the nightly wrapper
-  and the saver are workstation scripts (`~/aether-soak-logs/<date>/…`). #1323
+  and the saver are scripts on the operator's machine (`<run-dir>/<date>/…`). #1323
   found two defects in them on the last run: the restart watchdog started at
   T0+30 min instead of at T0, and the pre-flight's readiness check used an awk
   back-reference, which awk does not have, so it printed `NOT READY` for every
@@ -175,7 +175,7 @@ The counters **overlap** — a reset is in `stream_resets`, in one phase counter
 and in one reason counter — so the gate lists them and never adds them up. A
 counter that never incremented is absent from the report and reads zero; the
 `pool_overflow` control for that is real (it was seen non-zero on kind, under
-the CPU limit the engine used to need, and on talos-main with no client queue).
+the CPU limit the engine used to need, and on the reference cluster with no client queue).
 
 **An execution goes the distance.** Nighthawk carries four default *failure
 predicates* — `benchmark.http_4xx`, `http_5xx`, `pool_connection_failure` and
@@ -203,14 +203,14 @@ Four things the gate adds that k6's `rate<0.01` never had:
   report's per-backend `results`, so one slow node is named instead of being
   averaged away. Until 9fcbb81 this was a *rate* over the backend's own elapsed
   time. That time is fixed when the run stops and can read a hair under the
-  duration (899,999 ms of 900,000 on talos-main), which only flatters a rate —
+  duration (899,999 ms of 900,000 on the reference cluster), which only flatters a rate —
   and a backend that stopped at 96 % of the run, at exactly its share, had a
   perfect rate. A count against the plan has neither problem, and it is a range
   because a late-woken `WAIT` worker ends a run one request short — sortie's
   own README reports 999 of 1,000 in about one short run in four on a busy
   machine and asks for "a range with some slack, not an equality". The second
-  talos run read 40,497–40,500 of 40,500 per 9 rps target with every failure
-  class at zero ("Verified on talos-main"): that, or requests still in flight
+  reference-cluster run read 40,497–40,500 of 40,500 per 9 rps target with every failure
+  class at zero ("Verified on the reference cluster"): that, or requests still in flight
   when the run stopped, which 94cf103 counted nowhere — its reports cannot say
   which. 1 % is 81 requests of a 9 rps target's 15 minutes, 2,754 of its
   8h30m.
@@ -255,7 +255,7 @@ failed soak. The 2026-09-30 run had 147 k6 failures, 141 of them before T0.
 | The restart gate: "the watchdog stops at T0+8h because `k6-soak-loader` restarts once by design" | — | a finished Job pod has no restart; the 8 h window no longer has a trap at its end. The watchdog also now sees an engine OOM (it did, on kind) |
 | The UDS gates, item 1: "the `--- by target` table must show no `uds-echo` / `uds-cr-echo` row" | k6 summary | `sortie-gate.sh`: `PASS uds-echo`, `PASS uds-cr-echo`; a `FAIL` row must match an access-log row, as before. Control counts double (see "Rate shares") |
 | The UDS gates, control query: `client_sa default` ≈ 216,000 per authority | access logs | `client_sa soak-sortie` ≈ 432,000 per authority |
-| Benign `DC` (#1009): k6 lines must sit in a source-node proxy roll bracket; excluded from the k6 reconciliation | access logs + k6 | **expected to disappear for the loader**: see below. If `DC` + 200 + full bytes rows appear for `client_sa soak-sortie`, that is a finding, not a baseline. **One did**, in the second talos run ("Verified on talos-main") |
+| Benign `DC` (#1009): k6 lines must sit in a source-node proxy roll bracket; excluded from the k6 reconciliation | access logs + k6 | **expected to disappear for the loader**: see below. If `DC` + 200 + full bytes rows appear for `client_sa soak-sortie`, that is a finding, not a baseline. **One did**, in the second reference-cluster run ("Verified on the reference cluster") |
 | New-SA step text: "visible only because the k6 loaders happened to start … 58 s before T0" (#1086) | history | the engines are a new identity on every node at install; `run.sh` waits `SOAK_ENGINE_SETTLE` (30 s) after they are Ready before the first request |
 | Gate 3 (twin count = observed pairs): "k6 loaders + prober + new-SA steps" | Prometheus | same query; the loader's pairs are now `…@aether-test/soak-sortie` |
 | QUIC per-request cost gate (#1021): "at the soak's load shape", 300 rps | Pyroscope / Prometheus | the fleet rate is unchanged (300 rps), the per-target mix is not: re-baseline h3/h2 on the first sortie soak rather than comparing against 1.18× across drivers |
@@ -272,8 +272,8 @@ failed soak. The 2026-09-30 run had 147 k6 failures, 141 of them before T0.
   full body while the h3 upstream FIN was still in flight, which the source
   proxy logged as `DC` (#1009). Envoy's client does not treat a disconnect
   after a complete response as a failure, and it does not close first.
-  (Expected, and nearly so: the second talos run logged one such row in
-  269,992, still not a failure to the engine. "Verified on talos-main".)
+  (Expected, and nearly so: the second reference-cluster run logged one such row in
+  269,992, still not a failure to the engine. "Verified on the reference cluster".)
 - **Per-request DNS.** A target is resolved once per execution, by the engine,
   at the start. Mesh DNS is exercised 8 times per node per run by the loader,
   not continuously. The prober's `mesh_dns` tier (which resolves on every probe)
@@ -393,13 +393,13 @@ idle worker; eight workers at 3–9 rps each landing on 110–130 agrees with it
   for, than in the report.
 
 With the limit gone, `max_pending_requests` went too — and came back after the
-first talos run, for a reason that has nothing to do with CPU limits. It had
+first reference-cluster run, for a reason that has nothing to do with CPU limits. It had
 existed so that a throttled worker could queue the requests that came due while
-it was off CPU; on kind an unthrottled engine never needed it. On talos-main it
+it was off CPU; on kind an unthrottled engine never needed it. On the reference cluster it
 does: see "The client queue", next.
 
 The request is **150m**: the measured 0.125–0.14 core with the progress
-snapshots in it, and a little room. talos-main's workers have 3.95 allocatable
+snapshots in it, and a little room. The reference cluster's workers have 3.95 allocatable
 cores and sit at 1.3–1.65 in use before any load. Read there on 2026-10-07 (two
 15-minute runs): **127–135m and 302–321 MiB per engine pod**, so the request
 stands.
@@ -432,9 +432,9 @@ off; the circuit breaker is the only thing that refuses.) That takes several
 requests due at once with no connection ready for them: the node not completing
 new connections, or not running the worker thread, for longer than the gap
 between two requests (111 ms at 9 rps), after which the backlog arrives
-together. Which of the two it was on talos has not been established.
+together. Which of the two it was on the reference cluster has not been established.
 
-On kind (20 idle cores) that never happened in any run. On talos-main, without
+On kind (20 idle cores) that never happened in any run. On the reference cluster, without
 a queue, it happened 6 times in 270,000 requests (run 1 below), on two nodes,
 in executions whose progress lines show a ~1 s response-time maximum; with
 `max_pending_requests: 16` it did not happen in a run with an agent roll and a
@@ -496,9 +496,9 @@ Until then the plan carried two thresholds, `latency_2xx.p50 < 60s` and
 `latency_2xx.p99 < 60s`, only because a statistic could reach the report no
 other way than as a threshold's `actual`; they could not fail on a mesh that
 answers at all, and they are **removed, not replaced**. Latency is not a gate
-until talos-main has shown what the numbers look like there, under rolls, on
+until the reference cluster has shown what the numbers look like there, under rolls, on
 nodes that are busy: on kind p99 is flat at 2–4 ms with nothing else running,
-and the first talos runs read 115–207 ms. When there is a number to defend,
+and the first reference-cluster runs read 115–207 ms. When there is a number to defend,
 the place for it is a real threshold in the plan (`latency_2xx.p99 < …`),
 which sortie judges per backend.
 
@@ -537,9 +537,9 @@ sortie has no OTLP sink (Envoy's aborts the engine on its first flush there);
 the plan's `stats` block makes each engine flush its Envoy stats store to a
 statsd server over UDP, and the address must be an IP literal.
 
-**talos-main already has the receiver.** `o11y/otel-scraper` (GitOps:
-`clusters/talos-main/otel-scraper/values.yaml`) exposes `8125/UDP`, cluster IP
-`10.106.234.157` on 2026-10-07, with a statsd receiver (10 s aggregation,
+**The reference cluster already has the receiver.** `o11y/otel-scraper` (GitOps:
+`clusters/<cluster>/otel-scraper/values.yaml`) exposes `8125/UDP` on a ClusterIP Service
+(read on 2026-10-07), with a statsd receiver (10 s aggregation,
 monotonic counters, `|ms` timers as explicit-bucket histograms), a
 `deltatocumulative` processor and `job="statsd"`. It was added for Nighthawk
 in `clj-grpc-soak`. `run.sh --statsd auto` (the default) resolves that
@@ -556,7 +556,7 @@ sortie.<scenario>.<target>.<backend>.cluster.<worker>.benchmark_http_client.late
 ```
 
 and as they arrive in Prometheus (the path was verified on kind with 94cf103
-against a collector with talos-main's receiver and processor settings, read
+against a collector with the reference cluster's receiver and processor settings, read
 from the GitOps values; with 9fcbb81 the names were read off the wire only):
 
 ```
@@ -564,12 +564,12 @@ sortie_mesh_<target>_<backend>_cluster_0_benchmark_http_2xx_total
 sortie_mesh_<target>_<backend>_cluster_0_benchmark_pool_overflow_total     (exists once non-zero)
 sortie_mesh_<target>_<backend>_cluster_0_benchmark_http_client_latency_2xx_{bucket,sum,count}
 sortie_mesh_<target>_<backend>_cluster_0_upstream_rq_total   … and Envoy's other cluster counters
-sortie_mesh_svc_1_main_worker_03_cluster_0_benchmark_http_2xx_total        (an example)
+sortie_mesh_svc_1_node_c_cluster_0_benchmark_http_2xx_total        (an example)
 ```
 
 `<scenario>` is `mesh`; `<target>` has `-` as `_`; `cluster_0` is worker 0, the
 only one per target. **`<backend>` is the engine's node, by name**, lowercased
-and reduced to `[a-z0-9_]` (`main-worker-03` → `main_worker_03`). That is
+and reduced to `[a-z0-9_]` (`node-c` → `node_c`). That is
 sortie 0fc5746: the plan's stats block says `backend: name`, sortie sends a
 placeholder where the name goes, and each engine puts in the name it was
 started with (`--backend-name`), which the chart takes from the node
@@ -581,8 +581,8 @@ still in the metric *name* and nowhere else — but it is a name that means
 something and does not change. Two consequences of sortie not knowing the
 names: an engine started without one refuses the execution (so the two
 settings are pinned together by the harness test), and nothing checks that two
-nodes' names stay distinct once reduced to `[a-z0-9_]` (talos-main's
-`main-worker-01` … `-05` do). The **report** is unchanged: it names a backend
+nodes' names stay distinct once reduced to `[a-z0-9_]` (the reference cluster's
+`node-a` … `node-e` do). The **report** is unchanged: it names a backend
 by pod IP and port, and the gate maps that through `engines.tsv`.
 
 **The per-node series sum to the report.** With sortie b71b37e the names
@@ -606,8 +606,8 @@ no totals: every flush carries what each counter gained since the last one
 `deltatocumulative` adds them up. Since the names stopped changing with every
 install (0fc5746), a series the collector still holds carries on from the
 previous run's total; it starts from zero only if the collector had expired it
-or was restarted, and that can happen inside a run. On talos-main, 2026-10-08,
-`sortie_mesh_svc_1_main_worker_03_cluster_0_benchmark_http_2xx_total`: 7,739
+or was restarted, and that can happen inside a run. On the reference cluster, 2026-10-08,
+`sortie_mesh_svc_1_node_c_cluster_0_benchmark_http_2xx_total`: 7,739
 after run 4 (the report: 8,097); from zero again when the soak started 21
 minutes later; **241,808** at the soak's end where the report has **275,400**,
 with one reset in between; `increase()` over the soak's window: 274,864. So:
@@ -653,8 +653,8 @@ runbook for the ext_authz counters and under "Live view" in
 2026-10-08 were checked for this: `aether-k6` puts every `k6_*` counter under
 `rate()` and reads only the `k6_vus` gauges bare, and no dashboard or rule reads
 a `sortie_*` series yet. It
-is a GitOps change (sidecar ConfigMaps in `k8s-talos-main`), made in phase 2,
-once the first talos run has shown what the series look like there. Retiring
+is a GitOps change (sidecar ConfigMaps in the platform's GitOps repository), made in phase 2,
+once the first reference-cluster run has shown what the series look like there. Retiring
 `aether-k6` and `k6-operator` is phase 4, and only if nothing else still uses
 them.
 
@@ -662,7 +662,7 @@ them.
 
 - The sortie pod writes the JSON report to
   `/var/run/sortie/<run tag>.json` on PVC `sortie-soak-reports` (`run.sh`
-  creates it; `openebs-hostpath` on talos-main, which has no default class, so
+  creates it; `openebs-hostpath` on the reference cluster, which has no default class, so
   `run.sh` takes the cluster's only class, or `--storage-class`). One small
   file per run; the PVC is kept across runs.
 - `sortie-save.sh` is armed, detached, as soon as the Job exists and before
@@ -670,7 +670,7 @@ them.
   armed for a Job that had already ended, and such a run's report is the one
   thing that says why it ended). When the Job finishes it
   copies into the run directory: the report (through a short-lived reader pod
-  that prints the file — `kubectl exec` is denied on talos-main), the sortie
+  that prints the file — `kubectl exec` is denied on the reference cluster), the sortie
   pod's log (the progress lines and the readable summary), the Job and pod
   objects, every engine's log, and the engine pod list. It writes `SAVED` last, only if the report
   parsed.
@@ -729,7 +729,7 @@ after re-running the case it had been written for.
 | sortie b71b37e | the harness's workaround | sortie 94cf103 | the harness now |
 |---|---|---|---|
 | an execution ended at its first 4xx / 5xx / reset / connection failure, and then reported no counters | `nighthawk_template.failure_predicates`, four limits of 10¹² | sortie turns the default predicates off; a stopped execution still reports its counters | no `failure_predicates` in the plan. Deliberate failure re-run: 240 s of 240 s on both nodes, `http_5xx=552`, only that target fails |
-| a worker thread never blocked: 8.0 / 2.85 / 1.7 cores per engine (`SPIN` / `POLL` / `SLEEP`) | `SLEEP`, a 400m CPU limit, and `max_pending_requests: 16` so the throttled engine queued instead of refusing | the `WAIT` idle strategy (opt-in, through the template) | `WAIT`, a 150m request, **no CPU limit**: 0.11–0.14 core, every request sent, p99 2–4 ms instead of 20–100 ms. The pending queue went with the limit and **came back after the first talos run** as a sized client queue ("The client queue"): open-loop load needs one on nodes that stall, limit or no limit |
+| a worker thread never blocked: 8.0 / 2.85 / 1.7 cores per engine (`SPIN` / `POLL` / `SLEEP`) | `SLEEP`, a 400m CPU limit, and `max_pending_requests: 16` so the throttled engine queued instead of refusing | the `WAIT` idle strategy (opt-in, through the template) | `WAIT`, a 150m request, **no CPU limit**: 0.11–0.14 core, every request sent, p99 2–4 ms instead of 20–100 ms. The pending queue went with the limit and **came back after the first reference-cluster run** as a sized client queue ("The client queue"): open-loop load needs one on nodes that stall, limit or no limit |
 | a `--progress` snapshot copied every histogram (300 → 550–810 MiB, OOM at 512 MiB) | no `--progress` | snapshots carry summaries; memory is the same with and without | `--progress 60s`: 300 MiB flat |
 | statsd names carried no backend: every engine wrote one series | "the live series are one engine's worth; grade from the report" | `<backend>` (the engine's address, sanitised) in the prefix | per-node series that sum to the report; the caveat is gone, the IP → node map is documented |
 | the JSON report held thresholds and non-zero failure counters only | a `counter:benchmark.http_2xx > 0` threshold as a carrier for the 2xx total | per execution: `results` (per backend), `totals`, `backend_errors` | the carrier is dropped; `sortie-gate.sh` reads the three, judges rate and failures **per node**, and refuses an old-format report |
@@ -820,7 +820,7 @@ f0750ec commit.
 |---|---|
 | an execution of a stage refused at an engine's execution cap has `"refused": "execution_cap"` in the report and in the results stream; so does each `backend_errors` entry that is an engine which refused. The stages after it keep `"not_run": true` (and no `refused`) | `sortie-gate.sh` knows a refusal by the field. An entry of `backend_errors` without it is a lost backend, also inside a refused stage, which the text match could not tell. The error text is still read for one shape only: an execution with no `refused` field at all, which is a 9fcbb81 report, and those are still graded with this gate (run 4 and the first soak are 9fcbb81 reports) |
 | a backend's answer that is already there when the driver notices the deadline has passed, or arrives within 10 s of that, is taken as the result. The deadline is wall time, and a driver that was itself stopped can wake past it with every result waiting; 9fcbb81 then picked between "answered" and "overdue" at random | nothing to change. It is what the frozen-driver run of the 9fcbb81 evidence showed (the healthy node's engine reported silent on four of eight executions); re-run below |
-| the README says what a receiver shows across runs on series named by backend name: the engine sends per-flush deltas, so a kept series carries on from the last run | "Telemetry" and the README's "Live view" now say it, with what talos-main's Prometheus showed. Nothing in the harness read a total as a count |
+| the README says what a receiver shows across runs on series named by backend name: the engine sends per-flush deltas, so a kept series carries on from the last run | "Telemetry" and the README's "Live view" now say it, with what the reference cluster's Prometheus showed. Nothing in the harness read a total as a count |
 
 Not in f0750ec, and still done by the harness: `run.sh` used to abort on a
 Job that had already ended **before** it armed the saver (the 9fcbb81 evidence
@@ -893,7 +893,7 @@ red with the previous pin's text).
 The same cluster shape, aether install (from the tree this bump was made on),
 stand-in targets and UDP listener as for f0750ec below; every run through
 `run.sh e2e --verify` (`verified=cosign-v3.1.2`, chart `sha256:b30a4266…`).
-Run directories: `~/aether-soak-logs/1008-sortie-96e6bfb-kind/`.
+Run directory: `<run-dir>/1008-sortie-96e6bfb-kind/`.
 
 | run | result |
 |---|---|
@@ -928,8 +928,8 @@ rows now say so.
 
 The same cluster shape, aether install, stand-in targets and UDP listener as
 for 9fcbb81 below; every run through `run.sh e2e --verify`
-(`verified=cosign-v3.1.2`, chart `sha256:b1f0a6d5…`). Run directories:
-`~/aether-soak-logs/1008-sortie-f0750ec-kind/`.
+(`verified=cosign-v3.1.2`, chart `sha256:b1f0a6d5…`). Run directory:
+`<run-dir>/1008-sortie-f0750ec-kind/`.
 
 | run | result |
 |---|---|
@@ -940,7 +940,7 @@ for 9fcbb81 below; every run through `run.sh e2e --verify`
 | the same, frozen for ten minutes (the 9fcbb81 case, like for like) | `SORTIE_OVERDUE` at five minutes; the pod was evicted with its node and its log lost, as before; on the thaw sortie wrote the report and the stream before it was killed. Again results from both backends on all eight executions and only the frozen node's own engine failed (`reported an execution of 10m46.876s …`): `lost_backends=1`, where 9fcbb81 read 2. Sixteen of sixteen executions over the two runs took the healthy backend's waiting answer; with 9fcbb81 four of eight did not |
 | two 60 s runs one after the other, the listener on the control-plane node | on the wire, `sortie.mesh.tcp_a.sortie_worker.cluster.0.benchmark.http_2xx`: `40\|c 45\|c 45\|c 45\|c 45\|c 45\|c 45\|c 46\|c 45\|c 45\|c 45\|c 44\|c 5\|c` in the first run, which is the report's 540, then `40\|c 45\|c …` again under the same name in the second. Deltas, as sortie's README says; what a receiver makes of them is in "Telemetry" |
 
-**Not run against f0750ec:** talos-main; anything longer than five minutes;
+**Not run against f0750ec:** the reference cluster; anything longer than five minutes;
 `--rolls`; an engine pod deleted mid-run; a backend that answers *within the
 ten seconds after* a missed deadline rather than before it (both frozen runs
 had the answer waiting). The sortie session could not reproduce the frozen
@@ -974,7 +974,7 @@ is at or under what 94cf103 read with `WAIT` templated (0.11–0.14).
 
 **Not run against 9fcbb81:** a 15-minute run (5 and 11 minutes here); the
 deliberate-failure run (a Deployment scaled to zero); an engine pod deleted
-mid-run; the collector with talos-main's statsd receiver settings, and so the
+mid-run; the collector with the reference cluster's statsd receiver settings, and so the
 series' names in Prometheus and their sum against the report; a real
 `http_inflight_lost` (it needs a target that holds a request open across the
 end of a run for more than 30 s; the fixture for it is canned from the schema).
@@ -983,7 +983,7 @@ end of a run for more than 30 s; the fixture for it is canned from the schema).
 
 A three-node kind cluster (pinned kind v0.33.0, one control plane and two
 workers), aether from this tree as `e2e/uds.sh up` installs it (SPIRE off,
-`uds-echo`, `uds-cr-echo`, `tcp-echo`), a collector with talos-main's statsd
+`uds-echo`, `uds-cr-echo`, `tcp-echo`), a collector with the reference cluster's statsd
 receiver settings as `o11y/otel-scraper`, and the committed values and plan
 with a stand-in targets file of the same shape (six 9 rps targets on
 `tcp-echo`, the two UDS targets at 3 rps). Every run went through `run.sh e2e`,
@@ -1007,7 +1007,7 @@ rolls, and both engines OOM-killed at 512 MiB by the first progress snapshot.
 
 The clean roll result is a kind result: one replica per target, SPIRE off, a
 20-core host. It shows the driver does not manufacture failures at a hot
-restart; it says nothing about what a roll costs on talos-main.
+restart; it says nothing about what a roll costs on the reference cluster.
 
 ## Risks
 
@@ -1019,7 +1019,7 @@ restart; it says nothing about what a roll costs on talos-main.
 2. ~~**An 8 h unattended run is unproven**~~: memory over ~9 M requests per
    node, pacing at soak length, the final report's size and assembly time, 510
    progress snapshots. **Run once, 2026-10-08, with 9fcbb81** ("Verified on
-   talos-main"): 8h30m on five engines, every one of 9,180,000 requests sent
+   the reference cluster"): 8h30m on five engines, every one of 9,180,000 requests sent
    and answered, no engine restarted, the report and the stream written and
    saved 25 s after the last answer. One run; the k6 files stay until phase 4.
 3. **The engine has no CPU limit.** It costs 0.11–0.14 core on kind because a
@@ -1029,7 +1029,7 @@ restart; it says nothing about what a roll costs on talos-main.
    a sortie bump that changed the default back, would cost up to eight cores on
    a four-core node and starve the proxy under test. The test suite pins that
    the plan templates nothing; **the engine's CPU has to be read again at every
-   sortie bump**, and has not been read on talos for 9fcbb81, f0750ec or 96e6bfb
+   sortie bump**, and has not been read on the reference cluster for 9fcbb81, f0750ec or 96e6bfb
    (94cf103 read 127–135m per engine, 2026-10-07; neither saved run directory
    of 2026-10-08 holds a reading). f0750ec's engine has the layers of
    9fcbb81's, so the two are one reading. 96e6bfb's engine is a new binary
@@ -1102,9 +1102,9 @@ restart; it says nothing about what a roll costs on talos-main.
 
 ## Cut-over
 
-1. **Short e2e on talos-main** (15 min, `run.sh e2e`), k6 not running; the
+1. **Short e2e on the reference cluster** (15 min, `run.sh e2e`), k6 not running; the
    exact commands and what each writes to the cluster are in the README ("The
-   first short e2e on talos-main"). Reads: the pool is five backends on five
+   first short e2e on the reference cluster"). Reads: the pool is five backends on five
    nodes; what the engine really costs on those CPUs, against the 150m request;
    pacing (`http_2xx=<counted>/<planned>` per target and node) and
    `pool_overflow` zero with no limit and no queue; the latency the gate
@@ -1112,7 +1112,7 @@ restart; it says nothing about what a roll costs on talos-main.
    report; and, in a second run with `--rolls`, that one agent roll and one
    proxy roll produce failures the access logs can attribute. Exit:
    `sortie-gate.sh` PASS on a no-roll run, and every number that was
-   unverified replaced by a reading. **Run on 2026-10-07** ("Verified on talos-main"):
+   unverified replaced by a reading. **Run on 2026-10-07** ("Verified on the reference cluster"):
    the no-roll run FAILED the gate on 6 `pool_overflow` with no client queue,
    which is the finding; the run with rolls and a queue PASSED. The exit
    condition as written — a PASS on a no-roll run, with the default queue —
@@ -1127,7 +1127,7 @@ restart; it says nothing about what a roll costs on talos-main.
 3. **First sortie soak** (`run.sh soak`), k6 not running. It is graded as a
    soak and as the 8 h proof of the driver. Exit: prober gates as always, the
    loader ran 8h30m on five backends, its failures reconcile against access
-   logs the way k6's did. **Run on 2026-10-08** ("Verified on talos-main"):
+   logs the way k6's did. **Run on 2026-10-08** ("Verified on the reference cluster"):
    the loader ran its 8h30m on five backends and had no failure to reconcile;
    the prober's liveness tier was clean and its mesh_dns tier was not (37
    timeouts, all labelled one node, under investigation), so the exit is not
@@ -1137,12 +1137,12 @@ restart; it says nothing about what a roll costs on talos-main.
    and rewrite the README passages that still say "k6" (the churn script's
    comments too). Not before phase 3 has passed.
 
-## Verified on talos-main (2026-10-07 and -08), and what is still open
+## Verified on the reference cluster (2026-10-07 and -08), and what is still open
 
 Five runs, k6 not running, five workers at 60 rps per node, `WAIT`, no CPU
 limit: four 15-minute `run.sh e2e` runs and one `run.sh soak`. Runs 1 to 3
 with sortie 94cf103, run 4 and the soak with 9fcbb81; **none yet with
-f0750ec or 96e6bfb**. Run directories under `~/aether-soak-logs/`: `1007-sortie-e2e-1`,
+f0750ec or 96e6bfb**. Run directories under `<run-dir>/`: `1007-sortie-e2e-1`,
 `-2`, `-3`, `1008-sortie-e2e-9fcbb81`, `1008-sortie-soak`. Access-log figures
 are the source proxies' rows for `user_agent:"aether-soak-sortie"` (the LogsQL
 is in the README, "The mesh's own numbers"). Runs 1 and 2 first, as they were
@@ -1153,7 +1153,7 @@ written up at the time; runs 3 and 4 and the soak follow.
 | rolls | none | `aether-agent` at T+3m, `aether-proxy` at T+8m; both `ROLLED` |
 | client queue | none (the plan as it then was) | `max_pending_requests: 16` |
 | sent, of 270,000 planned | 269,994 | every target 40,497–40,500 of 40,500 (9 rps), 13,499–13,500 of 13,500 (3 rps) |
-| `pool_overflow` | **6**: `svc-1` 3 and `svc-4` 2 on main-worker-03, `svc-2` 1 on main-worker-02 | 0 |
+| `pool_overflow` | **6**: `svc-1` 3 and `svc-4` 2 on node C, `svc-2` 1 on node B | 0 |
 | every other failure class | 0 | 0 |
 | gate | `VERDICT FAIL targets=8 passed=5 failed=3` | `VERDICT PASS targets=8 passed=8 failed=0` |
 | sortie latency, worst node per target | p50 13–17 ms, p99 115–141 ms | p50 12–16 ms, p99 153–207 ms |
@@ -1173,7 +1173,7 @@ written up at the time; runs 3 and 4 and the soak follow.
   every one `200`. No first-use failure.
 - **The report PVC**: provisioned, written by the sortie pod, read back by the
   saver in both runs.
-- **Signature verification on talos** (`VERIFIED=cosign-v3.1.2` in both
+- **Signature verification on the reference cluster** (`VERIFIED=cosign-v3.1.2` in both
   `run.env`s) and the PriorityClass, which the first run created.
 - **One agent roll and one proxy roll under load** (run 2): no reset, no
   connection failure, no 5xx, on any target or node. One data point, not a
@@ -1190,7 +1190,7 @@ written up at the time; runs 3 and 4 and the soak follow.
   66–78 ms — a few ms at the median, tens of ms at the tail. It includes the
   client's connection wait and scheduling. It stays a soft signal; the
   access-log quantiles are the mesh's number.
-- **One `200` / `DC` row** in run 2: main-worker-04, to `echo`, at T+10m08s,
+- **One `200` / `DC` row** in run 2: node D, to `echo`, at T+10m08s,
   16 s before the proxy roll finished. A complete response (799 bytes, like
   every `echo` response; 78 ms), `downstream_remote_disconnect`, the single
   request on a second connection the engine opened while its usual one was
@@ -1210,10 +1210,10 @@ What is in each row is read from that run's saved `report.json`,
 | when | 2026-10-07, load from 11:43:08Z | 2026-10-08, 01:25:51Z to 01:40:54Z |
 | sortie, aether | 94cf103 | 9fcbb81, aether 2.4.16 |
 | sent, of 270,000 planned | 269,999 | 269,981 |
-| failure classes | **1**: `mesh/svc-3` on main-worker-03, `stream_resets` 1 = `stream_resets_before_headers` 1 = `stream_resets_connection_termination` 1 (one reset, counted in its class, its phase and its reason). Every other class 0, `pool_overflow` among them | every class 0, `http_inflight_lost` (new in 9fcbb81) among them |
+| failure classes | **1**: `mesh/svc-3` on node C, `stream_resets` 1 = `stream_resets_before_headers` 1 = `stream_resets_connection_termination` 1 (one reset, counted in its class, its phase and its reason). Every other class 0, `pool_overflow` among them | every class 0, `http_inflight_lost` (new in 9fcbb81) among them |
 | sortie's own verdict | `FAIL  7/8 executions passed` (the plan's `stream_resets == 0`) | `PASS  8/8 executions passed` |
 | gate | not graded by today's gate, which refuses a 94cf103 report as old-format; by the report: 7 targets clean, `svc-3` failed | `VERDICT PASS targets=8 passed=8 failed=0 not_run=0 backends=5 lost_backends=0 report_pass=true` |
-| short of the plan | 1, the reset | 19, **all on main-worker-03**: 3 on each of five 9 rps targets, 2 on `echo`, 1 on each UDS target; the four other nodes sent 54,000 of 54,000 each |
+| short of the plan | 1, the reset | 19, **all on node C**: 3 on each of five 9 rps targets, 2 on `echo`, 1 on each UDS target; the four other nodes sent 54,000 of 54,000 each |
 | sortie latency, worst node per target | p50 12–16 ms, p99 178–264 ms | p50 12–15 ms, p99 170–228 ms, max 1.1–2.0 s |
 | watchdog, engines | `verdict=PASS new_restarts=0`, 30 samples; no engine restart | the same |
 | saver | `SORTIE_SAVED … job=failed executions=8 pass=false` | `SORTIE_SAVED … job=complete executions=8 pass=true not_run=0 window=…01:25:51.582Z..…01:40:54.014Z stream_executions=8` |
@@ -1229,7 +1229,7 @@ What is in each row is read from that run's saved `report.json`,
   queue. No `pool_overflow` in either run (the queue of 18; run 1 had 6 with
   none).
 - **Run 4's 19 short requests are one node's late start, by the timestamps.**
-  Every worker of main-worker-03's engine started between 01:25:52.537Z and
+  Every worker of node C's engine started between 01:25:52.537Z and
   .573Z, 0.31–0.35 s after the first worker of the pool (.225Z); on the other
   four nodes the workers started between .225Z and .556Z. And that engine's
   own elapsed time is short by the same amount: 899.68–899.75 s on its eight
@@ -1239,7 +1239,7 @@ What is in each row is read from that run's saved `report.json`,
   (`http_inflight_lost` 0); 19 in 270,000 is 0.007 %, inside the gate's 1 %
   range, which is what the range is for. Why that one engine started late is
   not known.
-- **First on talos-main with 9fcbb81 in run 4:** the results stream on
+- **First on the reference cluster with 9fcbb81 in run 4:** the results stream on
   `openebs-hostpath` (eight lines, the report's eight executions), the
   timestamps and the `WINDOW` line, latency from `statistics`, the count judged
   as a range, and a run that ended 2.4 s after its 900 s with nothing in
@@ -1248,7 +1248,7 @@ What is in each row is read from that run's saved `report.json`,
 ### The first 8-hour soak (2026-10-08)
 
 `run.sh soak`, sortie 9fcbb81, aether 2.4.16-8f0ff40
-(`~/aether-soak-logs/1008-sortie-soak`). Load from 02:01:51Z to 10:31:53Z; the
+(`<run-dir>/1008-sortie-soak`). Load from 02:01:51Z to 10:31:53Z; the
 churn driver's T0 is **02:06:04Z**.
 
 | | |
@@ -1259,10 +1259,10 @@ churn driver's T0 is **02:06:04Z**.
 | churn | 35 `ROLLED` lines and no `FAILED` or `ABORTED`: the 33 rolls (6 proxy, 2 agent, 2 edge, 3 mesh-dns, 2 uds-csi, 18 `svc-*`) and the 2 new-ServiceAccount steps; the SHRINK done and restored |
 | restart watchdog | `verdict=PASS new_restarts=0 containers=0 samples=240 error_samples=0 baseline=0 ended=complete`, 02:06:10Z to 10:06:11Z |
 | engines | the five pods of the start are the five of the end, 0 restarts |
-| sortie latency, worst node per target | p50 12–15 ms, p99 388–473 ms, max 2.2–3.5 s. The worst p99 is main-worker-04's on all eight targets (388–473 ms there, 136–253 ms on the other four nodes) |
+| sortie latency, worst node per target | p50 12–15 ms, p99 388–473 ms, max 2.2–3.5 s. The worst p99 is node D's on all eight targets (388–473 ms there, 136–253 ms on the other four nodes) |
 | report and stream | `SORTIE_SAVED … job=complete executions=8 pass=true not_run=0 window=…02:01:51.550Z..…10:31:53.620Z stream_executions=8`, 25 s after the last answer |
 | prober, liveness tier | 0 non-success |
-| prober, mesh_dns tier | **37 timeouts, all labelled `node="main-worker-04"`**; attribution under investigation at the time of writing |
+| prober, mesh_dns tier | **37 timeouts, all labelled `node="node-d"`**; attribution under investigation at the time of writing |
 
 - **The loader gate passed an 8-hour soak with nothing to attribute**: no
   failure class moved on any target or node across 35 rollouts, so there was
@@ -1282,29 +1282,29 @@ churn driver's T0 is **02:06:04Z**.
 
 **Still open:**
 
-- **sortie f0750ec or 96e6bfb on talos-main at all.** Runs 4 and the soak were
+- **sortie f0750ec or 96e6bfb on the reference cluster at all.** Runs 4 and the soak were
   made with 9fcbb81. f0750ec changes the driver only, and what it changes (the
   `refused` field, the answer taken after a missed deadline) is not something
   a clean run exercises. 96e6bfb changes the engine's binary (a lock around
   one constructor, "What sortie 96e6bfb changed"), so its first run there is
   also the first reading of that engine's CPU on real nodes (risk 3).
 - **The mesh_dns timeouts of the soak** (37, all labelled
-  `node="main-worker-04"`): under investigation.
-- **The engine's CPU and memory on talos-main with 9fcbb81, f0750ec or
+  `node="node-d"`): under investigation.
+- **The engine's CPU and memory on the reference cluster with 9fcbb81, f0750ec or
   96e6bfb**, and over eight hours: not in the saved run directories (risk 3).
 - **The access-log cross-check for run 3, run 4 and the soak** is not recorded
   here (rows, codes and flags, `duration_ms` quantiles, whether a `200` / `DC`
   row recurred).
 - **h2 and h3**: the soak drives HTTP/1.1 only.
-- **A node that goes silent** (risk 5), and which of the two a talos reboot or
+- **A node that goes silent** (risk 5), and which of the two a reference-cluster reboot or
   upgrade is to sortie: a clean close, or silence.
 - ~~Anything past 15 minutes, and the 8 h run.~~ Run once (above).
 - ~~The default queue itself, and a no-roll run that passes.~~ Runs 3 and 4
   used 18; run 4 passed.
 - ~~The statsd path end to end on the real `otel-scraper` and Prometheus.~~
-  The node-named series arrive (`sortie_mesh_svc_1_main_worker_03_…` was read
+  The node-named series arrive (`sortie_mesh_svc_1_node_c_…` was read
   for run 4 and for the soak); they are not a count ("Telemetry"). Their sum
-  against a report was not taken on talos-main and, after that reading, is
+  against a report was not taken on the reference cluster and, after that reading, is
   not worth taking.
 - ~~Behaviour under more than one proxy hot restart.~~ The soak: six proxy
   rolls and two agent rolls among 35, no loader failure. What the handoffs of
@@ -1318,7 +1318,7 @@ churn driver's T0 is **02:06:04Z**.
 - ~~Latency in the JSON report.~~ **Answered by sortie 1b3d404**; the two
   always-true carrier thresholds are removed.
 - **A latency threshold that can fail.** The carriers are gone and nothing
-  judges latency. The 9fcbb81 runs on talos now give numbers: worst-node p99
+  judges latency. The 9fcbb81 runs on the reference cluster now give numbers: worst-node p99
   per target 170–228 ms over 15 minutes without rolls, 388–473 ms over the
   soak's 35 rollouts (136–253 ms on four of the five nodes). Whether a real
   `latency_2xx.p99 < …` is set from them, or the access logs stay the only
@@ -1349,7 +1349,7 @@ churn driver's T0 is **02:06:04Z**.
   no histogram and costs no memory, which holds here; it says nothing about
   CPU. At one a minute it is +10 millicores per node, and a short burst rather
   than a level. Whether it can be cheaper is a question for sortie; whether a
-  0.6 s burst matters at a proxy handoff on a four-core node is one for talos.
+  0.6 s burst matters at a proxy handoff on a four-core node is one for the reference cluster.
 - **Should the loader keep `default` as its identity** (`serviceAccount.create:
   false`) so old access-log queries keep working? Proposed: no — a named
   identity is the better instrument, and the side-by-side needs the two loads

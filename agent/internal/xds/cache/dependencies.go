@@ -120,9 +120,9 @@ func (c *SnapshotCache) ObserveDependency(ctx context.Context, service string) b
 // markStreamFresh clears the pending-add set, is nothing. A name it is still
 // waiting on appears in NEITHER field, and its on_demand filter dedupes every
 // later re-subscribe for a name already in that state, so no ODCDS request
-// reaches the new agent at all. On talos the outage ended only when Envoy's
+// reaches the new agent at all. On the reference cluster the outage ended only when Envoy's
 // 15s init-fetch timeout tore that subscription state down and the next request
-// re-subscribed from scratch: 14.05s (w01) / 14.67s (w03) of 503s, ~7 rounds of
+// re-subscribed from scratch: 14.05s (node A) / 14.67s (node C) of 503s, ~7 rounds of
 // the 2s on-demand timeout, with the agent logging nothing.
 //
 // The held-resource inventory is the evidence the agent was missing: it is the

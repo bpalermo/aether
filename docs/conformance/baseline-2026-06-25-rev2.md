@@ -1,7 +1,7 @@
 # Gateway API conformance — re-run rev2 (2026-06-25)
 
 A second run of the upstream Kubernetes **Gateway API conformance suite**
-(`sigs.k8s.io/gateway-api/conformance` @ **v1.5.1**) against **talos-main**, now
+(`sigs.k8s.io/gateway-api/conformance` @ **v1.5.1**) against **the reference cluster**, now
 at aether **0.43.0** (rev 70). This re-run measures the **delta** from the
 [2026-06-25 baseline](./baseline-2026-06-25.md) after three changes landed:
 
@@ -39,7 +39,7 @@ sigs.k8s.io/gateway-api => ../` for the nested conformance module) drives
 - `GatewayClassName: "aether"`, controller `gateway.aether.io/edge`.
 - `ManifestFS: conformance.Manifests` (required when calling the suite
   programmatically — only the CLI wires the embedded base/mesh manifest FS).
-- `AllowCRDsMismatch: true` — talos-main carries standard **and** experimental
+- `AllowCRDsMismatch: true` — the reference cluster carries standard **and** experimental
   Gateway API CRDs (aether's L4 routes); benign for these two profiles.
 - **GATEWAY-HTTP:** supported features **inferred** from
   `GatewayClass.status.supportedFeatures` (the rev2 unlock —
@@ -130,7 +130,7 @@ Every one of these asserts **status conditions only** — exactly the surface
 ### The 31 FAIL — three buckets
 
 **1. Missing per-Gateway address → no live traffic (the dominant bucket).**
-The edge is still **one Deployment on one LoadBalancer** (`192.168.100.101`) with
+The edge is still **one Deployment on one LoadBalancer** (`203.0.113.101`) with
 **no per-Gateway address allocation**: every conformance Gateway is
 `Programmed=True` but its `.status.addresses` is **empty**. The suite's traffic
 tests call `WaitForGatewayAddress` first and fail with:
@@ -191,7 +191,7 @@ BackendTLSPolicy, client-cert, …) were **skipped, not failed** — (b) working
 
 | Priority | Blocker | Profile | Impact |
 |---|---|---|---|
-| **P0 (GW)** | **Per-Gateway address allocation.** One edge Deployment / one LB (`192.168.100.101`) with no per-Gateway `.status.addresses`. | GATEWAY-HTTP | Converts the single largest bucket (~17 Core + 3 Extended traffic tests) from FAIL toward PASS. Needs either per-Gateway LB addresses or a shared-address/host-multiplexing model the suite tolerates (publish a reachable address in `.status.addresses` and route by host). |
+| **P0 (GW)** | **Per-Gateway address allocation.** One edge Deployment / one LB (`203.0.113.101`) with no per-Gateway `.status.addresses`. | GATEWAY-HTTP | Converts the single largest bucket (~17 Core + 3 Extended traffic tests) from FAIL toward PASS. Needs either per-Gateway LB addresses or a shared-address/host-multiplexing model the suite tolerates (publish a reachable address in `.status.addresses` and route by host). |
 | **P0 (Mesh)** | **Apply HTTPRoute filters on the GAMMA / transparent-capture path.** Redirect + request/response header-modifier translate at the edge but not on capture. | MESH-HTTP | Converts `MeshHTTPRouteRequestHeaderModifier` + `MeshHTTPRouteRedirectHostAndStatus` from FAIL to PASS (~6/7 target). |
 | **P1** | **`ReferenceGrant` cross-namespace enforcement** (reject cross-ns backendRef without a grant; honor with one). | GATEWAY-HTTP | ~8 Core tests; mandatory feature of the profile. |
 | **P2** | **`RequestMirror` filter** (advertised as `Planned`). | both | Unlocks `HTTPRouteRequestMirror*` (currently skipped, not failed). |

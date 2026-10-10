@@ -364,7 +364,7 @@ func TestNewInboundListener_EveryMTLSChainPinsTheClientSAN(t *testing.T) {
 // Refusing is also the only safe answer for an inbound listener specifically —
 // building one anyway would name an SDS secret ("spiffe:///ns/…") the agent
 // never serves, so the listener would come up with no certificate and the pod
-// would be unreachable on the mesh permanently (#815, main-worker-03).
+// would be unreachable on the mesh permanently (#815, node C).
 func TestNewInboundListener_NoTrustDomainRefuses(t *testing.T) {
 	pod := &cniv1.CNIPod{
 		Name:             "pod-a",

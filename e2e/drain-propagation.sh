@@ -8,14 +8,14 @@
 # 3.8 s after their destination agents logged "endpoint marked draining". The
 # registrar fanned the mark out within ~0.15 s; the source proxies did not hear
 # it because their ADS stream was DOWN: in the TRIPLE the source agents were
-# restarting too. main-worker-04's agent shut down at 05:41:24.45, came back
+# restarting too. Node D's agent shut down at 05:41:24.45, came back
 # serving xDS at 05:41:39.93, and the proxy did not reconnect until 05:41:48.34
 # -- 8.4 s after the socket was serving, Envoy's fully jittered 500 ms / 30 s
 # xDS reconnect backoff. The three requests went out at 05:41:39.8-40.0.
 #
 # THE HARNESS. EWQ_WORKER=1 shape of e2e/eastwest-quic.sh (the source client-a
 # on the control plane, the destination quic-a on the worker), on the etcd
-# registry backend as talos-main runs it (REGISTRY_BACKEND=kubernetes, read at
+# registry backend as the reference cluster runs it (REGISTRY_BACKEND=kubernetes, read at
 # `up` and `verify`, for the chart default). quic-a runs 2 replicas with a 15 s preStop sleep, so a deleted
 # replica's application keeps serving -- and logging every request it gets --
 # for 15 s after its drain mark: the last request it logs is the last request

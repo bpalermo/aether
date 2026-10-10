@@ -62,7 +62,7 @@ former standalone `conformance.yaml` was consolidated into `e2e.yaml`.)
 ## `mesh/manifests.yaml` — the aether mesh overlay
 
 The suite's base mesh manifests do not exercise aether's mesh path. This overlay adds
-the aether-specific adaptations the talos baseline runs applied by hand:
+the aether-specific adaptations the reference-cluster baseline runs applied by hand:
 
 - `aether.io/managed: "true"` on the `gateway-conformance-mesh` namespace (mesh injection),
 - **per-version ServiceAccounts** (`echo-v1`, `echo-v2`) on the echo Deployments —

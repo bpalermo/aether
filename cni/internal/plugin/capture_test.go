@@ -329,11 +329,11 @@ func TestPodExcludedOutboundIPRanges(t *testing.T) {
 		want []netip.Prefix
 	}{
 		{name: "single cidr", conf: anno("10.0.0.0/8"), want: []netip.Prefix{mk("10.0.0.0/8")}},
-		{name: "bare addr -> /32", conf: anno("192.168.1.5"), want: []netip.Prefix{mk("192.168.1.5/32")}},
-		{name: "list with whitespace", conf: anno("10.0.0.0/8, 192.168.1.0/24 ,172.16.0.0/12"), want: []netip.Prefix{mk("10.0.0.0/8"), mk("192.168.1.0/24"), mk("172.16.0.0/12")}},
+		{name: "bare addr -> /32", conf: anno("198.51.100.5"), want: []netip.Prefix{mk("198.51.100.5/32")}},
+		{name: "list with whitespace", conf: anno("10.0.0.0/8, 198.51.100.0/24 ,172.16.0.0/12"), want: []netip.Prefix{mk("10.0.0.0/8"), mk("198.51.100.0/24"), mk("172.16.0.0/12")}},
 		{name: "host bits masked off", conf: anno("10.1.2.3/8"), want: []netip.Prefix{mk("10.0.0.0/8")}},
 		{name: "dedup after masking", conf: anno("10.1.2.3/8,10.4.5.6/8"), want: []netip.Prefix{mk("10.0.0.0/8")}},
-		{name: "skips blank/garbage/ipv6", conf: anno("10.0.0.0/8,,foo,fd00::/8,300.0.0.0/8,192.168.1.5"), want: []netip.Prefix{mk("10.0.0.0/8"), mk("192.168.1.5/32")}},
+		{name: "skips blank/garbage/ipv6", conf: anno("10.0.0.0/8,,foo,fd00::/8,300.0.0.0/8,198.51.100.5"), want: []netip.Prefix{mk("10.0.0.0/8"), mk("198.51.100.5/32")}},
 		{name: "empty value", conf: anno(""), want: nil},
 		{name: "nil annotations", conf: config.AetherConf{RuntimeConfig: &config.RuntimeConfig{}}, want: nil},
 		{name: "nil runtime config", conf: config.AetherConf{}, want: nil},

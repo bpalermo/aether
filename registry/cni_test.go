@@ -71,7 +71,7 @@ func TestNewServiceEndpointFromCNIPod_Protocol(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			service, protocols, ep, err := NewServiceEndpointFromCNIPod(
-				"cluster-a", "node-1", "region-1", "zone-a", "192.168.0.10", testCNIPod(tt.annotation),
+				"cluster-a", "node-1", "region-1", "zone-a", "192.0.2.10", testCNIPod(tt.annotation),
 			)
 			if tt.wantErr {
 				require.Error(t, err)
@@ -86,7 +86,7 @@ func TestNewServiceEndpointFromCNIPod_Protocol(t *testing.T) {
 			assert.Equal(t, "10.0.0.1", ep.GetIp())
 			// proposal 019: the node's routable IP is advertised for the
 			// per-node east/west waypoint (cross-cluster dial target).
-			assert.Equal(t, "192.168.0.10", ep.GetKubernetesMetadata().GetNodeIp())
+			assert.Equal(t, "192.0.2.10", ep.GetKubernetesMetadata().GetNodeIp())
 		})
 	}
 }
@@ -157,7 +157,7 @@ func TestNewServiceEndpointFromCNIPod_PortProtocols(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			_, protocols, ep, err := NewServiceEndpointFromCNIPod(
-				"cluster-a", "node-1", "region-1", "zone-a", "192.168.0.10", testCNIPod(tt.annotations),
+				"cluster-a", "node-1", "region-1", "zone-a", "192.0.2.10", testCNIPod(tt.annotations),
 			)
 			if tt.wantErr != "" {
 				require.Error(t, err)

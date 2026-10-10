@@ -18,7 +18,7 @@ import (
 // errPeerNoIdentity is verbatim what go-spiffe's server-side verifier produced
 // on the rev210 upgrade roll (2026-09-07 20:03:45Z), when a registrar Pod was in
 // its Service's endpoints before SPIRE had issued its SVID and an agent on
-// main-worker-01 dialled it.
+// node A dialled it.
 var errPeerNoIdentity = errors.New("x509svid: could not get X509 bundle")
 
 // peerlessCreds is a TransportCredentials whose handshake fails the way an mTLS

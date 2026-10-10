@@ -86,7 +86,7 @@ TEST_P(AetherStatsIntegrationTest, RecordsRequestCounter) {
 // Reproduction: boot Envoy with the SAME bootstrap stats_config the agent ships
 // in production (charts/agent/templates/configmap.yaml): use_all_default_tags
 // off + custom stats_tags (aether.cluster/aether.pod) + a stats_matcher
-// exclusion_list. On talos-main the aether.requests_total counter exports with
+// exclusion_list. On the reference cluster the aether.requests_total counter exports with
 // the tags baked into the name and empty labels; this test asserts the tags
 // survive as real Stats tags under that config, to localize whether the break is
 // at the Envoy counter or downstream in the OTLP->Prometheus pipeline.

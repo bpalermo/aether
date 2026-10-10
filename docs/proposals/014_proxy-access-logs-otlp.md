@@ -145,7 +145,7 @@ appropriate to the sampled volume.
    hand-sent OTLP log).
 2. Agent HCM access logger behind `telemetry.accessLogs.enabled` (default off) +
    the filter/sampling values; chart-template tests.
-3. Enable on talos-main at a low sample rate; confirm in VL: errors complete,
+3. Enable on the reference cluster at a low sample rate; confirm in VL: errors complete,
    success sampled, fields queryable, per-node/source/destination filterable.
 4. Tune sampling; add a Grafana "access logs" explore over the VL datasource.
 

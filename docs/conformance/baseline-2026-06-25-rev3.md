@@ -1,13 +1,13 @@
 # Gateway API conformance — re-run rev3 (2026-06-25)
 
 A third run of the upstream Kubernetes **Gateway API conformance suite**
-(`sigs.k8s.io/gateway-api/conformance` @ **v1.5.1**) against **talos-main**, now
+(`sigs.k8s.io/gateway-api/conformance` @ **v1.5.1**) against **the reference cluster**, now
 at aether **0.45.0** (rev 72). This re-run measures the **delta** from the
 [rev2 baseline](./baseline-2026-06-25-rev2.md) (0.43.0, rev 70) after two
 fixes landed:
 
 - **(a) Gateway `status.addresses`** — every class-`aether` Gateway now publishes
-  `.status.addresses = [192.168.100.101]` (the shared edge LoadBalancer IP),
+  `.status.addresses = [203.0.113.101]` (the shared edge LoadBalancer IP),
   021 **Phase 1** (#327).
 - **(b) `ReferenceGrant` cross-namespace enforcement** — cross-namespace
   HTTPRoute `backendRef`s are now gated by a `ReferenceGrant` (#324).
@@ -20,7 +20,7 @@ cleaned up afterward (verified removed).
 
 | Profile | Setup | Tests run | PASS | FAIL | SKIP (in-profile) | Verdict |
 |---|---|---|---|---|---|---|
-| **GATEWAY-HTTP** (north-south) | passed | 37 | **6** | **31** | 0 | **Totals flat vs rev2 (6/31), but the failure mode moved an entire layer deeper.** Gateways now have an address (#327), so the ~20 tests that died at `WaitForGatewayAddress` in rev2 now sail past setup and **attempt real traffic** — where they hit a *new* wall: the edge redirects `http://192.168.100.101/` → `https://…`, and the conformance client can't verify the bare-IP TLS cert (no IP SAN). The score didn't move; the blocker did. |
+| **GATEWAY-HTTP** (north-south) | passed | 37 | **6** | **31** | 0 | **Totals flat vs rev2 (6/31), but the failure mode moved an entire layer deeper.** Gateways now have an address (#327), so the ~20 tests that died at `WaitForGatewayAddress` in rev2 now sail past setup and **attempt real traffic** — where they hit a *new* wall: the edge redirects `http://203.0.113.101/` → `https://…`, and the conformance client can't verify the bare-IP TLS cert (no IP SAN). The score didn't move; the blocker did. |
 | **MESH-HTTP** (east-west / GAMMA) | passed | 7 | **4** | **3** | 0 | **Unchanged from rev2 and the original baseline.** The interception-model gap is untouched: filters still aren't applied on the GAMMA capture path. |
 
 **Headline delta:** GATEWAY-HTTP is **6 PASS / 31 FAIL — identical totals to
@@ -38,7 +38,7 @@ sigs.k8s.io/gateway-api => ../`, **not committed**), driving
 
 - `GatewayClassName: "aether"`, controller `gateway.aether.io/edge`.
 - `ManifestFS: conformance.Manifests`; `AllowCRDsMismatch: true` (mixed
-  standard + experimental CRDs on talos-main).
+  standard + experimental CRDs on the reference cluster).
 - **GATEWAY-HTTP:** supported features **inferred** from
   `GatewayClass.status.supportedFeatures`. The suite read
   `{GRPCRoute, Gateway, GatewayPort8080, HTTPRoute, HTTPRouteMethodMatching,
@@ -61,7 +61,7 @@ sigs.k8s.io/gateway-api => ../`, **not committed**), driving
 | **GATEWAY-HTTP tests run** | 0 | 37 | 37 | 0 |
 | **GATEWAY-HTTP PASS** | 0 | 6 | **6** | **0** |
 | **GATEWAY-HTTP FAIL** | 0 | 31 (Core 28, Ext 3) | **31 (Core 28, Ext 3)** | **0** |
-| Gateways get `.status.addresses` | no | no | **yes (`192.168.100.101`)** | **fixed (#327)** |
+| Gateways get `.status.addresses` | no | no | **yes (`203.0.113.101`)** | **fixed (#327)** |
 | `WaitForGatewayAddress` failures | n/a | ~20 | **0** | **−20 (gone)** |
 | Bare-IP TLS-SAN traffic failures | n/a | 0 | **22** | **+22 (new)** |
 | HTTPRoute cross-ns backendRef **status** correct | no | no | **yes (conditions pass)** | **fixed (#324)** |
@@ -72,7 +72,7 @@ sigs.k8s.io/gateway-api => ../`, **not committed**), driving
 1. **#327 works.** The ~20 rev2 failures that read
    *"error waiting for Gateway to have at least one IP address in status"* are
    **completely gone** — zero such errors in the rev3 run. Every conformance
-   Gateway now reports `.status.addresses = [192.168.100.101]` and the suite
+   Gateway now reports `.status.addresses = [203.0.113.101]` and the suite
    proceeds into traffic.
 2. **#324 works for HTTPRoute backendRefs.** The cross-namespace-backendRef
    ReferenceGrant tests (`HTTPRouteReferenceGrant`,
@@ -104,14 +104,14 @@ FAIL / 0 skip-in-profile**.
 
 **1. Bare-IP TLS-SAN on the traffic path — the new dominant bucket (22 tests).**
 This is the rev3 story. Gateways now have an address, so the suite issues a real
-`GET http://192.168.100.101/`. The aether edge answers with an **HTTP→HTTPS
-redirect**, the client follows to `https://192.168.100.101/`, and the TLS
+`GET http://203.0.113.101/`. The aether edge answers with an **HTTP→HTTPS
+redirect**, the client follows to `https://203.0.113.101/`, and the TLS
 handshake fails:
 
 ```
-Request failed, not ready yet: Get "https://192.168.100.101/":
+Request failed, not ready yet: Get "https://203.0.113.101/":
   tls: failed to verify certificate: x509: cannot validate certificate for
-  192.168.100.101 because it doesn't contain any IP SANs
+  203.0.113.101 because it doesn't contain any IP SANs
 ```
 
 - **18 HTTP-path tests:** `HTTPRouteSimpleSameNamespace`, `HTTPRouteMatching`,
@@ -125,7 +125,7 @@ Request failed, not ready yet: Get "https://192.168.100.101/":
   `HTTPRouteInvalidCrossNamespaceBackendRef`,
   `HTTPRouteInvalidNonExistentBackendRef`,
   `HTTPRouteInvalidBackendRefUnknownKind`.
-- **4 HTTPS-listener / hostname tests** that target `https://192.168.100.101/`
+- **4 HTTPS-listener / hostname tests** that target `https://203.0.113.101/`
   directly (same SAN failure): `HTTPRouteHTTPSListener`,
   `HTTPRouteListenerHostnameMatching`, `HTTPRouteHostnameIntersection`,
   `HTTPRouteRedirectHostAndStatus`.
@@ -206,7 +206,7 @@ data path, so this is correctly **flat**.
 
 | Priority | Blocker | Profile | Impact |
 |---|---|---|---|
-| **P0 (GW)** | **Per-Gateway addressing with a verifiable cert (021 Phase 2).** One shared edge LB IP + HTTP→HTTPS redirect + a serving cert with no IP SAN means the conformance client can't complete TLS to `https://192.168.100.101/`. Give each Gateway its own routable address with a matching hostname/cert (or serve a cert with the LB IP in SANs / let the suite use plain HTTP). | GATEWAY-HTTP | **The single biggest lever: 22 of 31 fails.** Many would flip immediately (the status/conditions phases already pass, including the #324 backendRef ReferenceGrant cases). |
+| **P0 (GW)** | **Per-Gateway addressing with a verifiable cert (021 Phase 2).** One shared edge LB IP + HTTP→HTTPS redirect + a serving cert with no IP SAN means the conformance client can't complete TLS to `https://203.0.113.101/`. Give each Gateway its own routable address with a matching hostname/cert (or serve a cert with the LB IP in SANs / let the suite use plain HTTP). | GATEWAY-HTTP | **The single biggest lever: 22 of 31 fails.** Many would flip immediately (the status/conditions phases already pass, including the #324 backendRef ReferenceGrant cases). |
 | **P0 (Mesh)** | **Apply HTTPRoute filters on the GAMMA / transparent-capture path.** Redirect + request/response header-modifier translate at the edge but not on capture. | MESH-HTTP | `MeshHTTPRouteRedirectHostAndStatus` + `MeshHTTPRouteRequestHeaderModifier` → PASS (~6/7). **The single biggest MESH blocker, unchanged since baseline.** |
 | **P1** | **ReferenceGrant enforcement for Gateway listener `certificateRef`s.** #324 covers HTTPRoute backendRefs; extend the same gate to cross-ns TLS-secret refs. | GATEWAY-HTTP | `GatewaySecretInvalidReferenceGrant`, `GatewaySecretMissingReferenceGrant`. |
 | **P1** | **Status edge-cases.** GatewayClass `observedGeneration` bump; listener `InvalidRouteKinds`/`InvalidCertificateRef` `ResolvedRefs=False`; route `Accepted=False` for cross-ns/sectionName parentRef mismatch; non-port-8080 `attachedRoutes`. | GATEWAY-HTTP | 6 status-only tests, no traffic needed. |

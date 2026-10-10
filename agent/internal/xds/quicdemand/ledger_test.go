@@ -82,7 +82,7 @@ func TestLedgerOverlappingGenerationsAfterAgentRestart(t *testing.T) {
 
 	t.Run("new generation first, then the old one", func(t *testing.T) {
 		l := restored()
-		// rev248 main-worker-03 15:39:16: the child's stream names nothing.
+		// rev248 node C 15:39:16: the child's stream names nothing.
 		assert.ElementsMatch(t, []string{twinA, twinB}, l.Restate(child, nil))
 		assert.Empty(t, l.Dormant())
 		// 15:39:27: the parent's stream re-subscribes A; the cache parks it

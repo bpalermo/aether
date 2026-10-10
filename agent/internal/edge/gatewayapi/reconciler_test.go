@@ -899,7 +899,7 @@ func TestBuildHTTPRouteBackends_NonExistentService_Dropped(t *testing.T) {
 // TestBuildHTTPRouteBackends_RegistryService_Admitted is the regression guard for
 // #367: a backend that IS a registry/mesh service (HasRegistryService=true) but has
 // NO corresponding k8s Service in the route namespace must be ADMITTED (not dropped).
-// This is the api.palermo.dev 200→500 regression: mesh backends are namespace-blind
+// This is the api.example.com 200→500 regression: mesh backends are namespace-blind
 // and only exist in the registry, not as k8s Services in the edge namespace.
 func TestBuildHTTPRouteBackends_RegistryService_Admitted(t *testing.T) {
 	// Client has no Services — "echo" does not exist as a k8s Service.
@@ -926,7 +926,7 @@ func TestBuildVirtualHost_RegistryBackend_NoDirectResponse500(t *testing.T) {
 	sink := &fakeSink{hasRegistryService: func(name string) bool { return name == "echo" }}
 	r := &Reconciler{Client: c, Sink: sink}
 
-	hr := httpRoute([]string{"api.palermo.dev"}, []gatewayv1.HTTPRouteRule{
+	hr := httpRoute([]string{"api.example.com"}, []gatewayv1.HTTPRouteRule{
 		{
 			Matches:     pathMatch(gatewayv1.PathMatchPathPrefix, "/"),
 			BackendRefs: backend("echo", 8080),

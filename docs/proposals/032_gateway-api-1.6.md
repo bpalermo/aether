@@ -64,7 +64,7 @@ TCPRoute suite to the gated profile.
 - The conformance suite grew; M3 is the unbounded part (budget one
   `GatewayInvalidParametersRef` fix; anything else found is triaged on its
   merits).
-- CRD upgrade on talos-main is in-place; do it outside a soak window and
+- CRD upgrade on the reference cluster is in-place; do it outside a soak window and
   verify the l4route/gamma reconcilers pick the new served versions after an
   agent restart (crdcheck is setup-time).
 - `v1alpha2` TCP/UDP objects on existing clusters remain served post-upgrade

@@ -15,7 +15,7 @@ import (
 // mesh-Service projection, which arrives from a controller on its own schedule.
 // If the socket opened before it, a restarted agent would replace Envoy's
 // still-correct capture listener with one carrying none of those chains. On
-// talos the registry wait happened to outlast the reconciler; nothing made it.
+// the reference cluster the registry wait happened to outlast the reconciler; nothing made it.
 func TestPreListen_HoldsUntilCaptureProjection(t *testing.T) {
 	srv, registryCalls := newHoldServer(t, nil)
 	srv.SetCaptureGate(srv.cache.CaptureProjected())

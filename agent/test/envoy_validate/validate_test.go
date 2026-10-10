@@ -1316,7 +1316,7 @@ func TestQUICUpstreamsDetectADeadPeer(t *testing.T) {
 	if bound := wantKeepalive + time.Second + wantIdle; bound > 10*time.Second {
 		t.Errorf("dead-peer bound %v exceeds 10 s", bound)
 	}
-	// aether#1093: never at or below the 5-7 s worker stalls seen on talos-main.
+	// aether#1093: never at or below the 5-7 s worker stalls seen on the reference cluster.
 	if wantIdle < 8*time.Second {
 		t.Errorf("idle_network_timeout %v is inside the #1093 stall range", wantIdle)
 	}

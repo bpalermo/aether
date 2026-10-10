@@ -88,8 +88,8 @@ func TestDownstreamTransportSocket_AcceptsAndRejects(t *testing.T) {
 	rejected := []string{
 		// SPIRE's own agent/node identities: signed by the same bundle, not a
 		// workload. This is the class the pin exists to exclude.
-		"spiffe://aether.internal/spire/agent/k8s_psat/talos-main/abc123",
-		"spiffe://aether.internal/node/main-worker-01",
+		"spiffe://aether.internal/spire/agent/k8s_psat/test-cluster/abc123",
+		"spiffe://aether.internal/node/node-a",
 		// Another trust domain. Already unreachable in the client direction
 		// (the upstream pin is exact on the LOCAL trust domain); this closes
 		// the same hole on the server side.

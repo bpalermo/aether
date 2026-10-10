@@ -1,6 +1,6 @@
 # Proposal: Hot Restart for the aether-proxy Envoy (Spike)
 
-**Status:** Implemented — the hot-restart supervisor shipped (Strategy B), zero-drop validated on talos-main; follow-on audits merged (#109–#111). Carved out of the agent binary into `//agent/cmd/proxy-supervisor` and its own image by #772. (2026-06-09 spike.)
+**Status:** Implemented — the hot-restart supervisor shipped (Strategy B), zero-drop validated on the reference cluster; follow-on audits merged (#109–#111). Carved out of the agent binary into `//agent/cmd/proxy-supervisor` and its own image by #772. (2026-06-09 spike.)
 **Author:** Bruno Palermo
 **Date:** 2026-06-09
 
@@ -91,7 +91,7 @@ node, after:    [new Pod: supervisor → envoy epoch 6]   no dropped connection,
 > `StatMerger::mergeCounters` `.add()`s that delta onto the child's counter.
 > Since the parent has been latching every `stats_flush_interval` (5s default;
 > `charts/aether` sets none) for its whole life, the child inherits only the
-> last ≤5s of traffic. Measured on talos-main 2026-09-05 across one
+> last ≤5s of traffic. Measured on the reference cluster 2026-09-05 across one
 > `rollout restart ds/aether-proxy`: per node `139047→683`, `266735→1559`,
 > `131812→339`, `259710→379`, `266301→1147`, each then resuming at its exact
 > prior slope — every first post-restart sample is **< 1 minute of that node's
@@ -137,11 +137,11 @@ C is the end state once an Istio-grade proxy-upgrade operator is justified — n
 
 ## Plan
 
-1. **Spike A** — supervisor as the proxy entrypoint, Envoy from a shared volume, shared `/dev/shm`; trigger via watched bootstrap-config change / SIGHUP. Prove the handoff on talos-main.
+1. **Spike A** — supervisor as the proxy entrypoint, Envoy from a shared volume, shared `/dev/shm`; trigger via watched bootstrap-config change / SIGHUP. Prove the handoff on the reference cluster.
 2. **Build toward B** — once A is GREEN, add the cross-Pod pieces: `maxSurge` DaemonSet strategy, hostPath `/dev/shm`, the `/run/aether/hotrestart/epoch` coordination file (with the live-predecessor probe → epoch-0 reset), and a readiness gate that fires only after handoff.
 3. **C** — revisit only if B's transient surge or per-node behavior proves insufficient and an upgrade operator is warranted.
 
-## Validation (talos-main)
+## Validation (the reference cluster)
 
 - **Stats proof:** after a trigger, `server.hot_restart_generation` / `server.hot_restarts` increments, gauges carry over with their absolute values, and counters carry over **as deltas only** — the child starts from the parent's post-flush residual (≤ one `stats_flush_interval` of traffic), not its lifetime total (`curl :9901/stats`). Assert *rate* continuity (`sum(rate(aether_requests_total[5m]))` shows no dip and no spike through the roll), never value monotonicity.
 - **Zero-drop proof:** hold a long-lived streaming request through the mesh across a triggered restart; assert no reset. Re-run the mesh e2e (200 + XFCC URI SAN) against epoch *N+1*.
@@ -149,7 +149,7 @@ C is the end state once an Istio-grade proxy-upgrade operator is justified — n
 - **Image-upgrade proof (B):** roll the DaemonSet image with `maxSurge=1`; confirm overlap + handoff + zero drop.
 - **Crash proof:** `kill -9` the child; supervisor exits non-zero and Kubernetes recreates the pod.
 
-## Spike Findings (talos-main, 2026-06-09)
+## Spike Findings (the reference cluster, 2026-06-09)
 
 First on-cluster run (rev 29, `proxy.hotRestart.enabled=true` fleet-wide):
 
@@ -160,7 +160,7 @@ First on-cluster run (rev 29, `proxy.hotRestart.enabled=true` fleet-wide):
 
 **Caveat (test workloads):** the `aether-test` `client`/`echo`/`svc-a` pods were not exercising the mesh data path on their app port during this run (`client→echo:8080` showed zero delta on the `echo`/`app_echo` clusters — direct pod-to-pod, no XFCC), so an application-level zero-dropped-request assertion could not be made here. The hot-restart guarantees were instead proven via Envoy's own signals (listener/socket handover, `server.live` continuity, in-place `restartCount: 0`). A follow-up should restore a known mesh-intercepted request path for an end-to-end zero-drop assertion.
 
-## Strategy B Findings (talos-main, 2026-06-10) — **VALIDATED GREEN**
+## Strategy B Findings (the reference cluster, 2026-06-10) — **VALIDATED GREEN**
 
 Cross-pod hot restart implemented and validated over five on-cluster iterations. Final proof: a 5-node surge roll with **zero container restarts**, every node landing **LIVE at epoch 2, `hot_restart_generation` 3** (stats carried across the pod boundary twice), and an **application-level zero-drop e2e: 1500/1500 mesh requests succeeded (`ok=1500 fail=0`)** while the roll executed under live traffic.
 
@@ -177,7 +177,7 @@ The implementation: per-node epoch heartbeat file on shared hostPath (`--state-d
 
 **Also fixed en route:** the e2e mesh path itself. There is no iptables interception — apps reach the mesh via the outbound listener (`127.0.0.1:18081` + `Host: <service>`); the earlier direct-pod-IP curls were bypassing the proxy entirely.
 
-**Known issue found (pre-existing, agent) — FIXED:** `SubscribePod` (workload SVID subscription) fired only on CNI ADD. After an **agent** restart, listeners were rebuilt from storage but SVIDs were never re-subscribed → existing pods' mTLS broke ("Secret is not supplied by SDS") until the workload pods were recreated. Fixed by re-subscribing stored pods on agent startup (bridge `Started()` signal + `runResubscribeStoredPods` in the CNI server); validated on talos-main (agent roll → warming NONE, mesh 200 without workload recreation). Unrelated to hot restart.
+**Known issue found (pre-existing, agent) — FIXED:** `SubscribePod` (workload SVID subscription) fired only on CNI ADD. After an **agent** restart, listeners were rebuilt from storage but SVIDs were never re-subscribed → existing pods' mTLS broke ("Secret is not supplied by SDS") until the workload pods were recreated. Fixed by re-subscribing stored pods on agent startup (bridge `Started()` signal + `runResubscribeStoredPods` in the CNI server); validated on the reference cluster (agent roll → warming NONE, mesh 200 without workload recreation). Unrelated to hot restart.
 
 ## Risks / Open Questions
 
@@ -191,4 +191,4 @@ Production binary-delivery for A, the Strategy C operator, agent→supervisor RP
 
 ## Exit Criteria → Decision
 
-**A is GREEN** if a triggered hot restart shows an incremented `hot_restart_generation`, zero dropped in-flight connections, and *rate* continuity of the stats on talos-main (gauges carry over absolute; counters carry over as deltas, so the criterion is a dip-free `rate()`/`increase()` across the handoff, not an unbroken counter value — see the note under Strategy B). That unblocks building **B**, whose own exit criterion is a connection-preserving DaemonSet image roll. Go/no-go on the whole effort: does bootstrap-change + image-upgrade continuity justify the supervisor (A) and the surge/coordination machinery (B)?
+**A is GREEN** if a triggered hot restart shows an incremented `hot_restart_generation`, zero dropped in-flight connections, and *rate* continuity of the stats on the reference cluster (gauges carry over absolute; counters carry over as deltas, so the criterion is a dip-free `rate()`/`increase()` across the handoff, not an unbroken counter value — see the note under Strategy B). That unblocks building **B**, whose own exit criterion is a connection-preserving DaemonSet image roll. Go/no-go on the whole effort: does bootstrap-change + image-upgrade continuity justify the supervisor (A) and the surge/coordination machinery (B)?

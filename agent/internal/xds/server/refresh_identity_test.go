@@ -124,7 +124,7 @@ func TestReportReloadFailure_NilCounter(t *testing.T) {
 
 // TestReportReloadFailure_ClassifiesInOrder is PR 5 of #740: the same error text
 // arrives for three different conditions, and only local state tells them apart.
-// On the rev211 deploy roll (2026-09-07) main-worker-02 logged the registrar as
+// On the rev211 deploy roll (2026-09-07) node B logged the registrar as
 // the culprit twice within 600ms — once while the AGENT had no SVID, once while
 // its own connection was still re-establishing itself after acquiring one. The
 // registrar had had its identity for a minute.

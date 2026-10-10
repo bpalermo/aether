@@ -11,11 +11,11 @@
 ## Summary
 
 The Gateway API conformance suite (`sigs.k8s.io/gateway-api/conformance` @ **v1.5.1**)
-is run **manually, against the live `talos-main` cluster, from an uncommitted one-off
+is run **manually, against the live reference cluster, from an uncommitted one-off
 file** dropped into a gateway-api checkout (`/tmp/gateway-api/conformance/aether_rev20_test.go`).
 That has produced 21 hand-recorded baselines (`docs/conformance/baseline-*.md`) and a
 "GATEWAY-HTTP fully conformant 43/43" result — but nothing in the repo reproduces it,
-nothing gates regressions, and the only person who can run it is whoever has the talos
+nothing gates regressions, and the only person who can run it is whoever has the reference-cluster
 kubeconfig and remembers the env-var incantation.
 
 This proposes:
@@ -25,7 +25,7 @@ This proposes:
    Because the gateway-api conformance suite is a *separate, self-`replace`-ing Go
    module* (see Design — it cannot be imported as a normal dependency), the runner is a
    `//go:build conformance` **drop-in** copied into a gateway-api checkout at run time,
-   not an in-module Go test. Reproducible by anyone with a kubeconfig, talos or not.
+   not an in-module Go test. Reproducible by anyone with a kubeconfig, for the reference cluster or not.
 2. A **`workflow_dispatch` + nightly `schedule` GitHub Actions workflow**
    (`.github/workflows/conformance.yaml`) that stands up a **kind** cluster, builds and
    loads the aether images, installs aether's **edge** (north-south) path, installs the
@@ -41,7 +41,7 @@ This proposes:
   genuinely kind-specific piece is **LoadBalancer addressing** (the suite blocks on
   `Gateway.status.addresses`), solved with `cloud-provider-kind`.
 - **MESH-HTTP — NOT feasible yet; do not gate on it.** It is not conformant *anywhere*
-  (4/7 on talos, the 4 passing by kube-proxy coincidence — see proposal 022), it needs
+  (4/7 on the reference cluster, the 4 passing by kube-proxy coincidence — see proposal 022), it needs
   SPIRE for real mTLS identity and the arbitrary-service capture that 022 is still
   designing, and it depends on `kubectl exec` request timing under CNI redirect-all.
   We commit the runner and overlay so it is *reproducible*, but the workflow leaves it
@@ -60,7 +60,7 @@ what is conformant today.
   fixes (#380–#385, each exposing the next; see rev21). Every one of those is a class of
   bug a future edge change could silently reintroduce. There is currently no automated
   signal.
-- **Talos-only is operationally narrow.** The badge run requires the talos kubeconfig,
+- **One cluster only is operationally narrow.** The badge run requires the reference-cluster kubeconfig,
   MetalLB, a live SPIRE, and manual env vars. CI should make the *certifiable* subset
   reproducible on a throwaway cluster.
 
@@ -82,8 +82,8 @@ shape (same images via `make load-*-image` / `image_load`, same kind provider).
 
 The one thing `test/e2e` does **not** exercise that GATEWAY-HTTP needs is **LoadBalancer
 addressing**. The conformance suite blocks on `Gateway.status.addresses` being populated
-(`GatewayMustHaveAddress`, which the talos runner already stretches to 180s because
-MetalLB convergence is slow). On talos that address comes from MetalLB. kind has no
+(`GatewayMustHaveAddress`, which the reference-cluster runner already stretches to 180s because
+MetalLB convergence is slow). On the reference cluster that address comes from MetalLB. kind has no
 LoadBalancer by default. The standard kind answer — used by upstream Gateway API CI
 itself — is **`cloud-provider-kind`** (a tiny userspace LB controller that assigns
 docker-network IPs to `type: LoadBalancer` Services). We run it as a background process
@@ -189,9 +189,9 @@ module:
   "import-as-a-test-dependency" path in the brief is not achievable with the current
   upstream module layout.
 
-It keeps the suite options verbatim from the talos runner: `GatewayClassName: "aether"`,
+It keeps the suite options verbatim from the reference-cluster runner: `GatewayClassName: "aether"`,
   `AllowCRDsMismatch: true`, the GATEWAY-HTTP profile inferring features from
-  `GatewayClass.status.supportedFeatures`, and the talos timeouts
+  `GatewayClass.status.supportedFeatures`, and the reference-cluster timeouts
   (`GatewayMustHaveAddress=180s`, `MaxTimeToConsistency=60s`, `RequestTimeout=10s`).
 - gate both tests behind an env var (`AETHER_CONFORMANCE=1`) so a plain `bazel test //...`
   / `go test ./...` skips them — they need a live cluster, so they must NOT run as unit
@@ -199,7 +199,7 @@ It keeps the suite options verbatim from the talos runner: `GatewayClassName: "a
   convention in this repo.
 - write the report to a path the workflow uploads.
 
-The **MESH overlay** (`test/conformance/mesh/`) commits the aether adaptations the talos
+The **MESH overlay** (`test/conformance/mesh/`) commits the aether adaptations the reference-cluster
 runs applied by hand to the suite's base mesh manifests: the `aether.io/managed=true`
 namespace label, per-version ServiceAccounts for `echo-v1`/`echo-v2` (aether identity =
 ServiceAccount), and the `capture.aether.io/redirect-all=true` pod annotation. Committed
@@ -240,7 +240,7 @@ within a day; `workflow_dispatch` reproduces a badge run on demand.
   is the most likely flake source; the 180s `GatewayMustHaveAddress` budget absorbs slow
   convergence. If it proves flaky, the NodePort fallback (`perGatewayAddressing=false`)
   is the escape hatch, at the cost of testing a non-default addressing mode.
-- **kind vs talos parity.** kind runs a different kernel/CNI substrate than talos. The
+- **kind vs reference-cluster parity.** kind runs a different kernel/CNI substrate than Talos. The
   e2e job shows the agent/CNI come up; GATEWAY-HTTP doesn't use the mesh CNI path anyway,
   so parity risk is low for *this* profile (and high for MESH, another reason to defer it).
 - **MESH-HTTP is not conformant and this proposal does not pretend otherwise.** Per
@@ -253,12 +253,12 @@ within a day; `workflow_dispatch` reproduces a badge run on demand.
 - **Proven (from existing committed code, read this session):** CNI install + agent
   DaemonSet + registrar come up on kind with `--spire-enabled=false` (`test/e2e`,
   merged/green); the edge uses cleartext STRICT_DNS for non-mesh backends
-  (`edge.go`/`BuildEdgeK8sCluster`); the talos runner's exact suite options
-  (`/tmp/.../aether_rev20_test.go`); GATEWAY-HTTP is 43/43 on talos (rev21).
+  (`edge.go`/`BuildEdgeK8sCluster`); the reference-cluster runner's exact suite options
+  (`/tmp/.../aether_rev20_test.go`); GATEWAY-HTTP is 43/43 on the reference cluster (rev21).
 - **Assumed / to validate when the workflow first runs:** the **edge** installs cleanly
   on kind with SPIRE fully off; `cloud-provider-kind` populates `Gateway.status.addresses`
   within budget; the v1.5.1 CRDs + `AllowCRDsMismatch` reconcile against aether's
-  GatewayClass; the suite green in kind matches the talos 43/43.
+  GatewayClass; the suite green in kind matches the reference-cluster 43/43.
 
 A run is "good" when the GATEWAY-HTTP job logs `Core tests succeeded. Extended tests
 succeeded.` and uploads a `ConformanceReport` artifact with 33 Core + 10 Extended passes.

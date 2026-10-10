@@ -63,7 +63,7 @@ func newReprojectCache(t *testing.T) (*SnapshotCache, *mockRegistry) {
 // those are the cache's, derived from the endpoints.
 //
 // The projection only signals a rebuild; in the agent the next snapshot push
-// (any of them -- on talos it was the one a registry load had queued) carries
+// (any of them -- on the reference cluster it was the one a registry load had queued) carries
 // whatever listeners it left behind. The test pushes one immediately.
 func projectEchoTCP(t *testing.T, c *SnapshotCache) {
 	t.Helper()
@@ -104,7 +104,7 @@ func captureListenerWire(t *testing.T, c *SnapshotCache) map[string][]byte {
 
 // TestCaptureReprojectionKeepsDeclaredPortChains is issue #1094.
 //
-// On talos (2026-10-01, main-worker-03) a connection to tcp-echo's DECLARED
+// On the reference cluster (2026-10-01, node C) a connection to tcp-echo's DECLARED
 // port 9000 was served by the any-port shim 12 s after the agent restarted. The
 // agent log gives the order: a registry load derived the port set
 // (05:41:54.950), the capture reconciler re-projected the mesh Services
@@ -121,7 +121,7 @@ func captureListenerWire(t *testing.T, c *SnapshotCache) map[string][]byte {
 func TestCaptureReprojectionKeepsDeclaredPortChains(t *testing.T) {
 	ctx := context.Background()
 
-	t.Run("re-projection after a registry load (the talos order)", func(t *testing.T) {
+	t.Run("re-projection after a registry load (the reference-cluster order)", func(t *testing.T) {
 		c, reg := newReprojectCache(t)
 		projectEchoTCP(t, c)
 		require.NoError(t, c.LoadClustersFromRegistry(ctx, "cluster-1", "node-1", reg))

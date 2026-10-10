@@ -111,7 +111,7 @@ func NewSnapshot() *Snapshot {
 //
 // Cost, all under the write lock: a replace re-marshals and re-digests EVERY
 // endpoint (newEntry), O(N) per sync; every mutation, Apply included, re-sorts
-// all N keys, O(N log N). Negligible at talos scale (hundreds of endpoints);
+// all N keys, O(N log N). Negligible at the reference cluster's scale (hundreds of endpoints);
 // revisit -- an incremental (e.g. additive multiset) hash -- before ~10k.
 func (s *Snapshot) computeContentHashLocked() string {
 	keys := make([]serviceKey, 0, len(s.entries))

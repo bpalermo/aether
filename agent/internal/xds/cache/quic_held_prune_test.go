@@ -14,7 +14,7 @@ import (
 // The #1073 gates: the fetch-window prune (--east-west-quic-pair-fetch-window)
 // must never remove a twin the proxy uses.
 //
-// The #979 proving soak (talos-main, 1.0.12-33ff5e9): after a proxy restart
+// The #979 proving soak (the reference cluster, 1.0.12-33ff5e9): after a proxy restart
 // every twin reaches the new generation through the wildcard, with no on-demand
 // fetch and no subscription. An agent-only roll then re-stated all of them on
 // the fresh stream as HELD (initial_resource_versions only), and exactly one

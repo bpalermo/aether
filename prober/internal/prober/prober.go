@@ -270,7 +270,7 @@ func withDefaultPort(authority, port string) string {
 // from it for the `pod` datapoint attribute and the AETHER_PROBE_FAIL lines.
 //
 // There is deliberately NO host.name (serviceresource.WithoutHost, #1041). The prober is not hostNetwork, so
-// host.name is its POD name, and the talos collector's transform/promote set the metric
+// host.name is its POD name, and the reference-cluster collector's transform/promote set the metric
 // `node` label from host.name ahead of k8s.node.name: every series said
 // node="prober-h2mzs" instead of the Kubernetes node, which left #1040's burst
 // unplaceable once that pod was rolled away. Node identity comes only from k8s.node.name

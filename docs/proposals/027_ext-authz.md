@@ -1,6 +1,6 @@
 # Proposal: external authorization (ext_authz) via a node-proxy sidecar
 
-**Status:** Implemented — the node-local ext_authz sidecar (UDS transport, OPA preset) shipped; deployed enabled-but-inert on talos-main. (Accepted 2026-07-05.) **Amended 2026-10-05 (#1275)** — the sidecar is a Kubernetes native sidecar (an init container with `restartPolicy: Always` and a startupProbe on the authz socket), so the proxy container starts only once authz accepts and the sidecar outlives the proxy on shutdown; the chart now requires Kubernetes >= 1.29 when the sidecar is enabled.
+**Status:** Implemented — the node-local ext_authz sidecar (UDS transport, OPA preset) shipped; deployed enabled-but-inert on the reference cluster. (Accepted 2026-07-05.) **Amended 2026-10-05 (#1275)** — the sidecar is a Kubernetes native sidecar (an init container with `restartPolicy: Always` and a startupProbe on the authz socket), so the proxy container starts only once authz accepts and the sidecar outlives the proxy on shutdown; the chart now requires Kubernetes >= 1.29 when the sidecar is enabled.
 **Relates:** proposal 025 (proxy-extension escape hatch — the enablement machinery),
 proposal 015 (MeshConfig — the system-config half), proposal 026 (config propagation —
 policy parameters ride the channel), proposal 019 (waypoint — the alternative
@@ -103,7 +103,7 @@ a follow-up if policies need it.
 - **M3 — inbound enforcement:** the same machinery on the destination pods' inbound
   HCM (extension threading parity, listener regen) — unbypassable in-mesh authz on
   verified caller identity.
-- **M4 — talos e2e:** OPA preset with a header+SPIFFE policy: allow/deny,
+- **M4 — reference-cluster e2e:** OPA preset with a header+SPIFFE policy: allow/deny,
   per-route context_extensions, sidecar-down under BOTH failure modes, filter
   deletion restores. (025-M4 lesson: the e2e is where the truth lives.)
 

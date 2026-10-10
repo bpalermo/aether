@@ -269,7 +269,7 @@ func (r *RegistryRefresher) sinceIdentity() time.Duration {
 //
 //   - Our own SVID is pending: a workload with no certificate fails every
 //     handshake, and nothing about the registrar follows from that. Logged as
-//     itself; the rev211 roll (2026-09-07 20:47:27.338Z, main-worker-02) logged
+//     itself; the rev211 roll (2026-09-07 20:47:27.338Z, node B) logged
 //     it as the registrar's problem.
 //   - Identity arrived moments ago: the ClientConn is still carrying the
 //     failures it collected before, so this is the reconnect, not a fault.

@@ -1,7 +1,7 @@
 # Proposal: Proxy-extension escape hatch for Gateway API / GAMMA
 
 **Status:** Implemented — **Option C** (ExtensionRef → typed `HTTPFilter` CRD, opaque body, fail-closed
-**in-process proto-validate** — no Envoy binary in the webhook) shipped in full and is talos-validated:
+**in-process proto-validate** — no Envoy binary in the webhook) shipped in full and is validated on the reference cluster:
 the route-rule `ExtensionRef` form, the Service-`targetRef` (policy-attachment) form (unblocked once
 proposal 026 landed), and CHAIN-scoped filters. `common/extensionfilter` is the single source of truth
 for the allow-list + validation/rendering. (Accepted 2026-06-29.)

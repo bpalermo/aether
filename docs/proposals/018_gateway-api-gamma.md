@@ -283,7 +283,7 @@ data-plane detail below the API).
 ## As-built status (2026-06-24)
 
 Tracking what has actually shipped vs the design above. Validated end-to-end on the
-talos-main cluster unless noted.
+reference cluster unless noted.
 
 **Shipped + e2e-green:**
 - **Gateway API dependency** upgraded to `sigs.k8s.io/gateway-api` v1.5.1 (#272).

@@ -136,7 +136,7 @@ func TestInitStartEpochDoesNotGateWithoutAPredecessor(t *testing.T) {
 
 // TestReadinessHeldWhileAnEarlierEpochStillServes is the S17 regression test —
 // and a candidate fix for the unexplained proxy readiness-marker flap on
-// w01/w05 in the 2026-09-03 soak.
+// nodes A and E in the 2026-09-03 soak.
 //
 // During a bind-collision retry currentEpoch() is the rewound nextEpoch-1 (-1),
 // an epoch that never had a child, while the previous epoch's Envoy is still

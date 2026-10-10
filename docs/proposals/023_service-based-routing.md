@@ -126,7 +126,7 @@ path), same as a service today; its backendRefs are unioned in (the existing
   route target with no SA pods; backendRef resolves to the SA-backed cluster + correct SAN.
   Offline `envoy --mode validate` (proposal 011 / `//test/envoy_validate`) over the generated
   capture config.
-- e2e on talos: the **MESH-HTTP conformance** profile run with namespace injection (#401) +
+- e2e on the reference cluster: the **MESH-HTTP conformance** profile run with namespace injection (#401) +
   per-version SAs on the backends — `MeshHTTPRouteMatching`, `…Weight`,
   `…RequestHeaderModifier`, `…RedirectHostAndStatus` exercise the route-target → backend path
   for real (no kube-proxy coincidence). Target: a *meaningful* MESH-HTTP score.

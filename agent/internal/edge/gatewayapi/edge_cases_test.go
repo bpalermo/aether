@@ -236,7 +236,7 @@ func TestListenerInvalidTLS(t *testing.T) {
 // Secret of the right type whose cert/key bytes don't parse as a keypair all yield
 // ResolvedRefs=False/InvalidCertificateRef + Programmed=False (observedGeneration
 // stamped). A VALID keypair stays ResolvedRefs=True/Programmed=True (regression
-// guard — api.palermo.dev must stay green).
+// guard — api.example.com must stay green).
 func TestListenerInvalidTLSWithProvider(t *testing.T) {
 	cases := []struct {
 		name        string

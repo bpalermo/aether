@@ -17,7 +17,7 @@ import (
 // dead SDS resource name that the agent never serves and Envoy therefore never
 // resolves — the inbound listener comes up with NO certificate, every mesh
 // connection to the pod fails, and nothing repairs it because the malformed
-// name is already published. That is the main-worker-03 outage of 2026-09-19
+// name is already published. That is the node C outage of 2026-09-19
 // (issue #815). Refusing is always better: the caller keeps the config it has
 // and retries on the next rebuild.
 var ErrNoTrustDomain = errors.New("no SPIFFE trust domain known yet: refusing to build a mesh identity")
@@ -115,7 +115,7 @@ func SpiffeIDFromPod(cniPod *cniv1.CNIPod, trustDomain string) string {
 // real attested identity in the same trust domain, so mTLS still completes —
 // unlike the inbound SERVER certificate, where an empty trust domain yields a
 // name the agent never serves and the listener comes up with no certificate at
-// all (the main-worker-03 outage).
+// all (the node C outage).
 func SourceIdentityForPod(cniPod *cniv1.CNIPod, trustDomain string) string {
 	return SpiffeIDFromPod(cniPod, trustDomain)
 }

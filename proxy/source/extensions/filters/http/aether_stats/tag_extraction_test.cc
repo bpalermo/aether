@@ -28,7 +28,7 @@
 // History: aether_stats (proposal 012) records via counterFromStatNameWithTags,
 // which inlines the tag VALUES into the full stat name
 // (aether.requests_total.reporter.<v>.source_service.<v>....). The node proxy
-// hot-restarts on every config change (talos-main hit epoch 53), and Envoy's
+// hot-restarts on every config change (the reference cluster hit epoch 53), and Envoy's
 // StatMerger used to re-create every merged counter via counterFromStatName()
 // with NO tags ("TODO(snowp): Propagate tag values during hot restarts"). After
 // the first restart the programmatic tags were gone and their values collapsed
@@ -318,7 +318,7 @@ TEST_F(HotRestartTagPropagationTest, CountersTransferAsDeltasNotAbsoluteValues) 
 
 // What the chart regexes used to compensate for: with the propagation disabled
 // the parent sends no tag metadata, the merged counter has no tags at all, and
-// every tag value stays welded into the metric name (the talos-main symptom —
+// every tag value stays welded into the metric name (the reference-cluster symptom —
 // series named ...aether.requests_total.reporter.source....).
 TEST_F(HotRestartTagPropagationTest, TagsLostWhenPropagationDisabled) {
   RuntimeGuard disabled(kPropagateTagsFlag, false);

@@ -348,14 +348,14 @@ func TestGatewayServiceShape(t *testing.T) {
 	})
 
 	t.Run("update existing service to add pinned IP", func(t *testing.T) {
-		err := r.createOrUpdateGatewayService(context.Background(), svc.DeepCopy(), "aether-ingress", "edge", ports, "192.168.100.101")
+		err := r.createOrUpdateGatewayService(context.Background(), svc.DeepCopy(), "aether-ingress", "edge", ports, "203.0.113.101")
 		require.NoError(t, err)
 
 		got := &corev1.Service{}
 		require.NoError(t, fc.Get(context.Background(), types.NamespacedName{Namespace: "aether-ingress", Name: svcName}, got))
 
 		// MetalLB pinned-IP annotation must be set.
-		assert.Equal(t, "192.168.100.101", got.Annotations[AnnotationMetalLBLoadBalancerIPs])
+		assert.Equal(t, "203.0.113.101", got.Annotations[AnnotationMetalLBLoadBalancerIPs])
 		assert.Equal(t, corev1.ServiceTypeLoadBalancer, got.Spec.Type)
 		assert.Equal(t, "aether-ingress.edge", got.Labels[LabelEdgeGateway])
 	})

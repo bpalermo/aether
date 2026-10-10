@@ -87,7 +87,7 @@ func TestLoadClustersFromRegistry_TCPCluster(t *testing.T) {
 	// peer identity with the BARE ServiceAccount name in the sa/ segment —
 	// "spiffe://<td>/ns/<endpoint-ns>/sa/echo-tcp" — NOT the namespace-qualified
 	// key ("sa/aether-test/echo-tcp"), which never matches an SVID and fails every
-	// TCP-floor handshake with fail_verify_san (observed on talos, 2026-07-02).
+	// TCP-floor handshake with fail_verify_san (observed on the reference cluster, 2026-07-02).
 	combined := utc.GetCommonTlsContext().GetCombinedValidationContext()
 	require.NotNil(t, combined, "the tcp floor socket pins the server identity")
 	var got []string
