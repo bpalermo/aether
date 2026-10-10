@@ -166,8 +166,10 @@ helm upgrade --install aether \
 
 <div class="aether-note" markdown>
 
-Aether is pre-1.0 and built by one person. It is soak-tested on a real cluster
-and gated on Gateway API conformance in CI, but it has no support commitment.
+Aether is pre-1.0 and built by one person working with AI coding agents
+(Anthropic's Claude), which write most of the code, tests and documentation
+under that person's direction. It is soak-tested on a real cluster and gated on
+Gateway API conformance in CI, but it has no support commitment.
 Read the
 [proposals](proposals/index.md) and the
 [conformance baselines](https://github.com/bpalermo/aether/tree/main/docs/conformance)
