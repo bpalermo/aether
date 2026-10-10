@@ -37,7 +37,7 @@ lacks one aborts before it asks the cluster anything, naming each missing variab
 | `COLLECTOR_OTLP_ENDPOINT` | The OTLP gRPC endpoint the Job floods. | `<COLLECTOR_DEPLOY>.<COLLECTOR_NS>.svc.cluster.local:4317` |
 | `PROM_SVC` | Name of the Prometheus Service (port 80). | `prometheus-server` |
 | `AGENT_NS`, `AGENT_SELECTOR`, `AGENT_CONTAINER` | The node agent, as the `aether` chart installs it. | `aether-system`, `app.kubernetes.io/name=aether-agent`, `agent` |
-| `JOB_NS`, `JOB_NAME`, `--job-manifest` | The pressure Job. The shipped manifest takes its namespace and name from the two variables. A manifest of your own must hold one object, that same Job (`kind: Job`, `  name: <JOB_NAME>`, `  namespace: <JOB_NS>`): anything else is refused before anything is applied. | `aether-test`, `aether-collector-pressure`, `collector-pressure-job.yaml` |
+| `JOB_NS`, `JOB_NAME`, `--job-manifest` | The pressure Job. The shipped manifest takes its namespace and name from the two variables. A manifest of your own must be one YAML document, that same Job, written as `apiVersion: batch/v1`, `kind: Job`, and under `metadata:` the lines `  name: <JOB_NAME>` and `  namespace: <JOB_NS>` (two spaces, unquoted): a second document, with or without a kind, or anything else is refused before anything is applied. The check reads lines, because `kubectl --dry-run=client` asks the API server. | `aether-test`, `aether-collector-pressure`, `collector-pressure-job.yaml` |
 | `MIN_POLL_OK_PCT` | The share of a wait loop's polls that must have got an answer before its deadline may be read as a FAIL. A whole number from 0 to 100. | `50` |
 | `SOAK_POD_SELECTOR` | See [The soak guard](#the-soak-guard-what-it-can-and-cannot-know). | unset |
 
@@ -170,7 +170,7 @@ collector *pushes* its self-telemetry OTLP every 30 s, so `otelcol_*` in Prometh
 **A collector that only pushes its self-telemetry does not serve `:8888`.** When its
 `service.telemetry.metrics` has only a `periodic` OTLP reader and no pull reader, nothing
 listens on 8888, and `run.sh` logs a warning with the reason (no port-forward, a fetch that
-failed, or an answer with no `otelcol_*` sample) and falls back to Prometheus (poll 15 s
+failed, or an answer without the heap or the RSS gauge the safety ceilings read) and falls back to Prometheus (poll 15 s
 instead of 5 s). To get the lag-free path, add a pull reader to the collector's config:
 
 ```yaml
@@ -280,7 +280,7 @@ said that. Where absence is a legitimate answer it is read from a call that **su
 | the collector pod's memory limit | abort: no limit, the ceilings cannot be sized | abort |
 | `port-forward` to Prometheus | n/a | abort, with the port-forward's output |
 | `port-forward` to a collector replica, and the first `curl` of its `/metrics` | `auto`: fall back to Prometheus, with the reason; `collector`: abort | the same: the fallback is the design, and the reason is printed |
-| `curl` of a replica's `/metrics`, every poll | abort: an answer with no `otelcol_*` sample is not a zero heap | abort |
+| `curl` of a replica's `/metrics`, every poll | abort when the heap or the RSS gauge is not in the answer: a gauge that is not there is not a zero, and its ceiling could not fire | abort |
 | a Prometheus query for a required number (prober rate, collector heap, RSS, refused counters) | abort: `no data for …` | abort: `could not query Prometheus for …` (transport error, an error status, or not Prometheus's JSON) |
 | the age of the agent's series, pre-flight | abort: the series has no samples | abort: could not query |
 | `apply` of the Job | n/a | abort, saying the apply could not be confirmed: the Job may have been created, and the cleanup trap tries to delete it |

@@ -463,7 +463,7 @@ resolve_collector_limits() {
 # Returns non-zero if any replica does not answer, in which case the caller falls
 # back to Prometheus.
 start_collector_metrics() {
-	local i=0 pod out pid port body
+	local i=0 pod out pid port body missing
 	for pod in "${COLLECTOR_PODS[@]}"; do
 		CPF_LOGS[i]="${SCRATCH}/collector-pf-${i}.log"
 		out=$(start_pf "$COLLECTOR_NS" "pod/${pod}" "$COLLECTOR_METRICS_PORT" "${CPF_LOGS[i]}") || {
@@ -478,13 +478,15 @@ start_collector_metrics() {
 		CPF_PORTS[i]=$port
 		# Three different things, said apart: no port-forward (above), a fetch
 		# that failed (a collector with no pull reader listens on no such port),
-		# and an answer that is not the collector's.
-		if ! body=$(curl -fsS --max-time 8 "http://127.0.0.1:${port}/metrics"); then
+		# and an answer without the two gauges the safety ceilings read.
+		body="${SCRATCH}/metrics-first-${i}.txt"
+		if ! curl -fsS --max-time 8 "http://127.0.0.1:${port}/metrics" -o "$body"; then
 			log "WARN: could not fetch ${pod}:${COLLECTOR_METRICS_PORT}/metrics (curl's error is above)"
 			return 1
 		fi
-		if ! grep -q '^otelcol_' <<<"$body"; then
-			log "WARN: ${pod}:${COLLECTOR_METRICS_PORT}/metrics did not serve otelcol_* samples"
+		missing=$(missing_safety_samples "$body")
+		if [ -n "$missing" ]; then
+			log "WARN: ${pod}:${COLLECTOR_METRICS_PORT}/metrics did not serve ${missing}: without it a safety ceiling could never fire, so this endpoint is not used"
 			return 1
 		fi
 		i=$((i + 1))
@@ -497,6 +499,22 @@ stop_collector_metrics() {
 	for pid in ${CPF_PIDS[@]+"${CPF_PIDS[@]}"}; do kill "$pid" >/dev/null 2>&1 || true; done
 	CPF_PIDS=()
 	CPF_PORTS=()
+}
+
+# The two gauges the safety ceilings are read from (track_memory).
+SAFETY_SAMPLES='otelcol_process_runtime_heap_alloc_bytes otelcol_process_memory_rss_bytes'
+
+# missing_safety_samples <file> -> the names in SAFETY_SAMPLES that the
+# /metrics body in <file> has no sample of; nothing when both are there.
+# agg_samples reads a gauge that is not there as 0, and a ceiling compared
+# with 0 never fires. So "any otelcol_* sample" is not enough: both gauges
+# must be there, on the first fetch and on every poll.
+missing_safety_samples() {
+	local name out=""
+	for name in $SAFETY_SAMPLES; do
+		grep -qE "^${name}[{ ]" "$1" || out="${out}${out:+ }${name}"
+	done
+	printf '%s' "$out"
 }
 
 # agg_samples <file> <mode:sum|max> <name-alternation> -> integer.
@@ -520,7 +538,7 @@ REFUSED_LOGS_NAMES='otelcol_processor_memory_limiter_refused_log_records|otelcol
 # heap/RSS are the MAX across replicas (each is a per-process limit); the refused
 # counters are the SUM (any replica shedding is shedding).
 collector_snapshot() {
-	local i=0 f v
+	local i=0 f v missing
 	M_HEAP=0
 	M_RSS=0
 	M_POINTS=0
@@ -529,11 +547,12 @@ collector_snapshot() {
 		f="${SCRATCH}/metrics-${i}.txt"
 		curl -fsS --max-time 8 "http://127.0.0.1:${CPF_PORTS[i]}/metrics" -o "$f" ||
 			die "could not read ${COLLECTOR_PODS[i]}'s /metrics over its port-forward (curl's error is above) — re-run, or force --metrics-source prometheus"
-		# An answer with no collector sample (another server's page) would
-		# aggregate to a zero heap and zero refusals, which read as a healthy,
-		# idle collector.
-		grep -q '^otelcol_' "$f" ||
-			die "${COLLECTOR_PODS[i]}'s /metrics answered with no otelcol_* sample — not reading that as a zero heap and no refusals"
+		# A gauge that is not in the answer (another server's page, or a gauge
+		# that was there a poll ago) would aggregate to 0, which reads as a
+		# healthy, idle collector and disarms that gauge's ceiling.
+		missing=$(missing_safety_samples "$f")
+		[ -z "$missing" ] ||
+			die "${COLLECTOR_PODS[i]}'s /metrics answered without ${missing} — a gauge that is not there is not a zero, and its safety ceiling could not fire"
 		v=$(agg_samples "$f" max 'otelcol_process_runtime_heap_alloc_bytes')
 		[ "$v" -le "$M_HEAP" ] || M_HEAP=$v
 		v=$(agg_samples "$f" max 'otelcol_process_memory_rss_bytes')
@@ -826,6 +845,40 @@ track_memory() {
 	die "collector ${reason} — and the deletion of the job could NOT be confirmed (kubectl's error is above): the flood may still be running. The cleanup trap tries again; activeDeadlineSeconds ends it regardless. Also: ${agent}."
 }
 
+# manifest_defines_job <rendered manifest>: status 0 when the manifest is one
+# document, a batch/v1 Job, whose metadata reads `  name: ${JOB_NAME}` and
+# `  namespace: ${JOB_NS}` (#1600).
+#
+# Line-based on purpose. The structural way is `kubectl create
+# --dry-run=client -o json`, and it is not client-only: kubectl 1.35 asks the
+# API server for its OpenAPI document, and for its API group list even with
+# --validate=false. So the stream is cut into documents first:
+#   - exactly one document that is not empty (blank lines and comments do not
+#     make one). A second document, with or without a kind, is refused:
+#     `kubectl apply` creates objects in order, so a Job by another name ahead
+#     of a document that fails would be created, and the cleanup trap deletes
+#     only the expected name;
+#   - in that document, exactly one top-level `kind:` and one `apiVersion:`,
+#     and exactly one `name:` and one `namespace:` at the depth of metadata's
+#     keys. A Job has no other mapping at the top that holds them.
+manifest_defines_job() {
+	local m=$1 docs
+	docs=$(awk '
+		/^---([[:space:]]|$)/ { if (seen) n++; seen = 0; next }
+		/^[[:space:]]*(#.*)?$/ { next }
+		{ seen = 1 }
+		END { if (seen) n++; print n + 0 }' <<<"$m")
+	[ "$docs" = 1 ] || return 1
+	[ "$(grep -c '^kind:' <<<"$m")" = 1 ] || return 1
+	[ "$(grep -c '^apiVersion:' <<<"$m")" = 1 ] || return 1
+	[ "$(grep -c '^  name:' <<<"$m")" = 1 ] || return 1
+	[ "$(grep -c '^  namespace:' <<<"$m")" = 1 ] || return 1
+	grep -qxE 'kind: Job[[:space:]]*' <<<"$m" || return 1
+	grep -qxE 'apiVersion: batch/v1[[:space:]]*' <<<"$m" || return 1
+	grep -qxF "  name: ${JOB_NAME}" <<<"$m" || return 1
+	grep -qxF "  namespace: ${JOB_NS}" <<<"$m" || return 1
+}
+
 # The manifest on stdout, with the tokens of the shipped manifest filled in:
 # the collector the caller named, and the Job's own namespace and name (#1600).
 # A manifest of the caller's own (--job-manifest) that has no token passes
@@ -841,15 +894,9 @@ apply_job() {
 	local rendered
 	rendered=$(render_job) || die "could not read the job manifest ${JOB_MANIFEST}"
 	# The Job that is applied must be the Job that is watched and deleted
-	# (#1600). The manifest must be one object, a Job, whose metadata carries
-	# that name and namespace and no other: in a single Job document the only
-	# keys named `name` and `namespace` at this depth are its metadata's, so the
-	# expected name on some other object next to a Job by another name does not
-	# pass. Refused before anything is applied.
-	if [ "$(grep -c '^kind:' <<<"$rendered")" != 1 ] || ! grep -qxE 'kind: Job[[:space:]]*' <<<"$rendered" ||
-		! grep -qxF "  name: ${JOB_NAME}" <<<"$rendered" || ! grep -qxF "  namespace: ${JOB_NS}" <<<"$rendered"; then
-		die "${JOB_MANIFEST} does not define job ${JOB_NS}/${JOB_NAME}: its metadata must read '  name: ${JOB_NAME}' and '  namespace: ${JOB_NS}' (or carry the __JOB_NAME__ and __JOB_NS__ tokens), and it must hold that one Job and no other object. Nothing was applied."
-	fi
+	# (#1600): anything else is refused before anything is applied.
+	manifest_defines_job "$rendered" ||
+		die "${JOB_MANIFEST} does not define job ${JOB_NS}/${JOB_NAME} and nothing else: it must be one document, 'apiVersion: batch/v1' and 'kind: Job', whose metadata reads '  name: ${JOB_NAME}' and '  namespace: ${JOB_NS}' (or carries the __JOB_NAME__ and __JOB_NS__ tokens). Nothing was applied."
 	# Set before the apply: one that failed may still have created the Job, and
 	# the cleanup trap deletes it only when this says so.
 	JOB_APPLIED=1

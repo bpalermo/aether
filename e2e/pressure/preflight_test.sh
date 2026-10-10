@@ -617,13 +617,36 @@ call metrics-fetch-error 'start_pf() { echo "0 4242"; }; COLLECTOR_PODS=(c-0); S
 want metrics-fetch-error 0 'rc=1'
 want metrics-fetch-error 0 'could not fetch c-0:8888/metrics'
 want metrics-fetch-error 0 "$CURL_ERR"
-lacks metrics-fetch-error 'did not serve otelcol_* samples'
+lacks metrics-fetch-error 'did not serve'
 
 put metrics-no-samples metrics.out 'go_goroutines 12
 '
 call metrics-no-samples 'start_pf() { echo "0 4242"; }; COLLECTOR_PODS=(c-0); SCRATCH="$FAKE"; start_collector_metrics && echo rc=0 || echo rc=1'
 want metrics-no-samples 0 'rc=1'
-want metrics-no-samples 0 'did not serve otelcol_* samples'
+want metrics-no-samples 0 'c-0:8888/metrics did not serve otelcol_process_runtime_heap_alloc_bytes otelcol_process_memory_rss_bytes'
+
+# The two safety ceilings read the heap and the RSS gauge. An endpoint that
+# serves other collector metrics but not one of them would aggregate that
+# gauge to 0, and its ceiling could never fire while the Job raises the
+# pressure: such an endpoint is not a metrics source, on the first fetch and
+# on every poll (a gauge that disappears mid-run aborts).
+NO_HEAP='otelcol_process_memory_rss_bytes 2097152
+otelcol_receiver_refused_log_records_total 3
+'
+NO_RSS='otelcol_process_runtime_heap_alloc_bytes{a="b"} 1048576
+otelcol_process_memory_rss_bytes_other 5
+otelcol_receiver_refused_log_records_total 3
+'
+START='start_pf() { echo "0 4242"; }; COLLECTOR_PODS=(c-0); SCRATCH="$FAKE"; start_collector_metrics && echo rc=0 || echo rc=1'
+put metrics-no-heap metrics.out "$NO_HEAP"
+call metrics-no-heap "$START"
+want metrics-no-heap 0 'rc=1'
+want metrics-no-heap 0 'c-0:8888/metrics did not serve otelcol_process_runtime_heap_alloc_bytes'
+lacks metrics-no-heap 'otelcol_process_memory_rss_bytes'
+put metrics-no-rss metrics.out "$NO_RSS"
+call metrics-no-rss "$START"
+want metrics-no-rss 0 'rc=1'
+want metrics-no-rss 0 'c-0:8888/metrics did not serve otelcol_process_memory_rss_bytes'
 
 METRICS='# HELP x
 otelcol_process_runtime_heap_alloc_bytes{a="b"} 1048576
@@ -645,8 +668,25 @@ asked snapshot-fetch-error "could not read c-0's /metrics" "$CURL_ERR"
 put snapshot-no-samples metrics.out '<html>502 Bad Gateway</html>
 '
 call snapshot-no-samples "$SNAP"
-want snapshot-no-samples 2 "c-0's /metrics answered with no otelcol_* sample"
+want snapshot-no-samples 2 "c-0's /metrics answered without otelcol_process_runtime_heap_alloc_bytes otelcol_process_memory_rss_bytes"
 lacks snapshot-no-samples 'heap=0'
+
+put snapshot-no-heap metrics.out "$NO_HEAP"
+call snapshot-no-heap "$SNAP"
+want snapshot-no-heap 2 "c-0's /metrics answered without otelcol_process_runtime_heap_alloc_bytes"
+lacks snapshot-no-heap 'heap=0'
+put snapshot-no-rss metrics.out "$NO_RSS"
+call snapshot-no-rss "$SNAP"
+want snapshot-no-rss 2 "c-0's /metrics answered without otelcol_process_memory_rss_bytes"
+lacks snapshot-no-rss 'rss=0'
+
+# The gauge was there on the first poll and is gone on the second.
+put snapshot-heap-gone metrics.out.1 "$METRICS"
+put snapshot-heap-gone metrics.out.2 "$NO_HEAP"
+call snapshot-heap-gone 'COLLECTOR_PODS=(c-0); CPF_PORTS=(4242); SCRATCH="$FAKE"; collector_snapshot; echo "first=$M_HEAP"; collector_snapshot; echo "second=$M_HEAP"'
+want snapshot-heap-gone 2 'first=1048576'
+want snapshot-heap-gone 2 "c-0's /metrics answered without otelcol_process_runtime_heap_alloc_bytes"
+lacks snapshot-heap-gone 'second='
 
 # Prometheus: a query that could not be asked, one Prometheus refused, and one
 # that returned no sample.
@@ -762,6 +802,54 @@ if grep -q ' apply ' "$FAKE/calls"; then
 else
 	pass "apply-decoy: nothing was applied"
 fi
+# refused <case> <manifest>: the manifest is refused and nothing is applied.
+refused() {
+	call "$1" "$APPLY" JOB_MANIFEST="$2"
+	want "$1" 2 'Nothing was applied'
+	want "$1" 2 'JOB_APPLIED=0'
+	if grep -q ' apply ' "$FAKE/calls"; then
+		fail "$1: applied a refused manifest: $(cat "$FAKE/calls")"
+	else
+		pass "$1: nothing was applied"
+	fi
+}
+GOODMETA='metadata:
+  name: aether-collector-pressure
+  namespace: aether-test
+'
+# A Job by another name first, then a document with no kind that carries the
+# expected metadata: `kubectl apply` could create the first before it fails on
+# the second, and the cleanup would delete only the expected name.
+TWODOCS="$TMP/two-docs.yaml"
+printf 'apiVersion: batch/v1\nkind: Job\nmetadata:\n  name: some-other-flood\n  namespace: elsewhere\nspec: {}\n---\n%s' "$GOODMETA" >"$TWODOCS"
+refused apply-two-docs "$TWODOCS"
+# The same with the separator carrying a comment, and with the good one first.
+TWODOCS2="$TMP/two-docs-2.yaml"
+printf 'apiVersion: batch/v1\nkind: Job\n%sspec: {}\n--- # next\nmetadata:\n  name: some-other-flood\n' "$GOODMETA" >"$TWODOCS2"
+refused apply-two-docs-good-first "$TWODOCS2"
+# One document, a Job by another name, with the expected name under another key.
+STRAY="$TMP/stray-name.yaml"
+printf 'apiVersion: batch/v1\nkind: Job\nmetadata:\n  name: some-other-flood\n  namespace: aether-test\nextra:\n  name: aether-collector-pressure\n' >"$STRAY"
+refused apply-stray-name "$STRAY"
+# Another API group's Job.
+OTHERAPI="$TMP/other-api.yaml"
+printf 'apiVersion: example.org/v1\nkind: Job\n%s' "$GOODMETA" >"$OTHERAPI"
+refused apply-other-api "$OTHERAPI"
+# batch/v1, the expected metadata, and another kind.
+OTHERKIND="$TMP/other-kind.yaml"
+printf 'apiVersion: batch/v1\nkind: CronJob\n%s' "$GOODMETA" >"$OTHERKIND"
+refused apply-other-kind "$OTHERKIND"
+# The expected Job, then a document that is nothing kubectl knows: the apply
+# would fail after creating the Job. One document only.
+TRAILING="$TMP/trailing-doc.yaml"
+printf 'apiVersion: batch/v1\nkind: Job\n%sspec: {}\n---\nfoo: bar\n' "$GOODMETA" >"$TRAILING"
+refused apply-trailing-doc "$TRAILING"
+# Separators around the one document, and comments, are not a second document.
+WRAPPED="$TMP/wrapped.yaml"
+printf '# a comment\n---\n# another\napiVersion: batch/v1\nkind: Job\n%sspec: {}\n---\n\n# trailing\n' "$GOODMETA" >"$WRAPPED"
+call apply-wrapped "$APPLY" JOB_MANIFEST="$WRAPPED"
+want apply-wrapped 0 'JOB_APPLIED=1'
+
 NOTJOB="$TMP/not-a-job.yaml"
 printf 'apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: aether-collector-pressure\n  namespace: aether-test\n' >"$NOTJOB"
 call apply-not-a-job "$APPLY" JOB_MANIFEST="$NOTJOB"
