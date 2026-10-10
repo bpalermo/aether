@@ -21,6 +21,7 @@ go_test(
         "cds_partial_reject_test.go",
         "cds_reconnect_test.go",
         "harness_test.go",
+        "lds_reconnect_test.go",
         "podname_namespace_1584_test.go",
         "pool_identity_test.go",
         "quic_cost_test.go",

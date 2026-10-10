@@ -18,6 +18,8 @@ import (
 	registryv1 "aethermesh.dev/api/aether/registry/v1"
 	aetherlabels "aethermesh.dev/common/constants/labels"
 	"aethermesh.dev/registry"
+	discoveryv3 "github.com/envoyproxy/go-control-plane/envoy/service/discovery/v3"
+	resourcev3 "github.com/envoyproxy/go-control-plane/pkg/resource/v3"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
@@ -60,8 +62,9 @@ func (r *testRegistry) ListAllEndpoints(_ context.Context, _ registryv1.Service_
 
 // newTestCNIServer constructs a bare CNIServer without the gRPC/socket machinery, suitable
 // for unit-testing the AddPod and RemovePod methods directly. The ACK tracker
-// never sees an Envoy stream in unit tests, so AddPod's best-effort ACK wait
-// runs out its (short) deadline and RemovePod's absent-wait returns instantly.
+// sees one proxy that holds no listener and acknowledges none
+// (trackerOfAProxyHoldingNothing), so AddPod's best-effort ACK wait runs out
+// its (short) deadline and RemovePod's absent-wait returns instantly.
 // healthSocket is the UDS path of a fake health gateway (empty when the test
 // never reaches the liveness probe).
 func newTestCNIServer(k8sClient client.Client, stor storage.Storage[*cniv1.CNIPod], reg registry.Registry, sc *cache.SnapshotCache, healthSocket string) *CNIServer {
@@ -76,13 +79,36 @@ func newTestCNIServer(k8sClient client.Client, stor storage.Storage[*cniv1.CNIPo
 		registry:      reg,
 		snapshotCache: sc,
 		spireBridge:   spire.NewBridge(agentconstants.DefaultSpireBrokerSocketPath, sc, nil, slog.New(slog.DiscardHandler)),
-		ackTracker:    ack.NewTracker(slog.New(slog.DiscardHandler)),
+		ackTracker:    trackerOfAProxyHoldingNothing(),
 		healthClient:  newHealthGatewayClient(healthSocket),
 		// Effectively disables drain phase 2 so unrelated tests never race the
 		// pool-close goroutine; tests of phase 2 override this explicitly.
 		drainPoolCloseDelay: time.Hour,
 		k8sClient:           k8sClient,
 	}
+}
+
+// trackerOfAProxyHoldingNothing is an ACK tracker that has seen one proxy
+// connect and state that it holds no listener, and nothing since. With no
+// proxy at all the tracker knows nothing, and a removal wait then runs to its
+// deadline (#1572): TestRemovePod_WaitsUntilAProxySaysWhatItHolds.
+func trackerOfAProxyHoldingNothing() *ack.Tracker {
+	tracker := ack.NewTracker(slog.New(slog.DiscardHandler))
+	proxyStatesItsListeners(tracker, 1, nil)
+	return tracker
+}
+
+// proxyStatesItsListeners plays the opening Listener exchange of a proxy on
+// an ADS stream: it states the listeners it holds, and the agent answers with
+// nothing to add or remove.
+func proxyStatesItsListeners(tracker *ack.Tracker, streamID int64, held map[string]string) {
+	callbacks := tracker.Callbacks()
+	_ = callbacks.OnDeltaStreamOpen(context.Background(), streamID, "")
+	request := &discoveryv3.DeltaDiscoveryRequest{TypeUrl: resourcev3.ListenerType, InitialResourceVersions: held}
+	_ = callbacks.OnStreamDeltaRequest(streamID, request)
+	callbacks.OnStreamDeltaResponse(streamID, request, &discoveryv3.DeltaDiscoveryResponse{
+		TypeUrl: resourcev3.ListenerType, Nonce: "opening",
+	})
 }
 
 // validCNIPod returns a CNIPod that is not ignorable and carries the labels and annotations

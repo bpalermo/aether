@@ -7386,14 +7386,68 @@ product behaves:
 **The NACK counters (#1480).** `aether_agent_xds_nacks_total` counts the delta responses
 a proxy rejected, by `aether_xds_type_url`; `aether_agent_xds_ack_wait_failures_total`
 counts the ACK waits of a pod's listener that failed, by `aether_xds_wait` (`present`,
-`absent`) and `aether_xds_reason` (`nack`, `timeout`). Both are seeded at zero when the
-agent starts, so "no NACK" is a series at `0` and not an absent one. The first has seven
-series: one per resource type the agent serves (`…listener.v3.Listener`,
+`absent`) and `aether_xds_reason` (`nack`, `timeout`, `no_proxy`). Both are seeded at
+zero when the agent starts, so "no NACK" is a series at `0` and not an absent one. The
+first has seven series: one per resource type the agent serves (`…listener.v3.Listener`,
 `…cluster.v3.Cluster`, `…endpoint.v3.ClusterLoadAssignment`,
 `…route.v3.RouteConfiguration`, `…tls.v3.Secret`, `…core.v3.TypedExtensionConfig`, each as
 its full `type.googleapis.com/…` URL) and `other`, which nothing uses today. The second
-has four. Agents before #1480 created each series on its first increment, so on those an
-absent series is the healthy state and cannot be told from an agent that reports nothing.
+has five since #1624: `present` by `nack`, `timeout` and `no_proxy`, and `absent` by
+`timeout` and `no_proxy`. There is no `absent`/`nack` any more (it had four, with that
+one, from #1480 to #1624): no rejection fails a removal wait. Agents before #1480 created
+each series on its first increment, so on those an absent series is the healthy state and
+cannot be told from an agent that reports nothing.
+
+**What the two waits mean (#1624).** The agent keeps what the proxy holds per xDS stream.
+A stream is one connection of one proxy process: a hot restart has two for a while, and
+a proxy that reconnects opens a new one. What a proxy holds is what it stated in its
+first Listener request on the stream (`initial_resource_versions`), with every response
+it answered since. Everything goes with the stream when it closes. A proxy counts for a
+wait from its Listener request on, not from the moment its stream opens: a new generation
+that is still loading its clusters holds no listener. Read
+`aether_agent_xds_ack_wait_failures_total` with that in mind:
+
+- `present` is the wait of a pod ADD, and it is for a version, not for a name. A pod's
+  listeners are named after the pod (`outbound_http_<namespace>_<pod>`,
+  `inbound_<namespace>_<pod>`), so a pod recreated under the same name (a StatefulSet replica) publishes other content under a
+  name the proxy already holds. The wait is answered when one proxy holds the version
+  the agent publishes at that moment and has nothing unanswered about the name. A proxy
+  that states that version when it reconnects answers it, so a pod ADD retried or a pod
+  re-added after an agent restart no longer counts a failure for a listener that was
+  there all along (#1511). `present`/`nack` is a connected proxy rejecting the published
+  version; a rejection of an older version, or by a proxy whose stream has closed, fails
+  nothing. During a hot restart one generation holding the listener answers the wait and
+  either generation rejecting it fails it: the proxy's `envoy NACKed delta response` line
+  in the agent log says which, by time. That an answered wait means a *serving* proxy
+  has the listener is **not** promised in that overlap: a parent that has stopped its
+  listeners acknowledges a listener it does not add, and the agent sees only the ACK
+  (`//agent/test/mtlspool`, `TestADrainingProxyAcknowledgesAListenerItDoesNotAdd`). The
+  CNI plugin's in-netns probe is the proof that a listener serves.
+- `absent` is the wait of a pod DEL, and it is for every proxy that has asked for its
+  listeners to be **known** not to hold the listener. Each generation of a hot restart
+  has its own sockets in the pod's network namespace. A proxy is not known before the
+  agent has answered its first Listener request. Before #1624 the agent read "I know of
+  no such listener" as "the proxy has none" and such a DEL returned at once (#1572).
+- `timeout` and `no_proxy` are the two ways a wait runs out, and they are different
+  findings. `timeout`: there was a proxy to ask, and it did not give the answer within
+  the wait (2 s). For `absent` that is a proxy that did not acknowledge the removal of a
+  pod's listener before the pod's network namespace was torn down, which is the one to
+  look into. `no_proxy`: no connected proxy had asked for its listeners, so there was
+  nobody to ask. That is every managed pod ADD and DEL that arrives after an agent
+  restart until the proxy has reconnected, or while the proxy is down; each takes the
+  full wait and then proceeds. A burst of `no_proxy` at an agent roll is expected, and
+  its length is how long the proxy took to reconnect. `absent`/`no_proxy` is new with
+  #1624: those DELs used to return at once and count nothing.
+- A rejected response is read for what the proxy does with it, measured on the pinned
+  proxy (`//agent/test/mtlspool`). It does every removal of the response before any add,
+  so a listener the response removed is gone and its DEL's wait returns
+  (`TestRemovalCarriedByARejectedResponseIsDone`). It keeps the listeners of the
+  response that it could build, so a listener the response added is not read as absent:
+  its DEL waits for the removal, which the agent still sends
+  (`TestRejectedListenerResponseIsAppliedInPart`). One limit remains and is pinned
+  (`TestListenerOfARejectedResponseIsNotStatedAtReconnect`): a listener kept that way is
+  not in the proxy's statement when it reconnects, so after an agent restart the agent
+  has no word of it.
 
 The label names are the OTLP attribute keys (`aether.xds.type_url`, `aether.xds.wait`,
 `aether.xds.reason`) with their dots turned into underscores by the OTLP ingest, like
@@ -7721,6 +7775,123 @@ Two cautions when tempted to "test" one of these:
 
 Genuine test debt is tracked separately — see #868 for L4 route e2e coverage, which is a
 shipped default-on feature with no end-to-end test at all.
+
+### The proxy rejected a Listener update (`AetherProxyRejectedListenerUpdate`, #1633)
+
+**What it means.** The agent sent its proxy a Listener (LDS) response and the proxy
+answered with a NACK: at least one listener in it could not be built. The agent is the
+only writer of the proxy's configuration and the proxy is the pinned one, so a rejected
+update is **always an agent defect**, whatever led to it (a listener bound into a network
+namespace that is gone, a filter configuration the proxy refuses). Report it, with the
+log line below.
+
+The agent counts it, per resource type, in `aether_agent_xds_nacks_total`; the series for
+listeners is `aether_xds_type_url="type.googleapis.com/envoy.config.listener.v3.Listener"`,
+seeded at zero when the agent starts (#1480). `AetherProxyRejectedListenerUpdate`
+(`docs/observability/agent-xds-alerts.yml`) fires on one rejection, per `job` and `node`:
+
+```promql
+sum by (job, node) (increase(aether_agent_xds_nacks_total{aether_xds_type_url="type.googleapis.com/envoy.config.listener.v3.Listener"}[1h])) > 0
+```
+
+The rule has a second arm for a series whose first sample is already above zero (a
+rejection before the agent's first export, on a node nothing reported from before), where
+`increase()` is 0. The alert lasts an hour from the last rejection and then ends
+**whatever was done**: the counter cannot tell that a proxy was replaced. Read it as an
+event to act on. An agent restart puts the counter back to zero, and does not undo what
+is described next.
+
+**What the proxy did with the update.** A NACK is not "nothing was applied". Measured on
+the pinned proxy by `//agent/test/mtlspool` (`lds_reconnect_test.go`, added with #1632):
+
+- It does every removal of the response before any add, so a listener the response
+  removed is gone (`TestRemovalCarriedByARejectedResponseIsDone`).
+- It adds the listeners of the response that it could build, and runs them. Only the
+  listener it refused is missing (`TestRejectedListenerResponseIsAppliedInPart`, which
+  also shows the agent removing such a listener later on the same stream).
+- **A listener it kept that way is not in what it states when it reconnects**
+  (`TestListenerOfARejectedResponseIsNotStatedAtReconnect`). A reconnecting proxy tells
+  the control plane the resources it holds (`initial_resource_versions`), and the agent
+  removes what it no longer publishes from that statement. The listener kept from a
+  rejected response is not listed.
+
+So while the xDS stream that carried the update lives, the agent knows of the listener
+and removes it when its pod goes. **After an agent restart** (a roll, a crash, an upgrade), or after
+the proxy's xDS stream reset, the agent has no word of it. If the pod is still there, the
+agent publishes the listener again and nothing is lost. If the pod went while the agent
+or the stream was down, **nothing removes the listener from the proxy**: it stays bound in a network namespace that is dead or has been
+handed to another pod, a pod deletion is not held for it, and no metric of the agent
+shows it. The agent does not look for such listeners, by design: the precondition is an
+agent defect, and it is made loud instead (#1633).
+
+The pod whose listener was refused is a different matter: the proxy does not run that
+listener. A pod ADD that was waiting for its outbound listener when the response
+carrying it was rejected counts
+`aether_agent_xds_ack_wait_failures_total{aether_xds_wait="present",aether_xds_reason="nack"}`.
+That wait is best-effort and does not fail the ADD.
+
+**Finding the rejected listener.** The agent logs one INFO line per rejected response, on
+the node the alert names:
+
+```
+envoy NACKed delta response   typeURL=type.googleapis.com/envoy.config.listener.v3.Listener added=[<listener> …] removed=[<listener> …] error="<the proxy's reason>"
+```
+
+`added` and `removed` are the listener names the response carried. `error` is the
+proxy's `error_detail`, which names the listener it refused and why. Every other name in
+`added` is a listener the proxy now runs from a rejected response: those are the ones the
+agent loses at its next restart.
+
+```
+# VictoriaLogs
+_stream:{service.name="aether-agent"} AND "envoy NACKed delta response" AND "envoy.config.listener.v3.Listener"
+```
+
+```bash
+kubectl -n aether-system logs <aether-agent pod on the node> -c agent | grep 'envoy NACKed delta response'
+```
+
+The proxy's own side is `listener_manager.lds.update_rejected` and
+`listener_manager.listener_create_failure`; read them with `max_over_time(...[1h])`, never
+as an instant query.
+
+**Recovery.** In this order:
+
+1. **Fix the cause first**, so that the agent no longer publishes the listener the proxy
+   refuses (the `error` field says which and why; `added` no longer carries it, and the
+   counter stops moving). Do not replace the proxy before that: a hot-restart successor
+   is a new Envoy that receives every listener of the node in its first response, and
+   one that rejects that response can come up with **no listeners at all** (see "A pod is
+   stuck `Terminating`, or a node has stale netns entries" below, "Why the snapshot-time
+   skip matters").
+2. **Replace the proxy pod on that node:**
+
+   ```bash
+   kubectl -n aether-system get pod -o wide --field-selector spec.nodeName=<node> | grep aether-proxy
+   kubectl -n aether-system delete pod <aether-proxy pod on the node>
+   ```
+
+   The new pod's Envoy is a new process: it holds only the listeners the agent sends it,
+   and the listener nobody knew of ends with the old process. With the hot-restart
+   supervisor this is a handoff and not an outage: the delete takes the `successor_wait`
+   branch ("What the proxy supervisor does on SIGTERM" above), the surge replacement
+   starts within about a second and hot-restarts the node's Envoy, the old one drains
+   and exits. Expect 20 to 25 s of pod termination and no prober error on the node.
+   Connections still open on the old Envoy when its drain ends are closed, as in any
+   proxy roll. (That a hot restart ends such a listener follows from what a hot restart
+   is; it was not measured for this case.)
+3. **Report the defect**, with the agent's NACK line and its version. The alert ends by
+   itself an hour after the last rejection.
+
+If the alert names the edge control plane's `job`, the same reading applies to the edge
+proxy it serves; there is no per-pod listener to lose there, and replacing the edge
+proxy pod after the fix is the same recovery.
+
+**When the alert repeats with no new NACK line.** During a surge roll of the agent two
+agents export for one node. A metrics pipeline that keeps agents apart by `node` alone
+stores both in one series, and an old count interleaved with the successor's zero reads
+as an increase. It can only happen on a node whose outgoing agent had counted a
+rejection. Check the agent log for the line above before acting on it.
 
 ### A pod is stuck `Terminating`, or a node has stale netns entries (#245, #796)
 
