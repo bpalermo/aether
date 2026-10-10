@@ -42,9 +42,6 @@ pin openpolicyagent/opa 1.21.1-envoy-static sha256:b4a8bbe87c9405419d03d1a8b6b9f
 pin gcr.io/k8s-staging-gateway-api/echo-basic v20260102-monthly-2025.12-44-g8174882a sha256:eb7396722956640221e856b8e8cf44179da131d5bd6fc27a4f0cb91f60c237c3
 pin gcr.io/k8s-staging-gateway-api/echo-advanced v20240412-v1.0.0-394-g40c666fd sha256:5efb54877c2280c51b971857ea9a6256b355822ab84a4edbef9ec1c876587068
 
-# OpenTelemetry: the collector the QUIC hot-restart harness runs.
-pin ghcr.io/open-telemetry/opentelemetry-collector-releases/opentelemetry-collector 0.159.0 sha256:7725a7a10c87d8853208bdd4bb3439ad3c0d7b32b4292b9300ac07c8daba14a2
-
 # etcd, the same release from two registries (their indexes differ): the kind
 # harnesses start the quay.io one (e2e/etcd-image.sh), the testcontainers
 # integration tests the gcr.io one (registry/etcdtest). Keep both on the minor

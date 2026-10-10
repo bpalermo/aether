@@ -1,5 +1,11 @@
 # Proposal 041: Surge roll for the node agent — a standby agent takes the node over
 
+> **Note (2026-10-10):** the kind harness this proposal measures with,
+> `e2e/agent-restart-gap.sh`, has left this repository. It is now maintained
+> with an external harness, outside this repository. The path below names the
+> file as it was here when this was written. The text is kept as the record
+> of the design.
+
 **Status:** Implemented 2026-10-03, PRs #1155 (lock + standby), #1156
 (`agent-ready` probe), #1157 (chart, `agent.updateStrategy.surge`), #1158 (kind
 gate). On kind, with load running and 20 rolls, the proxy-side gap went from

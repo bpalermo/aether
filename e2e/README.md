@@ -6,6 +6,21 @@ on-demand regression test for #662: a collector that refuses telemetry must not
 block or kill an agent's start) are run by an external harness, maintained
 outside this repository.
 
+So are six kind reproductions of fixed incidents that no workflow here ran:
+`agent-restart-gap.sh` (#1123, proposal 041), `drain-propagation.sh` (#1103,
+#1124), `eastwest-quic-deadpeer.sh` (#1087, #1104), `eastwest-quic-hotrestart.sh`
+(#1009, #1054), `hotrestart-wedge.sh` (#1050) and `proxy-concurrency-change.sh`
+(#1136). They left this directory on 2026-10-10 and are maintained with that
+external harness, where they install the published chart instead of building
+this tree. The runbook still names each beside the incident it reproduces.
+
+What is here is what something runs: the suites of the nightly `e2e` workflow
+(`multicluster_waypoint.sh`, `multicluster_replicator.sh`, `uds.sh`,
+`uds-csi.sh`, `authz.sh`, `l4routes.sh`, `eastwest-quic.sh`,
+`first-install.sh`), the version pins they source with their consistency
+tests, and two scripts run by hand: `multicluster_config.sh` (the runbook's
+"Local multi-cluster end-to-end") and `multiprotocol.sh`.
+
 Every harness that creates a kind cluster sources
 [`kind-version.sh`](kind-version.sh) and passes `--image "$KIND_NODE_IMAGE"`, so
 a local run and CI run the same Kubernetes; bumping it is one file
