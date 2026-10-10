@@ -62,8 +62,9 @@ data:
             - name: envoy.tracers.opentelemetry.resource_detectors.environment
               typed_config:
                 "@type": type.googleapis.com/envoy.extensions.tracers.opentelemetry.resource_detectors.v3.EnvironmentResourceDetectorConfig
-            # service.name for these stats (#1561), which a metrics backend
-            # stores as `job`: until chart 2.4.26 they had none, and a query
+            # service.name for these stats (#1561), which Prometheus's OTLP
+            # ingestion stores as `job` (another backend may need the mapping
+            # made): until chart 2.4.26 they had none, and a query
             # could only tell them from the edge proxy's by negation
             # ({job!="aether-edge-proxy"}). It is set HERE and not in the
             # container's environment because the supervisor in the same

@@ -66,7 +66,9 @@ Five things follow from the table.
   `agent edge` replicas by default and spreads them across nodes only softly
   (`edge.replicaCount`, `edge.nodeSpread`), so two can share a node. Both report the pin
   gauges, and with `job` and `node` alone two co-located replicas write the same series.
-- **The node proxy's Envoy stats are `job="aether-proxy"`** since chart 2.4.26. Before
+- **The node proxy's Envoy stats set `service.name=aether-proxy`** since chart 2.4.26,
+  so they are `job="aether-proxy"` wherever `service.name` is mapped to `job` (the table
+  under [What you must do](#what-you-must-do)). Before
   that they had no `service.name` and arrived without a `job`; the edge proxy exports the
   same metric names with `job="aether-edge-proxy"`, and a query could only keep the two
   apart by negation (`{job!="aether-edge-proxy"}`, which still selects the node proxy's

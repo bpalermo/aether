@@ -19,7 +19,8 @@ import (
 )
 
 // nodeProxyServiceName is the service.name the node proxy's Envoy stats are
-// exported with (#1561). A metrics backend stores it as `job`, so a query can
+// exported with (#1561). Prometheus's OTLP ingestion stores it as `job` (another
+// backend may need the mapping made), so a query can
 // say {job="aether-proxy"} where it used to exclude the edge proxy by negation.
 // docs/observability/metric-labels.md names it for operators, and
 // //charts/aether:aether_proxy_stats_service_name_test pins the rendered block.
