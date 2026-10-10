@@ -81,7 +81,7 @@ func TestDeliveryObserver_EveryResponseInFlightLeavesItOnce(t *testing.T) {
 	assert.Len(t, *got, 3)
 	tr.onDeltaStreamClosed(2, nil)
 	assert.Equal(t, event{"ended", []string{"b"}}, (*got)[3])
-	assert.Empty(t, tr.inflight)
+	assert.Empty(t, unanswered(tr))
 }
 
 // TestDeliveryObserver_AResponseThatCarriesNothingIsNotInFlight: an empty

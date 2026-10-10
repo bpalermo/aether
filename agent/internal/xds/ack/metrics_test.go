@@ -70,8 +70,12 @@ func TestMetrics_Nack(t *testing.T) {
 }
 
 func TestMetrics_WaitFailures(t *testing.T) {
+	// Until #1624 this case had no proxy at all, and that counted as a
+	// timeout. A wait that ends with no proxy to ask is now counted apart.
 	t.Run("timeout", func(t *testing.T) {
 		tr, reader := newTestTracker(t)
+		// A proxy that was sent the listener and has not answered.
+		sendDelta(tr, 1, "n1", []string{testListener}, nil)
 		ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
 		defer cancel()
 		require.Error(t, tr.WaitListenerPresent(ctx, testListener))
@@ -79,6 +83,26 @@ func TestMetrics_WaitFailures(t *testing.T) {
 		v, ok := counterValue(t, reader, "aether.agent.xds.ack_wait_failures", "aether.xds.reason", "timeout")
 		require.True(t, ok, "wait failure counter not recorded")
 		assert.Equal(t, int64(1), v)
+		v, _ = counterValue(t, reader, "aether.agent.xds.ack_wait_failures", "aether.xds.reason", "no_proxy")
+		assert.Zero(t, v, "there was a proxy to ask")
+	})
+
+	t.Run("no proxy", func(t *testing.T) {
+		tr, reader := newTestTracker(t)
+		// An ADS stream that has not asked for its listeners is not a proxy
+		// to ask about them.
+		connect(tr, 1, "")
+		for _, wait := range []func(context.Context, string) error{tr.WaitListenerPresent, tr.WaitListenerAbsent} {
+			ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+			require.Error(t, wait(ctx, testListener))
+			cancel()
+		}
+
+		v, ok := counterValue(t, reader, "aether.agent.xds.ack_wait_failures", "aether.xds.reason", "no_proxy")
+		require.True(t, ok, "wait failure counter not recorded")
+		assert.Equal(t, int64(2), v, "one for each wait")
+		v, _ = counterValue(t, reader, "aether.agent.xds.ack_wait_failures", "aether.xds.reason", "timeout")
+		assert.Zero(t, v, "no proxy failed to answer")
 	})
 
 	t.Run("nack", func(t *testing.T) {

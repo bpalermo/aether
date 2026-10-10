@@ -31,12 +31,20 @@ func sendDelta(t *Tracker, streamID int64, nonce string, added, removed []string
 }
 
 // ackDelta simulates Envoy ACKing (errMsg == "") or NACKing the response with
-// the given nonce.
+// the given nonce. Like a proxy, it answers under the type of the response it
+// answers; a nonce nothing was sent under is echoed as a Listener request.
 func ackDelta(t *Tracker, streamID int64, nonce, errMsg string) {
 	req := &discoveryv3.DeltaDiscoveryRequest{
 		TypeUrl:       resourcev3.ListenerType,
 		ResponseNonce: nonce,
 	}
+	t.mu.Lock()
+	if s := t.streams[streamID]; s != nil {
+		if entry, ok := s.inflight[nonce]; ok {
+			req.TypeUrl = entry.typeURL
+		}
+	}
+	t.mu.Unlock()
 	if errMsg != "" {
 		req.ErrorDetail = status.New(codes.InvalidArgument, errMsg).Proto()
 	}
@@ -120,8 +128,18 @@ func TestNackClearedBySubsequentAck(t *testing.T) {
 func TestWaitListenerAbsent(t *testing.T) {
 	tr := NewTracker(slog.New(slog.DiscardHandler))
 
-	t.Run("never-known listener is absent immediately", func(t *testing.T) {
-		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	// Until #1624 this case read "never-known listener is absent immediately",
+	// with no proxy connected at all. Nothing known is not absent (#1572): the
+	// listener is absent once a proxy has said what it holds.
+	t.Run("a listener the connected proxy does not hold is absent immediately", func(t *testing.T) {
+		ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+		defer cancel()
+		require.Error(t, tr.WaitListenerAbsent(ctx, "unknown"), "no proxy has said anything")
+
+		open(tr, 1, resourcev3.ListenerType, nil)
+		sendDelta(tr, 1, "n0", nil, nil)
+		ackDelta(tr, 1, "n0", "")
+		ctx, cancel = context.WithTimeout(context.Background(), time.Second)
 		defer cancel()
 		require.NoError(t, tr.WaitListenerAbsent(ctx, "unknown"))
 	})
@@ -182,7 +200,9 @@ func TestAckObserver_ToldTheSnapshotVersionOfEveryAck(t *testing.T) {
 	tr.SetAckObserver(func(_ context.Context, accepted Accepted) {
 		// The tracker's lock is released by now: calling back into the tracker
 		// from the observer must not deadlock.
-		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		// The wait itself has nothing to return for: no proxy has said what
+		// listeners it holds.
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
 		defer cancel()
 		_ = tr.WaitListenerAbsent(ctx, "never-present")
 		got = append(got, observed{accepted.TypeURL, accepted.SystemVersion})
