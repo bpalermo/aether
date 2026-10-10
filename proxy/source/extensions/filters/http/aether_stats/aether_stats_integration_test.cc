@@ -99,7 +99,10 @@ TEST_P(AetherStatsIntegrationTest, RecordsRequestCounterUnderProdStatsConfig) {
     t1->set_regex("^cluster\\.(([^.]+)\\.)");
     auto* t2 = sc->add_stats_tags();
     t2->set_tag_name("aether.pod");
-    t2->set_regex("^listener\\.(?:inbound|out_http)(_([^.]+))\\.");
+    t2->set_regex("^listener\\.(?:inbound|out_http)(?:_[^_.]+)?(_([^.]+))\\.");
+    auto* t3 = sc->add_stats_tags();
+    t3->set_tag_name("aether.namespace");
+    t3->set_regex("^listener\\.(?:inbound|out_http)(_([^_.]+))_[^.]+\\.");
     // The aether_stats hot-restart fallback regexes (see configmap.yaml). On the
     // fresh write path the programmatic tags win (these run only on the no-tags
     // name), so the counter must still carry exactly the 7 real tags.

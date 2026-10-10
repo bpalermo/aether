@@ -307,8 +307,9 @@ type Metrics struct {
 	// of one xDS type carried in a snapshot build (#1584). go-control-plane
 	// keeps ONE resource per name, silently, so the proxy is sent only one of
 	// them and which one can change from build to build. Counted once per name
-	// per build for as long as the condition lasts. Healthy value: zero
-	// forever.
+	// per build for as long as the condition lasts. Zero on a node where
+	// nothing shares a name; the cache's duplicatenames.go lists the inputs
+	// known to produce it.
 	duplicateResourceNames metric.Int64Counter
 }
 

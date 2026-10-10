@@ -34,9 +34,16 @@ const duplicateNamesLogged = 20
 // are in all. Types without one are absent from the map.
 //
 // Two resources of one name that are equal are not reported: whichever of the
-// two go-control-plane keeps, the proxy is sent the same thing. (A service
-// registered under both the HTTP and the TCP key yields its load assignment
-// from both passes for one refresh, for instance.)
+// two go-control-plane keeps, the proxy is sent the same thing. A service
+// listed under both the HTTP and the TCP key yields its load assignment from
+// both passes, equal, for instance.
+//
+// The check is about names, not about pods, and per-pod names are not its
+// only input. Known today: two sandboxes of one pod (same namespace and name,
+// two network namespaces); and a service that is no longer listed under the
+// HTTP key while it still is under the TCP key, whose retained HTTP entry
+// (serviceRetentionGrace) carries an EMPTY load assignment under the name of
+// the TCP entry's populated one, for as long as it is retained.
 func duplicateResourceNames(resources map[resourcev3.Type][]types.Resource) (map[resourcev3.Type][]string, int) {
 	var (
 		out   map[resourcev3.Type][]string
@@ -109,7 +116,6 @@ func (c *SnapshotCache) reportDuplicateResourceNames(ctx context.Context, resour
 		c.log.ErrorContext(ctx, "more than one resource of a type carries the same name: the proxy is sent only one of them, and which one can change from build to build",
 			"type", typ,
 			"count", len(names),
-			"names", names[:min(len(names), duplicateNamesLogged)],
-			"issue", "1584")
+			"names", names[:min(len(names), duplicateNamesLogged)])
 	}
 }

@@ -3136,7 +3136,7 @@ kubectl -n "$NS" exec <proxy-pod> -c aether-proxy -- \
 
 ```promql
 # The agent found two different resources under one name in a snapshot it
-# built. Zero forever on a healthy node.
+# built. Zero where nothing shares a name; the two known inputs are below.
 sum by (node) (increase(aether_agent_snapshot_duplicate_resource_names_total[1h])) > 0
 ```
 
@@ -3145,11 +3145,21 @@ agent logs, at ERROR and once per change of the set,
 `more than one resource of a type carries the same name: the proxy is sent only one of them, and which one can change from build to build`
 with the xDS type and the names, and counts one per name on every build the
 condition lasts. It reports and changes nothing: the snapshot is published as
-before. One input still produces it: two sandboxes of the **same** pod (same
-namespace and name) stored at once, which is a replacement whose predecessor's
-CNI DEL was missed while the old network namespace still exists ("A pod is
-stuck `Terminating`, or a node has stale netns entries" below is the way out).
-Two resources of one name that are equal are not reported.
+before. Two resources of one name that are equal are not reported. The check
+is about names of any kind, and two inputs are known to produce it today:
+
+- two sandboxes of the **same** pod (same namespace and name) stored at once,
+  which is a replacement whose predecessor's CNI DEL was missed while the old
+  network namespace still exists ("A pod is stuck `Terminating`, or a node has
+  stale netns entries" below is the way out). The line names listeners and
+  clusters.
+- a service that stops being listed under the HTTP key while it stays listed
+  under the TCP key. Its HTTP entry is retained for the service retention
+  grace (90 s by default) with an empty load assignment, under the same name
+  as the TCP entry's populated one. The line names the endpoint type and the
+  service (`demo/db`), and the counter moves on every build of those 90 s.
+  Which of the two assignments the proxy is sent can change from build to
+  build for that time. This predates the check, which only made it visible.
 
 None of this was run on a cluster for this change. What was measured is named
 above; the labels, the swap and the two-pod case were each run against the
