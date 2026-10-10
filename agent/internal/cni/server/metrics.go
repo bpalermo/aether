@@ -20,6 +20,9 @@ const (
 	// has an inboundready_<pod> path on the health gateway) or "ungated" (it
 	// does not — the pod is judged on its application probe alone).
 	attrGateState = attribute.Key("aether.gate.state")
+	// attrSnapshotCaller labels aether.agent.cni.snapshot_watch_unanswered with
+	// the caller whose snapshot change it was: one of the snapshotCaller values.
+	attrSnapshotCaller = attribute.Key("aether.snapshot.caller")
 )
 
 // Gate-state attribute values.
@@ -54,6 +57,7 @@ type cniMetrics struct {
 	inboundGatePods    metric.Int64Gauge
 	inboundGateHeld    metric.Int64Gauge
 	pluginOperations   metric.Int64Counter
+	watchUnanswered    metric.Int64Counter
 }
 
 // newCNIMetrics registers the reconciliation instruments on the given meter.
@@ -74,7 +78,27 @@ func newCNIMetrics(meter metric.Meter) (*cniMetrics, error) {
 	}
 	m.seedCounters()
 	m.seedHealthTransitions()
+	m.seedSnapshotWatchUnanswered()
 	return m, nil
+}
+
+// seedSnapshotWatchUnanswered exports aether.agent.cni.snapshot_watch_unanswered
+// at zero for every caller. The counter is not expected to move (#1619), so
+// without a seed "never happened" and "the metric does not exist" look the same.
+func (m *cniMetrics) seedSnapshotWatchUnanswered() {
+	ctx := context.Background()
+	for _, caller := range []string{snapshotCallerCNIAdd, snapshotCallerCNIDel, snapshotCallerTakeover, snapshotCallerGhostSweep} {
+		m.watchUnanswered.Add(ctx, 0, metric.WithAttributes(attrSnapshotCaller.String(caller)))
+	}
+}
+
+// snapshotWatchUnanswered counts one snapshot change of this server's that was
+// installed while an open watch was not answered from it (#1620).
+func (m *cniMetrics) snapshotWatchUnanswered(ctx context.Context, caller string) {
+	if m == nil {
+		return
+	}
+	m.watchUnanswered.Add(ctx, 1, metric.WithAttributes(attrSnapshotCaller.String(caller)))
 }
 
 // seedHealthTransitions exports aether.agent.liveness.health_transitions at zero
@@ -209,6 +233,10 @@ func (m *cniMetrics) registerLifecycleInstruments(meter metric.Meter) error {
 	if m.spiffeIDOverrides, err = meter.Int64Counter("aether.agent.identity.spiffe_id_override_rejected",
 		metric.WithDescription("Pods carrying the rejected aether.io/spiffe-id annotation, whose mesh identity was derived from the pod's own namespace/ServiceAccount instead (#669); nonzero means someone is trying to choose a workload identity by annotation")); err != nil {
 		return fmt.Errorf("spiffe id overrides: %w", err)
+	}
+	if m.watchUnanswered, err = meter.Int64Counter("aether.agent.cni.snapshot_watch_unanswered",
+		metric.WithDescription("Pod listener changes (by caller: cni_add, cni_del, takeover, ghost_sweep) whose snapshot was installed while an open xDS watch was not answered from it within the cache's bound; the caller treats the change as made, and a later snapshot build sends the proxy the change (#1620). Not expected to move")); err != nil {
+		return fmt.Errorf("snapshot watch unanswered: %w", err)
 	}
 	return nil
 }

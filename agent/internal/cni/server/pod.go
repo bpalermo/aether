@@ -124,7 +124,7 @@ func (s *CNIServer) AddPod(ctx context.Context, req *cniv1.AddPodRequest) (*cniv
 
 	// Update the xDS listener snapshot with the new pod
 	xdsCtx, xdsSpan := startStepSpan(ctx, "cni_server.xds_add_pod", cniPod)
-	err = s.snapshotCache.AddPod(xdsCtx, cniPod, s.trustDomain)
+	err = s.snapshotInstalled(xdsCtx, log, snapshotCallerCNIAdd, s.snapshotCache.AddPod(xdsCtx, cniPod, s.trustDomain))
 	telemetry.EndSpan(xdsSpan, err)
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "failed to add listener: %v", err)
@@ -290,7 +290,7 @@ func (s *CNIServer) RemovePod(ctx context.Context, req *cniv1.RemovePodRequest) 
 // the caller); logCtx carries the request's log/trace context.
 func (s *CNIServer) removePodListeners(logCtx, opCtx context.Context, log *slog.Logger, storedPod *cniv1.CNIPod) {
 	xdsCtx, xdsSpan := startStepSpan(opCtx, "cni_server.xds_remove_pod", storedPod)
-	xdsErr := s.snapshotCache.RemovePod(xdsCtx, storedPod.GetNetworkNamespace())
+	xdsErr := s.snapshotInstalled(logCtx, log, snapshotCallerCNIDel, s.snapshotCache.RemovePod(xdsCtx, storedPod.GetNetworkNamespace()))
 	telemetry.EndSpan(xdsSpan, xdsErr)
 	if xdsErr != nil {
 		log.ErrorContext(logCtx, "failed to remove listener; snapshot rebuild will reconcile", "error", xdsErr, "netns", storedPod.GetNetworkNamespace())
