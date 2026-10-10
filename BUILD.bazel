@@ -82,6 +82,13 @@ exports_files(
     visibility = ["//e2e:__pkg__"],
 )
 
+# .bazelrc, for //scripts:docker_hub_mirror_test: what `--config=ci` passes to
+# the testcontainers tests (#1602).
+exports_files(
+    [".bazelrc"],
+    visibility = ["//scripts:__pkg__"],
+)
+
 # actionlint's configuration, for //bazel/actionlint.
 exports_files(
     [".github/actionlint.yaml"],
