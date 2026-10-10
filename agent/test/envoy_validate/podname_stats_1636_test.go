@@ -553,20 +553,62 @@ func podStats(t *testing.T, bin string, pods []podStatNames) (stat map[string]bo
 	require.NoError(t, os.WriteFile(bootstrap, []byte(podStatsBootstrapWithClusters(t, prefixes, clusters)), 0o600))
 	envoy := startEnvoy(t, bin, dir, "-c", bootstrap)
 
-	var plain string
-	envoy.eventually(t, 30*time.Second, func() bool {
-		var okPlain, okProm bool
-		plain, okPlain = envoy.admin("/stats")
-		prom, okProm = envoy.admin("/stats/prometheus")
-		return okPlain && okProm && strings.Contains(plain, "listener."+prefixes[0]+".")
-	}, "no stats from the proxy's admin endpoint")
-
-	stat = map[string]bool{}
-	for _, line := range strings.Split(plain, "\n") {
-		if name, _, ok := strings.Cut(line, ": "); ok {
-			stat[name] = true
-		}
+	// The admin endpoint answers, and the listeners' own stats exist, before
+	// the worker thread runs. The worker then allocates stats of its own, and
+	// they are whole metric FAMILIES: a rendering taken in that window has
+	// fewer families than one taken a moment later, for a reason that has
+	// nothing to do with a pod (seen in CI as a control that lacked
+	// envoy_server_worker_0_watchdog_miss and _mega_miss). So the proxy is
+	// read only once every stat the worker allocates at start is there:
+	//
+	//   - server.worker_0.watchdog_miss (with watchdog_mega_miss): the
+	//     worker's watchdog, registered as its thread starts;
+	//   - thread_local_cluster_manager.worker_0.clusters_inflated: the
+	//     worker's cluster manager;
+	//   - listener.<prefix>.worker_0.downstream_cx_total (with
+	//     downstream_cx_active), per listener: the listener handed to the
+	//     worker.
+	//
+	// A stat is never dropped here once allocated, so the Prometheus rendering
+	// requested after that has them all. This is a wait and not a list of
+	// families to ignore on purpose: the comparison stays one of whole sets,
+	// the families named after a worker included (one of the pods is called
+	// "w.worker-0").
+	startMarkers := []string{
+		"server.worker_0.watchdog_miss",
+		"server.worker_0.watchdog_mega_miss",
+		"thread_local_cluster_manager.worker_0.clusters_inflated",
 	}
+	for _, prefix := range prefixes {
+		startMarkers = append(startMarkers, "listener."+prefix+".downstream_cx_total", "listener."+prefix+".worker_0.downstream_cx_total")
+	}
+	var missing []string
+	envoy.eventually(t, 30*time.Second, func() bool {
+		plain, ok := envoy.admin("/stats")
+		if !ok {
+			missing = []string{"(no answer from /stats)"}
+			return false
+		}
+		stat = map[string]bool{}
+		for _, line := range strings.Split(plain, "\n") {
+			if name, _, ok := strings.Cut(line, ": "); ok {
+				stat[name] = true
+			}
+		}
+		missing = missing[:0]
+		for _, marker := range startMarkers {
+			if !stat[marker] {
+				missing = append(missing, marker)
+			}
+		}
+		return len(missing) == 0
+	}, "the proxy never allocated the stats its worker allocates at start; missing at the last read: %v", &missing)
+
+	envoy.eventually(t, 30*time.Second, func() bool {
+		var ok bool
+		prom, ok = envoy.admin("/stats/prometheus")
+		return ok
+	}, "no Prometheus rendering from the proxy's admin endpoint")
 	return stat, prom
 }
 
