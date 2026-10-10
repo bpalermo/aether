@@ -64,9 +64,15 @@ can see it: when the `aether-proxy` DaemonSet in the release's namespace, or the
 `csi.aether.io` CSIDriver, already exists and names another Helm release
 (Helm's `meta.helm.sh/release-name` / `release-namespace` annotations, or the
 `app.kubernetes.io/instance` label on an object that has lost them), the render
-fails and says so. It does not see a second release in **another namespace**
-when the first one runs with `udsCsi.enabled=false` (both objects are looked
-up whatever the new release enables), and it sees nothing in a render without a cluster
+fails and says so. The label names a release, not the namespace it is stored
+in, so a first **install** is also refused when one of the two objects names a
+release of the same name and has no `release-namespace` annotation: it may be
+another release called the same. An upgrade of the owner whose objects lost
+their annotations is not refused. Both objects are looked up whatever the new
+release enables. The check does not see a second release in **another
+namespace** when the first one runs with `udsCsi.enabled=false` (there is no
+CSIDriver, and the first release's proxy DaemonSet is in the other namespace),
+nor a first release that runs neither the proxy nor uds-csi, and it sees nothing in a render without a cluster
 (`helm template`, a client-side `--dry-run`, a GitOps tool that renders with
 `helm template`): there, one release per cluster is yours to keep.
 

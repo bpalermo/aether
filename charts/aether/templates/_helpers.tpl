@@ -733,15 +733,31 @@ measured for this change.)
 
 "Belongs to another release" is read from Helm's ownership annotations
 (meta.helm.sh/release-name, meta.helm.sh/release-namespace) and, on an object
-that has lost them, from the app.kubernetes.io/instance label. An object that
-names no release at all is not refused.
+that has lost them, from the app.kubernetes.io/instance label. The label names
+a release and not the namespace it is stored in, so it cannot tell two
+releases of the same name apart:
 
-What it does not see: a second release in another namespace when the FIRST
-one runs with udsCsi.enabled=false (there is then no CSIDriver to find, and
-the chart does not list other namespaces' DaemonSets), a first release with
-proxy.enabled=false and udsCsi.enabled=false (neither marker exists), and anything
-at all in a render without a cluster (`helm template`, a client-side
---dry-run), where `lookup` returns nothing.
+  - on an UPGRADE a marker that names this release by the label alone passes
+    (the owner, with its annotations stripped, must keep upgrading);
+  - on a first INSTALL a marker that names a release of this name with no
+    release namespace is refused: it may be another release called the same,
+    stored elsewhere, and a wrong pass installs a second node stack.
+
+An object that names no release at all is not refused.
+
+What it does not see:
+  - a second release in ANOTHER namespace when the first one runs with
+    udsCsi.enabled=false: there is then no CSIDriver to find, the first
+    release's proxy DaemonSet is in the other namespace, and the chart does
+    not list other namespaces' DaemonSets;
+  - a first release with proxy.enabled=false and udsCsi.enabled=false
+    (neither marker exists);
+  - anything at all in a render without a cluster (`helm template`, a
+    client-side --dry-run), where `lookup` returns nothing.
+
+No test in this repository reaches this helper's failures: the template rules
+render without a cluster (charts/aether/BUILD.bazel, "One release per
+cluster").
 Usage: include "aether.release.assertOnlyOne" .
 */}}
 {{- define "aether.release.assertOnlyOne" -}}
@@ -757,6 +773,9 @@ Usage: include "aether.release.assertOnlyOne" .
 {{- $l := dig "metadata" "labels" (dict) .live | default (dict) -}}
 {{- $ownerName := get $a "meta.helm.sh/release-name" | default (get $l "app.kubernetes.io/instance") | toString -}}
 {{- $ownerNs := get $a "meta.helm.sh/release-namespace" | toString -}}
+{{- if and $.Release.IsInstall $ownerName (eq $ownerName $.Release.Name) (not $ownerNs) -}}
+{{- fail (printf "%s already exists and names a release called %q without saying which namespace that release is stored in (it has lost Helm's meta.helm.sh/release-namespace annotation and only its app.kubernetes.io/instance label or release-name annotation is left), and this is a first install of %q in namespace %q: the chart cannot tell this release from another one of the same name. The mesh is one release per cluster. If an aether release already exists (helm list -A), upgrade it instead of installing a second one. If the object is a leftover of a release that is gone, delete it and install again. See docs/configuration.md, \"One release per cluster\"." .what $ownerName $.Release.Name $.Release.Namespace) -}}
+{{- end -}}
 {{- if or (and $ownerName (ne $ownerName $.Release.Name)) (and $ownerNs (ne $ownerNs $.Release.Namespace)) -}}
 {{- fail (printf "%s already exists and belongs to another aether release (%q%s), not to %q in namespace %q. The mesh is one release per cluster: the agent, the node proxy, mesh-dns and uds-csi own node-level state (/run/aether, the CNI plugin and conflist, the host network's data-plane ports, the csi.aether.io driver), and the node proxy's objects are named aether-proxy whatever the release is called, so a second release cannot be installed next to the first. Upgrade the existing release instead (helm list -A), or uninstall it first. See docs/configuration.md, \"One release per cluster\"." .what $ownerName (ternary (printf " in namespace %q" $ownerNs) "" (ne $ownerNs "")) $.Release.Name $.Release.Namespace) -}}
 {{- end -}}
