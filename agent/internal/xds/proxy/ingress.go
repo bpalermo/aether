@@ -135,11 +135,19 @@ func NewInboundListener(cniPod *cniv1.CNIPod, trustDomain string, emitStatsPod b
 // SPIRE is disabled: no transport socket (plain TCP), AUTO codec (so cleartext h2c
 // from the source proxy and HTTP/1 are both handled), routing every request to the
 // pod's primary application cluster. XFCC is not set (no verified peer identity).
+//
+// Being the only chain, it also receives a source's TCP floor (tcp_proxy) in
+// this mode. HTTP carried that way gets the outcome header (OutcomeHeader) on
+// every response with no HTTP-aware caller to remove it, so the client
+// application sees it. The mTLS listener has a tcp_proxy chain for the floor.
 func buildInboundCleartextFilterChain(cniPod *cniv1.CNIPod, emitStatsPod bool, extensionFilters []*http_connection_managerv3.HttpFilter, inboundFilter *ExtensionFilter) *listenerv3.FilterChain {
 	defaultPort := AppPortFromPod(cniPod)
 	rc := buildInboundRouteConfiguration(AppClusterName(cniPod, defaultPort))
 	applyInboundFilter(rc, inboundFilter)
 	hcm := buildHTTPConnectionManager("inbound", ReporterDestination, cniPod.GetName(), cniPod.GetNamespace(), rc, peerFacingIdleTimeout)
+	// The local replies no route stamps (an overloaded proxy's 503) get their
+	// outcome header here (aether#1641; see OutcomeHeader).
+	hcm.LocalReplyConfig = inboundOutcomeLocalReply()
 	filters := []*http_connection_managerv3.HttpFilter{
 		buildLivenessHealthCheckFilter(),
 		buildReadinessHealthCheckFilter(HealthProbeClusterName(cniPod)),
@@ -287,6 +295,9 @@ func buildInboundHCM(cniPod *cniv1.CNIPod, chainPort uint16, emitStatsPod bool, 
 	rc := buildInboundRouteConfiguration(AppClusterName(cniPod, chainPort))
 	applyInboundFilter(rc, inboundFilter)
 	hcm := buildHTTPConnectionManager("inbound", ReporterDestination, cniPod.GetName(), cniPod.GetNamespace(), rc, peerFacingIdleTimeout)
+	// The local replies no route stamps (an overloaded proxy's 503) get their
+	// outcome header here (aether#1641; see OutcomeHeader).
+	hcm.LocalReplyConfig = inboundOutcomeLocalReply()
 	// Liveness/readiness are answered locally before the router; everything else
 	// passes through to the pod's application. The stats filter sits after the
 	// health-check filters (so locally-answered probe requests are not counted)
@@ -521,6 +532,12 @@ func buildHealthCheckFilter(name, path string, clusterMinHealthy map[string]*typ
 
 // buildInboundRouteConfiguration routes all inbound requests to the per-pod
 // application cluster, which forwards to the pod's own application on loopback.
+//
+// The virtual host stamps the outcome header on every response, an
+// application's and the proxy's own local replies alike, overwriting anything
+// the application put under that name: it is what a caller's retry policy
+// reads (OutcomeHeader, aether#1641). It also removes a request header of
+// that name, so that no application is handed one to echo.
 func buildInboundRouteConfiguration(appClusterName string) *routev3.RouteConfiguration {
 	return &routev3.RouteConfiguration{
 		Name: "in_http",
@@ -530,8 +547,11 @@ func buildInboundRouteConfiguration(appClusterName string) *routev3.RouteConfigu
 		ValidateClusters: wrapperspb.Bool(false),
 		VirtualHosts: []*routev3.VirtualHost{
 			{
-				Name:    "catch_all",
-				Domains: []string{"*"},
+				Name:                 "catch_all",
+				Domains:              []string{"*"},
+				ResponseHeadersToAdd: []*corev3.HeaderValueOption{inboundOutcomeHeader()},
+				// The header is the mesh's: an application never receives one.
+				RequestHeadersToRemove: []string{OutcomeHeader},
 				Routes: []*routev3.Route{
 					{
 						Match: &routev3.RouteMatch{

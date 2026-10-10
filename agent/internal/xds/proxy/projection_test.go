@@ -182,8 +182,9 @@ func TestConfigProjection_ImportsExporterOutput(t *testing.T) {
 	assert.Equal(t, 5.0, v2.GetRoute().GetTimeout().AsDuration().Seconds())
 	assert.Contains(t, v2.GetTypedPerFilterConfig(), "envoy.filters.http.header_mutation")
 	require.Len(t, v2.GetRequestHeadersToAdd(), 2)
-	assert.Equal(t, []string{"X-Rm"}, v2.GetRequestHeadersToRemove())
-	assert.Equal(t, []string{"X-RRm"}, v2.GetResponseHeadersToRemove())
+	assert.Equal(t, []string{"X-Rm", "x-aether-outcome"}, v2.GetRequestHeadersToRemove())
+	// The rule's own removal, then the outcome header (aether#1641).
+	assert.Equal(t, []string{"X-RRm", "x-aether-outcome"}, v2.GetResponseHeadersToRemove())
 
 	rd := byPath["/redirect"]
 	require.NotNil(t, rd)

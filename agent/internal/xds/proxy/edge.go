@@ -670,12 +670,27 @@ func BuildEdgeRouteWeighted(prefix, exact string, headers []RouteHeaderMatch, me
 
 	var totalWeight uint32
 	clusters := make([]*routev3.WeightedCluster_ClusterWeight, 0, len(backends))
+	// One retry policy per route, so a rule that splits between a mesh
+	// service and a cleartext Kubernetes Service takes the mesh one: the
+	// status-code policy would replay a POST the mesh backend had begun, and
+	// Envoy has no retry policy per weighted cluster. The cleartext share of
+	// such a rule loses the retry of an application's 503. Nothing overwrites
+	// the outcome header on that share, so a cleartext backend that sets it
+	// on its own response decides its own retry, as it did by answering 503.
+	anyMesh := false
 	for _, b := range backends {
 		totalWeight += b.Weight
-		clusters = append(clusters, &routev3.WeightedCluster_ClusterWeight{
+		cw := &routev3.WeightedCluster_ClusterWeight{
 			Name:   b.Cluster,
 			Weight: wrapperspb.UInt32(b.Weight),
-		})
+		}
+		// The removal is per backend: a header of that name from a backend
+		// that is not behind a destination proxy is the backend's own.
+		if isMeshBackendCluster(b.Cluster) {
+			anyMesh = true
+			cw.ResponseHeadersToRemove = []string{OutcomeHeader}
+		}
+		clusters = append(clusters, cw)
 	}
 	wc := &routev3.WeightedCluster{
 		Clusters:    clusters,
@@ -684,21 +699,26 @@ func BuildEdgeRouteWeighted(prefix, exact string, headers []RouteHeaderMatch, me
 
 	ra := &routev3.RouteAction{
 		ClusterSpecifier: &routev3.RouteAction_WeightedClusters{WeightedClusters: wc},
-		RetryPolicy:      outboundRetryPolicy(),
+		RetryPolicy:      nonMeshRetryPolicy(),
+	}
+	if anyMesh {
+		ra.RetryPolicy = outboundRetryPolicy()
 	}
 	if timeout != nil {
 		ra.Timeout = timeout
 	}
 	applyURLRewrite(ra, urlRewrite, prefix)
 
-	return &routev3.Route{
+	// Whatever the backends: an external client's x-aether-outcome goes no
+	// further than the edge (see OutcomeHeader).
+	return dropRequestOutcomeHeader(&routev3.Route{
 		Match:                   match,
 		RequestHeadersToAdd:     reqAdd,
 		RequestHeadersToRemove:  reqRemove,
 		ResponseHeadersToAdd:    respAdd,
 		ResponseHeadersToRemove: respRemove,
 		Action:                  &routev3.Route_Route{Route: ra},
-	}
+	})
 }
 
 // BuildEdgeRoute builds one Envoy route for the edge. Exactly one of prefix/exact
@@ -731,13 +751,22 @@ func BuildEdgeRoute(prefix, exact string, headers []RouteHeaderMatch, method str
 	} else {
 		ra := &routev3.RouteAction{
 			ClusterSpecifier: &routev3.RouteAction_Cluster{Cluster: cluster},
-			RetryPolicy:      outboundRetryPolicy(),
+			RetryPolicy:      nonMeshRetryPolicy(),
+		}
+		if isMeshBackendCluster(cluster) {
+			ra.RetryPolicy = outboundRetryPolicy()
 		}
 		if timeout != nil {
 			ra.Timeout = timeout
 		}
 		applyURLRewrite(ra, urlRewrite, prefix)
 		r.Action = &routev3.Route_Route{Route: ra}
+		// Whatever the backend: an external client's x-aether-outcome goes
+		// no further than the edge (see OutcomeHeader).
+		dropRequestOutcomeHeader(r)
+		if isMeshBackendCluster(cluster) {
+			stripOutcomeHeader(r)
+		}
 	}
 	return r
 }
