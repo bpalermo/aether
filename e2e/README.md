@@ -1,8 +1,10 @@
 # e2e scripts
 
 Kind harnesses for the mesh. Each script documents its own legs, knobs and
-gates in its header; `pressure/` and `spike/` have their own READMEs. The
-long-running soak is run by an external soak harness, maintained outside this repository.
+gates in its header. The long-running soak and the collector-pressure test (the
+on-demand regression test for #662: a collector that refuses telemetry must not
+block or kill an agent's start) are run by an external harness, maintained
+outside this repository.
 
 Every harness that creates a kind cluster sources
 [`kind-version.sh`](kind-version.sh) and passes `--image "$KIND_NODE_IMAGE"`, so
