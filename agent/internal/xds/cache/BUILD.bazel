@@ -90,6 +90,7 @@ go_test(
         "ackedpins_test.go",
         "ackpublished_test.go",
         "alias_floor_eds_test.go",
+        "bare_cla_owner_1635_test.go",
         "bindinglog_test.go",
         "cache_test.go",
         "capture_reproject_test.go",

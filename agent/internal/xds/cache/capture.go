@@ -658,8 +658,12 @@ func (c *SnapshotCache) udpClusterForLocked(svc string) string {
 	if svc == "" {
 		return ""
 	}
-	entry, ok := c.serviceEntryLocked(svc)
-	if !ok || entry.loadAssignment == nil {
+	// The entry that HOLDS the service's bare load assignment, for the
+	// endpoints and for the port alike: an entry of the service that holds none
+	// (a retained HTTP or TCP entry beside a live floor entry, #1635) carries
+	// the port of a listing that is gone.
+	entry, ok := c.bareServiceHolderLocked(svc)
+	if !ok {
 		return ""
 	}
 	// entry.sni carries the backend's registered application port.
@@ -724,9 +728,10 @@ func (c *SnapshotCache) captureUDPClusters() []types.Resource {
 			continue
 		}
 		// A UDPRoute backend may be classified either way, and this needs only
-		// service-level facts (the app port in entry.sni and the bare-name EDS),
-		// so take whichever entry carries them.
-		entry, _ := c.serviceEntryLocked(svc)
+		// service-level facts (the app port in entry.sni and the bare-name EDS):
+		// both from the one entry that holds the load assignment, as the
+		// predicate above reads them.
+		entry, _ := c.bareServiceHolderLocked(svc)
 		// entry.sni carries the backend's registered application port. The UDP floor
 		// has no inbound mTLS hop, so udp_proxy must reach that app port directly (not
 		// the mesh inbound :18008 the shared bare-name EDS carries) — build an inline

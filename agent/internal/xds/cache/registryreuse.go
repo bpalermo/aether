@@ -37,8 +37,9 @@ import (
 //     address, priority, waypoint tag;
 //   - the mesh domain and the edge flag: cluster names, FQDNs, aliases;
 //   - for the TCP and UDP passes, whether the entry owns the service's bare-name
-//     load assignment (it does unless an HTTP entry built in the same refresh
-//     owns it, buildTCPEndpointsLocked);
+//     load assignment (it does unless an entry built earlier in the same
+//     refresh owns it: the HTTP one, or for UDP the TCP one,
+//     ownsBareCLALocked);
 //   - every registry row of the service, in listing order, as its
 //     deterministic protobuf encoding. A row is the WHOLE ServiceEndpoint: ip,
 //     port, ports, port_protocols, health (so a DRAINING or UNHEALTHY mark is a

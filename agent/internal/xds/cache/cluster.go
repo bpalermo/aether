@@ -137,7 +137,7 @@ func (c *SnapshotCache) clustersEndpointsVhostsAndPinsInto(buf []entryClass, mtl
 		}
 		clusters = append(clusters, cluster)
 		clas = c.appendEntryCLAsLocked(clas, entry)
-		twins, twinCLAs, vhost := quic.entryTwinsAndVhost(key, entry, c.meshDomain)
+		twins, twinCLAs, vhost := quic.entryTwinsAndVhost(key, c.withBareCLALocked(key, entry), c.meshDomain)
 		clusters = append(clusters, twins...)
 		clas = append(clas, twinCLAs...)
 		quicClusters += len(twins)
@@ -171,24 +171,54 @@ func (c *SnapshotCache) appendEntryCLAsLocked(clas []types.Resource, entry clust
 }
 
 // bareServiceCLALocked returns the load assignment published under a service's
-// BARE EDS resource name (the default HTTP cluster's subscription): the HTTP
-// default entry's when it owns one, otherwise the L4 floor entry's, which takes
-// ownership when the service has no HTTP entry (buildTCPEndpointsLocked). Nil
-// when nothing publishes it. The clusters that must see the same membership
+// BARE EDS resource name (the default HTTP cluster's subscription). Exactly one
+// entry holds it (#1635): the HTTP default entry's when it owns one, otherwise
+// the TCP floor entry's, otherwise the UDP floor entry's (ownsBareCLALocked for
+// entries built from a live listing, retainAbsentClustersLocked for retained
+// ones), so the order below finds the one holder, it does not choose between
+// several. Nil when nothing publishes it. The clusters that must see the same membership
 // without sharing the subscription -- port aliases and TCP floors -- republish
 // it under their own names (proxy.LoadAssignmentAlias, aether#1013). Caller
 // must hold clusterMu.
 func (c *SnapshotCache) bareServiceCLALocked(serviceName string) *endpointv3.ClusterLoadAssignment {
+	holder, _ := c.bareServiceHolderLocked(serviceName)
+	return holder.loadAssignment
+}
+
+// bareServiceHolderLocked returns the one entry that holds a service's
+// bare-name load assignment (see bareServiceCLALocked), and false when none
+// does. A reader that needs more than the endpoints -- the udp: cluster dials
+// the application port the entry carries in sni -- takes BOTH from this entry:
+// two listings of one service need not register the same port, so endpoints
+// from the holder with the port of another entry (a retained one, say) is a
+// live pod dialed at a port it does not serve (#1635). Caller must hold
+// clusterMu.
+func (c *SnapshotCache) bareServiceHolderLocked(serviceName string) (clusterEntry, bool) {
 	if e, ok := c.clusters[serviceName]; ok && e.loadAssignment != nil {
-		return e.loadAssignment
+		return e, true
 	}
 	if e, ok := c.tcpEntryLocked(serviceName); ok && e.loadAssignment != nil {
-		return e.loadAssignment
+		return e, true
 	}
 	if e, ok := c.udpEntryLocked(serviceName); ok && e.loadAssignment != nil {
-		return e.loadAssignment
+		return e, true
 	}
-	return nil
+	return clusterEntry{}, false
+}
+
+// withBareCLALocked returns a default HTTP entry (keyed by the bare service
+// name) with the load assignment its cluster's EDS subscription resolves to:
+// its own, or -- when it is retained and a live floor entry publishes the bare
+// name (retainAbsentClustersLocked, #1635) -- that entry's. For what is DERIVED
+// from the default cluster's membership (the QUIC twins' own-name copies); the
+// entry's own publication reads entry.loadAssignment, so the bare name is not
+// published twice. Any other entry is returned as is. Caller must hold
+// clusterMu.
+func (c *SnapshotCache) withBareCLALocked(key string, entry clusterEntry) clusterEntry {
+	if entry.loadAssignment == nil && key == entry.service {
+		entry.loadAssignment = c.bareServiceCLALocked(entry.service)
+	}
+	return entry
 }
 
 // edsServiceName is the EDS resource name a cluster subscribes to: its
@@ -274,8 +304,10 @@ func (c *SnapshotCache) LoadClustersFromRegistry(ctx context.Context, clusterNam
 	// raw mTLS passthrough through the transparent-capture TCP floor. The floor's
 	// "tcp:<svc>" cluster (built in captureTCPClusters) references the bare-name
 	// EDS this method publishes, so a TCP service needs a cluster entry here too
-	// — holding only the load assignment (no HTTP h2 cluster/vhost). A service is
-	// HTTP or TCP, never both, so the two sets never share a name.
+	// — holding only the load assignment (no HTTP h2 cluster/vhost). A service
+	// can be in both listings (pods of one ServiceAccount that declare
+	// different protocols): the TCP entry is keyed by its own cluster name and
+	// one of the two owns the bare-name load assignment (ownsBareCLALocked).
 	tcpServiceEndpoints, err := reg.ListAllEndpoints(ctx, registryv1.Service_PROTOCOL_TCP)
 	if err != nil {
 		return fmt.Errorf("failed to list TCP endpoints from registry: %w", err)
@@ -863,10 +895,13 @@ func buildTCPPortEntries(
 // republishes it under the floor's own name (bareServiceCLALocked,
 // aether#1013).
 //
-// An HTTP entry with no CLA of its own (the retained-absent alias shape) does
-// not own one either, so the TCP entry takes ownership rather than leave the
-// bare EDS name unpublished: the floor cluster resolves through it, and
-// tcp_proxy has no ODCDS cold path to recover from a missing one.
+// Ownership is decided among the entries built from a LIVE listing, in pass
+// order: HTTP, then TCP, then UDP. An entry RETAINED after its listing went
+// (retainAbsentClustersLocked) is not in the map while the passes run and so
+// never keeps the name from a live entry: the floor cluster resolves through
+// it, and tcp_proxy has no ODCDS cold path to recover from an empty or a
+// missing one. The retained entry gives its (empty) load assignment up to the
+// live one in the retention step (#1635).
 func buildTCPEndpoints(
 	serviceName string,
 	endpoints []*registryv1.ServiceEndpoint,
@@ -893,12 +928,15 @@ func buildTCPEndpoints(
 }
 
 // ownsBareCLALocked reports whether an L4 floor entry built now for
-// serviceName owns the service's bare-name load assignment: it does unless the
-// HTTP entry built in the same refresh owns one (see buildTCPEndpoints). Caller
-// must hold clusterMu, after the HTTP pass.
+// serviceName owns the service's bare-name load assignment: it does unless an
+// entry built EARLIER in the same refresh owns it (see buildTCPEndpoints) --
+// the HTTP default entry for the TCP pass; that or the TCP floor entry for the
+// UDP pass. Before #1635 the UDP pass looked at the HTTP entry only, so a
+// service listed under TCP and UDP published two load assignments of one name
+// for as long as it was. Caller must hold clusterMu, during the refresh's
+// passes: the map then holds entries built from a live listing only.
 func (c *SnapshotCache) ownsBareCLALocked(serviceName string) bool {
-	httpEntry, ok := c.clusters[serviceName]
-	return !ok || httpEntry.loadAssignment == nil
+	return c.bareServiceCLALocked(serviceName) == nil
 }
 
 // buildUDPClustersLocked adds the cluster entries for PROTOCOL_UDP services.
@@ -1027,6 +1065,25 @@ func (c *SnapshotCache) retainAbsentClustersLocked(ctx context.Context, prev map
 	// shadows the on-demand cold path — the stale-503 outage behind #167.
 	// Any further traffic re-warms it as an observed dependency, which is
 	// the truthful state for traffic nobody on the node declares.
+	//
+	// One load assignment per name (#1635). A retained entry's load assignment
+	// is EMPTY, and the name it is published under can be one an entry built
+	// from a live listing publishes in this refresh: the bare service name,
+	// which the HTTP default entry, the TCP floor entry and the UDP floor
+	// entry of one service all name. Two resources of one name do not reach
+	// the proxy as two: go-control-plane keeps one, and which one is redrawn
+	// on every build, so the published endpoints alternated between none and
+	// the live ones for the whole grace. The live listing wins: a retained
+	// entry holds a load assignment only under a name nothing else holds, and
+	// otherwise none (the shape of a port alias). It keeps its cluster and its
+	// vhost, which is what the retention is for; its cluster's subscription to
+	// the bare name resolves to the live entry's load assignment, exactly as
+	// it does for the floor cluster of a service listed under both.
+	//
+	// This runs for every retained entry on every refresh, not only when the
+	// entry is first retained: the live holder can appear later (both
+	// listings go, one comes back).
+	held := c.heldLoadAssignmentNamesLocked()
 	now := time.Now()
 	for name, entry := range prev {
 		if _, present := c.clusters[name]; present {
@@ -1063,8 +1120,43 @@ func (c *SnapshotCache) retainAbsentClustersLocked(ctx context.Context, prev map
 			c.log.InfoContext(ctx, "service absent past grace period; pruning", "service", name)
 			continue
 		}
-		c.clusters[name] = entry
+		c.clusters[name] = c.yieldHeldLoadAssignment(ctx, held, name, entry)
 	}
+}
+
+// heldLoadAssignmentNamesLocked returns the names under which the entries now
+// in the cluster map hold a load assignment. Called by the retention step
+// before it re-inserts anything, so these are the names published from a live
+// listing in this refresh. Caller must hold clusterMu.
+func (c *SnapshotCache) heldLoadAssignmentNamesLocked() map[string]struct{} {
+	held := make(map[string]struct{}, len(c.clusters))
+	for _, entry := range c.clusters {
+		if entry.loadAssignment != nil {
+			held[entry.loadAssignment.GetClusterName()] = struct{}{}
+		}
+	}
+	return held
+}
+
+// yieldHeldLoadAssignment returns a retained entry as the retention step
+// stores it: without its load assignment when another entry already holds
+// that name (#1635, see retainAbsentClustersLocked), unchanged otherwise, in
+// which case the name is recorded as held so that no later retained entry
+// publishes it as well.
+func (c *SnapshotCache) yieldHeldLoadAssignment(ctx context.Context, held map[string]struct{}, name string, entry clusterEntry) clusterEntry {
+	if entry.loadAssignment == nil {
+		return entry
+	}
+	claName := entry.loadAssignment.GetClusterName()
+	if _, taken := held[claName]; !taken {
+		held[claName] = struct{}{}
+		return entry
+	}
+	c.log.InfoContext(ctx, "retained entry publishes no load assignment of its own: another entry of the service publishes that name",
+		"cluster", name, "service", entry.service, "loadAssignment", claName)
+	entry.loadAssignment = nil
+	entry.endpoints = map[string]*endpointv3.LocalityLbEndpoints{}
+	return entry
 }
 
 // defaultServiceRetentionGrace is how long a service that vanished from the

@@ -3196,7 +3196,7 @@ kubectl -n "$NS" exec <proxy-pod> -c aether-proxy -- \
 
 ```promql
 # The agent found two different resources under one name in a snapshot it
-# built. Zero where nothing shares a name; the two known inputs are below.
+# built. Zero where nothing shares a name; the one known input is below.
 sum by (node) (increase(aether_agent_snapshot_duplicate_resource_names_total[1h])) > 0
 ```
 
@@ -3206,20 +3206,29 @@ agent logs, at ERROR and once per change of the set,
 with the xDS type and the names, and counts one per name on every build the
 condition lasts. It reports and changes nothing: the snapshot is published as
 before. Two resources of one name that are equal are not reported. The check
-is about names of any kind, and two inputs are known to produce it today:
+is about names of any kind, and one input is known to produce it today:
 
 - two sandboxes of the **same** pod (same namespace and name) stored at once,
   which is a replacement whose predecessor's CNI DEL was missed while the old
   network namespace still exists ("A pod is stuck `Terminating`, or a node has
   stale netns entries" below is the way out). The line names listeners and
   clusters.
-- a service that stops being listed under the HTTP key while it stays listed
-  under the TCP key. Its HTTP entry is retained for the service retention
-  grace (90 s by default) with an empty load assignment, under the same name
-  as the TCP entry's populated one. The line names the endpoint type and the
-  service (`demo/db`), and the counter moves on every build of those 90 s.
-  Which of the two assignments the proxy is sent can change from build to
-  build for that time. This predates the check, which only made it visible.
+
+A line that names the **endpoint** type and a service (`demo/db`) was a second
+input until #1635, and is not expected from an agent that carries that fix. A
+service's HTTP cluster, its TCP floor and its UDP floor share one load
+assignment, named after the service, and exactly one of the service's entries
+publishes it: the one built from a listing that still has endpoints, HTTP
+before TCP before UDP. When one listing goes while another stays (a workload
+re-annotated from `http` to `tcp`, say), the cluster of the listing that went
+is retained for the service retention grace (90 s by default) and resolves to
+the endpoints of the listing that stayed. Before the fix the retained entry
+published an empty load assignment under the same name: the service's
+published endpoints changed between none and the live ones from build to
+build, with an EDS push each time, and its TCP floor and UDP clusters had no
+endpoints at all for those 90 s. A service listed under TCP and UDP at once,
+with different pods under each, did the same for as long as it was listed
+under both.
 
 None of this was run on a cluster for this change. What was measured is named
 above; the labels, the swap and the two-pod case were each run against the
