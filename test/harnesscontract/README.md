@@ -139,6 +139,14 @@ holds the contract to the list of its ties (`ties` in `contract_test.go`), in
 both directions: a tie that is gone fails, and a new one is added to the list.
 Neither needs a version bump.
 
+The lock is written to match. Where a promise is made through a tie, its line
+is named and digested by what the tie comes to, never by the id of the entry:
+an object's name, the value an argument is run with, the path a host path
+pattern comes to, the attribute a container is given or is not to be given,
+the label a webhook selects by. So a tie moved to another entry that says the
+same is no bump (only `ties` changes), and the same tie coming to something
+else is one.
+
 `stored_name` is checked against the usual OTLP-to-Prometheus translation of
 `otel_name`, computed by the test. Whether a given pipeline applies that
 translation is not something this repository can test.

@@ -232,9 +232,10 @@ func (r Render) promises(p promises) {
 		if o.name() != "" {
 			p.put(o.name(), o.ID, "name")
 		}
-		// What each comes to, not the id it is made from.
-		for i, pattern := range o.HostPaths {
-			p.put(o.hostPaths[i], o.ID, "host_paths", pattern)
+		// The path each pattern comes to, under that path's own name: the entry
+		// a pattern is made of is a tie (Contract.Ties), not what is deployed.
+		for _, path := range o.hostPaths {
+			p.put(true, o.ID, "host_paths", path)
 		}
 		for _, webhook := range sortedKeys(o.Webhooks) {
 			p.put(o.webhooks[webhook], o.ID, "webhooks", webhook)
@@ -258,8 +259,15 @@ func (c Container) promises(p promises, path ...string) {
 	for _, env := range sortedKeys(c.EnvContains) {
 		p.members(c.EnvContains[env], at("env_contains", env)...)
 	}
-	p.members(c.ResourceAttributes, at("resource_attributes")...)
-	p.members(c.CodeResourceAttributes, at("code_resource_attributes")...)
+	// The attribute the container is given, or is not to be given, and not the
+	// id of the entry that names it: which entry a chart is held through is a
+	// tie (Contract.Ties), and a harness reads the attribute.
+	for _, a := range c.attributes {
+		p.put(true, at("resource_attributes", a.Attribute)...)
+	}
+	for _, a := range c.codeAttributes {
+		p.put(true, at("code_resource_attributes", a.Attribute)...)
+	}
 	for _, flag := range sortedKeys(c.Args) {
 		// The value the container is run with, not the id it comes from.
 		p.put(c.args[flag], at("args", flag)...)

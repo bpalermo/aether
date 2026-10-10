@@ -184,6 +184,39 @@ func TestCheckLock_SameVersion(t *testing.T) {
 		"the order of a line's fields":   {changes: []change{{"fields: [t, tier, err]", "fields: [err, t, tier]"}}},
 		"the order within a class":       {changes: []change{{"one: [x, w]", "one: [w, x]"}}},
 		"the order of a metric's labels": {changes: []change{{"      - {name: pod, open: true}\n", ""}, {"    labels:\n", "    labels:\n      - {name: pod, open: true}\n"}}},
+		// A tie moved to another entry that says the same: what is deployed and
+		// what a harness reads are as they were, so the only news is the entry.
+		// TestTies, not the lock, holds which entry a tie names.
+		"a host path made of another entry with the same value": {
+			changes: []change{{"names:\n", "names:\n  - {id: dom2, value: v, checked_by: //a:b}\n"}, {`host_paths: ["/plugins/<dom>"]`, `host_paths: ["/plugins/<dom2>"]`}},
+			want:    []string{noBumpNeeded, `"dom2 value": "`},
+		},
+		"a name taken from another entry with the same value": {
+			changes: []change{{"names:\n", "names:\n  - {id: dom2, value: v, checked_by: //a:b}\n"}, {"name_from: dom", "name_from: dom2"}},
+			want:    []string{noBumpNeeded, `"dom2 value": "`},
+		},
+		"an argument taken from another entry with the same value": {
+			changes: []change{{"names:\n", "names:\n  - {id: dom2, value: v, checked_by: //a:b}\n"}, {"--domain: dom,", "--domain: dom2,"}},
+			want:    []string{noBumpNeeded, `"dom2 value": "`},
+		},
+		"a webhook held to another entry with the same value": {
+			changes: []change{{"names:\n", "names:\n  - {id: dom2, value: v, checked_by: //a:b}\n"}, {"webhooks: {hook.x: {objects: dom}}", "webhooks: {hook.x: {objects: dom2}}"}},
+			want:    []string{noBumpNeeded, `"dom2 value": "`},
+		},
+		"a resource attribute given through another entry of the same attribute": {
+			changes: []change{{"resource_attributes:\n", "resource_attributes:\n  - {id: ra2, attribute: k8s.node.name, components: [agent], checked_by: review-only}\n"}, {"            resource_attributes: [ra]\n", "            resource_attributes: [ra2]\n"}},
+			want:    []string{noBumpNeeded, `"ra2 attribute": "`},
+		},
+		"a code attribute withheld through another entry of the same attribute": {
+			changes: []change{{"resource_attributes:\n", "resource_attributes:\n  - {id: sn2, attribute: service.name, value: svc, components: [prober], checked_by: review-only}\n"}, {"code_resource_attributes: [sn]", "code_resource_attributes: [sn2]"}},
+			want:    []string{noBumpNeeded, `"sn2 attribute": "`},
+		},
+		// And the other way: the same entry, another attribute, is another thing
+		// deployed.
+		"a container given another attribute through the same entry": {
+			changes: []change{{"{id: ra, attribute: k8s.node.name,", "{id: ra, attribute: k8s.node,"}},
+			want:    []string{`containers agent resource_attributes k8s.node.name is gone`, bumpNeeded},
+		},
 		// The same promise to a harness, so no bump; that the tie is gone is
 		// TestTies's to say, on the checked-in contract.
 		"a name written out instead of taken from the entry that has it": {changes: []change{{"name_from: dom", "name: v"}}},
@@ -222,7 +255,7 @@ func TestCheckLock_SameVersion(t *testing.T) {
 				`the entry "dom" no longer promises what it did at version 3: value changed`,
 				// And what the charts are held to through it.
 				`the entry "c.d" no longer promises what it did at version 3: name changed`,
-				`the entry "c.o" no longer promises what it did at version 3: containers agent args --domain changed; host_paths /plugins/<dom> changed`,
+				`the entry "c.o" no longer promises what it did at version 3: containers agent args --domain changed; host_paths /plugins/v is gone`,
 				`the entry "c.w" no longer promises what it did at version 3: webhooks hook.x changed`,
 				bumpNeeded,
 			},
@@ -281,20 +314,20 @@ func TestCheckLock_SameVersion(t *testing.T) {
 		"a pod label removed":        {changes: []change{{"        pod_labels: {app: agent}\n", ""}}, want: []string{`pod_labels app is gone`, bumpNeeded}},
 		"a container removed": {
 			changes: []change{{"          - name: prober\n            code_resource_attributes: [sn]\n", ""}},
-			want:    []string{`"c.o" no longer promises what it did at version 3: containers prober is gone; containers prober code_resource_attributes sn is gone`, bumpNeeded},
+			want:    []string{`"c.o" no longer promises what it did at version 3: containers prober is gone; containers prober code_resource_attributes service.name is gone`, bumpNeeded},
 		},
 		"a container no longer held to its environment": {changes: []change{{"            env_contains: {VAR: [\"k=\"]}\n", ""}}, want: []string{`containers agent env_contains VAR k= is gone`, bumpNeeded}},
-		"a container no longer given an attribute":      {changes: []change{{"            resource_attributes: [ra]\n", ""}, {"components: [agent], ", ""}}, want: []string{`containers agent resource_attributes ra is gone`, `components agent is gone`, bumpNeeded}},
+		"a container no longer given an attribute":      {changes: []change{{"            resource_attributes: [ra]\n", ""}, {"components: [agent], ", ""}}, want: []string{`containers agent resource_attributes k8s.node.name is gone`, `components agent is gone`, bumpNeeded}},
 		"an argument with another value":                {changes: []change{{`"127.0.0.1:<port>"`, `"localhost:<port>"`}}, want: []string{`containers agent args --egress changed`, bumpNeeded}},
 		"an argument no longer given":                   {changes: []change{{`--domain: dom, `, ``}}, want: []string{`containers agent args --domain is gone`, bumpNeeded}},
-		"a host path no longer held":                    {changes: []change{{"        host_paths: [\"/plugins/<dom>\"]\n", ""}}, want: []string{`host_paths /plugins/<dom> is gone`, bumpNeeded}},
+		"a host path no longer held":                    {changes: []change{{"        host_paths: [\"/plugins/<dom>\"]\n", ""}}, want: []string{`host_paths /plugins/v is gone`, bumpNeeded}},
 		"a host path of another shape": {
 			changes: []change{{`host_paths: ["/plugins/<dom>"]`, `host_paths: ["/plugin/<dom>"]`}},
-			want:    []string{`host_paths /plugins/<dom> is gone`, bumpNeeded},
+			want:    []string{`host_paths /plugins/v is gone`, bumpNeeded},
 		},
 		"one more host path": {
 			changes: []change{{`host_paths: ["/plugins/<dom>"]`, `host_paths: ["/plugins/<dom>", "/registry/<dom>"]`}},
-			want:    []string{noBumpNeeded, `"c.o host_paths /registry/<dom>": "`},
+			want:    []string{noBumpNeeded, `"c.o host_paths /registry/v": "`},
 		},
 		"a webhook selecting by another name":  {changes: []change{{"webhooks: {hook.x: {objects: dom}}", "webhooks: {hook.x: {objects: port}}"}}, want: []string{`"c.w" no longer promises what it did at version 3: webhooks hook.x changed`, bumpNeeded}},
 		"a webhook held by its other selector": {changes: []change{{"webhooks: {hook.x: {objects: dom}}", "webhooks: {hook.x: {namespaces: dom}}"}}, want: []string{`"c.w" no longer promises what it did at version 3: webhooks hook.x changed`, bumpNeeded}},
