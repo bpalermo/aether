@@ -106,18 +106,20 @@ func TestMetrics_NacksSeededPerTypeURL(t *testing.T) {
 	require.Equal(t, want, got, "an unserved type URL must not open a series of its own")
 }
 
-// TestMetrics_WaitFailuresSeeded is the other half of #1480: the four series
-// of the wait-failure counter (present/absent by nack/timeout) exist at zero
-// before any wait has failed.
+// TestMetrics_WaitFailuresSeeded is the other half of #1480: the five series
+// of the wait-failure counter exist at zero before any wait has failed. They
+// are every failure a wait can have (#1624): no rejection fails a removal
+// wait, so there is no absent/nack.
 func TestMetrics_WaitFailuresSeeded(t *testing.T) {
 	const name = "aether.agent.xds.ack_wait_failures"
 	tr, reader := newTestTracker(t)
 
 	want := map[string]int64{
-		"aether.xds.reason=nack,aether.xds.wait=absent":     0,
-		"aether.xds.reason=nack,aether.xds.wait=present":    0,
-		"aether.xds.reason=timeout,aether.xds.wait=absent":  0,
-		"aether.xds.reason=timeout,aether.xds.wait=present": 0,
+		"aether.xds.reason=nack,aether.xds.wait=present":     0,
+		"aether.xds.reason=timeout,aether.xds.wait=absent":   0,
+		"aether.xds.reason=timeout,aether.xds.wait=present":  0,
+		"aether.xds.reason=no_proxy,aether.xds.wait=absent":  0,
+		"aether.xds.reason=no_proxy,aether.xds.wait=present": 0,
 	}
 	got, ok := counterSeries(t, reader, name)
 	require.True(t, ok, "before any failed wait the counter must already export")
@@ -126,7 +128,7 @@ func TestMetrics_WaitFailuresSeeded(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
 	defer cancel()
 	require.Error(t, tr.WaitListenerPresent(ctx, testListener))
-	want["aether.xds.reason=timeout,aether.xds.wait=present"] = 1
+	want["aether.xds.reason=no_proxy,aether.xds.wait=present"] = 1
 	got, _ = counterSeries(t, reader, name)
 	require.Equal(t, want, got, "a failed wait increments its own series; no series is added")
 }

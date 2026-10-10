@@ -88,6 +88,7 @@ go_test(
     size = "medium",
     srcs = [
         "ackedpins_test.go",
+        "ackpublished_test.go",
         "alias_floor_eds_test.go",
         "bare_cla_owner_1635_test.go",
         "bindinglog_test.go",

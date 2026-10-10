@@ -1,0 +1,125 @@
+# Prometheus alerting rules for xDS updates a proxy rejected (#1633).
+#
+# The agent (and the edge control plane) counts every delta-xDS response its
+# proxy rejects (NACKs), by resource type:
+#
+#   aether_agent_xds_nacks_total{aether_xds_type_url="<type URL>"}
+#
+# seeded at zero for each type the agent serves when the process starts (#1480),
+# so "no rejection" is a series at 0. The name is as Prometheus stores it from
+# OTLP: dots become underscores and a counter gains _total. The series carry
+# `job` (aether-agent, or the edge's) and `node`
+# (docs/observability/metric-labels.md).
+#
+# A rejected response is always a defect of the agent that built it: the proxy
+# is the pinned one, and the agent is the only writer of its configuration.
+# Rejected Cluster responses are read by agent-pin-alerts.yml. This file is
+# for Listener responses, because of what the proxy does with one, measured on
+# the pinned proxy (//agent/test/mtlspool, lds_reconnect_test.go, added with
+# #1632):
+#
+#   - it does the removals of the response
+#     (TestRemovalCarriedByARejectedResponseIsDone), and adds the listeners it
+#     could build (TestRejectedListenerResponseIsAppliedInPart); only the
+#     listener it refused is missing;
+#   - a listener it kept from a rejected response is not in what it states
+#     when it reconnects (TestListenerOfARejectedResponseIsNotStatedAtReconnect).
+#     After an agent restart the agent has no word of that listener, and if
+#     its pod is gone nothing removes it from the proxy.
+#
+# Nothing in the agent removes such a listener, by design (#1633): the
+# precondition is the defect, so the defect is made loud here and the
+# recovery is an operator's, in docs/runbook.md, "The proxy rejected a
+# Listener update".
+#
+# Install: merge into the Prometheus rule files (with the Prometheus helm chart,
+# under serverFiles: alerting_rules.yml: groups: [...]). See README.md in this
+# directory. agent-xds-alerts_test.yml beside this file is its promtool unit
+# test. `bazel test //:observability_rules_test` runs it, and `promtool check
+# rules` on this file, with the promtool the build pins.
+
+groups:
+  - name: aether-agent-xds
+    rules:
+      # ---------------------------------------------------------------- P2
+      # One rejection is the whole signal. The agent does not send a rejected
+      # response again while its snapshot does not change, so a refused
+      # listener is a counter that goes from 0 to 1 and stays: there is no
+      # rate to put a threshold on, and no `for:` to wait out (for: 0m).
+      #
+      # Two arms, because the counter is pushed over OTLP (every 60 s, no
+      # staleness marker, no created-timestamp zero):
+      #
+      #   increase(...[1h]) > 0
+      #     the ordinary case. The seeded zero was exported, then the count.
+      #     Also a restarted agent: its counter restarts at the seeded zero,
+      #     and a count below the previous process's is a reset, after which
+      #     increase() counts from zero.
+      #
+      #   (... > 0) unless max_over_time(...[1h] offset 1h)
+      #     the first-sample case. A proxy that rejects the first Listener
+      #     response of an agent process does it within a second of
+      #     connecting, before the first export, so the series' first sample
+      #     is already 1. On a node no agent reported from before (a new node,
+      #     a first install, an agent silent for two hours) that series has
+      #     no earlier sample, and increase() of a series that appears at 1
+      #     is 0. This arm fires on a count above zero with no
+      #     sample between two hours and one hour ago, which is true for the
+      #     first hour of such a series and never again. A window and not an
+      #     instant `offset 1h`, so that a few lost exports an hour ago do
+      #     not make an old count look new.
+      #
+      # The alert lasts one hour from the last rejection and then ends,
+      # whatever was done about it: a counter cannot tell that the proxy was
+      # replaced. Treat it as an event to act on, not as a state to watch
+      # resolve.
+      #
+      # What it does not see, pinned in the test file:
+      #
+      #   - a restarted agent whose first export carries exactly the count the
+      #     previous process ended on (1, then 1): one unbroken series. It
+      #     takes a rejection in the first 60 s of the new process and a
+      #     previous process that had the same number of them. The earlier
+      #     rejections fired when they happened.
+      #   - a node whose agent does not report. The counter is pushed, so a
+      #     down agent is no series: AetherCNIConflistUnchained
+      #     (agent-cni-alerts.yml) is the rule for that.
+      #
+      # And one way it can fire with no new rejection: two processes writing
+      # ONE series. A pipeline that keeps agents apart by `node` alone stores
+      # the two agents of a surge roll (the one that owns the node and its
+      # standby successor, which seeds its own zeros) in the same series for
+      # the overlap, and a count above zero interleaved with a zero reads as
+      # resets and increases. It needs a rejection in the outgoing agent's
+      # life, so it repeats an alert that was true once on that node.
+      - alert: AetherProxyRejectedListenerUpdate
+        expr: >-
+          sum by (job, node) (
+            increase(aether_agent_xds_nacks_total{aether_xds_type_url="type.googleapis.com/envoy.config.listener.v3.Listener"}[1h])
+          ) > 0
+          or
+          sum by (job, node) (
+            (aether_agent_xds_nacks_total{aether_xds_type_url="type.googleapis.com/envoy.config.listener.v3.Listener"} > 0)
+            unless
+            max_over_time(aether_agent_xds_nacks_total{aether_xds_type_url="type.googleapis.com/envoy.config.listener.v3.Listener"}[1h] offset 1h)
+          )
+        for: 0m
+        labels:
+          severity: warning
+          component: aether-agent
+        annotations:
+          summary: "the proxy on {{ $labels.node }} rejected a Listener update from {{ $labels.job }}"
+          description: >-
+            The proxy that {{ $labels.job }} serves on {{ $labels.node }}
+            rejected (NACKed) at least one Listener response in the last hour.
+            The agent published a listener the proxy cannot build, which is an
+            agent defect: report it. The proxy applied the rest of that
+            response, its removals and the listeners it could build, and a
+            listener it kept that way is unknown to the agent after an agent
+            restart, so nothing removes it when its pod goes. The agent's log
+            line `envoy NACKed delta response` on that node names the listeners
+            of the response (`added`, `removed`) and carries the proxy's reason
+            (`error`). Once the cause is fixed, replace that proxy's pod (for
+            the node agent, the aether-proxy pod on that node). The alert ends
+            an hour after the last rejection, whatever was done. See
+            docs/runbook.md, "The proxy rejected a Listener update".
