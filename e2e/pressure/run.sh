@@ -23,9 +23,11 @@
 # error on the terminal: "could not ask" is never read as "absent", and never
 # as a verdict. Where absence is an answer (no such node, no agent pod yet, no
 # GOMEMLIMIT, no sample in Prometheus) it is read from a call that succeeded.
-# The wait loops ask again after a failed call, and abort (exit 2), not FAIL
-# (exit 1), when the last call before their deadline failed. README.md has the
-# table.
+# The wait loops ask again after a failed call, and at their deadline abort
+# (exit 2), not FAIL (exit 1), when the last call failed, or when fewer than
+# MIN_POLL_OK_PCT percent of their polls got an answer even though the last
+# one did (#1599): one look in a window of failed calls is not a watch.
+# README.md has the table.
 #
 # WHAT THE SOAK GUARD CAN AND CANNOT KNOW (#1555). A soak is run by an external
 # soak harness, maintained outside this repository. What such a harness may read
@@ -101,13 +103,14 @@ SOAK_POD_SELECTOR="${SOAK_POD_SELECTOR:-}"
 #   auto       — collector if :8888 answers on every replica, else prometheus
 METRICS_SOURCE="${METRICS_SOURCE:-auto}"
 
-# Series selector for the SHARED collector's self-telemetry in Prometheus: its
-# pods, by the Deployment's name. Deliberately not a bare job= match: any other
-# collector-based process in the cluster (a scraper, a profiler) also emits
-# otelcol_* series. The name goes into a regex, and the one regex character a
-# Deployment's name may hold is the dot, so it is escaped (twice: once for the
-# PromQL string, once for the regex).
-COLLECTOR_SEL="${COLLECTOR_SEL:-instance=~\"${COLLECTOR_DEPLOY//./\\\\.}-.*\"}"
+# Series selector for the SHARED collector's self-telemetry in Prometheus.
+# Left empty, discover_collector_pods makes it of the exact names of the
+# replicas it found: `instance=~"<pod>|<pod>"`. Not a prefix of the
+# Deployment's name, which the pods of another Deployment share
+# (`<name>-scraper-...`), and not a bare job= match: any other collector-based
+# process in the cluster (a scraper, a profiler) also emits otelcol_* series,
+# and its heap or its refusals must not drive this run's ceilings or verdict.
+COLLECTOR_SEL="${COLLECTOR_SEL:-}"
 
 # memory_limiter settings, as in the collector's deployed config. The absolute
 # thresholds are derived from the pod's real memory limit at run time rather
@@ -428,6 +431,17 @@ discover_collector_pods() {
 		die "could not list the collector pods (-l ${sel}) of ${COLLECTOR_NS} (kubectl's error is above) — not reading that as none Running"
 	[ -n "$names" ] || die "no Running collector pods matched -l ${sel} in ${COLLECTOR_NS}"
 	mapfile -t COLLECTOR_PODS <<<"$names"
+	if [ -z "$COLLECTOR_SEL" ]; then
+		# The names go into a regex inside a PromQL string. The one regex
+		# character a pod's name may hold is the dot, escaped twice: once for
+		# the string, once for the regex.
+		local alt
+		alt=$(
+			IFS='|'
+			printf '%s' "${COLLECTOR_PODS[*]}"
+		)
+		COLLECTOR_SEL="instance=~\"${alt//./\\\\.}\""
+	fi
 	log "collector replicas (-l ${sel}): ${COLLECTOR_PODS[*]}"
 }
 
@@ -565,6 +579,9 @@ collector_snapshot() {
 }
 
 prom_snapshot() {
+	# `metric{}` would select every collector in the cluster.
+	[ -n "$COLLECTOR_SEL" ] ||
+		die "no series selector for the collector: the replicas were not discovered yet, and COLLECTOR_SEL is not set"
 	M_HEAP=$(promq_req "max(otelcol_process_runtime_heap_alloc_bytes{${COLLECTOR_SEL}})" "collector heap")
 	M_RSS=$(promq_req "max(otelcol_process_memory_rss_bytes{${COLLECTOR_SEL}})" "collector RSS")
 	# `or` unions the two metric names (their __name__ labels differ, so nothing is

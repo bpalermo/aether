@@ -32,7 +32,7 @@ lacks one aborts before it asks the cluster anything, naming each missing variab
 | `EXPECT_CONTEXT` | The kube context the run is meant for. The run aborts when `kubectl config current-context` is another one (a `kind` cluster made in the meantime takes the current context). | none, required |
 | `COLLECTOR_NS` | Namespace of the collector Deployment. | none, required |
 | `PROM_NS` | Namespace of the Prometheus Service. | none, required |
-| `COLLECTOR_DEPLOY` | Name of the collector Deployment. Its `.spec.selector` finds the replicas, and its name the collector's own series in Prometheus (`COLLECTOR_SEL`, default `instance=~"<COLLECTOR_DEPLOY>-.*"`). | `otel-collector` |
+| `COLLECTOR_DEPLOY` | Name of the collector Deployment. Its `.spec.selector` finds the replicas, and their exact names select the collector's own series in Prometheus (`COLLECTOR_SEL`, default `instance=~"<pod>|<pod>"`; a prefix of the Deployment's name would also match another Deployment's pods). | `otel-collector` |
 | `COLLECTOR_CONTAINER`, `COLLECTOR_METRICS_PORT` | The collector's container and its self-telemetry port. | `opentelemetry-collector`, `8888` |
 | `COLLECTOR_OTLP_ENDPOINT` | The OTLP gRPC endpoint the Job floods. | `<COLLECTOR_DEPLOY>.<COLLECTOR_NS>.svc.cluster.local:4317` |
 | `PROM_SVC` | Name of the Prometheus Service (port 80). | `prometheus-server` |

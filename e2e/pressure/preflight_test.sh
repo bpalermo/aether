@@ -1349,15 +1349,39 @@ for c in "$CASES"/*/; do
 done
 pass "every kubectl call but the context check names the expected context"
 
-# The collector's series are selected by a regex made of the Deployment's
-# name, and a Deployment's name may have dots: `otel.collector` must not match
-# the pods of `otelxcollector`.
-call series-selector 'echo "sel=$COLLECTOR_SEL"' COLLECTOR_DEPLOY=otel.collector
-want series-selector 0 'sel=instance=~"otel\\.collector-.*"'
-call series-selector-default 'echo "sel=$COLLECTOR_SEL"'
-want series-selector-default 0 'sel=instance=~"otel-collector-.*"'
-call series-selector-given 'echo "sel=$COLLECTOR_SEL"' COLLECTOR_SEL='job="x"'
+# The collector's series are selected by a regex, and a pod's name may have
+# dots: `otel.collector-0` must not match `otelxcollector-0`.
+# (#1594 review) A prefix of the Deployment's name is not its pods: the pods of
+# `otel-collector-scraper` start with `otel-collector-` too. The default
+# selector is made of the exact names of the replicas that were found.
+put series-selector deploy-json.out "$DEPLOY_JSON"
+put series-selector collector-pods.out 'otel-collector-7d9f-abcde
+otel-collector-7d9f-fghij
+'
+call series-selector 'discover_collector_pods; echo "sel=$COLLECTOR_SEL"'
+want series-selector 0 'sel=instance=~"otel-collector-7d9f-abcde|otel-collector-7d9f-fghij"'
+lacks series-selector '.*'
+put series-selector-dots deploy-json.out "$DEPLOY_JSON"
+put series-selector-dots collector-pods.out 'otel.collector-0
+'
+call series-selector-dots 'discover_collector_pods; echo "sel=$COLLECTOR_SEL"'
+want series-selector-dots 0 'sel=instance=~"otel\\.collector-0"'
+put series-selector-given deploy-json.out "$DEPLOY_JSON"
+put series-selector-given collector-pods.out 'c-0
+'
+call series-selector-given 'discover_collector_pods; echo "sel=$COLLECTOR_SEL"' COLLECTOR_SEL='job="x"'
 want series-selector-given 0 'sel=job="x"'
+# Before the replicas are known there is no selector, and `metric{}` selects
+# every collector in the cluster: a snapshot asked for then aborts.
+call series-selector-early 'echo "sel=[$COLLECTOR_SEL]"; PROM_PORT=4242; prom_snapshot; echo reached'
+want series-selector-early 2 'sel=[]'
+want series-selector-early 2 'no series selector for the collector'
+lacks series-selector-early 'reached'
+if grep -q '^curl ' "$FAKE/calls"; then
+	fail "series-selector-early: queried Prometheus with no selector: $(cat "$FAKE/calls")"
+else
+	pass "series-selector-early: no query was made"
+fi
 
 # --- what the guard must not do -----------------------------------------------
 # No object is asked for by a name this repository does not define, and local
