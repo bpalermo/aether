@@ -14,6 +14,7 @@ import (
 	registryv1 "aethermesh.dev/api/aether/registry/v1"
 	clusterv3 "github.com/envoyproxy/go-control-plane/envoy/config/cluster/v3"
 	corev3 "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
+	endpointv3 "github.com/envoyproxy/go-control-plane/envoy/config/endpoint/v3"
 	listenerv3 "github.com/envoyproxy/go-control-plane/envoy/config/listener/v3"
 	discoveryv3 "github.com/envoyproxy/go-control-plane/envoy/service/discovery/v3"
 	"github.com/envoyproxy/go-control-plane/pkg/cache/types"
@@ -384,18 +385,19 @@ func TestDuplicateResourceNames(t *testing.T) {
 	assert.Empty(t, dups)
 }
 
-// TestRetainedHTTPEntryBesideALiveTCPEntryIsLoggedOnceAndCounted is the check
-// on an input that has nothing to do with pods. A service listed under both
-// the HTTP and the TCP key yields two EQUAL load assignments of one name, and
-// nothing is said. When its HTTP listing goes and its TCP listing stays, the
-// HTTP entry is retained (serviceRetentionGrace) with an EMPTY load
-// assignment beside the TCP entry's populated one: two different resources
-// under one name. The check says so once, names the type and the service and
-// no issue, and counts every build the condition lasts.
+// TestRetainedHTTPEntryBesideALiveTCPEntryIsNotADuplicate is the input this
+// check was first seen to report outside pods (review of #1634), which is not
+// an input any more (#1635). A service's HTTP listing goes and its TCP listing
+// stays: the HTTP entry is retained (serviceRetentionGrace), and it used to
+// carry an EMPTY load assignment beside the TCP entry's populated one, two
+// different resources under one name. The check said so once and counted every
+// build of the grace (one ERROR, a counter of 32 over these 32 builds), while
+// the published endpoints alternated between none and two.
 //
-// It pins what the check does with that input, not the input: the retained
-// entry is behaviour that predates the check.
-func TestRetainedHTTPEntryBesideALiveTCPEntryIsLoggedOnceAndCounted(t *testing.T) {
+// Now the retained entry publishes no load assignment under a name a live
+// entry publishes: the check is silent and what is published is the live one,
+// on every build. bare_cla_owner_1635_test.go pins the rule and its siblings.
+func TestRetainedHTTPEntryBesideALiveTCPEntryIsNotADuplicate(t *testing.T) {
 	f := newReuseFixture(t)
 	rec := &recorder{}
 	f.c.log = slog.New(&captureHandler{rec: rec})
@@ -408,21 +410,19 @@ func TestRetainedHTTPEntryBesideALiveTCPEntryIsLoggedOnceAndCounted(t *testing.T
 	f.listing[registryv1.Service_PROTOCOL_HTTP]["demo/db"] = slices.Clone(f.listing[registryv1.Service_PROTOCOL_TCP]["demo/db"])
 	f.mu.Unlock()
 	f.refresh(t)
-	require.Empty(t, rec.with(duplicateNamesMsg), "listed under both keys: two equal load assignments, no report")
+	require.Empty(t, rec.with(duplicateNamesMsg), "listed under both keys: the HTTP entry holds the one load assignment, no report")
 	require.Zero(t, counterValue(t, reader, duplicateNamesCtr))
 
 	f.edit(registryv1.Service_PROTOCOL_HTTP, "demo/db", func([]*registryv1.ServiceEndpoint) []*registryv1.ServiceEndpoint { return nil })
 	const builds = 32
 	for range builds {
 		s := f.refresh(t)
-		require.Contains(t, s.GetResources(resourcev3.EndpointType), "demo/db", "the check drops nothing")
+		cla, ok := s.GetResources(resourcev3.EndpointType)["demo/db"].(*endpointv3.ClusterLoadAssignment)
+		require.True(t, ok)
+		require.Equal(t, 2, lbEndpoints(cla), "the live TCP listing's two endpoints, on every build")
+		require.Contains(t, s.GetResources(resourcev3.ClusterType), f.fqdn("demo/db"), "the h2 cluster is retained")
 	}
 
-	lines := rec.with(duplicateNamesMsg)
-	require.Len(t, lines, 1, "written when the set of names changes, not once per build")
-	assert.Equal(t, slog.LevelError, lines[0].level)
-	assert.Equal(t, resourcev3.EndpointType, lines[0].attrs["type"])
-	assert.Equal(t, "[demo/db]", lines[0].attrs["names"])
-	assert.NotContains(t, lines[0].attrs, "issue", "this input is not the pod-name one; the line claims no cause")
-	assert.Equal(t, int64(builds), counterValue(t, reader, duplicateNamesCtr), "one per name per build")
+	assert.Empty(t, rec.with(duplicateNamesMsg), "one load assignment per name: nothing to report")
+	assert.Zero(t, counterValue(t, reader, duplicateNamesCtr))
 }

@@ -659,7 +659,10 @@ func (c *SnapshotCache) udpClusterForLocked(svc string) string {
 		return ""
 	}
 	entry, ok := c.serviceEntryLocked(svc)
-	if !ok || entry.loadAssignment == nil {
+	// The service's bare load assignment, from whichever entry holds it: the
+	// entry serviceEntryLocked prefers need not be the holder (a retained HTTP
+	// entry beside a live floor entry holds none, #1635).
+	if !ok || c.bareServiceCLALocked(svc) == nil {
 		return ""
 	}
 	// entry.sni carries the backend's registered application port.
@@ -737,7 +740,7 @@ func (c *SnapshotCache) captureUDPClusters() []types.Resource {
 			// the same lock; kept so a malformed port is skipped, never wrapped.
 			continue
 		}
-		la := proxy.UDPLoadAssignment(entry.loadAssignment, udpName, port)
+		la := proxy.UDPLoadAssignment(c.bareServiceCLALocked(svc), udpName, port)
 		// A published UDP cluster with no routable endpoint is a SILENT
 		// blackhole, and it is the shape #931 shipped in: udp_proxy takes the
 		// datagram, finds an empty healthy set (NewUDPServiceCluster sets

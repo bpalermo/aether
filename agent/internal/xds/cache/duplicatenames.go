@@ -34,16 +34,15 @@ const duplicateNamesLogged = 20
 // are in all. Types without one are absent from the map.
 //
 // Two resources of one name that are equal are not reported: whichever of the
-// two go-control-plane keeps, the proxy is sent the same thing. A service
-// listed under both the HTTP and the TCP key yields its load assignment from
-// both passes, equal, for instance.
+// two go-control-plane keeps, the proxy is sent the same thing.
 //
 // The check is about names, not about pods, and per-pod names are not its
 // only input. Known today: two sandboxes of one pod (same namespace and name,
-// two network namespaces); and a service that is no longer listed under the
-// HTTP key while it still is under the TCP key, whose retained HTTP entry
-// (serviceRetentionGrace) carries an EMPTY load assignment under the name of
-// the TCP entry's populated one, for as long as it is retained.
+// two network namespaces). A service's bare load assignment, which its HTTP,
+// TCP and UDP entries all name, was a second one until #1635 (a retained HTTP
+// entry's empty one beside a live TCP entry's; a service listed under TCP and
+// UDP): exactly one entry holds it now (ownsBareCLALocked,
+// retainAbsentClustersLocked), so the check has nothing to say about it.
 func duplicateResourceNames(resources map[resourcev3.Type][]types.Resource) (map[resourcev3.Type][]string, int) {
 	var (
 		out   map[resourcev3.Type][]string
