@@ -140,8 +140,10 @@ func BuildHealthGatewayListener(socketPath string, probes []HealthGatewayProbe) 
 		// unhealthy, and the registry would flap cluster-wide on transient
 		// overload. Shedding away from an overloaded node happens through the
 		// data-plane listeners instead: 503'd new streams are retried by client
-		// routes on a different endpoint, and active-mode client health checks
-		// fail against the inbound listener. The gateway is a node-local UDS
+		// routes on a different endpoint (the inbound connection manager marks
+		// that reply's outcome "overload", which the client's retry rule
+		// accepts for every method; see OutcomeHeader), and active-mode client
+		// health checks fail against the inbound listener. The gateway is a node-local UDS
 		// with a handful of agent connections — bypassing it frees no
 		// meaningful memory.
 		BypassOverloadManager: true,

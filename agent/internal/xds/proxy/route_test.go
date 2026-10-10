@@ -210,8 +210,12 @@ func TestOutboundRetryPolicy(t *testing.T) {
 			}
 		}
 		require.NotNil(t, rp, name)
-		assert.Equal(t, "connect-failure,refused-stream,reset-before-request,retriable-status-codes", rp.GetRetryOn(), name)
-		assert.Equal(t, []uint32{503}, rp.GetRetriableStatusCodes(), name)
+		// The response-driven condition is the destination's outcome header and
+		// no status code (aether#1641; outcome_test.go has the rule itself).
+		assert.Equal(t, "connect-failure,refused-stream,reset-before-request,retriable-headers", rp.GetRetryOn(), name)
+		assert.Empty(t, rp.GetRetriableStatusCodes(), name)
+		require.Len(t, rp.GetRetriableHeaders(), 1, name)
+		assert.Equal(t, "x-aether-outcome", rp.GetRetriableHeaders()[0].GetName(), name)
 		assert.Equal(t, uint32(2), rp.GetNumRetries().GetValue(), name)
 		require.Len(t, rp.GetRetryHostPredicate(), 1, name)
 		assert.Equal(t, "envoy.retry_host_predicates.previous_hosts", rp.GetRetryHostPredicate()[0].GetName(), name)
