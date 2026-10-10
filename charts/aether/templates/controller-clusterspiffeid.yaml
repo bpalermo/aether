@@ -1,3 +1,4 @@
+{{- include "aether.controller.assertWebhookIdentity" . -}}
 {{- if and .Values.controller.webhook.spire .Values.controller.webhook.clusterSpiffeID.create .Values.controller.webhook.clusterSpiffeID.className }}
 {{- /*
   In SPIRE webhook mode the controller serves with its SPIRE SVID, which must

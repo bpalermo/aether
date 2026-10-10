@@ -23,7 +23,13 @@
 # NOTE: the external SPIRE agent DaemonSet must also tolerate this taint — set it in
 # your spire helm values (spire-agent.tolerations), NOT here.
 
-# Override the chart name / fully-qualified resource name.
+# Override the chart name / fully-qualified resource name. Neither changes the
+# node proxy's objects: its DaemonSet and ServiceAccount are `aether-proxy` and
+# its ConfigMap `aether-proxy-config` whatever the release is called (#1540).
+# Install this chart ONCE per cluster: the agent, the proxy, mesh-dns and
+# uds-csi own node-level state, and a second release is refused at render time
+# where the chart can see the first (docs/configuration.md, "One release per
+# cluster").
 nameOverride: ""
 fullnameOverride: ""
 
@@ -88,9 +94,12 @@ otel:
   enabled: false
   # OTLP gRPC collector endpoint (host:port, insecure), e.g.
   # "otel-collector.observability.svc:4317". Empty disables OTLP export and the
-  # proxy/CNI stat sink. NOTE: this is a deterministic, deploy-time value — the
-  # CNI plugin and Envoy bootstrap bake it in; it is never read from a runtime
-  # ConfigMap, so the fleet rolls atomically and a config change can't break CNI.
+  # Envoy stats sink of the node proxy and the edge proxy. NOTE: this is a
+  # deploy-time value: the chart passes it to each Go component as
+  # --otlp-endpoint and renders it into the two Envoy bootstraps; it is never
+  # read from a runtime ConfigMap. The CNI plugin takes no endpoint: it exports
+  # no telemetry of its own (#1166, #1185) and forwards its timings to the
+  # agent, which exports them.
   endpoint: ""
   # Export component application logs over OTLP (tee'd into stderr).
   logs: false
@@ -778,9 +787,25 @@ proxy:
     # restart anyway, which resets about half of the predecessor's live HTTP/3
     # connections on every node. An operator override, not a tuning knob.
     hotRestartOnConcurrencyChange: false
-  # Envoy worker thread count (#1093). 0 = do not pass the flag: Envoy runs one
-  # worker per core, today's behaviour. N > 0 passes `--concurrency N` to every
-  # Envoy epoch through the supervisor (--envoy-arg). It exists because on a
+  # Envoy worker thread count (#1093). 0 = do not pass the flag, and Envoy picks
+  # its own count: the smallest of the node's online CPUs, the CPUs the
+  # container's affinity mask allows, and the CPU limit of the container's OWN
+  # cgroup (resources.limits.cpu below) rounded DOWN to a whole CPU, never less
+  # than 1 (#1442, #1455). That is one worker per core only while the container
+  # has no CPU limit and no restricted mask, which is what the chart's defaults
+  # give; with a 1500m limit it is one worker, with 2 or 2500m two. So, with 0:
+  #   - changing resources.limits.cpu across a whole-CPU boundary changes the
+  #     worker count, and that rollout is the drain + fresh start described
+  #     below on every node, not a hot restart. Set an explicit count whenever
+  #     you set a CPU limit.
+  #   - only the container's own cgroup is read. A CPU limit on the pod as a
+  #     whole, with none on this container, leaves one worker per core on a
+  #     throttled pod (docs/runbook.md, "Sizing nodes for a proxy hot restart").
+  # The chart never renders `--concurrency 0`: passed explicitly, that is ONE
+  # worker, not this default (docs/configuration.md).
+  # N > 0 passes `--concurrency N` to every Envoy epoch through the supervisor
+  # (--envoy-arg), and Envoy runs exactly N whatever the limit or the mask. It
+  # exists because on a
   # 4-core node a hot-restart handoff runs two Envoys at once — 8 worker threads
   # plus 2 main threads on 4 saturated cores — and #1093 needs to A/B a smaller
   # count.
@@ -813,6 +838,8 @@ proxy:
   # itself, instead of being SIGKILLed with connections open (#771). Keep it well
   # above hotRestart.drainTime + 15s or that fallback cannot fit and the supervisor
   # reverts to waiting for the SIGKILL.
+  # `helm uninstall` is one of those terminations: each proxy pod then stays
+  # Terminating for most of this value (#1472; docs/runbook.md, "Uninstalling").
   terminationGracePeriodSeconds: 180
   # Supervisor --shutdown-drain-immediately (#795): on SIGTERM, drain Envoy's
   # listeners straight away instead of first waiting (bounded by
@@ -1113,8 +1140,12 @@ edge:
   goMaxProcs: 2
   # Envoy worker thread count for the edge pod's `envoy` container (#1344), the
   # same shape as proxy.concurrency (#1093): N > 0 passes `--concurrency N`,
-  # 0 passes no flag and Envoy runs one worker per node core -- what every chart
-  # before 2.4.13 did (4 workers on a 4-core talos-main node).
+  # 0 passes no flag and Envoy picks its own count -- what every chart before
+  # 2.4.13 did: the smallest of the node's online CPUs, the CPUs the container's
+  # affinity mask allows, and the CPU limit of the container's own cgroup
+  # (edge.resources.limits.cpu) rounded down to a whole CPU, never less than 1
+  # (#1455). One worker per node core only when the container has no CPU limit
+  # and no restricted mask; a limit on the pod as a whole is not read.
   #
   # Default 2, the count the node proxies run with on talos-main since #1093.
   # The edge Envoy averages about 12m of CPU there, so two workers are far from
@@ -1310,7 +1341,9 @@ controller:
     #     bundle into the caBundle at runtime. Requires the ClusterSPIFFEID below
     #     (or an equivalent) granting the controller the webhook Service DNS name
     #     in its dnsNames, else the apiserver's TLS hostname check fails. The
-    #     controller is then granted update on its webhook configurations: the
+    #     controller is then granted get and update on its webhook configurations
+    #     (no list, watch or patch since 2.4.27, #1456; a controller image older
+    #     than chart 2.4.19's needs them): the
     #     validating one, and the pod-mutating one whenever namespaceInjection
     #     or injectPodNdots renders it (one condition for the object, the flag
     #     naming it and the grant: aether.controller.mutatingWebhook, #1411).
@@ -1335,10 +1368,18 @@ controller:
     # When spire=true, have the chart create the controller's ClusterSPIFFEID with
     # the webhook Service DNS SANs, so SPIRE mode works without a manual entry.
     clusterSpiffeID:
+      # false = "I register the controller's identity myself" (a ClusterSPIFFEID
+      # or a registration entry of your own that gives its SVID the webhook
+      # Service's DNS names): nothing is rendered and nothing is checked.
       create: true
       # spire-controller-manager class name for your SPIRE install (e.g.
-      # "spire-mgmt-spire"). REQUIRED when create=true; if empty the resource is
-      # not rendered (manage the ClusterSPIFFEID yourself).
+      # "spire-mgmt-spire"). REQUIRED when spire=true and create=true: the
+      # ClusterSPIFFEID is rendered only with it. Left empty in that case
+      # (#1457), the render FAILS on a cluster that serves the ClusterSPIFFEID
+      # API (spire-controller-manager installed), naming this value and
+      # create=false; where the API is not served, and in a render that is not
+      # told what the cluster serves (`helm template` without --api-versions),
+      # nothing is rendered and the install notes carry a warning.
       className: ""
     # Egress identity gate (#1053). The pod-mutating webhook injects an
     # `aether-identity-ready` init container — FIRST, ahead of the pod's own init

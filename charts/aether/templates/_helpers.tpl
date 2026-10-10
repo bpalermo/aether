@@ -702,7 +702,66 @@ so a bad value fails the install rather than crash-looping the DaemonSet.
 {{- end -}}
 
 {{/* ------------------------------------------------------------------ proxy */}}
+{{/*
+The node proxy's DaemonSet, ServiceAccount and (with "-config") ConfigMap are
+named "aether-proxy" WHATEVER the release is called, unlike every other
+workload of the chart. That is deliberate and stays (#1540):
+
+  - The mesh is one release per cluster. The agent, the proxy, mesh-dns and
+    uds-csi own node-level state that has one owner per node: /run/aether and
+    its sockets, the CNI binary and conflist, the host network namespace's
+    data-plane ports, the hot-restart shared memory, the csi.aether.io driver.
+    A release-derived name would let a second release's objects be created; it
+    would not let its pods work.
+  - Renaming a DaemonSet is a delete and a create: every node's proxy pod
+    replaced at once with no hot-restart handoff. No existing release may be
+    renamed, and a release not called "aether" has the constant too.
+  - The name is in the external-harness contract
+    (test/harnesscontract/external-harness.yaml, chart.aether.proxy).
+
+aether.release.assertOnlyOne refuses a second release where the chart can see
+one. docs/configuration.md, "One release per cluster".
+*/}}
 {{- define "aether.proxy.fullname" -}}{{- "aether-proxy" -}}{{- end -}}
+{{/*
+Fails the render when a live object this chart names without the release (the
+proxy DaemonSet in the release's namespace, the cluster-scoped csi.aether.io
+CSIDriver) belongs to ANOTHER Helm release (#1540), and says what is wrong:
+the mesh is one release per cluster. (Helm has an ownership check of its own
+for an object that already exists; what it does with these two was not
+measured for this change.)
+
+"Belongs to another release" is read from Helm's ownership annotations
+(meta.helm.sh/release-name, meta.helm.sh/release-namespace) and, on an object
+that has lost them, from the app.kubernetes.io/instance label. An object that
+names no release at all is not refused.
+
+What it does not see: a second release in another namespace with
+udsCsi.enabled=false (no object of the two renders has the same name and
+scope, and the chart does not list other namespaces' DaemonSets), and anything
+at all in a render without a cluster (`helm template`, a client-side
+--dry-run), where `lookup` returns nothing.
+Usage: include "aether.release.assertOnlyOne" .
+*/}}
+{{- define "aether.release.assertOnlyOne" -}}
+{{- $ns := include "aether.namespace" . -}}
+{{- $objects := list -}}
+{{- if .Values.proxy.enabled -}}
+{{- $objects = append $objects (dict "what" (printf "DaemonSet %s/%s" $ns (include "aether.proxy.fullname" .)) "live" (lookup "apps/v1" "DaemonSet" $ns (include "aether.proxy.fullname" .) | default (dict))) -}}
+{{- end -}}
+{{- if .Values.udsCsi.enabled -}}
+{{- $objects = append $objects (dict "what" "CSIDriver csi.aether.io" "live" (lookup "storage.k8s.io/v1" "CSIDriver" "" "csi.aether.io" | default (dict))) -}}
+{{- end -}}
+{{- range $objects -}}
+{{- $a := dig "metadata" "annotations" (dict) .live | default (dict) -}}
+{{- $l := dig "metadata" "labels" (dict) .live | default (dict) -}}
+{{- $ownerName := get $a "meta.helm.sh/release-name" | default (get $l "app.kubernetes.io/instance") | toString -}}
+{{- $ownerNs := get $a "meta.helm.sh/release-namespace" | toString -}}
+{{- if or (and $ownerName (ne $ownerName $.Release.Name)) (and $ownerNs (ne $ownerNs $.Release.Namespace)) -}}
+{{- fail (printf "%s already exists and belongs to another aether release (%q%s), not to %q in namespace %q. The mesh is one release per cluster: the agent, the node proxy, mesh-dns and uds-csi own node-level state (/run/aether, the CNI plugin and conflist, the host network's data-plane ports, the csi.aether.io driver), and the node proxy's objects are named aether-proxy whatever the release is called, so a second release cannot be installed next to the first. Upgrade the existing release instead (helm list -A), or uninstall it first. See docs/configuration.md, \"One release per cluster\"." .what $ownerName (ternary (printf " in namespace %q" $ownerNs) "" (ne $ownerNs "")) $.Release.Name $.Release.Namespace) -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
 {{- define "aether.proxy.serviceAccountName" -}}{{ include "aether.proxy.fullname" . }}{{- end -}}
 {{- define "aether.proxy.configMapName" -}}
 {{- printf "%s-config" (include "aether.proxy.fullname" .) | trunc 63 | trimSuffix "-" -}}
@@ -941,6 +1000,43 @@ renaming it would delete and recreate the object on upgrade.
 */}}
 {{- define "aether.controller.mutatingWebhookName" -}}
 {{- include "aether.controller.clusterScopedName" . }}-pod-ndots
+{{- end -}}
+{{/*
+"The chart was asked to register the SPIRE-served webhook's identity and has no
+class to register it with": non-empty ("true") when controller.webhook.spire
+and controller.webhook.clusterSpiffeID.create are on and
+controller.webhook.clusterSpiffeID.className is empty (#1457).
+
+The controller then gets no ClusterSPIFFEID from this chart. Unless something
+else gives its SVID the webhook Service's DNS names, the apiserver's TLS
+hostname check of the webhook fails and the webhooks fail open (failurePolicy:
+Ignore): validation, namespace injection and the identity gate are skipped
+without an error. (Read from the templates; the runtime effect was not
+reproduced for #1457.)
+Use it as `{{ if include "aether.controller.webhookIdentityUnregistered" . }}`.
+*/}}
+{{- define "aether.controller.webhookIdentityUnregistered" -}}
+{{- with .Values.controller.webhook -}}
+{{- if and .spire .clusterSpiffeID.create (not .clusterSpiffeID.className) -}}true{{- end -}}
+{{- end -}}
+{{- end -}}
+{{/*
+Fails the render in that state on a cluster that serves the ClusterSPIFFEID
+API (spire-controller-manager is installed): create=true asks for a
+registration the chart could create and cannot, for want of the class name.
+The two ways out are in the message; create=false is how a deployment that
+registers the identity itself says so.
+
+A cluster that does not serve the API is not refused: the chart could not
+create the object there whatever the class, and NOTES.txt warns instead. So is
+a render that is not told what the cluster serves (`helm template` without
+--api-versions), which is what the template tests and the
+`--set controller.webhook.spire=true` diff of docs/runbook.md are.
+*/}}
+{{- define "aether.controller.assertWebhookIdentity" -}}
+{{- if and (include "aether.controller.webhookIdentityUnregistered" .) (.Capabilities.APIVersions.Has "spire.spiffe.io/v1alpha1/ClusterSPIFFEID") -}}
+{{- fail (printf "controller.webhook.spire=true with controller.webhook.clusterSpiffeID.create=true, but controller.webhook.clusterSpiffeID.className is empty: the chart renders no ClusterSPIFFEID, so nothing it renders gives the controller's SVID the webhook Service's DNS names (%s.%s.svc), the apiserver's TLS hostname check of the webhook fails, and the webhooks then fail open (failurePolicy: Ignore) without an error. Either set controller.webhook.clusterSpiffeID.className to your spire-controller-manager class, or, if you register the controller's identity yourself (a ClusterSPIFFEID or a registration entry of your own with those DNS names), say so with controller.webhook.clusterSpiffeID.create=false. See docs/configuration.md, controller.webhook.clusterSpiffeID." (include "aether.controller.webhookServiceName" .) (include "aether.namespace" .)) -}}
+{{- end -}}
 {{- end -}}
 {{- define "aether.controller.selectorLabels" -}}
 app.kubernetes.io/name: aether-controller

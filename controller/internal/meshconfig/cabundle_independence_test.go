@@ -221,7 +221,10 @@ func TestCABundleInjectorNeverWaitsOnAnInformer(t *testing.T) {
 
 // TestCABundleInjectorNeedsOnlyGetAndUpdate pins what the injector asks of
 // RBAC: with `list` and `watch` refused on both resources — which no informer
-// survives — both webhooks are injected and follow a rotation.
+// survives — both webhooks are injected and follow a rotation. It also sends
+// nothing but a get and an update: the fake server answers any other request
+// (a PATCH, a create, a delete) with 405 and counts it as "unsupported". That
+// is what lets the chart grant `get` and `update` alone (#1456).
 func TestCABundleInjectorNeedsOnlyGetAndUpdate(t *testing.T) {
 	api := startFakeAPIServer(t)
 	api.forbid(validatingResource, "list", "watch")
@@ -245,6 +248,11 @@ func TestCABundleInjectorNeedsOnlyGetAndUpdate(t *testing.T) {
 		return bytes.Equal(api.validatingBundle(), rotated) && bytes.Equal(api.mutatingBundle(), rotated)
 	}, eventually, tick, "both webhooks must follow a rotation; logs:\n%s", logs.String())
 	assert.Empty(t, logs.level(t, msgInjectionFailed))
+	for _, resource := range []string{validatingResource, mutatingResource} {
+		assert.Positive(t, api.served(resource, "get"), "%s is read with a get", resource)
+		assert.Positive(t, api.served(resource, "update"), "%s is written with an update", resource)
+		assert.Zero(t, api.served(resource, "unsupported"), "no patch (or any verb but get and update) may be sent to %s", resource)
+	}
 }
 
 // newWebhookPair returns a fake client holding an un-injected validating and

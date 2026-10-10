@@ -37,15 +37,18 @@ rules:
     resources: ["httproutes"]
     verbs: ["get", "list", "watch"]
   {{- if .Values.controller.webhook.spire }}
-  # Inject the SPIRE trust bundle into the webhook's caBundle (by name).
+  # Inject the SPIRE trust bundle into the webhook's caBundle (by name). get and
+  # update only (#1456): since #1453 (chart 2.4.19) the injector reads each
+  # configuration uncached and writes it with an update. A controller image
+  # older than that needs list and watch here and hangs without them (#1431).
   - apiGroups: ["admissionregistration.k8s.io"]
     resources: ["validatingwebhookconfigurations"]
-    verbs: ["get", "list", "watch", "update", "patch"]
+    verbs: ["get", "update"]
   {{- /* The condition that renders the object and passes its name (#1411). */}}
   {{- if include "aether.controller.mutatingWebhook" . }}
   - apiGroups: ["admissionregistration.k8s.io"]
     resources: ["mutatingwebhookconfigurations"]
-    verbs: ["get", "list", "watch", "update", "patch"]
+    verbs: ["get", "update"]
   {{- end }}
   {{- end }}
 ---

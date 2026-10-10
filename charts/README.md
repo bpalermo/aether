@@ -205,9 +205,21 @@ namespace" below.
 ## Multiple instances & labels
 
 Resource names are release-prefixed (`<release>-agent`, …) and cluster-scoped
-resources (ClusterRole/ClusterRoleBinding) additionally include the namespace, so
-several releases coexist without collisions. Customize naming with `nameOverride`
-/ `fullnameOverride`, and target a namespace with `helm install <release> -n <ns>`.
+resources (ClusterRole/ClusterRoleBinding) additionally include the namespace.
+Customize naming with `nameOverride` / `fullnameOverride`, and target a
+namespace with `helm install <release> -n <ns>`.
+
+**One `aether` release per cluster** (#1540). Not every name follows the
+release: the node proxy's DaemonSet and ServiceAccount are `aether-proxy` and
+its ConfigMap `aether-proxy-config` whatever the release is called, and the
+`csi.aether.io` CSIDriver is cluster-scoped. More to the point, the agent, the
+proxy, mesh-dns and uds-csi own node-level state (see the note below), so two
+releases on the same nodes cannot both work. Since 2.4.27 the chart refuses a
+second release at render time when it can see the first one's `aether-proxy`
+DaemonSet (same namespace) or CSIDriver; it cannot see one in another namespace
+with `udsCsi.enabled=false`, or anything in a render without a cluster.
+`docs/configuration.md`, "One release per cluster", has the list of names and
+why the proxy's is a constant.
 
 **Who creates the namespace** (#1403). Helm stores the release record in the
 release namespace before it creates anything a chart renders, so a chart cannot

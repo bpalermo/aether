@@ -24,6 +24,19 @@ Refusals show as: kubectl -n {{ $ns }} get events --field-selector reason=Failed
 If pods were already refused, follow the label with:
   kubectl -n {{ $ns }} rollout restart daemonset
 {{- end }}
+{{- if include "aether.controller.webhookIdentityUnregistered" . }}
+
+WEBHOOK IDENTITY NOTE: controller.webhook.spire=true, and this chart rendered
+no ClusterSPIFFEID for the controller (controller.webhook.clusterSpiffeID.className
+is empty). The controller's SVID must carry the webhook Service's DNS names
+({{ include "aether.controller.webhookServiceName" . }}.{{ $ns }}.svc and
+{{ include "aether.controller.webhookServiceName" . }}.{{ $ns }}.svc.cluster.local), or the apiserver's TLS
+hostname check of the webhook fails and the webhooks fail open
+(failurePolicy: Ignore) without an error. Set
+controller.webhook.clusterSpiffeID.className, or, if you register that
+identity yourself, set controller.webhook.clusterSpiffeID.create=false (which
+also silences this note).
+{{- end }}
 {{- if .Values.spire.enabled }}
 
 UPGRADE ORDER (issue #815, applies to chart 0.92.28 and newer):
