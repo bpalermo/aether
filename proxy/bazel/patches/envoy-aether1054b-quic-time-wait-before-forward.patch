@@ -32,10 +32,10 @@ index fee95ab99e..119f508966 100644
      return true;
    }
 diff --git a/source/common/runtime/runtime_features.cc b/source/common/runtime/runtime_features.cc
-index 3bb4210772..23f904d9f7 100644
+index 05b8a92678..76473b649a 100644
 --- a/source/common/runtime/runtime_features.cc
 +++ b/source/common/runtime/runtime_features.cc
-@@ -141,6 +141,10 @@ RUNTIME_GUARD(envoy_reloadable_features_proxy_protocol_remove_too_long_tlvs);
+@@ -152,6 +152,10 @@ RUNTIME_GUARD(envoy_reloadable_features_proxy_protocol_remove_too_long_tlvs);
  // TODO(panting): Default to true after ssl fix.
  FALSE_RUNTIME_GUARD(envoy_reloadable_features_quic_enable_reset_ssl_after_handshake);
  RUNTIME_GUARD(envoy_reloadable_features_quic_hostname_check_deferred_to_explicit_san_match);
@@ -47,7 +47,7 @@ index 3bb4210772..23f904d9f7 100644
  RUNTIME_GUARD(envoy_reloadable_features_quic_mtls_server_enabled);
  // Ignore the automated "remove this flag" issue: we should keep this for 1 year. Confirm with
 diff --git a/test/common/quic/envoy_quic_dispatcher_test.cc b/test/common/quic/envoy_quic_dispatcher_test.cc
-index cbfe51d13e..903ccb9b37 100644
+index 745d86687f..ac85d4a0bb 100644
 --- a/test/common/quic/envoy_quic_dispatcher_test.cc
 +++ b/test/common/quic/envoy_quic_dispatcher_test.cc
 @@ -503,6 +503,83 @@ TEST_P(EnvoyQuicDispatcherTest, ProcessPacketReturnsTrueForDispatchedPacketOnExi

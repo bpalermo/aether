@@ -21,19 +21,21 @@ common --noenable_workspace
 # The registry commit and the envoy/envoy_api versions in MODULE.bazel are ONE
 # pin. The envoy bazel-registry keeps a single rolling dev snapshot per module and
 # DELETES the previous version directory on every bump, so an unpinned registry
-# breaks the build the next time upstream publishes. 263a259e is the commit at
-# which envoy@1.40.0-dev.20260926.726d7ac.envoy, envoy_api at the same snapshot,
-# and the full transitive .envoy-suffixed closure all resolve (registry #197/#198,
-# 2026-09-26). See README.md "Envoy version bumps" for the recipe.
+# breaks the build the next time upstream publishes. 5db29c09 is the commit at
+# which envoy@1.40.0-dev.20261009.189f198.envoy, envoy_api at the same snapshot,
+# and the full transitive .envoy-suffixed closure all resolve (registry #269/#270,
+# 2026-10-09). See README.md "Envoy version bumps" for the recipe.
 #
-# Why this bump (2026-09-26): envoyproxy/envoy#47623 "quic: make it support SDS
-# for mTLS" (77d1a4a48e, 2026-09-25) is in 726d7ac and NOT in 13144fb. Without
-# it a QUIC downstream that requires a client certificate is rejected at load
-# unless the trust anchor is a static trusted_ca -- and the mesh's inbound
-# validates callers against the SDS-served trust bundle, so the per-pod HTTP/3
-# inbound (proposal 038 Phase 4) could not exist on the old pin.
+# Why this bump (2026-10-10, aether#980): 189f198 is the first snapshot cut after
+# the 2026-09-30 upstream merges of envoyproxy/envoy#47743 (UDP hot-restart
+# forwarding keyed by listener address + network namespace) and #47776
+# (execInNetworkNamespace restores the calling thread's namespace), so the two
+# patches carried for them are dropped; it also brings #47492 (a hot-restart
+# successor inherits its listen sockets before entering the network namespace).
+# The previous pin moved for envoyproxy/envoy#47623 (QUIC downstream mTLS from
+# SDS), which every later snapshot contains.
 common --registry=https://bcr.bazel.build/
-common --registry=https://raw.githubusercontent.com/envoyproxy/bazel-registry/263a259ec7498fe90ad0308edd3592992243560e
+common --registry=https://raw.githubusercontent.com/envoyproxy/bazel-registry/5db29c09de17218d24f58c665be38208284754d8
 
 #############################################################################
 # UPSTREAM: global
@@ -80,12 +82,14 @@ test --experimental_ui_max_stdouterr_bytes=11712829 #default 1048576
 #############################################################################
 # UPSTREAM: module wiring (Envoy's own .bazelrc at the pinned snapshot)
 #
-# Envoy removed WORKSPACE at 726d7ac (envoyproxy/envoy#47217) and with it the
+# Envoy removed WORKSPACE (envoyproxy/envoy#47217) and with it the
 # `--@quiche//:*_impl_lib`, `--@grpc//third_party:*`, `--@googleurl//...` and
 # `--@protobuf//:zlib` flag lines that WORKSPACE macros used to need: the
-# registry modules now carry those wirings themselves. What is left below is
-# exactly the set upstream's root .bazelrc still sets at 726d7ac, plus the one
-# aether-specific line (the wasm engine).
+# registry modules now carry those wirings themselves. What is left below is the
+# set upstream's root .bazelrc sets at the pinned snapshot, plus
+# `prefer_prebuilt_protoc` (upstream's root file dropped it in envoyproxy/envoy#47806;
+# the filter-cc template and upstream's own downstream test, bazel/tests/external,
+# still set it) and the one aether-specific line (the wasm engine).
 #############################################################################
 
 # Refuse deprecated `repo = ...` args in Envoy's own macros (upstream default).
@@ -121,7 +125,14 @@ build:linux --fission=dbg,opt
 build:linux --features=per_object_debug_info
 
 #############################################################################
-# UPSTREAM: hermetic clang toolchain (toolchains_llvm 1.9.0.envoy, LLVM 22.1.8)
+# UPSTREAM: hermetic clang toolchain (toolchains_llvm 1.9.1.envoy, LLVM 22.1.8)
+#
+# envoyproxy/envoy#47806 (in the pinned snapshot) removed `--config=clang` from
+# Envoy's own .bazelrc: clang with libc++ is its default toolchain and the standard
+# library is derived from the compiler, so the `--@envoy//bazel:libc++` flag and
+# the `force_libcpp` define no longer exist and are gone from the `libc++` config
+# below. The rest of these configs is kept as it was: the flags are still valid,
+# and they are what this workspace's two RBE legs have been built with.
 #############################################################################
 
 common:clang-common --linkopt=-fuse-ld=lld
@@ -133,8 +144,6 @@ common:libc++ --action_env=LDFLAGS="-stdlib=libc++ -fuse-ld=lld"
 common:libc++ --action_env=BAZEL_CXXOPTS=-stdlib=libc++
 common:libc++ --action_env=BAZEL_LINKLIBS=-l%:libc++.a:-l%:libc++abi.a
 common:libc++ --action_env=BAZEL_LINKOPTS=-lm:-pthread
-common:libc++ --define force_libcpp=enabled
-common:libc++ --@envoy//bazel:libc++=true
 
 common:clang --config=clang-common
 common:clang --config=libc++

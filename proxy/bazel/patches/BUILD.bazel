@@ -9,11 +9,8 @@ exports_files(glob(["*.patch"]))
 test_suite(
     name = "carried_patch_tests",
     tests = [
-        # envoy-aether1022-exec-in-netns-thread-self.patch (aether#1022):
-        # execInNetworkNamespace restores the CALLING THREAD's netns.
-        "@envoy//test/common/network:exec_in_netns_thread_test",
-        "@envoy//test/common/network:utility_test",
-        # envoy-aether1050-hotrestart-nonblocking-forward.patch (aether#1050):
+        # envoy-aether1050-hotrestart-nonblocking-forward.patch (aether#1050,
+        # envoyproxy/envoy#47834):
         # non-blocking parent UDP forwarding, child keeps servicing it while waiting
         # for a reply, bounded waits. The child test's
         # ServicesUdpForwardingWhileWaitingForParentStats is the deadlock interleaving.
@@ -25,7 +22,8 @@ test_suite(
         # the child's inherited UDP listeners stay paused until the parent has exited
         # (hot_restarting_child_test DrainsCompleteOnlyAfterParentHasExited), and idle
         # HTTP/3 connections drain themselves inside the drain window
-        # (conn_manager_impl_test Http3IdleConnection*). The patch's
+        # (conn_manager_impl_test Http3IdleConnection*; the same target runs upstream's
+        # ProactiveDrain* cases, which the patch has to keep green). The patch's
         # quic_http_integration_test case is not listed: quiche's test tooling needs
         # Envoy's platform test headers, which this downstream module does not wire
         # up, so it runs in the Envoy workspace only.
