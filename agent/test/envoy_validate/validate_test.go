@@ -547,16 +547,6 @@ func singleListener(t *testing.T, data []byte) *listenerv3.Listener {
 	return ls[0]
 }
 
-// chainByName returns a listener's filter chain with the given name.
-func chainByName(l *listenerv3.Listener, name string) *listenerv3.FilterChain {
-	for _, fc := range l.GetFilterChains() {
-		if fc.GetName() == name {
-			return fc
-		}
-	}
-	return nil
-}
-
 // TestCaptureTCPRouteWeightedFloorChain asserts the TCPRoute fixture's floor
 // chain really carries a WEIGHTED tcp_proxy over both backends at the weights
 // the route asked for.

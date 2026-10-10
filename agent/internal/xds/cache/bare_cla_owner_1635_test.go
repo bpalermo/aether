@@ -147,16 +147,6 @@ func published(s *cachev3.Snapshot, name string) int {
 	return lbEndpoints(cla)
 }
 
-// udpEndpoints is how many endpoints the udp: cluster of svc carries (its load
-// assignment is inline: a STATIC cluster), or -1 when it is not published.
-func (f *bareFixture) udpEndpoints(s *cachev3.Snapshot, svc string) int {
-	cl, ok := s.GetResources(resourcev3.ClusterType)[proxy.UDPClusterName(svc, f.c.meshDomain)].(*clusterv3.Cluster)
-	if !ok {
-		return -1
-	}
-	return lbEndpoints(cl.GetLoadAssignment())
-}
-
 // requireOneOwner asserts the structural rule: no two entries of the cluster
 // cache hold a load assignment of one name, EQUAL ones included.
 func (f *bareFixture) requireOneOwner(t *testing.T) {
