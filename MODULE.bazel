@@ -164,7 +164,6 @@ use_repo(
     "com_github_fsnotify_fsnotify",
     "com_github_go_logr_logr",
     "com_github_google_nftables",
-    "com_github_google_renameio_v2",
     "com_github_grpc_ecosystem_go_grpc_middleware_v2",
     "com_github_miekg_dns",
     "com_github_pseudomuto_protoc_gen_doc",

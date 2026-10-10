@@ -9,6 +9,8 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+
+	"aethermesh.dev/common/procsched"
 )
 
 // procfs readers for the Envoy thread-stall sampler (stallsampler.go, issue
@@ -60,19 +62,7 @@ type procReader struct {
 // taskIDs lists the thread IDs of pid. A process that is gone yields an error
 // wrapping os.ErrNotExist.
 func (r procReader) taskIDs(pid int) ([]int, error) {
-	entries, err := os.ReadDir(filepath.Join(r.root, strconv.Itoa(pid), "task"))
-	if err != nil {
-		return nil, err
-	}
-	tids := make([]int, 0, len(entries))
-	for _, e := range entries {
-		tid, convErr := strconv.Atoi(e.Name())
-		if convErr != nil {
-			continue
-		}
-		tids = append(tids, tid)
-	}
-	return tids, nil
+	return procsched.Reader{Root: r.root, PID: strconv.Itoa(pid)}.ThreadIDs()
 }
 
 func (r procReader) taskFile(pid, tid int, name string) string {
@@ -103,7 +93,10 @@ func (r procReader) thread(pid, tid int) (threadStat, error) {
 	if err != nil {
 		return threadStat{}, err
 	}
-	cpu, runq, err := parseSchedstat(sched)
+	// The one schedstat parser in the tree (//common/procsched, stdlib only):
+	// the agent's own scheduler metrics read the same file with it. The third
+	// field, the timeslice count, is not sampled here.
+	cpu, runq, _, err := procsched.ParseSchedstat(sched)
 	if err != nil {
 		return threadStat{}, err
 	}
@@ -158,21 +151,6 @@ func parseTaskState(stat []byte) (byte, error) {
 		return 0, fmt.Errorf("malformed stat line %q", truncate(stat))
 	}
 	return rest[0], nil
-}
-
-// parseSchedstat returns the on-CPU and runqueue-wait nanoseconds.
-func parseSchedstat(b []byte) (cpuNs, runqNs uint64, err error) {
-	f := strings.Fields(string(b))
-	if len(f) < 2 {
-		return 0, 0, fmt.Errorf("malformed schedstat %q", truncate(b))
-	}
-	if cpuNs, err = strconv.ParseUint(f[0], 10, 64); err != nil {
-		return 0, 0, fmt.Errorf("schedstat cpu time: %w", err)
-	}
-	if runqNs, err = strconv.ParseUint(f[1], 10, 64); err != nil {
-		return 0, 0, fmt.Errorf("schedstat runqueue wait: %w", err)
-	}
-	return cpuNs, runqNs, nil
 }
 
 // parseProcStat parses the "cpu" (aggregate) and "cpu<N>" lines of /proc/stat.
