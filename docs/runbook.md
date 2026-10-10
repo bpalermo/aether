@@ -6639,9 +6639,9 @@ caller whose context had already ended (a CNI ADD whose RPC was abandoned) could
 at any open watch, by a random choice made once per watch, and leave that one and
 the ones after it unanswered: the proxy was not sent the change until the next build,
 and the caller was told the build had failed. If the line does appear,
-a library upgrade has changed how a stream buffers, the build that logged it held up
-every other build on the node for those 5 s, and the proxy is sent the change by a
-later build.
+the build that logged it held up every other build on the node for those 5 s, and the
+proxy is sent the change by a later build; the first thing to check is whether the
+control plane library was upgraded, since how a stream buffers is the library's.
 
 ```promql
 # N clusters unpinned for reason R on this node, now.
