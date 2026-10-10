@@ -2115,6 +2115,33 @@ and fails on a digest that differs (`scripts/check-image-digest-stability.sh`,
 or `make check-image-digests` locally; it takes seconds once the images are
 built).
 
+The same check holds the images to one more thing: a digest does not depend on
+the name of the directory Bazel built the image in (#1500). Bazel names
+`bazel-out/<configuration>/` from the flags, so a flag added to `.bazelrc`, a
+transition a rule gains or a Bazel upgrade can rename it with no change to any
+source. Generated Go source (every `.pb.go`) is compiled from under that
+directory, and the Go compiler records the path of each file in the binary, so
+the six binaries that link generated protobuf code (agent, identity-ready,
+uds-csi, cni, controller, registrar) used to change with the name, GNU build ID
+and image digest with them. `build --experimental_output_paths=strip` in
+`.bazelrc` is what stops it: rules_go's compile actions are run with every
+`bazel-out/<configuration>/` rewritten to `bazel-out/cfg/`. A stack trace
+through generated code reads
+`bazel-out/cfg/bin/api/aether/cni/v1/cniv1_go_proto_/aethermesh.dev/api/aether/cni/v1/service_grpc.pb.go:121`
+whichever configuration built the binary. The check builds every index a third
+time under `--platform_suffix`, which renames the directories and nothing else,
+and fails on a digest that differs; it also fails if the binaries of the images
+did not move to other directories, because then it compared a build with
+itself.
+
+Two consequences for a build. A path-mapped action runs only in a sandbox or on
+a remote executor; with `--spawn_strategy=local` (or `standalone`) Bazel stops
+with "requires sandboxing due to path mapping" instead of building something
+else. And to see whether a binary still holds a configuration's name:
+every line `strings <binary> | grep bazel-out/` prints must start with
+`bazel-out/cfg/`. A binary that links no generated source (mesh-dns, for one)
+prints none, and that is fine too.
+
 The `aether-proxy` image is the exception, and stays one. It is built in the
 separate `proxy/` workspace by its own release workflow, and it still carries
 the aether commit twice: as `org.opencontainers.image.revision` (label and
