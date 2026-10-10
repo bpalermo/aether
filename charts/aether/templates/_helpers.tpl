@@ -736,22 +736,22 @@ measured for this change.)
 that has lost them, from the app.kubernetes.io/instance label. An object that
 names no release at all is not refused.
 
-What it does not see: a second release in another namespace with
-udsCsi.enabled=false (no object of the two renders has the same name and
-scope, and the chart does not list other namespaces' DaemonSets), and anything
+What it does not see: a second release in another namespace when the FIRST
+one runs with udsCsi.enabled=false (there is then no CSIDriver to find, and
+the chart does not list other namespaces' DaemonSets), a first release with
+proxy.enabled=false and udsCsi.enabled=false (neither marker exists), and anything
 at all in a render without a cluster (`helm template`, a client-side
 --dry-run), where `lookup` returns nothing.
 Usage: include "aether.release.assertOnlyOne" .
 */}}
 {{- define "aether.release.assertOnlyOne" -}}
 {{- $ns := include "aether.namespace" . -}}
-{{- $objects := list -}}
-{{- if .Values.proxy.enabled -}}
-{{- $objects = append $objects (dict "what" (printf "DaemonSet %s/%s" $ns (include "aether.proxy.fullname" .)) "live" (lookup "apps/v1" "DaemonSet" $ns (include "aether.proxy.fullname" .) | default (dict))) -}}
-{{- end -}}
-{{- if .Values.udsCsi.enabled -}}
-{{- $objects = append $objects (dict "what" "CSIDriver csi.aether.io" "live" (lookup "storage.k8s.io/v1" "CSIDriver" "" "csi.aether.io" | default (dict))) -}}
-{{- end -}}
+{{- /* Both are looked up whatever THIS release renders: a release with
+       proxy.enabled=false or udsCsi.enabled=false still brings an agent and
+       the CNI plugin to the first release's nodes. */ -}}
+{{- $objects := list
+  (dict "what" (printf "DaemonSet %s/%s" $ns (include "aether.proxy.fullname" .)) "live" (lookup "apps/v1" "DaemonSet" $ns (include "aether.proxy.fullname" .) | default (dict)))
+  (dict "what" "CSIDriver csi.aether.io" "live" (lookup "storage.k8s.io/v1" "CSIDriver" "" "csi.aether.io" | default (dict))) -}}
 {{- range $objects -}}
 {{- $a := dig "metadata" "annotations" (dict) .live | default (dict) -}}
 {{- $l := dig "metadata" "labels" (dict) .live | default (dict) -}}

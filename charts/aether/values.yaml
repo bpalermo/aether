@@ -95,9 +95,11 @@ otel:
   # OTLP gRPC collector endpoint (host:port, insecure), e.g.
   # "otel-collector.observability.svc:4317". Empty disables OTLP export and the
   # Envoy stats sink of the node proxy and the edge proxy. NOTE: this is a
-  # deploy-time value: the chart passes it to each Go component as
-  # --otlp-endpoint and renders it into the two Envoy bootstraps; it is never
-  # read from a runtime ConfigMap. The CNI plugin takes no endpoint: it exports
+  # deploy-time value: the chart passes it as --otlp-endpoint to the agent,
+  # the proxy supervisor, mesh-dns, the registrar, the controller and the edge
+  # control plane, and renders it into the two Envoy bootstraps; it is never
+  # read from a runtime ConfigMap. uds-csi and cni-install are not passed it,
+  # and the CNI plugin takes no endpoint: it exports
   # no telemetry of its own (#1166, #1185) and forwards its timings to the
   # agent, which exports them.
   endpoint: ""

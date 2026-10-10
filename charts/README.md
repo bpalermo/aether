@@ -217,7 +217,7 @@ proxy, mesh-dns and uds-csi own node-level state (see the note below), so two
 releases on the same nodes cannot both work. Since 2.4.27 the chart refuses a
 second release at render time when it can see the first one's `aether-proxy`
 DaemonSet (same namespace) or CSIDriver; it cannot see one in another namespace
-with `udsCsi.enabled=false`, or anything in a render without a cluster.
+when the first runs with `udsCsi.enabled=false`, or anything in a render without a cluster.
 `docs/configuration.md`, "One release per cluster", has the list of names and
 why the proxy's is a constant.
 

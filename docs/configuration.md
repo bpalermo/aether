@@ -65,7 +65,8 @@ can see it: when the `aether-proxy` DaemonSet in the release's namespace, or the
 (Helm's `meta.helm.sh/release-name` / `release-namespace` annotations, or the
 `app.kubernetes.io/instance` label on an object that has lost them), the render
 fails and says so. It does not see a second release in **another namespace**
-with `udsCsi.enabled=false`, and it sees nothing in a render without a cluster
+when the first one runs with `udsCsi.enabled=false` (both objects are looked
+up whatever the new release enables), and it sees nothing in a render without a cluster
 (`helm template`, a client-side `--dry-run`, a GitOps tool that renders with
 `helm template`): there, one release per cluster is yours to keep.
 
@@ -81,7 +82,7 @@ access-log/tracing policy via the MeshConfig CR.
 | Key | Default | Purpose |
 |---|---|---|
 | `otel.enabled` | `false` | Enable the OTel MeterProvider + push telemetry everywhere. |
-| `otel.endpoint` | `""` | OTLP gRPC collector `host:port` (insecure). Empty disables OTLP export from every component, and the Envoy stats sink of the node proxy and the edge proxy. A deploy-time value: the chart passes it to each Go component as `--otlp-endpoint` and renders it into the two Envoy bootstraps; it is never read from a runtime ConfigMap. The CNI plugin takes no endpoint: it exports no telemetry of its own (#1166/#1185) and forwards its timings to the agent, which exports them (see `cniInstall` below). |
+| `otel.endpoint` | `""` | OTLP gRPC collector `host:port` (insecure). Empty disables OTLP export from every component, and the Envoy stats sink of the node proxy and the edge proxy. A deploy-time value: the chart passes it as `--otlp-endpoint` to the agent, the proxy supervisor, mesh-dns, the registrar, the controller and the edge control plane, and renders it into the two Envoy bootstraps; it is never read from a runtime ConfigMap. `uds-csi` and `cni-install` are not passed it. The CNI plugin takes no endpoint: it exports no telemetry of its own (#1166/#1185) and forwards its timings to the agent, which exports them (see `cniInstall` below). |
 | `otel.logs` | `false` | Export component logs over OTLP (also tee'd to stderr). |
 | `otel.traceSampleRate` | `0.1` | Head-sampling ratio (0.0–1.0); bounds exported spans only. |
 | `otel.traceExport` | `false` | Export spans over OTLP (needs a collector traces pipeline). |
