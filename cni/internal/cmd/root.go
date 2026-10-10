@@ -51,8 +51,8 @@ func init() {
 }
 
 // registerRetiredOTLPFlags keeps --otlp-endpoint and --otlp-pin-endpoint
-// parseable for one release, as deprecated no-ops, so a chart that predates
-// #1166 still starts a newer cni-install image. The CNI plugin exports no
+// parseable as deprecated no-ops, so a chart older than 2.4.0 (#1166) still starts a newer
+// cni-install image; removable from chart 2.5.0 on (one chart minor, AGENTS.md). The plugin exports no
 // telemetry any more: it forwards its timings to the agent over the CNI gRPC
 // socket, and the agent exports them with its own.
 func registerRetiredOTLPFlags(cmd *cobra.Command) {
