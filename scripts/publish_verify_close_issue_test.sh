@@ -350,6 +350,16 @@ check "failure in between: the log says why" grep -q '^reopened #1316: a failure
 step 0 "another green run comments in between" GITHUB_EVENT_NAME=schedule \
 	FAKE_COMMENT_BEFORE_CLOSE="Closed by a green publish-verify run: the scheduled sweep verified every push head it covers. https://example.invalid/runs/43" &&
 	check "another closer in between: the issue stays closed" test "$(issue_state 1316)" = closed
+# Nor is the library's own note on a duplicate it is folding, in either wording
+# (scripts/rolling-issue-lib.sh): no report landed, so nothing is reopened.
+for note in "Duplicate of #1300, which is older: the report is there." \
+	"Duplicate of #1300, opened in the same moment, which is older: the report is there."; do
+	step 0 "a duplicate note lands in between" GITHUB_EVENT_NAME=schedule FAKE_COMMENT_BEFORE_CLOSE="$note" &&
+		check "a duplicate note in between: the issue stays closed" test "$(issue_state 1316)" = closed
+done
+# ... and those are the very notes the library writes.
+check "the library's two duplicate notes start the way the count leaves out" test \
+	"$(grep -c 'rolling_issue_comment "$[a-z]*" "${ROLLING_ISSUE_NOTE_PREFIX}' "$HERE/rolling-issue-lib.sh") $(grep -c 'A duplicate of\|"Opened in the same moment' "$HERE/rolling-issue-lib.sh")" = "2 0"
 # Nor is a comment by anyone else: a person writing on the issue in that moment
 # does not get to reopen it.
 step 0 "a person comments in between" GITHUB_EVENT_NAME=schedule \

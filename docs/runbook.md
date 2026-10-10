@@ -714,10 +714,9 @@ by the workflow when it ends.
 | **Nightly e2e failing** | the `report-failure` job of `e2e.yaml` | `bug`, `ci` | a person |
 | **CI: third-party image pins are behind their tags** | `third-party-images.yaml` | `enhancement`, `ci` | itself, when every pin is current |
 
-Three rules hold for all of them
-(`scripts/rolling-issue-lib.sh`; the post-merge watcher carries its own copy
-of them, and the pin report checks who opened the issue but still finds it by
-search):
+Three rules hold for the issues of `stuck-runs.yaml`, `publish-verify.yaml`
+and the `report-failure` job, which share `scripts/rolling-issue-lib.sh`. The
+other two differ, as said after them.
 
 - **Only the workflow's own issue is its rolling issue.** It is the one opened
   by `github-actions[bot]` under exactly the title, and only what that account
@@ -733,8 +732,18 @@ search):
 - **It is opened with a kind and an area label.** If a label no longer exists
   the issue is still filed, without it, and the run that filed it **fails**
   with `was opened without the label(s) …`: create the label again (`gh label
-  create ci`), or change the script that names it. The post-merge watcher
-  files without labels and warns instead of failing.
+  create ci`), or change the script that names it.
+
+The two that do not use the library:
+
+- **The post-merge watcher** (`scripts/main-post-merge-watch.sh`) follows the
+  first two rules with its own code. When a label is gone it files the issue
+  without labels and **warns**; its run does not fail.
+- **The pin report** (`scripts/third-party-images-report.sh`) takes only an
+  issue `github-actions` opened, but finds it by **search**, so two runs close
+  together can still open two. When a label is gone its create fails, **no
+  issue is filed**, and the run fails: create the label, then run it again
+  (`gh workflow run third-party-images.yaml -f dry_run=false`).
 
 ### Stuck workflow runs
 

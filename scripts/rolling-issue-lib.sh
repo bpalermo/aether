@@ -45,6 +45,10 @@
 # The account the workflow token writes as, and how a listing is asked for it.
 ROLLING_ISSUE_BOT="github-actions[bot]"
 ROLLING_ISSUE_BOT_QUERY="github-actions%5Bbot%5D"
+# How the notes this library writes on a duplicate it folds begin. They are
+# the workflow's own comments and no report: rolling_issue_reports leaves them
+# out, or a fold next to a close would read as a failure written meanwhile.
+ROLLING_ISSUE_NOTE_PREFIX="Duplicate of #"
 
 _rolling_issue_repo() {
 	[ -n "${GH_REPO:-}" ] || {
@@ -118,8 +122,9 @@ rolling_issue_text() {
 }
 
 # rolling_issue_reports <number> <prefix>
-# How many comments the workflow wrote on the issue that do NOT start with
-# <prefix>: its reports, as against its own closing comments. A closer counts
+# How many comments the workflow wrote on the issue that start neither with
+# <prefix> nor with ROLLING_ISSUE_NOTE_PREFIX: its reports, as against its own
+# closing comments and this library's notes on a folded duplicate. A closer counts
 # them before and after it closes, to see a report that landed in between.
 # Non-zero when the comments could not be read.
 rolling_issue_reports() {
@@ -133,7 +138,7 @@ rolling_issue_reports() {
 	esac
 	# One line per such comment (--jq runs once per page, so no `length` here).
 	out="$(gh api --paginate "repos/${repo}/issues/$1/comments?per_page=100" \
-		--jq ".[] | select(.user.login == \"${ROLLING_ISSUE_BOT}\" and .user.type == \"Bot\") | select(.body | startswith(\"$2\") | not) | .id")" ||
+		--jq ".[] | select(.user.login == \"${ROLLING_ISSUE_BOT}\" and .user.type == \"Bot\") | select((.body | startswith(\"$2\") or startswith(\"${ROLLING_ISSUE_NOTE_PREFIX}\")) | not) | .id")" ||
 		return 1
 	grep -c . <<<"$out" || true
 }
@@ -189,7 +194,7 @@ rolling_issue_close_extras() {
 			fi
 			echo "copied the report of #${n} to #${oldest}"
 		fi
-		rolling_issue_comment "$n" "A duplicate of #${oldest}, which is older: the report is there." || true
+		rolling_issue_comment "$n" "${ROLLING_ISSUE_NOTE_PREFIX}${oldest}, which is older: the report is there." || true
 		if rolling_issue_close "$n" not_planned; then
 			echo "closed #${n}, a duplicate of #${oldest}"
 		else
@@ -247,7 +252,7 @@ rolling_issue_create() {
 	oldest="$(sed -n 1p <<<"$numbers")"
 	if [ -n "$oldest" ] && [ "$oldest" != "$created" ]; then
 		if rolling_issue_comment "$oldest" "$body"; then
-			rolling_issue_comment "$created" "Opened in the same moment as #${oldest}, which is older: the report is there." || true
+			rolling_issue_comment "$created" "${ROLLING_ISSUE_NOTE_PREFIX}${oldest}, opened in the same moment, which is older: the report is there." || true
 			rolling_issue_close "$created" not_planned ||
 				echo "::warning title=rolling-issue::could not close #${created}, a duplicate of #${oldest}" >&2
 			printf '%s\n' "$oldest"
