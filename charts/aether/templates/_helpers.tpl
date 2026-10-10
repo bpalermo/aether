@@ -1021,26 +1021,52 @@ renaming it would delete and recreate the object on upgrade.
 {{- include "aether.controller.clusterScopedName" . }}-pod-ndots
 {{- end -}}
 {{/*
-"The chart was asked to register the SPIRE-served webhook's identity and has no
-class to register it with": non-empty ("true") when controller.webhook.spire
-and controller.webhook.clusterSpiffeID.create are on and
-controller.webhook.clusterSpiffeID.className is empty (#1457).
+Who registers the SPIRE-served webhook's identity (#1457). ONE decision, read by
+everything that depends on it, so the three cannot disagree:
 
-The controller then gets no ClusterSPIFFEID from this chart. Unless something
-else gives its SVID the webhook Service's DNS names, the apiserver's TLS
-hostname check of the webhook fails and the webhooks fail open (failurePolicy:
-Ignore): validation, namespace injection and the identity gate are skipped
-without an error. (Read from the templates; the runtime effect was not
-reproduced for #1457.)
-Use it as `{{ if include "aether.controller.webhookIdentityUnregistered" . }}`.
+  controller-clusterspiffeid.yaml         renders the ClusterSPIFFEID on "chart"
+  aether.controller.assertWebhookIdentity fails the render on "unregistered"
+                                          (where the cluster serves the API)
+  NOTES.txt                               prints WEBHOOK IDENTITY NOTE on
+                                          "unregistered"
+
+Results, from controller.webhook.{spire, clusterSpiffeID.create,
+clusterSpiffeID.className}:
+
+  ""              the webhook is not SPIRE-served: nothing to register
+  "chart"         spire, create, a className: the chart renders the
+                  ClusterSPIFFEID with the webhook Service's DNS names
+  "operator"      spire, create=false: "I register it myself"; nothing is
+                  rendered, checked or warned about
+  "unregistered"  spire, create, NO className: the chart was asked to register
+                  the identity and has no class to register it with
+
+In "unregistered" the controller gets no ClusterSPIFFEID from this chart.
+Unless something else gives its SVID the webhook Service's DNS names, the
+apiserver's TLS hostname check of the webhook fails and the webhooks fail open
+(failurePolicy: Ignore): validation, namespace injection and the identity gate
+are skipped without an error. (Read from the templates; the runtime effect was
+not reproduced for #1457.)
+
+What holds each result: //charts/aether:aether_controller_clusterspiffeid_*_test
+render all four through the template and the failure. NOTES.txt itself is in
+no test: the pinned Helm's `helm template` cannot print notes (BUILD.bazel
+says more). The note reads this helper and nothing else, so it cannot take a
+different decision from the two that are tested; that it is still there, and
+what it says, is not held by anything.
+Use it as `{{ if eq (include "aether.controller.webhookIdentity" .) "chart" }}`.
 */}}
-{{- define "aether.controller.webhookIdentityUnregistered" -}}
+{{- define "aether.controller.webhookIdentity" -}}
 {{- with .Values.controller.webhook -}}
-{{- if and .spire .clusterSpiffeID.create (not .clusterSpiffeID.className) -}}true{{- end -}}
+{{- if not .spire -}}
+{{- else if not .clusterSpiffeID.create -}}operator
+{{- else if .clusterSpiffeID.className -}}chart
+{{- else -}}unregistered
+{{- end -}}
 {{- end -}}
 {{- end -}}
 {{/*
-Fails the render in that state on a cluster that serves the ClusterSPIFFEID
+Fails the render in the "unregistered" state on a cluster that serves the ClusterSPIFFEID
 API (spire-controller-manager is installed): create=true asks for a
 registration the chart could create and cannot, for want of the class name.
 The two ways out are in the message; create=false is how a deployment that
@@ -1053,7 +1079,7 @@ a render that is not told what the cluster serves (`helm template` without
 `--set controller.webhook.spire=true` diff of docs/runbook.md are.
 */}}
 {{- define "aether.controller.assertWebhookIdentity" -}}
-{{- if and (include "aether.controller.webhookIdentityUnregistered" .) (.Capabilities.APIVersions.Has "spire.spiffe.io/v1alpha1/ClusterSPIFFEID") -}}
+{{- if and (eq (include "aether.controller.webhookIdentity" .) "unregistered") (.Capabilities.APIVersions.Has "spire.spiffe.io/v1alpha1/ClusterSPIFFEID") -}}
 {{- fail (printf "controller.webhook.spire=true with controller.webhook.clusterSpiffeID.create=true, but controller.webhook.clusterSpiffeID.className is empty: the chart renders no ClusterSPIFFEID, so nothing it renders gives the controller's SVID the webhook Service's DNS names (%s.%s.svc), the apiserver's TLS hostname check of the webhook fails, and the webhooks then fail open (failurePolicy: Ignore) without an error. Either set controller.webhook.clusterSpiffeID.className to your spire-controller-manager class, or, if you register the controller's identity yourself (a ClusterSPIFFEID or a registration entry of your own with those DNS names), say so with controller.webhook.clusterSpiffeID.create=false. See docs/configuration.md, controller.webhook.clusterSpiffeID." (include "aether.controller.webhookServiceName" .) (include "aether.namespace" .)) -}}
 {{- end -}}
 {{- end -}}

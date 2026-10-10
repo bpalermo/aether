@@ -24,7 +24,7 @@ Refusals show as: kubectl -n {{ $ns }} get events --field-selector reason=Failed
 If pods were already refused, follow the label with:
   kubectl -n {{ $ns }} rollout restart daemonset
 {{- end }}
-{{- if include "aether.controller.webhookIdentityUnregistered" . }}
+{{- if eq (include "aether.controller.webhookIdentity" .) "unregistered" }}
 
 WEBHOOK IDENTITY NOTE: controller.webhook.spire=true, and this chart rendered
 no ClusterSPIFFEID for the controller (controller.webhook.clusterSpiffeID.className

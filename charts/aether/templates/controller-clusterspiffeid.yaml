@@ -1,5 +1,5 @@
 {{- include "aether.controller.assertWebhookIdentity" . -}}
-{{- if and .Values.controller.webhook.spire .Values.controller.webhook.clusterSpiffeID.create .Values.controller.webhook.clusterSpiffeID.className }}
+{{- if eq (include "aether.controller.webhookIdentity" .) "chart" }}
 {{- /*
   In SPIRE webhook mode the controller serves with its SPIRE SVID, which must
   carry the webhook Service DNS name as a SAN or the apiserver's TLS hostname

@@ -2804,6 +2804,22 @@ helm_template_match_test(
 # clusterSpiffeID.create=true (the default) and no className it rendered
 # nothing and said nothing.
 
+#
+# One helper decides all of it: `aether.controller.webhookIdentity` is "",
+# "chart", "operator" or "unregistered", and the ClusterSPIFFEID template, the
+# render failure and the WEBHOOK IDENTITY NOTE of NOTES.txt read that result
+# and nothing else. The tests below render each of the four through the
+# template and the failure.
+#
+# THE NOTE ITSELF IS IN NO TEST. The rules of //bazel/helm run `helm template`,
+# and the pinned Helm (4.2.0) has no flag that makes `helm template` print
+# NOTES.txt; only `helm install --dry-run` prints it. A test of the note needs
+# the runners to drive another subcommand, with a kubeconfig that cannot reach
+# a cluster and the fail-closed mask applied to that command's different
+# output: a new mode of those rules, not an option passed through. So what is
+# held is the decision the note reads, not that the note is still printed or
+# what it says.
+
 SPIRE_CRD_API = "spire.spiffe.io/v1alpha1/ClusterSPIFFEID"
 
 # Class given: the registration, with both DNS names of the webhook Service.
