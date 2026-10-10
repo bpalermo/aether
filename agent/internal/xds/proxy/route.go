@@ -56,12 +56,28 @@ const (
 // first health-check round — by retrying on a *different* host
 // (previous_hosts predicate).
 //
-// Only conditions that are safe for non-idempotent requests are retried:
-// connect-failure, refused-stream and reset-before-request all fail before the
-// request reaches an application, and 503 is the standard
-// "try-another-endpoint" drain signal (Envoy's no-healthy-upstream and
-// service overload both use it; applications returning 503 explicitly opt
-// into retry semantics).
+// What is retried, whatever the method:
+//
+//   - connect-failure, refused-stream and reset-before-request: this proxy
+//     never sent the request;
+//   - a 503 response. That is the destination proxy saying it could not reach
+//     its application (connect refused or timed out, no healthy host, pool
+//     overflow), or the application answering 503 itself, which is the standard
+//     "try another endpoint" signal.
+//
+// What is NOT retried is a 503 the destination proxy generated after it had
+// begun sending the request to its application (the application closed or
+// reset the connection before answering), when the method is not idempotent:
+// the application may have run it. Nothing in this policy says so. The
+// destination marks that response with x-envoy-ratelimited, which Envoy's
+// retry state reads as "do not retry" ahead of every status-code condition;
+// see requestBegunHeader for why the mark is that header and why the status
+// code and this policy both stay as they are (aether#1641). Do not add
+// envoy-ratelimited to retry_on: it is the one condition that would retry the
+// marked response.
+//
+// A route that carries this policy must also remove the mark from the response
+// (dropRequestBegunHeader), so that it never reaches the client application.
 func outboundRetryPolicy() *routev3.RetryPolicy {
 	return &routev3.RetryPolicy{
 		RetryOn:              "connect-failure,refused-stream,reset-before-request,retriable-status-codes",
@@ -178,7 +194,7 @@ func buildOnDemandCatchAllVirtualHost(meshDomain string, passthrough bool, known
 				DirectResponse: &routev3.DirectResponseAction{Status: 200},
 			},
 		},
-		{
+		dropRequestBegunHeader(&routev3.Route{
 			Match: &routev3.RouteMatch{
 				PathSpecifier: &routev3.RouteMatch_Prefix{Prefix: "/"},
 				Headers: []*routev3.HeaderMatcher{
@@ -202,7 +218,7 @@ func buildOnDemandCatchAllVirtualHost(meshDomain string, passthrough bool, known
 					RetryPolicy: outboundRetryPolicy(),
 				},
 			},
-		},
+		}),
 	}
 	// Known-target safety net (redirect-all only): a captured request whose
 	// authority is a known in-scope mesh service — under any of its non-mesh
@@ -219,7 +235,7 @@ func buildOnDemandCatchAllVirtualHost(meshDomain string, passthrough bool, known
 		if !passthrough || kt.AuthorityRegex == "" || kt.Cluster == "" {
 			continue
 		}
-		routes = append(routes, &routev3.Route{
+		routes = append(routes, dropRequestBegunHeader(&routev3.Route{
 			Match: &routev3.RouteMatch{
 				PathSpecifier: &routev3.RouteMatch_Prefix{Prefix: "/"},
 				Headers: []*routev3.HeaderMatcher{
@@ -241,7 +257,7 @@ func buildOnDemandCatchAllVirtualHost(meshDomain string, passthrough bool, known
 					RetryPolicy:      outboundRetryPolicy(),
 				},
 			},
-		})
+		}))
 	}
 	routes = append(routes, fallthrough_)
 	return &routev3.VirtualHost{
@@ -290,7 +306,7 @@ func BuildOutboundClusterVirtualHost(clusterName string, domains []string) *rout
 		Name:    clusterName,
 		Domains: domains,
 		Routes: []*routev3.Route{
-			{
+			dropRequestBegunHeader(&routev3.Route{
 				Match: &routev3.RouteMatch{
 					PathSpecifier: &routev3.RouteMatch_Prefix{
 						Prefix: "/",
@@ -304,7 +320,7 @@ func BuildOutboundClusterVirtualHost(clusterName string, domains []string) *rout
 						RetryPolicy: outboundRetryPolicy(),
 					},
 				},
-			},
+			}),
 		},
 	}
 }
@@ -475,13 +491,13 @@ func BuildOutboundServiceVirtualHost(name string, domains []string, rules []Gamm
 	for _, s := range scored {
 		routes = append(routes, s.route)
 	}
-	routes = append(routes, &routev3.Route{
+	routes = append(routes, dropRequestBegunHeader(&routev3.Route{
 		Match: &routev3.RouteMatch{PathSpecifier: &routev3.RouteMatch_Prefix{Prefix: "/"}},
 		Action: &routev3.Route_Route{Route: &routev3.RouteAction{
 			ClusterSpecifier: &routev3.RouteAction_Cluster{Cluster: name},
 			RetryPolicy:      outboundRetryPolicy(),
 		}},
-	})
+	}))
 	return &routev3.VirtualHost{Name: name, Domains: domains, Routes: routes}
 }
 
@@ -513,6 +529,10 @@ func buildScoredRoutes(name string, rules []GammaRoute) []scoredRoute {
 				r.Action = gammaRedirectAction(rule.Redirect)
 			} else {
 				r.Action = gammaRouteAction(name, rule, m.Prefix)
+				// A slice of its own: respRemove is shared by every match
+				// of the rule.
+				r.ResponseHeadersToRemove = slices.Clone(respRemove)
+				dropRequestBegunHeader(r)
 			}
 			scored = append(scored, scoredRoute{route: r, key: gammaMatchSpecificity(m)})
 		}

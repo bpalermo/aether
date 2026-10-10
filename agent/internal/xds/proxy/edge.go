@@ -672,10 +672,16 @@ func BuildEdgeRouteWeighted(prefix, exact string, headers []RouteHeaderMatch, me
 	clusters := make([]*routev3.WeightedCluster_ClusterWeight, 0, len(backends))
 	for _, b := range backends {
 		totalWeight += b.Weight
-		clusters = append(clusters, &routev3.WeightedCluster_ClusterWeight{
+		cw := &routev3.WeightedCluster_ClusterWeight{
 			Name:   b.Cluster,
 			Weight: wrapperspb.UInt32(b.Weight),
-		})
+		}
+		// Per backend, not per route: a rule may split between a mesh
+		// service and a cleartext Kubernetes Service.
+		if isMeshBackendCluster(b.Cluster) {
+			cw.ResponseHeadersToRemove = []string{requestBegunHeader}
+		}
+		clusters = append(clusters, cw)
 	}
 	wc := &routev3.WeightedCluster{
 		Clusters:    clusters,
@@ -738,6 +744,9 @@ func BuildEdgeRoute(prefix, exact string, headers []RouteHeaderMatch, method str
 		}
 		applyURLRewrite(ra, urlRewrite, prefix)
 		r.Action = &routev3.Route_Route{Route: ra}
+		if isMeshBackendCluster(cluster) {
+			dropRequestBegunHeader(r)
+		}
 	}
 	return r
 }

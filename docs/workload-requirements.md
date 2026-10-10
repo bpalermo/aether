@@ -422,12 +422,44 @@ the app actually answering).
 
 ## What the mesh retries for you
 
-Client routes retry, on a **different endpoint** (2 attempts, 25–250ms
-backoff): `connect-failure`, `refused-stream`, `reset-before-request`, and
-`503`. All of these fail before a request reaches an application (or are the
-standard "try another endpoint" signal), so retries are safe for
-non-idempotent traffic. Application errors (other 5xx) and timeouts are
-deliberately **not** retried.
+Client routes retry on a **different endpoint** (2 retries, 25–250ms backoff):
+
+| What happened | Retried? |
+|---|---|
+| The caller's proxy could not send the request: `connect-failure`, `refused-stream`, `reset-before-request` | yes, every method |
+| The destination's proxy could not reach your application and answered `503`: connection refused or timed out, no healthy host | yes, every method |
+| Your application answered `503` itself (the standard "try another endpoint" signal) | yes, every method |
+| The destination's proxy had sent the request to your application, and the application closed or reset the connection before answering (`503`) | **only** `GET`, `HEAD`, `OPTIONS`, `TRACE`, `PUT`, `DELETE` |
+| Any other application error (other 5xx), a timeout, a gRPC status | no |
+
+The fourth row is the one to design for. A request your application has
+received may have been run, so the mesh replays it only when the method is
+idempotent by definition (RFC 9110). What that means for you:
+
+- **A `POST` or `PATCH` your application received is never run again by the
+  mesh.** If the application exits, crashes or closes the connection with one
+  in flight, the caller gets a `503` and decides for itself. A caller that
+  retries needs the endpoint to be safe to retry (an idempotency key, or a
+  natural one).
+- **A `GET`, `HEAD`, `OPTIONS`, `TRACE`, `PUT` or `DELETE` may be run twice**,
+  on two different pods: once by the pod that failed to answer, once by the
+  one the retry reached. Keep them idempotent, as HTTP requires. A `GET` with
+  a side effect will see that side effect repeated.
+- **Keep your server's keep-alive (idle) timeout long**, or unset. The node
+  proxy reuses its connections to your application (an idle HTTP/1.1
+  connection for up to an hour, an idle HTTP/2 one for 30 seconds). A server
+  that closes an idle connection at the instant the proxy sends a request on
+  it looks exactly like a server that died with the request in hand, so a
+  `POST` that loses that race is answered `503` and not replayed. Idempotent
+  methods are retried and never notice.
+- An application that answers `503` asks for another endpoint, for every
+  method, `POST` included. Answer `503` only for a request you did not run.
+- gRPC calls are not retried on the destination-side rows: a proxy answers a
+  gRPC request with a `grpc-status`, not an HTTP `503`.
+
+The response header `x-envoy-ratelimited` carries the fourth row between
+proxies and is removed before a response reaches a client application. A
+header of that name set by your application does not reach the caller.
 
 ## Termination sequence (what actually happens)
 

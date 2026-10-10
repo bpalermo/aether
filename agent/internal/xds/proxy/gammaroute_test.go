@@ -125,8 +125,9 @@ func TestBuildOutboundServiceVirtualHost_HeaderMutation(t *testing.T) {
 	assert.Equal(t, "x-served-by", respAdd[0].GetHeader().GetKey())
 	assert.Equal(t, corev3.HeaderValueOption_OVERWRITE_IF_EXISTS_OR_ADD, respAdd[0].GetAppendAction())
 
-	// Response headers to remove.
-	assert.Equal(t, []string{"x-internal"}, r0.GetResponseHeadersToRemove())
+	// Response headers to remove: the rule's own, then the request-begun mark
+	// every route to a mesh service removes (aether#1641).
+	assert.Equal(t, []string{"x-internal", "x-envoy-ratelimited"}, r0.GetResponseHeadersToRemove())
 
 	// The trailing catch-all has no mutations.
 	last := vh.Routes[len(vh.Routes)-1]

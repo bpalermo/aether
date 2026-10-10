@@ -398,7 +398,8 @@ func TestCaptureVhosts_RouteTargetGAMMAFeatures(t *testing.T) {
 	assert.Equal(t, []string{"X-Header-Remove"}, setRoute.GetRequestHeadersToRemove())
 	require.Len(t, setRoute.GetResponseHeadersToAdd(), 1, "response set header emitted on the capture path")
 	assert.Equal(t, "X-Resp-Set", setRoute.GetResponseHeadersToAdd()[0].GetHeader().GetKey())
-	assert.Equal(t, []string{"X-Resp-Remove"}, setRoute.GetResponseHeadersToRemove())
+	// The rule's own removal, then the request-begun mark (aether#1641).
+	assert.Equal(t, []string{"X-Resp-Remove", "x-envoy-ratelimited"}, setRoute.GetResponseHeadersToRemove())
 
 	// 2. Redirect: the /hostname-redirect route emits a RedirectAction (NOT a forward).
 	redirectRoute := routeForPrefix(vh, "/hostname-redirect")

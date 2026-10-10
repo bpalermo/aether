@@ -563,10 +563,13 @@ draining phase, so brief errors are possible.
 
 ### What the mesh retries for you
 
-On a **different endpoint** (2 attempts, 25–250 ms backoff): `connect-failure`,
-`refused-stream`, `reset-before-request`, and `503`. These all fail before
-reaching your app, so retries are safe even for non-idempotent traffic.
-Application 5xx and timeouts are deliberately **not** retried.
+On a **different endpoint** (2 retries, 25–250 ms backoff): `connect-failure`,
+`refused-stream`, `reset-before-request`, and `503`. A request that never
+reached your app is retried whatever its method. One your app received and did
+not answer (it closed the connection) is retried only when the method is
+idempotent (`GET`, `HEAD`, `OPTIONS`, `TRACE`, `PUT`, `DELETE`); a `POST` gets
+the `503`. Other application 5xx and timeouts are deliberately **not** retried.
+See [What the mesh retries for you](workload-requirements.md#what-the-mesh-retries-for-you).
 
 ---
 

@@ -6751,6 +6751,68 @@ connections per listener; the overload manager above is what reclaims them. Watc
 `envoy_http_capture_http_downstream_cx_active` per node if a workload is suspected of
 leaking.
 
+### A client gets a 503 the mesh did not retry: the request had begun (#1641)
+
+A destination proxy answers `503` both when it never reached its application and when
+it had already sent the request to the application and the application's connection
+then closed or reset before any response. The second kind must not be replayed for a
+method that is not idempotent, because the application may have run it. Until #1641
+the caller retried both on another endpoint, whatever the method.
+
+Now the destination marks the second kind, and the caller does not retry a marked
+response. The status code is still `503`.
+
+| At the destination (`reporter=destination`) | Method | What the caller does |
+|---|---|---|
+| `503` with flag `UF`, `UH`, `UO` or `NC` (application never reached) | any | retries on another endpoint, as before |
+| `503` from the application itself (`response_flags` `-`, `response_code_details` `via_upstream`) | any | retries on another endpoint, as before |
+| `503` with flag `UC`, `UR` or `LR` (the request had begun) | `GET`, `HEAD`, `OPTIONS`, `TRACE`, `PUT`, `DELETE` | retries on another endpoint, as before |
+| `503` with flag `UC`, `UR` or `LR` (the request had begun) | anything else (`POST`, `PATCH`, …) | **does not retry**: the client gets the `503` |
+
+The mark is the response header `x-envoy-ratelimited`, added by the inbound connection
+manager's `local_reply_config` and removed by the caller's route before the response
+reaches the client application (and by the edge before it leaves the mesh). It is that
+header because it is the one Envoy's retry logic reads as "do not retry"; nothing is
+rate limited. It is on the wire between two proxies only, so it is in no access-log
+field. To find such a request:
+
+- **Destination row**: `response_code=503`, `response_flags` one of `UC` / `UR` / `LR`,
+  `response_code_details` starting `upstream_reset_before_response_started{`,
+  `us_tx_beg_ms` a number (the request was written to the application; `-` means it
+  never was), and a `method` outside the idempotent six.
+- **Source row** with the same `x_request_id`: `response_code=503`, `response_flags`
+  `-`, `response_code_details=via_upstream`, and `upstream_host` the pod of the
+  destination row. A retried request shows the last endpoint tried instead, and
+  usually a `200`.
+
+What causes a `UC` at the destination: the application exited or was killed with the
+request in flight, or it closed an idle kept-alive connection at the instant the proxy
+reused it (HTTP/1.1 has no GOAWAY; the rule in the #1350 section above, seen from the
+other side: here the proxy is the client and the application is the server). The node
+proxy keeps an idle HTTP/1.1 connection to the application for up to 1 h (Envoy's
+default; the app cluster sets none) and an idle HTTP/2 one for 30 s, so an application
+with a shorter keep-alive timeout always closes first. For idempotent methods the
+caller's retry hides that, as it always did. A `POST` that loses the race is now a
+`503` at the client where it used to be replayed, and in that case the application
+had not read it. The proxy cannot tell the two apart, which is the reason it does not
+replay. If a workload sees these outside its own restarts, raise the application's
+keep-alive (idle) timeout, or make the endpoint safe to retry and retry it in the
+client.
+
+Three things this does not change:
+
+- A **gRPC** call is never retried by the mesh on a destination failure of either
+  kind: the destination answers a gRPC request `200` with `grpc-status: 14`, which is
+  not a `503` response.
+- A destination proxy whose agent is older than #1641 marks nothing, and its `503`s
+  are retried as before, for every method. During an upgrade or a rollback the old
+  behaviour holds for requests to not-yet-upgraded (or rolled-back) nodes. Callers
+  need no upgrade to honour the mark; one that is not upgraded yet honours it and
+  forwards the header to its client application with the `503`.
+- An application can no longer switch its own `503` out of the retry by sending
+  `x-envoy-ratelimited` itself: the destination removes the header from the
+  application's response. Nothing documented that it could.
+
 The gate is `TestDownstreamIdleTimeoutFollowsWhoTheDownstreamIs` in
 `//agent/test/envoy_validate`: it reads both values off the generated config and
 fails on an HTTP connection manager it cannot classify. There is no timing test: with
