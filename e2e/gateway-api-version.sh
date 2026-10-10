@@ -19,4 +19,4 @@
 # file. Override per run with GWAPI_VERSION=<release> (e.g. to try the next
 # release locally); CI never sets it.
 # shellcheck disable=SC2034 # read by the harnesses that source this file
-GWAPI_VERSION="${GWAPI_VERSION:-v1.6.2}"
+GWAPI_VERSION="${GWAPI_VERSION:-v1.6.3}"
