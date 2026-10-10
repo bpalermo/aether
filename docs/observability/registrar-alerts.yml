@@ -21,8 +21,15 @@
 # See README.md in this directory. Deployed from
 # bpalermo/k8s-talos-main -> clusters/talos-main/prometheus/values.yaml, where
 # promtool unit tests (clusters/talos-main/prometheus/rules_test.yaml) run this
-# expression in CI. In this repository `bazel test //:observability_rules_test`
-# runs `promtool check rules` on this file; there is no unit test for it here.
+# expression in CI. registrar-alerts_test.yml beside this file is its promtool
+# unit test in this repository: `bazel test //:observability_rules_test` runs
+# it, and `promtool check rules` on this file, with the promtool the build pins.
+#
+# The rule needs one series per replica. Since chart 2.5.3 the registrar sets
+# service.instance.id to its pod name, which Prometheus stores as `instance`,
+# so the replicas are apart with no pipeline configuration (#1560). Before it,
+# a pipeline that promoted nothing per replica stored one series for all of
+# them, and one series is never two hashes: the rule could not fire.
 #
 # UPGRADING from a registrar without the value gauge (before #1329): this rule
 # reads a metric an older replica does not export, so it is blind to that
@@ -43,8 +50,8 @@ groups:
       #   count_values without () ("revision", aether_registrar_snapshot_revision)
       #     one series per replica, with the replica's revision as a LABEL (value
       #     1). `without ()` keeps every label the series has, so this does not
-      #     depend on what the pipeline calls the replica label (`node` on
-      #     talos-main).
+      #     depend on what the replica label is called (`instance` by default,
+      #     `pod` or `node` where a pipeline makes one).
       #   content_hash * ignoring (revision) group_left (revision) ...
       #     the replica's hash (times 1), now labelled with its revision. The two
       #     gauges have the same labels, so the match is one to one per replica.
@@ -62,9 +69,28 @@ groups:
       #     queued; `unless ... > 0` is quiet only when a depth above zero is
       #     actually reported, so a missing series does not disable the rule.
       #
-      # No staleness handling is needed (#1322 needed a timestamp() filter): a
-      # content change moves the VALUE of the one series a replica has, so there
-      # is no superseded series left in the 5-minute lookback.
+      # Fresh samples only (#1560). Each selector is wrapped in
+      # last_over_time(...[150s]): the newest sample of a series, if it is at
+      # most 150 s old. A content change needs none of this (it moves the VALUE
+      # of the one series a replica has, where #1322 needed a timestamp()
+      # filter), but a replaced POD does: its series end, OTLP has no staleness
+      # marker, and a bare selector returns their last sample for 5 minutes.
+      # With the pod name in the replica label a roll leaves those series
+      # beside the replacements', and the rule would compare a pod that is gone:
+      # a last export that fell between an agent RPC and its sync (below)
+      # became a 3-minute divergence, and a last non-zero queue depth kept the
+      # `unless` arm true and a real divergence quiet for 5 minutes.
+      #
+      # Why 150 s. The registrar exports every 60 s (the OTel SDK's periodic
+      # reader at its default interval; common/telemetry/setup sets none and
+      # the chart sets no OTEL_METRIC_EXPORT_INTERVAL). Above 120 s, so a live
+      # replica that loses one export is still read until its next one lands
+      # (two intervals, plus 30 s for the export's 10 s timeout and the
+      # pipeline's delay). Below 180 s, the `for:` of this rule, so one last
+      # sample of a replica that is gone is never an alert by itself. A dead
+      # replica's last queue depth still delays a real divergence, by at most
+      # those 150 s. If your registrar exports less often, or you scrape it at
+      # a longer interval, raise the window to 2.5 intervals and `for:` with it.
       #
       # Timestamps. The registrar observes revision and hash in one callback from
       # one read of the snapshot, so the pair in one export is always consistent.
@@ -88,12 +114,12 @@ groups:
           count by (job, revision) (
             count_values by (job, revision) (
               "hash",
-              aether_registrar_snapshot_content_hash
+              last_over_time(aether_registrar_snapshot_content_hash[150s])
               * ignoring (revision) group_left (revision)
-              count_values without () ("revision", aether_registrar_snapshot_revision)
+              count_values without () ("revision", last_over_time(aether_registrar_snapshot_revision[150s]))
             )
           ) > 1
-          unless on (job) (max by (job) (aether_registrar_writebehind_queue_depth) > 0)
+          unless on (job) (max by (job) (last_over_time(aether_registrar_writebehind_queue_depth[150s])) > 0)
         for: 3m
         labels:
           severity: warning

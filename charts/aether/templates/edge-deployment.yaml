@@ -183,8 +183,15 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: metadata.uid
+            # service.instance.id (#1560): two edge replicas may share a node
+            # (the spread is soft), and both report the pin gauges and the
+            # NACK counter with the same job and node. Prometheus's OTLP
+            # ingestion maps this attribute onto `instance` by itself, so the
+            # replicas are separate series, as the proxy container's below
+            # already are. See the registrar's Deployment for what a pod name
+            # in a label costs, and what the shipped rules do about it.
             - name: OTEL_RESOURCE_ATTRIBUTES
-              value: "k8s.node.name=$(NODE_NAME),k8s.namespace.name=$(POD_NAMESPACE),k8s.pod.name=$(POD_NAME),k8s.pod.uid=$(POD_UID),k8s.deployment.name={{ include "aether.edge.fullname" . }}"
+              value: "service.instance.id=$(POD_NAME),k8s.node.name=$(NODE_NAME),k8s.namespace.name=$(POD_NAMESPACE),k8s.pod.name=$(POD_NAME),k8s.pod.uid=$(POD_UID),k8s.deployment.name={{ include "aether.edge.fullname" . }}"
             {{- /* 90% of limits.memory, never 100% (aether.goMemLimit). */}}
             {{- with include "aether.goMemLimit" .Values.edge.resources }}
             - name: GOMEMLIMIT

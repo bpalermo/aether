@@ -3372,6 +3372,135 @@ dotted pod whose application is up, `503` for one whose application is down,
 and following a pod whose application comes up; and the gateway across the
 replacement of the probe clusters.
 
+#### Chart 2.5.3: the registrar, the controller and the edge control plane report per pod (#1560)
+
+**What changed.** The registrar, the controller and the `agent` container of
+the edge Deployment now set `service.instance.id=$(POD_NAME)` in
+`OTEL_RESOURCE_ATTRIBUTES` (the edge's proxy container already did). Prometheus's
+OTLP ingestion stores that attribute as the label `instance`, so each replica of
+those three is its own series with no pipeline configuration. Before, a pipeline
+that promoted nothing per replica stored all replicas of a component as ONE
+series, and `AetherRegistrarSnapshotDiverged`, which compares the replicas'
+hashes, could never fire.
+
+The rule files of this release changed with it: every selector in
+`docs/observability/agent-pin-alerts.yml` and `registrar-alerts.yml` is wrapped
+in `last_over_time(...[150s])`.
+
+**What rolls.** The variable is rendered whether or not `otel.endpoint` is set,
+so on every install:
+
+| Workload | Rolls on the upgrade across 2.5.3 |
+| --- | --- |
+| registrar Deployment | yes, once |
+| controller Deployment | yes, once |
+| edge Deployment (`edge.enabled`) | yes, once: both containers restart, the edge proxy with them |
+| agent, mesh-dns, proxy and uds-csi DaemonSets | no: their pod templates render as in 2.5.2 (compared, with the edge and telemetry on) |
+
+There is no value to turn it off. The node proxy's bootstrap is unchanged, so no
+Envoy restarts on the nodes.
+
+**Order of work. Update the rules first.** The rule files of this release are
+correct against a chart that does not set the attribute (they read each series'
+newest sample of the last 150 s, and these components export every 60 s). Rule
+files of an earlier release are NOT correct against this chart: with the pod
+name in a label, a replaced pod's last sample is read for five minutes beside
+its replacement's, and (measured with `promtool test rules`, an old pod's
+series ending at minute 9 and its replacement's starting at minute 10):
+
+- `AetherMeshClusterUnpinned` fired at minutes 12 and 13 from ONE last sample of
+  a replaced edge pod, a critical alert for a pod that no longer exists;
+- `AetherRegistrarSnapshotDiverged` fired at minutes 12 and 13 when a replaced
+  registrar's last export fell between an agent RPC and its sync, and a
+  replaced registrar's last non-zero `aether_registrar_writebehind_queue_depth`
+  kept a real divergence quiet until minute 13.
+
+The chart cannot check which rule files you run. So:
+
+1. Install the rule files of this release (`docs/observability/README.md`,
+   "Installing"). Nothing changes for a chart at 2.5.2: an alert that is firing
+   stays firing, and one whose pod or agent stopped reporting now ends 2.5
+   minutes after its last export instead of 5.
+2. Upgrade the chart, reading your values back and passing them with `-f`
+   (never `--reuse-values`).
+3. Run the checks below.
+
+If your pipeline already made a per-pod label for these components (the `pod`
+label earlier versions of `metric-labels.md` recommended), the false alerts
+above were possible after every roll already; the new rule files end that. The
+`pod` promotion is no longer needed for the rules.
+
+**What changes in the stored metrics**, on the registrar's, the controller's and
+the edge control plane's series only:
+
+- **`instance="<pod name>"` appears**, from each pod's first export on. A label
+  that appears makes a new series: the series without `instance` receive no
+  more samples and are returned by a bare selector for five more minutes.
+- **A panel that does not aggregate shows one line per pod** where it showed
+  one line per component (or per node, for the edge), and at every later roll
+  the old pods' lines end and new ones start. For one line per component,
+  aggregate the label away: `max without (instance) (...)` for a gauge that is
+  the same on every replica, `sum without (instance) (rate(...[5m]))` for a
+  counter.
+- **A panel or rule of your own that aggregates a gauge over these series**
+  (`sum`, `count`, `max`, a comparison between replicas) counts a replaced pod
+  for five minutes after a roll unless its selector is wrapped the way the
+  shipped rules' are: `last_over_time(<selector>[150s])`.
+- **Counters.** `rate()` and `increase()` are computed per series. Across this
+  upgrade the series without `instance` end and the ones with it begin, so a
+  `sum(rate())` can read low for the length of its window around the roll.
+  Not measured.
+- **Selectors.** A selector that names `instance` on these components did not
+  match before. One that relies on its absence (`{instance=""}`) stops
+  matching.
+- **Cardinality.** One set of series per pod instead of one per component, and
+  a new set at every roll: with the default two replicas each, a handful of
+  series sets. The per-node DaemonSets are unchanged.
+- **Do not drop the label.** A Collector processor or relabelling rule that
+  removes `service.instance.id` or `instance` from these series puts the
+  replicas back into one series.
+
+A rollback to 2.5.2 rolls the same three Deployments again and removes the
+label from new samples; the new rule files stay correct.
+
+**Checks**, after the three Deployments have rolled. Nothing here was run on a
+cluster for this change; the rule behaviour above is from `promtool test rules`
+(`bazel test //:observability_rules_test`), and the rendered attribute from the
+chart's template tests.
+
+```bash
+# Newest last: the registrar, controller and edge pods are new and Ready, and
+# no agent, proxy, mesh-dns or uds-csi pod was replaced by the upgrade.
+kubectl get pods -A --sort-by=.metadata.creationTimestamp | grep aether
+```
+
+```promql
+# One row per registrar pod, named after it (kubectl get pods). One row with no
+# `instance` means the label is dropped on the way to the store.
+count by (instance) (last_over_time(aether_registrar_snapshot_content_hash[150s]))
+
+# The value has to equal the number of registrar replicas, also in the five
+# minutes after a roll (a bare count() reads the replaced pods as well there).
+count(last_over_time(aether_registrar_snapshot_content_hash[150s]))
+
+# With the edge on: one row per edge pod, two rows for a node that runs two.
+count by (node, instance) (last_over_time(aether_agent_snapshot_tls_clusters{job="aether-edge", pin="pinned"}[150s]))
+
+# The divergence rule's expression can now see two replicas. MUST be empty.
+count by (job, revision) (
+  count_values by (job, revision) (
+    "hash",
+    last_over_time(aether_registrar_snapshot_content_hash[150s])
+    * ignoring (revision) group_left (revision)
+    count_values without () ("revision", last_over_time(aether_registrar_snapshot_revision[150s]))
+  )
+) > 1
+
+# No alert of the two rule files fired because of the roll: empty over the
+# half hour that follows it.
+max_over_time(ALERTS{alertstate="firing", alertname=~"AetherMeshCluster.*|AetherProxyHoldsUnpinnedClusters|AetherProxyPinStateUnknown|AetherRegistrarSnapshotDiverged"}[30m])
+```
+
 #### The prober chart (#1372, #1373, #1374)
 
 The `prober` chart has the same rule since chart **1.0.5**: its DaemonSet's pod
@@ -6189,13 +6318,15 @@ aether_registrar_store_revision - aether_registrar_snapshot_revision
 max(aether_registrar_store_revision) - min(aether_agent_registry_last_version)
 
 # divergence: more than one endpoint set at ONE revision, with no write-behind
-# intent pending. MUST be empty. See "Divergence rule" below.
+# intent pending. MUST be empty. See "Divergence rule" below. Each selector
+# reads a replica only while its newest sample is at most 150 s old, so a
+# registrar pod that was replaced is not compared (#1560).
 count by (job, revision) (
   count_values by (job, revision) (
     "hash",
-    aether_registrar_snapshot_content_hash
+    last_over_time(aether_registrar_snapshot_content_hash[150s])
     * ignoring (revision) group_left (revision)
-    count_values without () ("revision", aether_registrar_snapshot_revision)
+    count_values without () ("revision", last_over_time(aether_registrar_snapshot_revision[150s]))
   )
 ) > 1
 unless on (job) (max by (job) (aether_registrar_writebehind_queue_depth) > 0)
@@ -6300,14 +6431,29 @@ To read the pairs by hand:
 
 ```promql
 # one row per replica: value = the hash, revision label = where it serves it
-aether_registrar_snapshot_content_hash
+last_over_time(aether_registrar_snapshot_content_hash[150s])
   * ignoring (revision) group_left (revision)
-  count_values without () ("revision", aether_registrar_snapshot_revision)
+  count_values without () ("revision", last_over_time(aether_registrar_snapshot_revision[150s]))
 ```
 
 The alert is `AetherRegistrarSnapshotDiverged`
-(`docs/observability/registrar-alerts.yml`, `for: 3m`). Its promtool tests are in
-the GitOps repo (`clusters/talos-main/prometheus/rules_test.yaml`).
+(`docs/observability/registrar-alerts.yml`, `for: 3m`). Its promtool tests are
+`docs/observability/registrar-alerts_test.yml` (`bazel test
+//:observability_rules_test`), and more in the GitOps repo
+(`clusters/talos-main/prometheus/rules_test.yaml`).
+
+**A replica is its pod, and a pod that is gone must not be compared (#1560).**
+Since chart 2.5.3 the registrar's series carry `instance`, its pod name, so the
+replicas are separate series in any backend that maps `service.instance.id`
+(Prometheus does by itself). Every registrar roll therefore ends one set of
+series and starts another, and nothing marks the ended ones stale: a bare
+selector returns a replaced pod's last sample for five minutes. That is what
+`last_over_time(...[150s])` is for, here and in the rule: a replica is read
+while its newest sample is at most 150 s old (two and a half 60 s exports).
+Without it a replaced registrar whose last export fell between an agent RPC and
+its sync fired the alert against the live replicas, and one whose last
+write-behind depth was above zero kept a real divergence quiet for five
+minutes; both are cases of the rule's test file.
 
 **Deprecated: `aether_registrar_snapshot_content{content_hash}`.** Until #1329
 the hash was a label on an info gauge (always 1). A content change ended one
@@ -6332,9 +6478,9 @@ a second arm. Both arms return `{job, revision}`, so `or` yields one alert:
   count by (job, revision) (
     count_values by (job, revision) (
       "hash",
-      aether_registrar_snapshot_content_hash
+      last_over_time(aether_registrar_snapshot_content_hash[150s])
       * ignoring (revision) group_left (revision)
-      count_values without () ("revision", aether_registrar_snapshot_revision)
+      count_values without () ("revision", last_over_time(aether_registrar_snapshot_revision[150s]))
     )
   ) > 1
   or
@@ -6356,8 +6502,14 @@ a second arm. Both arms return `{job, revision}`, so `or` yields one alert:
     )
   ) > 1
 )
-unless on (job) (max by (job) (aether_registrar_writebehind_queue_depth) > 0)
+unless on (job) (max by (job) (last_over_time(aether_registrar_writebehind_queue_depth[150s])) > 0)
 ```
+
+The first arm and the `unless` are the shipped rule's, 150 s window included.
+The transitional arm keeps its bare selectors and its `timestamp()` filter: it
+is not tested in this repository, and with a pod-name label it reads a replaced
+registrar's last labelled series for five minutes after a roll. Drop it before
+the upgrade to chart 2.5.3 if every replica already exports the value gauge.
 
 Order of work: deploy that rule (it is correct against any mix of images),
 upgrade the registrar, then drop the second arm, and only then take the release
@@ -7307,6 +7459,15 @@ sum by (node) (aether_agent_snapshot_tls_clusters{pin="pinned"}) > 0
 # is not). Seeded at zero, so a live zero is a real series (not an absent one).
 sum by (node, reason) (increase(aether_agent_identity_cluster_unpinned_total[1h]))
 ```
+
+The gauge queries here and below are written with bare selectors, which return
+a series' last sample for five minutes after it stopped. For a node agent that
+is one series per node and reason, and the next sample replaces the last. The
+edge control plane's series carry its pod name (`instance`, chart 2.5.3), so
+for five minutes after an edge roll these sums count the replaced pod as well.
+The alert rules do not: they wrap each selector in `last_over_time(...[150s])`
+(`docs/observability/metric-labels.md`, "A label that holds the pod name"). Do
+the same in a query whose answer you act on after a roll.
 
 **Published is not held.** The gauge above is what the agent *published*.
 `aether_agent_xds_acked_tls_clusters` has the same series and counts the clusters the
