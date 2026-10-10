@@ -514,8 +514,8 @@ Reading a red job:
 | The log shows | What it means | Do |
 |---|---|---|
 | `::warning::bazel warm-up attempt 1/3 hit a repository-fetch error`, then success | the retry absorbed a blip | nothing |
-| `::error::bazel warm-up: repository fetch failed on all 3 attempts` | the upstream was down for the whole ~1 min of backoff | **re-run the job** once the upstream answers (`gh run rerun <id> --failed`); a re-run restores the same cache, so it only re-fetches what failed |
-| a `fetch_repo` / `Error downloading` failure in a step **after** the warm-up | that step needed a repository the warm-up's targets did not cover (e.g. a `bazel run` of a tool, `bazel-diff` at the base revision, which falls back to a full run on failure) | re-run; if it repeats, add the target to that job's warm-up |
+| `::error::bazel warm-up: repository fetch failed on all 3 attempts` | the upstream was down for the whole ~1 min of backoff | **re-run the job** once the upstream answers (`gh run rerun <run id> --failed`: the job concluded `failure`, so `--failed` takes it); a re-run restores the same cache, so it only re-fetches what failed |
+| a `fetch_repo` / `Error downloading` failure in a step **after** the warm-up | that step needed a repository the warm-up's targets did not cover (e.g. a `bazel run` of a tool, `bazel-diff` at the base revision, which falls back to a full run on failure) | re-run the failed job (`gh run rerun <run id> --failed`); if it repeats, add the target to that job's warm-up |
 | `bazel warm-up failed (exit N) with no repository-fetch error` | a real analysis failure | fix the change; a re-run will not help |
 
 A plain re-run is still the answer for anything the warm-up does not cover: the
@@ -554,7 +554,7 @@ times, and the log of the `ci` job says which case it was:
 | `decision: impacted; had to run: test race …` | those legs ran and succeeded | nothing |
 | `decision: nothing impacted (diff wrote false to has_any, …)` | bazel-diff found no target the change reaches; the legs are skipped by design | nothing |
 | `decision: the control plane is untouched (changes wrote control_plane=false)` | a proxy-only change; the `proxy` workflow is its gate | nothing |
-| `job <x> ended as failure` / `cancelled` | that job is the one to read | fix it, or re-run it if no step ran |
+| `job <x> ended as failure` / `cancelled` | that job is the one to read | fix it, or re-run it if no step ran: `gh run rerun <run id> --failed` when it ended `failure`, the whole run (`gh run rerun <run id>`) when it was `cancelled` ([which command](#re-running-a-run-which-command-1553)) |
 | `job diff succeeded and its output has_… is not set` | `diff` wrote no decision, so the legs skipped on an empty value | read the `Compute impacted targets` step; this is a defect in the workflow or the script, not in the change |
 | `job <x> was skipped, and diff says it had to run` | a leg did not run although its output is `true` (usually a job it needs failed, reported on its own line) | read the failed job first |
 | `job <x> is not in the needs of the ci job` / `has no rule for it` | a job was added to `ci.yaml` and not to the `needs` of `ci` or to `scripts/ci-gate.sh` | add both; `//scripts:ci_gate_test` holds them to the workflow |
@@ -569,7 +569,7 @@ only because `changes` wrote `proxy=false`:
 | `decision: the proxy workspace changed (changes wrote proxy=true); had to run: shell test` | both ran and succeeded | nothing |
 | `decision: the proxy workspace is untouched (changes wrote proxy=false)` | nothing under the path filter changed; `ci` is the gate of this change | nothing |
 | `job changes succeeded and its output proxy is not set` | the path filter wrote no decision, so `shell` and `test` skipped on an empty value | read the `changes` job; this is a defect in the workflow, not in the change |
-| `job <x> was skipped, and changes says proxy=true` | a job did not run although the workspace changed | read that job; re-run it if no step ran |
+| `job <x> was skipped, and changes says proxy=true` | a job did not run although the workspace changed | read that job; if no step ran, re-run the WHOLE run, `gh run rerun <run id>`: a skipped job is not one `--failed` selects ([which command](#re-running-a-run-which-command-1553)) |
 
 **The post-merge run** (`main-post-merge`, `main.yaml`) is decided by the same
 script with a third table (`scripts/ci-gate.sh main`, #1501), in its `main`
@@ -583,8 +583,8 @@ wrote `false`:
 |---|---|---|
 | `decision: impacted; had to run: test` | `test` ran and succeeded | nothing |
 | `decision: nothing impacted (diff wrote false to has_any, has_unit and has_integration)` | bazel-diff found no target the merge reaches; `test` is skipped by design | nothing |
-| `job diff succeeded and its output has_… is not set` | `diff` wrote no decision, so `test` skipped on an empty value and the merge was not tested | read the `Compute impacted targets` step. If it failed on something transient, re-run the run. If the workflow or the script is at fault, a re-run repeats it (a re-run executes that commit's own workflow): fix it in a new commit, and test the missed commit yourself (`make test` on a checkout of it), or the merge stays untested |
-| `job test was skipped, and diff says it had to run` | `test` did not run although `has_any` is `true` | read the `test` job; re-run it if no step ran |
+| `job diff succeeded and its output has_… is not set` | `diff` wrote no decision, so `test` skipped on an empty value and the merge was not tested | read the `Compute impacted targets` step. If it failed on something transient, re-run the WHOLE run, `gh run rerun <run id>`: `diff` concluded `success`, so `--failed` would re-run the `main` job alone and it would read the same empty output ([which command](#re-running-a-run-which-command-1553)). If the workflow or the script is at fault, a re-run repeats it (a re-run executes that commit's own workflow): fix it in a new commit, and test the missed commit yourself (`make test` on a checkout of it), or the merge stays untested |
+| `job test was skipped, and diff says it had to run` | `test` did not run although `has_any` is `true` | read the `test` job; if no step ran, re-run the WHOLE run, `gh run rerun <run id>`: a skipped job is not one `--failed` selects ([which command](#re-running-a-run-which-command-1553)) |
 
 **A post-merge run that did not pass files an issue** (#1506):
 "main-post-merge: a commit on main failed its post-merge run", labelled `bug`
@@ -720,6 +720,72 @@ skipped would satisfy the ruleset, so it runs and fails. The checks of the
 newest commit are the ones that count. `ci` has no concurrency group and is not
 cancelled this way.
 
+### Re-running a run: which command (#1553)
+
+"Re-run it" is one of two commands, and the wrong one does nothing:
+
+| What the run looks like | Command | Why |
+|---|---|---|
+| ALL of: at least one job did not pass; EVERY job that did not pass concluded `failure` (a step failed, a registry or GitHub answered 5xx); and the gate job (`ci`, `proxy`, `main`) is not the only one that failed | `gh run rerun <run id> --failed` | re-runs "the failed jobs and their dependent jobs", and keeps the jobs that passed |
+| anything else: no job started (`startup_failure`); a job was `cancelled` (it never got a runner, the run was cancelled) or timed out, alone or next to a failed one; a job was **skipped** that should have run; or the gate failed and nothing else did (the job at fault concluded `success`) | `gh run rerun <run id>` | `--failed` has nothing to select, is not documented to select that job, or selects only the gate, which reads the same inputs again |
+| you do not know | `gh run rerun <run id>` | the whole run is always enough; it costs the jobs that had passed |
+
+The rows do not overlap: the first needs all three of its conditions. Whether
+`--failed` also takes a `cancelled` job is not documented and not relied on
+here (#1552).
+
+`<run id>` is the number in the run's URL (`…/actions/runs/<run id>`); a job's
+URL holds it too, before `/job/`. One job alone is
+`gh run rerun --job <job id>`, the number after `/job/`: it re-runs that job
+and the jobs that depend on it.
+
+### The issues the workflows open (#1532, #1568)
+
+Nine titles are opened by workflows, never by a person: the five below that
+stand alone, and the four of the expected-red control. Each is ONE rolling
+issue: reused while the condition lasts, and (where the table says so) closed
+by the workflow when it ends.
+
+| Title | Opened by | Labels | Closed by |
+|---|---|---|---|
+| **main-post-merge: a commit on main failed its post-merge run** | `main-watch.yaml` | `bug`, `ci` | itself, when no commit on it is failing |
+| **CI: workflow runs stuck before they started** | `stuck-runs.yaml` | `bug`, `ci` | itself, when nothing is stuck |
+| **publish-verify: the expected-red control …** (four titles) | `publish-verify.yaml` | `bug`, `ci` | itself, by the next run whose control goes red |
+| **publish: artifacts missing for a commit on main** | `publish-verify.yaml` | `bug`, `ci` | itself, by a green run for `main`'s head or a green sweep |
+| **Nightly e2e failing** | the `report-failure` job of `e2e.yaml` | `bug`, `ci` | a person |
+| **CI: third-party image pins are behind their tags** | `third-party-images.yaml` | `enhancement`, `ci` | itself, when every pin is current |
+
+Three rules hold for the issues of `stuck-runs.yaml`, `publish-verify.yaml`
+and the `report-failure` job, which share `scripts/rolling-issue-lib.sh`. The
+other two differ, as said after them.
+
+- **Only the workflow's own issue is its rolling issue.** It is the one opened
+  by `github-actions[bot]` under exactly the title, and only what that account
+  wrote on it is read back (the hidden markers that hold a set of runs, or the
+  uncancellable runs). The repository is public: an issue you open under one
+  of these titles is yours. No workflow comments on it or closes it, and it
+  does not stop the workflow opening its own. A marker pasted into a comment
+  does nothing.
+- **It is found by listing, not by search.** The search index lags a create by
+  seconds, which is how two failures close together opened two issues. If two
+  runs do open one in the same moment, the newer is closed as a duplicate and
+  its report becomes a comment on the older.
+- **It is opened with a kind and an area label.** If a label no longer exists
+  the issue is still filed, without it, and the run that filed it **fails**
+  with `was opened without the label(s) …`: create the label again (`gh label
+  create ci`), or change the script that names it.
+
+The two that do not use the library:
+
+- **The post-merge watcher** (`scripts/main-post-merge-watch.sh`) follows the
+  first two rules with its own code. When a label is gone it files the issue
+  without labels and **warns**; its run does not fail.
+- **The pin report** (`scripts/third-party-images-report.sh`) takes only an
+  issue `github-actions` opened, but finds it by **search**, so two runs close
+  together can still open two. When a label is gone its create fails, **no
+  issue is filed**, and the run fails: create the label, then run it again
+  (`gh workflow run third-party-images.yaml -f dry_run=false`).
+
 ### Stuck workflow runs
 
 `publish.yaml`, `proxy-release.yml` and `pages.yaml` serialise on a concurrency
@@ -765,9 +831,11 @@ not in progress"). Nothing in this repository can clear a run like that (#1301).
 When a cancel and the force-cancel after it both return 409, the watchdog
 reports the run once as **uncancellable — needs GitHub support**. It records the
 run ID in a hidden `<!-- stuck-runs-uncancellable: … -->` marker on the issue
-and stops counting the run as stuck. Each check reads the marker back from the
-newest issue with that title, even a closed one, so the issue can close and new
-stuck runs are still reported. The ID drops out of the marker once GitHub stops
+and stops counting the run as stuck. Each check reads the marker back from its
+own issue with that title (the open one; with none open, the newest closed one
+that is not a folded duplicate), so the issue can close and new stuck runs are
+still reported. Only a marker the watchdog itself wrote is
+read (#1532): pasting one into a comment does not hide a run. The ID drops out of the marker once GitHub stops
 listing the run. To have such a run removed, open a GitHub support ticket.
 
 To see what the watchdog would do without it cancelling or writing anything,

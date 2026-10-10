@@ -32,6 +32,11 @@
 #     GH_REPO and RUN_URL. Comments on the open issue with that case's exact
 #     title, or opens one. No verdict on record (the control was killed before
 #     it wrote one) is filed under the old, general title.
+#     "The open issue" is the one this workflow's token opened, found by
+#     listing: an issue anyone else filed under the title is not written to
+#     (#1532; scripts/rolling-issue-lib.sh). A new issue is opened with
+#     ISSUE_LABELS (#1568); if a label is gone the issue is filed without it
+#     and the step fails, as it does when the issue cannot be filed at all.
 #   scripts/publish-verify-control-issue.sh result-file
 #     where the verdict is recorded: $CONTROL_RESULT_FILE, else
 #     $RUNNER_TEMP/publish-verify-control.result (GitHub Actions), else nothing
@@ -54,6 +59,11 @@ TITLE_UNKNOWN="publish-verify: the expected-red control did not go red"
 TITLE_GREEN="publish-verify: the expected-red control went GREEN"
 TITLE_WRONG="publish-verify: the expected-red control went red for the wrong reason"
 TITLE_INCONCLUSIVE="publish-verify: the expected-red control was inconclusive"
+# Labels the repository has; AGENTS.md asks a kind and an area of every issue.
+ISSUE_LABELS=(bug ci)
+
+# shellcheck source=scripts/rolling-issue-lib.sh
+. "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/rolling-issue-lib.sh"
 
 result_file() {
 	if [ -n "${CONTROL_RESULT_FILE:-}" ]; then
@@ -177,13 +187,19 @@ issue_title="$(title "$v")"
 issue_body="$(body "$v")"
 echo "expected-red control: ${v} -> \"${issue_title}\""
 
-# `in:title` is a word search, so match the title exactly: the other cases'
-# issues share most of their words with this one.
-num="$(gh issue list --state open --search "in:title \"${issue_title}\"" -L 20 \
-	--json number,title -q ".[] | select(.title == \"${issue_title}\") | .number" | sed -n 1p)"
-if [[ "$num" =~ ^[0-9]+$ ]]; then
-	gh issue comment "$num" --body "$issue_body"
-	echo "commented on #${num}"
-else
-	gh issue create --title "$issue_title" --body "$issue_body"
-fi
+# The workflow's own open issue with exactly this title (the other cases'
+# issues share most of its words), or a new one. The run is already red: an
+# issue that could not be filed, or was filed without a label, fails this step.
+rc=0
+rolling_issue_report "$issue_title" "$issue_body" "${ISSUE_LABELS[@]}" || rc=$?
+case "$rc" in
+0) ;;
+3)
+	echo "::error title=publish-verify::the control issue was filed without its labels (${ISSUE_LABELS[*]})" >&2
+	exit 1
+	;;
+*)
+	echo "::error title=publish-verify::the control issue could not be filed" >&2
+	exit 1
+	;;
+esac

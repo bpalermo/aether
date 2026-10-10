@@ -63,12 +63,20 @@
 #   cancel|report  id  workflow  event  branch  sha  status  age_minutes  reason  url
 #
 # `run` cancels the `cancel` lines (unless --dry-run), then keeps ONE rolling
-# issue current (the e2e.yaml `report-failure` shape: title-deduped, reused, no
-# duplicates). It comments only when the set of stuck runs changed since its
-# last comment, so a run stuck for a day costs one comment, not 48; and it
-# closes the issue once nothing is stuck. --dry-run cancels nothing and writes
-# no issue; it prints what it would do. Needs GH_TOKEN (actions: write, issues:
-# write) and GH_REPO.
+# issue current (reused, no duplicates). It comments only when the set of stuck
+# runs changed since its last comment, so a run stuck for a day costs one
+# comment, not 48; and it closes the issue once nothing is stuck. --dry-run
+# cancels nothing and writes no issue; it prints what it would do. Needs
+# GH_TOKEN (actions: write, issues: write) and GH_REPO.
+#
+# WHOSE ISSUE (#1532, #1568). The rolling issue is the one the workflow token
+# opened under the title, found by listing and never by search, and only what
+# that account wrote on it is read back: scripts/rolling-issue-lib.sh says why.
+# It matters twice here. An issue a stranger opened under the title was
+# commented on and closed; and the memory below is a hidden marker, so a
+# comment by anyone carrying `stuck-runs-uncancellable: <id>` made the watchdog
+# stop counting that run. The issue is opened with ISSUE_LABELS; a label that
+# is gone still files the report, and then fails the run (exit 2).
 #
 # UNCANCELLABLE RUNS
 #
@@ -81,7 +89,7 @@
 # "uncancellable — needs GitHub support" and remembered in a hidden marker,
 #   <!-- stuck-runs-uncancellable: <id>,<id> -->
 # carried in every report the watchdog writes (body, comment, closing comment).
-# Each tick reads it back from the newest issue with the title, open or closed,
+# Each tick reads it back from its own issue with the title (the open one, else the newest closed),
 # and leaves those runs out of the stuck set, so the issue closes once nothing
 # else is stuck and a NEW stuck run is reported as usual. A remembered id is
 # carried only while GitHub still lists the run as stuck. Any other cancel
@@ -99,11 +107,16 @@ set -euo pipefail
 THRESHOLD="${STUCK_THRESHOLD_MINUTES:-60}"
 JQ="${JQ:-jq}"
 ISSUE_TITLE="CI: workflow runs stuck before they started"
+# Labels the repository has; AGENTS.md asks a kind and an area of every issue.
+ISSUE_LABELS=(bug ci)
 MARKER_PREFIX="<!-- stuck-runs:"
 # Not a prefix of MARKER_PREFIX ("-" after "stuck-runs", not ":"), so the
 # same-set check never mistakes one for the other.
 UNCANCELLABLE_PREFIX="<!-- stuck-runs-uncancellable:"
 UNCANCELLABLE_OUTCOME="uncancellable — needs GitHub support"
+
+# shellcheck source=scripts/rolling-issue-lib.sh
+. "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/rolling-issue-lib.sh"
 
 SCRATCH="$(mktemp -d)"
 trap 'rm -rf "$SCRATCH"' EXIT
@@ -309,17 +322,16 @@ render_report() {
 }
 
 # The runs remembered as uncancellable: every id in an UNCANCELLABLE_PREFIX
-# marker on the newest issue with the report's title, open or closed (a closed
-# one still carries its closing comment's marker). One id per line. Returns
-# non-zero when the issue cannot be read.
+# marker on the issue that holds the watchdog's record under the report's
+# title: its open one, and with none open its newest closed one (which still
+# carries its closing comment's marker), never a duplicate that was folded into
+# another (rolling_issue_record). Only what the watchdog itself wrote there is
+# read. One id per line. Returns non-zero when the issue cannot be read.
 read_uncancellable() {
 	local num
-	num="$(gh issue list --state all --limit 100 --search "in:title \"${ISSUE_TITLE}\"" \
-		--json number,title --jq "[.[] | select(.title == \"${ISSUE_TITLE}\")] | max_by(.number) | .number // empty")" ||
-		return 1
+	num="$(rolling_issue_record "$ISSUE_TITLE")" || return 1
 	[ -n "$num" ] || return 0
-	gh issue view "$num" --json body,comments --jq '[.body, .comments[].body] | .[]' >"$SCRATCH/issue.txt" ||
-		return 1
+	rolling_issue_text "$num" >"$SCRATCH/issue.txt" || return 1
 	# grep -o reads all of its input (never the early-exit `| grep -q` shape), and
 	# finding no marker is not an error.
 	{ grep -oE -- "${UNCANCELLABLE_PREFIX} [0-9,]+ -->" "$SCRATCH/issue.txt" || true; } |
@@ -449,9 +461,13 @@ cmd_run() {
 		return 0
 	fi
 
-	# Exact-title match (the search is fuzzy, the select is not).
-	num="$(gh issue list --state open --limit 100 --search "in:title \"${ISSUE_TITLE}\"" \
-		--json number,title --jq "[.[] | select(.title == \"${ISSUE_TITLE}\")] | .[0].number // empty")"
+	# The watchdog's own open issue with exactly the title (the oldest, should
+	# there be two): never one somebody else opened under it.
+	local numbers
+	numbers="$(rolling_issue_list open "$ISSUE_TITLE")" || die "could not list the open issues"
+	num="$(sed -n 1p <<<"$numbers")"
+	# A duplicate whose close failed when two ticks opened one at once.
+	rolling_issue_close_extras "$numbers"
 	if [ "$n" -eq 0 ]; then
 		if [ -n "$num" ]; then
 			local closing="Nothing is stuck any more (threshold ${THRESHOLD}m). Closing; the next stuck run opens a new issue. ${RUN_URL:-}"
@@ -459,27 +475,33 @@ cmd_run() {
 				# The closed issue is where the next tick reads the memory from.
 				closing="${closing}"$'\n\n'"Still listed by GitHub but not counted (${UNCANCELLABLE_OUTCOME}): ${remember//,/, }"$'\n\n'"${uncancellable_marker}"
 			fi
-			gh issue comment "$num" --body "$closing"
-			gh issue close "$num"
+			rolling_issue_comment "$num" "$closing" || die "could not comment on #${num}"
+			rolling_issue_close "$num" completed || die "could not close #${num}"
 			echo "closed #${num}"
 		fi
 		return 0
 	fi
 	if [ -z "$num" ]; then
-		gh issue create --title "$ISSUE_TITLE" --body-file "$tmp/body.md"
+		local rc=0
+		num="$(rolling_issue_create "$ISSUE_TITLE" "$(cat "$tmp/body.md")" "${ISSUE_LABELS[@]}")" || rc=$?
+		[ "$rc" -ne 1 ] || die "could not open the issue"
+		echo "reported on #${num}"
+		# The report is filed; an issue without its labels is not a clean run.
+		[ "$rc" -eq 0 ] || die "#${num} was opened without its labels (${ISSUE_LABELS[*]})"
 		return 0
 	fi
 	# Same set of stuck runs as the last report: say nothing new — unless a run
 	# just turned out uncancellable, which is reported (once) regardless.
+	# The last set the watchdog itself wrote there (rolling_issue_text prints
+	# nothing anyone else wrote).
 	local last
-	last="$(gh issue view "$num" --json body,comments \
-		--jq '[.body, .comments[].body] | map(select(contains("'"${MARKER_PREFIX}"'"))) | last // ""' |
-		grep -oF -- "$marker" || true)"
-	if [ -n "$last" ] && [ ! -s "$tmp/new-uncancellable" ]; then
+	rolling_issue_text "$num" >"$tmp/issue.txt" || die "could not read #${num}"
+	last="$({ grep -oE -- "${MARKER_PREFIX} [0-9a-z,]+ -->" "$tmp/issue.txt" || true; } | sed -n '$p')"
+	if [ "$last" = "$marker" ] && [ ! -s "$tmp/new-uncancellable" ]; then
 		echo "#${num} already reports this set of stuck runs"
 		return 0
 	fi
-	gh issue comment "$num" --body-file "$tmp/body.md"
+	rolling_issue_comment "$num" "$(cat "$tmp/body.md")" || die "could not comment on #${num}"
 	echo "commented on #${num}"
 }
 
