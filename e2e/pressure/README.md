@@ -37,9 +37,27 @@ lacks one aborts before it asks the cluster anything, naming each missing variab
 | `COLLECTOR_OTLP_ENDPOINT` | The OTLP gRPC endpoint the Job floods. | `<COLLECTOR_DEPLOY>.<COLLECTOR_NS>.svc.cluster.local:4317` |
 | `PROM_SVC` | Name of the Prometheus Service (port 80). | `prometheus-server` |
 | `AGENT_NS`, `AGENT_SELECTOR`, `AGENT_CONTAINER` | The node agent, as the `aether` chart installs it. | `aether-system`, `app.kubernetes.io/name=aether-agent`, `agent` |
-| `JOB_NS`, `JOB_NAME`, `--job-manifest` | The pressure Job. The shipped manifest takes its namespace and name from the two variables. A manifest of your own must be one YAML document, that same Job, written as `apiVersion: batch/v1`, `kind: Job`, and under `metadata:` the lines `  name: <JOB_NAME>` and `  namespace: <JOB_NS>` (two spaces, unquoted): a second document, with or without a kind, or anything else is refused before anything is applied. Its spec must carry a positive `  activeDeadlineSeconds:`, because that is the stop the cleanup's messages rely on when a delete cannot be confirmed. The check reads lines, because `kubectl --dry-run=client` asks the API server. | `aether-test`, `aether-collector-pressure`, `collector-pressure-job.yaml` |
+| `JOB_NS`, `JOB_NAME`, `--job-manifest` | The pressure Job. The shipped manifest takes its namespace and name from the two variables. A manifest of your own must have the one shape `run.sh` accepts (an allow-list, see below); anything else is refused before anything is applied. | `aether-test`, `aether-collector-pressure`, `collector-pressure-job.yaml` |
 | `MIN_POLL_OK_PCT` | The share of a wait loop's polls that must have got an answer before its deadline may be read as a FAIL. A whole number from 0 to 100. | `50` |
 | `SOAK_POD_SELECTOR` | See [The soak guard](#the-soak-guard-what-it-can-and-cannot-know). | unset |
+
+**The shape of a `--job-manifest`.** The Job that is applied must be the Job that is watched
+and deleted, and `kubectl apply` creates the objects of a stream in order, so `run.sh` accepts
+one shape and refuses everything else (`manifest_defines_job`):
+
+- one YAML document in block style: no second document behind `---` or `...`, no JSON, no
+  flow-style `{...}` at the top, no tags, directives or anchors there, no tab, carriage return
+  or byte-order mark;
+- top-level keys exactly `apiVersion: batch/v1`, `kind: Job`, `metadata:` and `spec:`, each
+  once, in any order;
+- under `metadata:`, at two spaces, the lines `  name: <JOB_NAME>` and `  namespace: <JOB_NS>`
+  (unquoted), once each, no `generateName`; labels and annotations are free;
+- under `spec:`, one `  activeDeadlineSeconds: <positive integer>`: it is the stop that works
+  when a delete cannot be confirmed.
+
+It reads lines and does not parse YAML: `kubectl --dry-run=client` asks the API server
+(measured with kubectl 1.35), and the script requires no YAML tool. A valid Job written
+another way is refused, which is the safe side.
 
 The measured numbers further down (a 2Gi collector, two replicas, five nodes) are those of the
 cluster the runs of 2026-09-05 were made on. They are a worked example, not a requirement:

@@ -782,7 +782,7 @@ call apply-own-manifest "$APPLY" JOB_MANIFEST="$OWN"
 want apply-own-manifest 0 'JOB_APPLIED=1'
 
 call apply-mismatch "$APPLY" JOB_MANIFEST="$OWN" JOB_NS=other-ns
-want apply-mismatch 2 'does not define job other-ns/aether-collector-pressure'
+want apply-mismatch 2 "'  namespace: other-ns' under metadata"
 want apply-mismatch 2 'JOB_APPLIED=0'
 if grep -q ' apply ' "$FAKE/calls"; then
 	fail "apply-mismatch: applied a manifest for another Job: $(cat "$FAKE/calls")"
@@ -859,6 +859,127 @@ refused apply-no-deadline "$NODEADLINE"
 ZERODEADLINE="$TMP/zero-deadline.yaml"
 printf 'apiVersion: batch/v1\nkind: Job\n%sspec:\n  activeDeadlineSeconds: 0\n' "$GOODMETA" >"$ZERODEADLINE"
 refused apply-zero-deadline "$ZERODEADLINE"
+
+# The check is an allow-list: one document whose top-level keys are exactly
+# apiVersion, kind, metadata and spec, in block style. Each form below is one
+# way a YAML stream could show kubectl an object the line checks do not see.
+HEAD='apiVersion: batch/v1
+kind: Job
+'
+SPEC='spec:
+  activeDeadlineSeconds: 600
+'
+m() { printf '%s' "$2" >"$TMP/$1.yaml"; }
+# `...` ends a document as `---` starts one: a Job by another name with its
+# metadata in flow style, then the expected metadata in a second document.
+m dots "${HEAD}metadata: {name: some-other-flood, namespace: elsewhere}
+${SPEC}...
+${GOODMETA}"
+m dots-then-doc "${HEAD}${GOODMETA}${SPEC}...
+${HEAD}metadata:
+  name: some-other-flood
+${SPEC}"
+m flow-metadata "${HEAD}metadata: {name: aether-collector-pressure, namespace: aether-test}
+${SPEC}"
+m no-namespace "${HEAD}metadata:
+  name: aether-collector-pressure
+${SPEC}"
+m no-name "${HEAD}metadata:
+  namespace: aether-test
+${SPEC}"
+m generate-name "${HEAD}${GOODMETA}  generateName: flood-
+${SPEC}"
+m name-twice "${HEAD}${GOODMETA}  name: some-other-flood
+${SPEC}"
+m quoted-name-key "${HEAD}${GOODMETA}  \"name\": some-other-flood
+${SPEC}"
+m merge-key "${HEAD}${GOODMETA}  <<: {name: some-other-flood}
+${SPEC}"
+m metadata-twice "${HEAD}${GOODMETA}${SPEC}metadata:
+  name: some-other-flood
+"
+m metadata-anchor "${HEAD}metadata: &m
+  name: aether-collector-pressure
+  namespace: aether-test
+${SPEC}"
+m marker-content "${HEAD}${GOODMETA}${SPEC}--- {apiVersion: batch/v1, kind: Job, metadata: {name: some-other-flood}}
+"
+m marker-comment-doc "${HEAD}${GOODMETA}${SPEC}--- # the next one
+${HEAD}"
+m directive "%YAML 1.2
+---
+${HEAD}${GOODMETA}${SPEC}"
+m tag "--- !!map
+${HEAD}${GOODMETA}${SPEC}"
+m list-kind "apiVersion: v1
+kind: List
+items:
+- ${HEAD}"
+m extra-top-key "${HEAD}${GOODMETA}${SPEC}status: {}
+"
+m no-spec "${HEAD}${GOODMETA}"
+m json '{"apiVersion":"batch/v1","kind":"Job","metadata":{"name":"aether-collector-pressure","namespace":"aether-test"},"spec":{"activeDeadlineSeconds":600}}
+'
+m json-after "${HEAD}${GOODMETA}${SPEC}{\"kind\":\"Job\"}
+"
+m tab "${HEAD}${GOODMETA}${SPEC}  template:	{}
+"
+m crlf "$(printf '%s' "${HEAD}${GOODMETA}${SPEC}" | sed 's/$/\r/')
+"
+m bom "$(printf '\357\273\277')${HEAD}${GOODMETA}${SPEC}"
+m deadline-in-metadata "${HEAD}${GOODMETA}  activeDeadlineSeconds: 600
+spec:
+  parallelism: 1
+"
+m indented-first "  ${HEAD}${GOODMETA}${SPEC}"
+m kind-indented "${HEAD}${GOODMETA}  kind: other
+${SPEC}  kind: Job
+"
+m marker-then-indented "${HEAD}${GOODMETA}${SPEC}---
+  foo: bar
+"
+m spec-twice "${HEAD}${GOODMETA}${SPEC}spec:
+  parallelism: 9
+"
+m cr-in-spec "${HEAD}${GOODMETA}${SPEC}  parallelism: 1$(printf '\r')
+"
+m no-kind "apiVersion: batch/v1
+${GOODMETA}${SPEC}"
+m no-apiversion "kind: Job
+${GOODMETA}${SPEC}"
+for f in marker-then-indented spec-twice cr-in-spec no-kind no-apiversion \
+	dots dots-then-doc flow-metadata no-namespace no-name generate-name name-twice \
+	quoted-name-key merge-key metadata-twice metadata-anchor marker-content marker-comment-doc \
+	directive tag list-kind extra-top-key no-spec json json-after tab crlf bom \
+	deadline-in-metadata indented-first; do
+	refused "shape-$f" "$TMP/$f.yaml"
+done
+# What is accepted: the four keys in any order, comments, a leading `---`, a
+# trailing marker with nothing after it, other metadata and spec keys.
+m accepted "# a comment
+---
+spec:
+  parallelism: 3
+  activeDeadlineSeconds: 600
+  template:
+    metadata:
+      name: a-pod-template-name
+      namespace: ignored
+metadata:
+  labels:
+    name: a-label-called-name
+  name: aether-collector-pressure
+  namespace: aether-test
+  # a comment
+kind: Job
+apiVersion: batch/v1
+...
+# trailing
+"
+call shape-accepted "$APPLY" JOB_MANIFEST="$TMP/accepted.yaml"
+want shape-accepted 0 'JOB_APPLIED=1'
+call shape-kind-indented "$APPLY" JOB_MANIFEST="$TMP/kind-indented.yaml"
+want shape-kind-indented 0 'JOB_APPLIED=1'
 
 NOTJOB="$TMP/not-a-job.yaml"
 printf 'apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: aether-collector-pressure\n  namespace: aether-test\n' >"$NOTJOB"

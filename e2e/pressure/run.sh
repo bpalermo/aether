@@ -845,43 +845,82 @@ track_memory() {
 	die "collector ${reason} — and the deletion of the job could NOT be confirmed (kubectl's error is above): the flood may still be running. The cleanup trap tries again; activeDeadlineSeconds ends it regardless. Also: ${agent}."
 }
 
-# manifest_defines_job <rendered manifest>: status 0 when the manifest is one
-# document, a batch/v1 Job, whose metadata reads `  name: ${JOB_NAME}` and
-# `  namespace: ${JOB_NS}` (#1600).
+# manifest_defines_job <rendered manifest>: status 0 when the manifest is the
+# Job this run watches and deletes, and nothing else (#1600).
 #
-# Line-based on purpose. The structural way is `kubectl create
-# --dry-run=client -o json`, and it is not client-only: kubectl 1.35 asks the
-# API server for its OpenAPI document, and for its API group list even with
-# --validate=false. So the stream is cut into documents first:
-#   - exactly one document that is not empty (blank lines and comments do not
-#     make one). A second document, with or without a kind, is refused:
-#     `kubectl apply` creates objects in order, so a Job by another name ahead
-#     of a document that fails would be created, and the cleanup trap deletes
-#     only the expected name;
-#   - in that document, exactly one top-level `kind:` and one `apiVersion:`,
-#     and exactly one `name:` and one `namespace:` at the depth of metadata's
-#     keys. A Job has no other mapping at the top that holds them;
-#   - a positive `activeDeadlineSeconds` at the depth of spec's keys. It is
-#     the stop that needs neither this script nor the API server to be
-#     reachable from it, and the messages of a delete that could not be
+# An ALLOW-LIST of one shape, not a list of forms to refuse. YAML has many ways
+# to show kubectl an object that a line check does not see (a second document
+# behind `---` or `...`, flow-style `metadata: {...}`, JSON, a List, tags,
+# directives, anchors and merge keys, a repeated key), and kubectl applies a
+# stream in order: a Job by another name ahead of anything that fails is
+# created, and the cleanup trap deletes only the expected name. So every line
+# that is not blank or a comment must be one of:
+#
+#   - a document marker, `---` or `...`, alone on its line (a comment may
+#     follow). After the first line of content a marker ends the manifest: no
+#     content may follow it;
+#   - one of four top-level lines, each exactly once, in any order:
+#     `apiVersion: batch/v1`, `kind: Job`, `metadata:`, `spec:`. Nothing else
+#     may start in the first column;
+#   - under `metadata:`, at two spaces, plain `key:` lines, among them exactly
+#     one `  name: ${JOB_NAME}` and one `  namespace: ${JOB_NS}`, no other
+#     `name` or `namespace`, and no `generateName`. Deeper lines (labels,
+#     annotations) are not looked at;
+#   - under `spec:`, anything indented, with exactly one
+#     `  activeDeadlineSeconds: <positive integer>` at two spaces. That
+#     deadline is the stop that needs neither this script nor the API server
+#     to be reachable from it, and the messages of a delete that could not be
 #     confirmed rely on it.
+#
+# A tab, a carriage return or a byte-order mark anywhere refuses the manifest.
+#
+# Why lines and not a parser: the structural way is `kubectl create
+# --dry-run=client -o json`, and it is not client-only. kubectl 1.35 asks the
+# API server for its OpenAPI document, and for its API group list even with
+# --validate=false.
 manifest_defines_job() {
-	local m=$1 docs
-	docs=$(awk '
-		/^---([[:space:]]|$)/ { if (seen) n++; seen = 0; next }
+	case "$1" in
+	*$'\t'* | *$'\r'* | $'\xef\xbb\xbf'*) return 1 ;;
+	esac
+	WANT_NAME="  name: ${JOB_NAME}" WANT_NS="  namespace: ${JOB_NS}" awk '
+		function refuse() { ok = 0; exit }
+		BEGIN { ok = 1 }
 		/^[[:space:]]*(#.*)?$/ { next }
-		{ seen = 1 }
-		END { if (seen) n++; print n + 0 }' <<<"$m")
-	[ "$docs" = 1 ] || return 1
-	[ "$(grep -c '^kind:' <<<"$m")" = 1 ] || return 1
-	[ "$(grep -c '^apiVersion:' <<<"$m")" = 1 ] || return 1
-	[ "$(grep -c '^  name:' <<<"$m")" = 1 ] || return 1
-	[ "$(grep -c '^  namespace:' <<<"$m")" = 1 ] || return 1
-	grep -qxE 'kind: Job[[:space:]]*' <<<"$m" || return 1
-	grep -qxE 'apiVersion: batch/v1[[:space:]]*' <<<"$m" || return 1
-	grep -qxF "  name: ${JOB_NAME}" <<<"$m" || return 1
-	grep -qxF "  namespace: ${JOB_NS}" <<<"$m" || return 1
-	grep -qxE '  activeDeadlineSeconds: [1-9][0-9]*[[:space:]]*' <<<"$m" || return 1
+		/^(---|\.\.\.)[[:space:]]*(#.*)?$/ { if (content) ended = 1; next }
+		ended { refuse() }
+		{ content = 1 }
+		/^[^ ]/ {
+			sub(/[[:space:]]+$/, "")
+			if ($0 == "apiVersion: batch/v1") section = "apiVersion"
+			else if ($0 == "kind: Job") section = "kind"
+			else if ($0 == "metadata:") section = "metadata"
+			else if ($0 == "spec:") section = "spec"
+			else refuse()
+			if (seen[section]++) refuse()
+			next
+		}
+		section == "metadata" {
+			if ($0 ~ /^ [^ ]/) refuse()
+			if ($0 ~ /^  [^ ]/) {
+				if ($0 !~ /^  [A-Za-z][A-Za-z0-9]*:( |$)/) refuse()
+				if ($0 == ENVIRON["WANT_NAME"]) name++
+				else if ($0 == ENVIRON["WANT_NS"]) namespace++
+				else if ($0 ~ /^  (name|namespace|generateName):/) refuse()
+			}
+			next
+		}
+		section == "spec" {
+			if ($0 ~ /^  activeDeadlineSeconds:/) {
+				if ($0 !~ /^  activeDeadlineSeconds: [1-9][0-9]*[[:space:]]*$/) refuse()
+				deadline++
+			}
+			next
+		}
+		{ refuse() }
+		END {
+			exit !(ok && seen["apiVersion"] == 1 && seen["kind"] == 1 && seen["metadata"] == 1 &&
+				seen["spec"] == 1 && name == 1 && namespace == 1 && deadline == 1)
+		}' <<<"$1"
 }
 
 # The manifest on stdout, with the tokens of the shipped manifest filled in:
@@ -901,7 +940,7 @@ apply_job() {
 	# The Job that is applied must be the Job that is watched and deleted
 	# (#1600): anything else is refused before anything is applied.
 	manifest_defines_job "$rendered" ||
-		die "${JOB_MANIFEST} does not define job ${JOB_NS}/${JOB_NAME} and nothing else: it must be one document, 'apiVersion: batch/v1' and 'kind: Job', whose metadata reads '  name: ${JOB_NAME}' and '  namespace: ${JOB_NS}' (or carries the __JOB_NAME__ and __JOB_NS__ tokens), and whose spec has a positive '  activeDeadlineSeconds:'. Nothing was applied."
+		die "${JOB_MANIFEST} is not the one shape this run applies: one block-style YAML document whose top-level keys are exactly 'apiVersion: batch/v1', 'kind: Job', 'metadata:' and 'spec:', with '  name: ${JOB_NAME}' and '  namespace: ${JOB_NS}' under metadata (or the __JOB_NAME__ and __JOB_NS__ tokens) and one positive '  activeDeadlineSeconds:' under spec. Nothing was applied. See manifest_defines_job in this script."
 	# Set before the apply: one that failed may still have created the Job, and
 	# the cleanup trap deletes it only when this says so.
 	JOB_APPLIED=1
