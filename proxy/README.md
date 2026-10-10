@@ -47,8 +47,9 @@ bazel test //:image_test
 > # local_repository at bazel/build_config, not Envoy's default_envoy_build_config.
 > bazel mod show_repo --base_module=envoy @envoy_build_config
 >
-> # Selected versions match the registry pin, with no MVS surprises.
-> bazel mod explain @quiche @protobuf @abseil-cpp
+> # Selected versions match the registry pin, with no MVS surprises. By module
+> # name: quiche is not a direct dependency any more, so `@quiche` does not resolve.
+> bazel mod explain quiche protobuf abseil-cpp
 > ```
 >
 > Everything from `bazel build --nobuild //:envoy` onward is validated by
@@ -112,35 +113,31 @@ symbol upload is keyed by (#653).
   module, so a patch needs a `single_version_override(patches = [...])` in
   `MODULE.bazel` (the `bazel/patches/` directory). Prefer upstreaming; a carried
   patch is an upstream PR that has not reached a pin yet, and it goes away with
-  the next pin bump that contains it. Carried today: envoyproxy/envoy#47743
-  (UDP hot-restart forwarding keyed by listener address + network namespace,
-  aether#967; test cases, docs and changelog dropped, `test/mocks/network/mocks.h` kept for our test build)
-  and envoyproxy/envoy#47740 (QUIC client hostname check deferred to explicit SAN
-  matchers, aether#957; behind
-  `envoy.reloadable_features.quic_hostname_check_deferred_to_explicit_san_match`),
-  and aether#1022 (`execInNetworkNamespace` restores the calling THREAD's netns via
-  `/proc/thread-self/ns/net`, not the main thread's `/proc/self/ns/net`; not yet
-  proposed upstream), and aether#1050 (the hot-restart main-thread deadlock:
-  parent UDP/QUIC forwarding to the child no longer blocks the parent's main
-  thread, and the child keeps servicing forwarded packets while it waits, with a
-  bound, for the parent's replies; not yet proposed upstream), and aether#1054 (the
-  hot-restart child keeps its inherited UDP listeners paused until the parent has
-  exited, and idle HTTP/3 connections drain themselves inside the drain window;
-  not yet proposed upstream), and a second aether#1054 patch (a draining hot-restart
-  parent answers packets for its own recently closed QUIC connections from its
-  time-wait list instead of forwarding them to the child, which stateless-reset
-  them; not yet proposed upstream), and a third aether#1054 patch (a paused
-  hot-restart child UDP listener no longer reads the parent's socket when the
-  QUIC listener injects a read to process forwarded handshakes; an upstream bug,
-  to be proposed upstream), and aether#1074 (HTTP/3 pools keep the per-cluster
-  persistent QUIC info alive after a CDS removal, instead of their draining
-  connections reading its freed clock; an upstream bug, proposed as
-  envoyproxy/envoy#47893), and aether#1126 (a hot-restart child with fewer workers
-  than its parent no longer indexes past its worker table when the parent forwards a
-  UDP/QUIC datagram tagged with one of its extra workers: the index is mapped onto
-  index % concurrency; an upstream bug in the envoyproxy/envoy#47743 forwarding, not
-  yet reported upstream). A carried patch's own Envoy tests run from
+  the next pin bump that contains it. A carried patch's own Envoy tests run from
   `//bazel/patches:carried_patch_tests`, since `//...` does not reach `@envoy` tests.
+
+### Carried today
+
+Applied in this order (`single_version_override` in `MODULE.bazel`, which also
+says what each one changes in detail). `scripts/bump-envoy-pin.sh` reports, for a
+new pin, which of them the snapshot already contains.
+
+| Patch (`bazel/patches/envoy-…`) | What it fixes | Upstream |
+|---|---|---|
+| `47740-quic-hostname-check-explicit-san` | The QUIC client defers its hostname check to explicit SAN matchers (aether#957); behind `envoy.reloadable_features.quic_hostname_check_deferred_to_explicit_san_match`. | envoyproxy/envoy#47740, open |
+| `aether1050-hotrestart-nonblocking-forward` | The hot-restart main-thread deadlock (aether#1050): parent UDP/QUIC forwarding to the child no longer blocks the parent's main thread, and the child keeps servicing forwarded packets while it waits, with a bound, for the parent's replies. Counts what it forwards in `server.hot_restart_udp_forwarding_{datagrams,retries,dropped}`. | envoyproxy/envoy#47834, open (the patch is that pull request's diff) |
+| `aether1054-hotrestart-terminate-wait-h3-goaway` | The hot-restart child keeps its inherited UDP listeners paused until the parent has exited, and idle HTTP/3 connections drain themselves inside the drain window (aether#1054); the second half is behind `envoy.reloadable_features.http3_drain_idle_connections` and sits beside upstream's own proactive drain (envoyproxy/envoy#47991), which arms nothing at the chart's 10s drain time. | not proposed |
+| `aether1054b-quic-time-wait-before-forward` | A draining hot-restart parent answers packets for its own recently closed QUIC connections from its time-wait list instead of forwarding them to the child, which stateless-reset them (aether#1054); behind `envoy.reloadable_features.quic_hot_restart_time_wait_before_forward`. | not proposed |
+| `aether1054c-paused-udp-listener-no-read` | A paused hot-restart child UDP listener no longer reads the parent's socket when the QUIC listener injects a read to process forwarded handshakes (aether#1054). | envoyproxy/envoy#47868, open |
+| `aether1074-quic-persistent-info-lifetime` | HTTP/3 pools keep the per-cluster persistent QUIC info alive after a CDS removal, instead of their draining connections reading its freed clock (aether#1074). | envoyproxy/envoy#47893, open |
+| `aether1126-forwarded-udp-worker-index` | A hot-restart child with fewer workers than its parent no longer indexes past its worker table when the parent forwards a UDP/QUIC datagram tagged with one of its extra workers: the index is mapped onto `index % concurrency` (aether#1126). | not reported |
+
+No longer carried, because the pinned snapshot contains them (aether#980):
+envoyproxy/envoy#47743 (UDP hot-restart forwarding keyed by listener address +
+network namespace, aether#967) and envoyproxy/envoy#47776
+(`execInNetworkNamespace` restores the calling thread's netns via
+`/proc/thread-self/ns/net`, aether#1022; the carried patch also fell back to
+`/proc/self/task/<tid>/ns/net` on kernels older than 3.17, upstream does not).
 
 ## Which Envoy is this? (`envoy_server_version`, and the image labels)
 
@@ -193,9 +190,10 @@ envoy_server_version = 3121738 = 0x2FA24A -> aether commit 2fa24a8
 ```
 
 That is a genuinely useful fact — it tells you which aether tree cut the proxy —
-but it is only 24 bits of it, and it is *not* the Envoy revision. `13144f`, the
-first six digits of the pinned `1.40.0-dev.20260926.726d7ac.envoy`, is what you
-would be looking for and it is nowhere in the process.
+but it is only 24 bits of it, and it is *not* the Envoy revision. `189f19`, the
+first six digits of the Envoy commit in the pinned
+`1.40.0-dev.20261009.189f198.envoy`, is what you would be looking for and it is
+nowhere in the process.
 
 ### Where the Envoy revision actually is: the image labels
 
@@ -207,8 +205,8 @@ config) and **annotations** (manifest):
 |---|---|
 | `org.opencontainers.image.source` | `https://github.com/bpalermo/aether` — **overrides** the `GoogleContainerTools/distroless` value inherited from the base, which used to be the image's only annotation |
 | `org.opencontainers.image.revision` | the aether commit; the same sha the gauge reports the first six digits of |
-| `dev.aethermesh.envoy.module-version` | e.g. `1.40.0-dev.20260926.726d7ac.envoy` |
-| `dev.aethermesh.envoy.revision` | e.g. `726d7ac` — the upstream Envoy commit |
+| `dev.aethermesh.envoy.module-version` | e.g. `1.40.0-dev.20261009.189f198.envoy` |
+| `dev.aethermesh.envoy.revision` | e.g. `189f198` — the upstream Envoy commit |
 | `dev.aethermesh.envoy.bazel-registry` | the `envoyproxy/bazel-registry` commit; the other half of the pin (see "Envoy version bumps") |
 
 To read them off a published image, without pulling it:
@@ -296,17 +294,19 @@ Then, in one commit:
 1. `MODULE.bazel`: set `envoy` and `envoy_api` to that snapshot version.
 2. `.bazelrc`: set `--registry=https://raw.githubusercontent.com/envoyproxy/bazel-registry/<that commit>`.
 3. Update every other `.envoy`-suffixed `bazel_dep` in `MODULE.bazel`
-   (`quiche`, `googleurl`, `proxy-wasm-cpp-host`, `rules_rust`,
-   `toolchains_llvm`, `protobuf`) to the versions that commit carries — they
-   must match what the `envoy` module requests or MVS will fail.
+   (`proxy-wasm-cpp-host`, `rules_rust`, `toolchains_llvm`, `protobuf`) to the
+   versions that commit carries — they must match what the `envoy` module
+   requests or MVS will fail. Move the plain BCR ones the `envoy` module also
+   requests (`rules_python`, `abseil-cpp`, `rules_cc`, …) to the version it asks
+   for too, so `MODULE.bazel` states what is selected.
 4. Re-diff `.bazelrc` against the two upstream sources named at the top of that
    file (the filter-cc template and Envoy's own `.bazelrc` at the new pin).
 5. Run the local `bazel mod` checks above, then push and let CI build both
    arches.
 
 When a stable release publishes a `1.40.0.envoy` (etc.) module, move to it. As of
-2026-09-19 no such module exists — `modules/envoy/metadata.json` still lists only
-the `1.40.0-dev.20260926.726d7ac.envoy` snapshot.
+2026-10-10 no such module exists — `modules/envoy/metadata.json` lists only
+`-dev` snapshots, the newest being `1.40.0-dev.20261009.189f198.envoy`.
 
 Nothing in the root workspace needs re-pinning alongside it any more. The root
 `MODULE.bazel` used to carry `@envoy_binary_linux_*`, a stock Envoy release asset

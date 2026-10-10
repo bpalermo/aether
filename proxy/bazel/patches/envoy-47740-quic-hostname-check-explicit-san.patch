@@ -1,8 +1,8 @@
 diff --git a/source/common/quic/envoy_quic_proof_verifier.cc b/source/common/quic/envoy_quic_proof_verifier.cc
-index 95dd7f41f534b..1fd890c8cad93 100644
+index 95dd7f41f5..1fd890c8ca 100644
 --- a/source/common/quic/envoy_quic_proof_verifier.cc
 +++ b/source/common/quic/envoy_quic_proof_verifier.cc
-@@ -37,9 +37,9 @@ class QuicValidateResultCallback : public Ssl::ValidateResultCallback {
+@@ -37,9 +37,9 @@ public:
    QuicValidateResultCallback(Event::Dispatcher& dispatcher,
                               std::unique_ptr<quic::ProofVerifierCallback>&& quic_callback,
                               const std::string& hostname, absl::string_view leaf_cert,
@@ -14,7 +14,7 @@ index 95dd7f41f534b..1fd890c8cad93 100644
  
    Event::Dispatcher& dispatcher() override { return dispatcher_; }
  
-@@ -48,7 +48,7 @@ class QuicValidateResultCallback : public Ssl::ValidateResultCallback {
+@@ -48,7 +48,7 @@ public:
      std::string error;
      if (!succeeded) {
        error = error_details;
@@ -23,7 +23,7 @@ index 95dd7f41f534b..1fd890c8cad93 100644
        std::unique_ptr<quic::CertificateView> cert_view =
            quic::CertificateView::ParseSingleCertificate(leaf_cert_);
        succeeded = verifyLeafCertMatchesHostname(*cert_view, hostname_, &error);
-@@ -64,11 +64,24 @@ class QuicValidateResultCallback : public Ssl::ValidateResultCallback {
+@@ -64,11 +64,24 @@ private:
    const std::string hostname_;
    // Leaf cert needs to be retained in case of asynchronous validation.
    std::string leaf_cert_;
@@ -84,7 +84,7 @@ index 95dd7f41f534b..1fd890c8cad93 100644
        // info can report the validated issuer.
        *details = std::make_unique<CertVerifyResult>(true, std::move(result.validated_chain));
 diff --git a/source/common/quic/envoy_quic_proof_verifier.h b/source/common/quic/envoy_quic_proof_verifier.h
-index 506f088cebc0c..2a7e5fcea891d 100644
+index 506f088ceb..2a7e5fcea8 100644
 --- a/source/common/quic/envoy_quic_proof_verifier.h
 +++ b/source/common/quic/envoy_quic_proof_verifier.h
 @@ -3,6 +3,8 @@
@@ -124,7 +124,7 @@ index 506f088cebc0c..2a7e5fcea891d 100644
    // EnvoyQuicProofVerifierBase
    quic::QuicAsyncStatus
    VerifyCertChain(const std::string& hostname, const uint16_t port,
-@@ -75,6 +91,9 @@ class EnvoyQuicProofVerifier : public EnvoyQuicProofVerifierBase {
+@@ -75,6 +91,9 @@ private:
    // True if the verifier should accept untrusted certs (see documentation for
    // envoy::extensions::transport_sockets::tls::v3::CertificateValidationContext::ACCEPT_UNTRUSTED)
    bool accept_untrusted_;
@@ -135,7 +135,7 @@ index 506f088cebc0c..2a7e5fcea891d 100644
  
  } // namespace Quic
 diff --git a/source/common/quic/quic_client_transport_socket_factory.cc b/source/common/quic/quic_client_transport_socket_factory.cc
-index a64098617ce19..cf12754129cd9 100644
+index a64098617c..cf12754129 100644
 --- a/source/common/quic/quic_client_transport_socket_factory.cc
 +++ b/source/common/quic/quic_client_transport_socket_factory.cc
 @@ -169,15 +169,19 @@ std::shared_ptr<quic::QuicCryptoClientConfig> QuicClientTransportSocketFactory::
@@ -165,10 +165,10 @@ index a64098617ce19..cf12754129cd9 100644
  
      registerCertCompression(tls_config.crypto_config_->ssl_ctx());
 diff --git a/source/common/runtime/runtime_features.cc b/source/common/runtime/runtime_features.cc
-index 080f346dd8a5a..add618e72452f 100644
+index 24bd615943..3127a7225b 100644
 --- a/source/common/runtime/runtime_features.cc
 +++ b/source/common/runtime/runtime_features.cc
-@@ -136,6 +136,7 @@ RUNTIME_GUARD(envoy_reloadable_features_proxy_protocol_allow_duplicate_tlvs);
+@@ -147,6 +147,7 @@ RUNTIME_GUARD(envoy_reloadable_features_proxy_protocol_allow_duplicate_tlvs);
  RUNTIME_GUARD(envoy_reloadable_features_proxy_protocol_remove_too_long_tlvs);
  // TODO(panting): Default to true after ssl fix.
  FALSE_RUNTIME_GUARD(envoy_reloadable_features_quic_enable_reset_ssl_after_handshake);
@@ -177,7 +177,7 @@ index 080f346dd8a5a..add618e72452f 100644
  RUNTIME_GUARD(envoy_reloadable_features_quic_mtls_server_enabled);
  // Ignore the automated "remove this flag" issue: we should keep this for 1 year. Confirm with
 diff --git a/source/extensions/transport_sockets/tls/cert_validator/spiffe/BUILD b/source/extensions/transport_sockets/tls/cert_validator/spiffe/BUILD
-index 7472c819da657..e12c3716497de 100644
+index 7472c819da..e12c371649 100644
 --- a/source/extensions/transport_sockets/tls/cert_validator/spiffe/BUILD
 +++ b/source/extensions/transport_sockets/tls/cert_validator/spiffe/BUILD
 @@ -17,6 +17,10 @@ envoy_cc_extension(
