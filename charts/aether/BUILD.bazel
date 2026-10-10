@@ -2591,7 +2591,9 @@ GET_LIST_WATCH = "\"get\", \"list\", \"watch\""
 
 GET_LIST_WATCH_PATCH = GET_LIST_WATCH + ", \"patch\""
 
-GET_LIST_WATCH_UPDATE = GET_LIST_WATCH + ", \"update\", \"patch\""
+# What the caBundle injector asks of a webhook configuration since #1453: one
+# uncached read and one update, by name (#1456).
+GET_UPDATE = "\"get\", \"update\""
 
 GET_LIST_WATCH_WRITE = GET_LIST_WATCH + ", \"create\", \"update\", \"patch\""
 
@@ -2740,17 +2742,23 @@ helm_template_match_test(
     },
 )
 
-# With the SPIRE-served webhook the controller patches the caBundle of the
-# webhook configurations itself, so it may update both kinds (the mutating one
-# renders by default; every combination of the switches that decide it is in
-# the aether_mutating_webhook_*_test truth table below, #1411).
+# With the SPIRE-served webhook the controller writes the caBundle of the
+# webhook configurations itself, so it may read and update both kinds (the
+# mutating one renders by default; every combination of the switches that
+# decide it is in the aether_mutating_webhook_*_test truth table below, #1411).
+# `get` and `update` and nothing else (#1456): the injector reads each
+# configuration by name, uncached, and writes it back with an update
+# (controller/internal/meshconfig/cabundle.go, since #1453; its
+# TestCABundleInjectorNeedsOnlyGetAndUpdate runs it with list, watch and patch
+# refused). list and watch were cluster-wide reads of every webhook
+# configuration in the cluster.
 helm_template_match_test(
     name = "aether_controller_rbac_webhook_spire_test",
     chart = ":aether",
     document_patterns = {
         "ClusterRole/release-name-aether-controller-default": [
-            RULE % ("\"admissionregistration\\.k8s\\.io\"", "\"validatingwebhookconfigurations\"", GET_LIST_WATCH_UPDATE) +
-            RULE % ("\"admissionregistration\\.k8s\\.io\"", "\"mutatingwebhookconfigurations\"", GET_LIST_WATCH_UPDATE) + "$",
+            RULE % ("\"admissionregistration\\.k8s\\.io\"", "\"validatingwebhookconfigurations\"", GET_UPDATE) +
+            RULE % ("\"admissionregistration\\.k8s\\.io\"", "\"mutatingwebhookconfigurations\"", GET_UPDATE) + "$",
         ],
     },
     opts = [
@@ -2758,6 +2766,143 @@ helm_template_match_test(
         "controller.webhook.spire=true",
     ],
 )
+
+# --- One release per cluster (#1540) -------------------------------------------
+#
+# The node proxy's objects are named aether-proxy whatever the release is
+# called (:aether_template_test and the RBAC tests above pin them under the
+# release "release-name"), and whatever fullnameOverride says: the guard below.
+# Renaming them would delete and recreate every node's proxy pod.
+#
+# `aether.release.assertOnlyOne`, which refuses a second release, reads live
+# objects with `lookup`, and `helm template` has no cluster: NO RULE IN THIS
+# FILE CAN EXERCISE ITS FAILURE. It was run by hand against a stub API server
+# (the pull request of #1540 has the transcript). What is tested here is that a
+# render without a cluster is not refused, which is every other test.
+helm_template_match_test(
+    name = "aether_proxy_names_ignore_fullname_override_test",
+    chart = ":aether",
+    document_patterns = {
+        "DaemonSet/aether-proxy": ["\\n      serviceAccountName: aether-proxy\\n"],
+        "ServiceAccount/aether-proxy": ["\\nmetadata:\\n  name: aether-proxy\\n"],
+        "ConfigMap/aether-proxy-config": ["\\nmetadata:\\n  name: aether-proxy-config\\n"],
+        # The override does reach every other workload.
+        "DaemonSet/mesh-agent": ["\\nmetadata:\\n  name: mesh-agent\\n"],
+    },
+    opts = [
+        "--set",
+        "fullnameOverride=mesh",
+    ],
+)
+
+# --- The SPIRE-served webhook's identity registration (#1457) ------------------
+#
+# With controller.webhook.spire=true the controller serves the webhooks with
+# its SVID, which the apiserver accepts only when it carries the webhook
+# Service's DNS names. The chart registers that (a ClusterSPIFFEID) when it is
+# given the spire-controller-manager class to register it with. With
+# clusterSpiffeID.create=true (the default) and no className it rendered
+# nothing and said nothing.
+
+#
+# One helper decides all of it: `aether.controller.webhookIdentity` is "",
+# "chart", "operator" or "unregistered", and the ClusterSPIFFEID template, the
+# render failure and the WEBHOOK IDENTITY NOTE of NOTES.txt read that result
+# and nothing else. The tests below render each of the four through the
+# template and the failure.
+#
+# THE NOTE ITSELF IS IN NO TEST. The rules of //bazel/helm run `helm template`,
+# and the pinned Helm (4.2.0) has no flag that makes `helm template` print
+# NOTES.txt; only `helm install --dry-run` prints it. A test of the note needs
+# the runners to drive another subcommand, with a kubeconfig that cannot reach
+# a cluster and the fail-closed mask applied to that command's different
+# output: a new mode of those rules, not an option passed through. So what is
+# held is the decision the note reads, not that the note is still printed or
+# what it says.
+
+SPIRE_CRD_API = "spire.spiffe.io/v1alpha1/ClusterSPIFFEID"
+
+# Class given: the registration, with both DNS names of the webhook Service.
+helm_template_match_test(
+    name = "aether_controller_clusterspiffeid_test",
+    chart = ":aether",
+    document_patterns = {
+        "ClusterSPIFFEID/release-name-aether-controller-webhook": [
+            "\\nspec:\\n  className: \"spire-mgmt-spire\"\\n",
+            "\\n  dnsNameTemplates:\\n    - \"release-name-aether-controller-webhook\\.default\\.svc\"\\n    - \"release-name-aether-controller-webhook\\.default\\.svc\\.cluster\\.local\"\\n",
+        ],
+    },
+    opts = [
+        "--set",
+        "controller.webhook.spire=true",
+        "--set",
+        "controller.webhook.clusterSpiffeID.className=spire-mgmt-spire",
+        "--api-versions",
+        SPIRE_CRD_API,
+    ],
+)
+
+# No class, on a cluster that serves the ClusterSPIFFEID API: the chart was
+# asked to create the registration, could, and has nothing to create it with.
+helm_template_fail_test(
+    name = "aether_controller_clusterspiffeid_no_class_fail_test",
+    chart = ":aether",
+    expected_message = "controller.webhook.clusterSpiffeID.className is empty",
+    opts = [
+        "--set",
+        "controller.webhook.spire=true",
+        "--api-versions",
+        SPIRE_CRD_API,
+    ],
+)
+
+# "I register the controller's identity myself": create=false renders, with no
+# ClusterSPIFFEID, on the same cluster.
+helm_template_absent_test(
+    name = "aether_controller_clusterspiffeid_self_managed_test",
+    absent = ["kind: ClusterSPIFFEID"],
+    chart = ":aether",
+    control = "kind: ValidatingWebhookConfiguration",
+    opts = [
+        "--set",
+        "controller.webhook.spire=true",
+        "--set",
+        "controller.webhook.clusterSpiffeID.create=false",
+        "--api-versions",
+        SPIRE_CRD_API,
+    ],
+)
+
+# Guards: what must keep rendering. A render that is not told the cluster
+# serves the API (`helm template` with no --api-versions: every other test in
+# this file, and the "render both sides with controller.webhook.spire=true"
+# diff of docs/runbook.md) is not refused; neither is the self-signed webhook
+# on a cluster that has SPIRE's CRDs.
+[
+    helm_template_absent_test(
+        name = "aether_controller_clusterspiffeid_%s_test" % case,
+        absent = ["kind: ClusterSPIFFEID"],
+        chart = ":aether",
+        control = "kind: ValidatingWebhookConfiguration",
+        opts = opts,
+    )
+    for case, opts in [
+        (
+            "no_class_no_api",
+            [
+                "--set",
+                "controller.webhook.spire=true",
+            ],
+        ),
+        (
+            "self_signed_with_api",
+            [
+                "--api-versions",
+                SPIRE_CRD_API,
+            ],
+        ),
+    ]
+]
 
 # The registrar: the Service write is what the mesh-Service VIP generator
 # needs; MCS is off by default, so nothing multicluster is granted.
@@ -3024,8 +3169,8 @@ helm_template_absent_test(
 
 # The grant, as the ClusterRole's last two rules.
 WEBHOOK_CA_RBAC = (
-    RULE % ("\"admissionregistration\\.k8s\\.io\"", "\"validatingwebhookconfigurations\"", GET_LIST_WATCH_UPDATE) +
-    RULE % ("\"admissionregistration\\.k8s\\.io\"", "\"mutatingwebhookconfigurations\"", GET_LIST_WATCH_UPDATE) + "$"
+    RULE % ("\"admissionregistration\\.k8s\\.io\"", "\"validatingwebhookconfigurations\"", GET_UPDATE) +
+    RULE % ("\"admissionregistration\\.k8s\\.io\"", "\"mutatingwebhookconfigurations\"", GET_UPDATE) + "$"
 )
 
 # The flag, naming the configuration this release renders, as the container's

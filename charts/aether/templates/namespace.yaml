@@ -25,6 +25,11 @@
   chart for the `keep` command once.
 */ -}}
 {{- $ns := include "aether.namespace" . -}}
+{{- /* One release per cluster (#1540). Here because this template is evaluated
+       whatever is enabled, and ahead of the namespace assertions below: "this
+       is a second release" comes before any of their messages about a
+       namespace that belongs to the first. */ -}}
+{{- include "aether.release.assertOnlyOne" . -}}
 {{- include "aether.namespace.assertNoneLeftBehind" . -}}
 {{- if .Values.namespace.create -}}
 {{- /* A retry over a failed first install of an older chart gets the message
