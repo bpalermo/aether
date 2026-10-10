@@ -212,8 +212,16 @@ strategy, a metric that keeps its name and counts something else) bumps the
 file's `version`; adding an entry does not. A harness pins
 the version it was written against; the README's "Versions" table says what
 each bump changed (version 2: what `aether_agent_xds_acked_tls_clusters` counts
-and when it is absent, #1508). The bump is a review rule: nothing can
-compare the file with its previous revision in a hermetic test.
+and when it is absent, #1508). For what the file's keys say, the bump is a
+test: `external-harness.lock.yaml` beside the contract holds one line per
+promise of the current version, and
+`//test/harnesscontract:harnesscontract_test` fails when a promise left or
+changed and `version` did not (it prints the lock for the new version once it
+is bumped, and the lines to add for a new promise). On a pull request
+`scripts/check-harness-contract-bump.sh` also compares the lock with the one
+at the base, so an entry removed together with its lock lines needs the bump
+too. A change of meaning that leaves every key as it was, like version 2's,
+is not seen by either and is bumped by hand.
 [`test/harnesscontract/README.md`](../test/harnesscontract/README.md) has the
 table of what each test compares, what is kept by review alone, and how to add
 or remove an entry.

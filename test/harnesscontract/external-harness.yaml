@@ -17,13 +17,20 @@
 #   - Adding an entry, or an optional field to a log line that keeps every
 #     field it had, does not.
 #
-# No test can compare this file with its previous revision, so the bump is a
-# review rule. What the tests do enforce: every entry below is compared with
-# the code that produces the thing (`checked_by` names the Bazel test), and
-# each of those tests lists the entries it expects (a chart test lists its
-# renders and their objects, by id), so removing an entry here fails that test
-# until the check is removed too. README.md beside this file
-# says how each kind of entry is tied and what to do when a test fails.
+# The bump is a test. external-harness.lock.yaml beside this file holds one
+# line per promise made at the current `version`; a promise that leaves this
+# file or changes while `version` stays fails
+# //test/harnesscontract:harnesscontract_test, and a new promise adds a line
+# there without a bump. Prose is not covered: what an entry means beyond its
+# keys is said in `notes` and comments, and a change of meaning made only
+# there (and in the code's behaviour) is a bump no test asks for.
+#
+# Every entry below is also compared with the code that produces the thing.
+# `checked_by` names the Bazel test that does, or lists them when several do,
+# and each of those tests lists the entries it holds (a chart test lists its
+# renders, their objects and what they refer to, by id), so removing an entry
+# here fails that test until the check is removed too. README.md beside this
+# file says how each kind of entry is tied and what to do when a test fails.
 #
 # `checked_by: review-only` marks what no test in this repository can hold:
 # what a metrics pipeline or Envoy does to a name after it leaves the product,
@@ -184,15 +191,27 @@ resource_attributes:
     attribute: k8s.node.name
     components: [agent, prober]
     notes: The node the component runs on. For the prober that is the SOURCE of a probe.
-    # This test holds the link (above); the comparison with the rendered
-    # charts is made by :aether_chart_test (agent) and :prober_chart_test
-    # (prober), which list this id in their `ids`.
-    checked_by: //test/harnesscontract:harnesscontract_test
+    # harnesscontract_test holds the link (above); the comparison with the
+    # rendered charts is made by the chart test of each component's chart.
+    checked_by:
+      - //test/harnesscontract:harnesscontract_test
+      - //test/harnesscontract:aether_chart_test
+      - //test/harnesscontract:prober_chart_test
+  # The prober's own code sets this one, and the environment can still replace
+  # it: OTEL_SERVICE_NAME is an explicit override, so a chart that gave the
+  # container that variable would deploy another name while the code still
+  # said this one. (`service.name=` in OTEL_RESOURCE_ATTRIBUTES no longer
+  # renames the prober, #1562; a chart that wrote it there would only mislead.)
+  # So the prober container lists the entry in its `code_resource_attributes`
+  # (charts below), and the chart test fails when the render gives the
+  # container either.
   - id: resource.service_name.prober
     attribute: service.name
     value: aether-prober
     components: [prober]
-    checked_by: //prober/internal/prober:prober_test
+    checked_by:
+      - //prober/internal/prober:prober_test
+      - //test/harnesscontract:prober_chart_test
 
 # --- Log lines ----------------------------------------------------------------
 #
@@ -264,24 +283,45 @@ envoy_stats:
 # A name a chart passes to a component on its command line is tied to the
 # chart as well: under `charts`, a container's `args` maps the flag to the
 # entry's id, and the chart test looks for `<flag>=<this entry's value>` among
-# the rendered arguments.
+# the rendered arguments. A name a chart gives an object is tied the same way:
+# the object has `name_from: <id>` in place of a name. Either way the entry's
+# `checked_by` names the chart test beside the test that compares it with the
+# Go constant, and the contract does not load when the two disagree.
 names:
+  # No chart value moves the port a proxy listens on: it is a Go constant in
+  # the agent, the CNI plugin and the registrar. The prober chart spells it in
+  # the default of `probe.egress`, the listener the prober dials, so that
+  # default is held to the entry (chart.prober).
   - id: port.outbound_http
     value: "18081"
-    checked_by: //test/harnesscontract:harnesscontract_test
+    checked_by:
+      - //test/harnesscontract:harnesscontract_test
+      - //test/harnesscontract:prober_chart_test
+  # Go constants only: no chart passes or spells this port in what it renders
+  # for a mesh component.
   - id: port.outbound_l4
     value: "18082"
     checked_by: //test/harnesscontract:harnesscontract_test
-  # The Go default, and the default of the chart value `meshDomain`, which is
-  # what a deployed component is really given (--mesh-domain of the agent and
-  # of the mesh-DNS daemon in chart.aether, rendered with no `meshDomain` set).
+  # The Go default, and the default of the chart values a deployed component
+  # is really given it from: `meshDomain` of the aether chart (--mesh-domain of
+  # the agent and of the mesh-DNS daemon in chart.aether) and `probe.meshDomain`
+  # of the prober chart (--mesh-domain of the prober in chart.prober), each
+  # rendered with the value left alone.
   - id: mesh.default_domain
     value: aether.internal
-    checked_by: //test/harnesscontract:harnesscontract_test
-  # Pod label: "true" opts a pod into the mesh.
+    checked_by:
+      - //test/harnesscontract:harnesscontract_test
+      - //test/harnesscontract:aether_chart_test
+      - //test/harnesscontract:prober_chart_test
+  # Pod label: "true" opts a pod into the mesh. The agent, the CNI plugin and
+  # the controller read it through the Go constant; the aether chart writes it
+  # again in the selectors of the controller's pod webhooks, which are held to
+  # this entry (chart.aether.pod_webhooks).
   - id: pod.label.managed
     value: aether.io/managed
-    checked_by: //test/harnesscontract:harnesscontract_test
+    checked_by:
+      - //test/harnesscontract:harnesscontract_test
+      - //test/harnesscontract:aether_chart_test
   # Pod annotation: the comma-separated upstream services the pod calls.
   - id: pod.annotation.upstreams
     value: config.aether.io/upstreams
@@ -309,11 +349,14 @@ names:
     value: aether.io/mesh-service
     checked_by: //test/harnesscontract:harnesscontract_test
   # The CSI driver a pod's UDS volume names, and the name in a node's CSINode
-  # once the node plugin has registered. Also rendered as a CSIDriver object
-  # (charts below).
+  # once the node plugin has registered. The node plugin takes it from the Go
+  # constant; the aether chart writes it once more, as the name of the
+  # CSIDriver object, which is held to this entry (chart.aether.csidriver).
   - id: csi.driver
     value: csi.aether.io
-    checked_by: //test/harnesscontract:harnesscontract_test
+    checked_by:
+      - //test/harnesscontract:harnesscontract_test
+      - //test/harnesscontract:aether_chart_test
 
 # --- Chart objects ------------------------------------------------------------
 #
@@ -325,14 +368,26 @@ names:
 # (the documented one); the namespace is whatever the install chose, except
 # where an object says otherwise.
 #
-# For an object: `pod_labels` must all be on the pod template; `containers`
-# must all be containers of the pod (others may exist); a container's
-# `resource_attributes` are ids of entries above whose attribute its
-# OTEL_RESOURCE_ATTRIBUTES sets, and its `args` maps a flag to the id of the
-# `names` entry whose value it is run with; `rolling_update` is the
-# workload's rolling-update strategy, which decides whether a roll runs the old
-# and the new pod of a node side by side (maxSurge 1) or leaves a gap
-# (maxSurge 0).
+# For an object: `name_from` is the id of the `names` entry the object is named
+# by, in place of `name`; `pod_labels` must all be on the pod template;
+# `containers` must all be containers of the pod (others may exist); a
+# container's `resource_attributes` are ids of entries above whose attribute
+# its OTEL_RESOURCE_ATTRIBUTES sets, its `code_resource_attributes` ids of
+# entries whose attribute the component's own code sets and the chart must
+# therefore NOT give it, and its `args` maps a flag to the id of the `names`
+# entry whose value it is run with (or to a pattern: `<id>` inside other text
+# stands for that entry's value); `host_paths` are such patterns too, each the
+# end of the path of a hostPath volume of the pod, which one of these
+# containers mounts at a path that ends the same way (a pattern that starts
+# with `<arg:FLAG>` is the whole path instead, under the value a listed
+# container is run with for that flag); `webhooks` maps a webhook of an
+# admission configuration to the `names` entry it selects by (`namespaces` for its
+# namespaceSelector, `objects` for its objectSelector), as a label with the
+# value "true" and nothing else, its other selector empty; an object with
+# neither `name` nor `name_from`
+# is the render's one object of its kind; `rolling_update` is the workload's
+# rolling-update strategy, which decides whether a roll runs the old and the
+# new pod of a node side by side (maxSurge 1) or leaves a gap (maxSurge 0).
 charts:
   - id: chart.aether
     chart: aether
@@ -393,6 +448,10 @@ charts:
         # A node has no plugin pod from the old one's end to the new one's
         # readiness: a harness that tests a mount during the roll relies on it.
         rolling_update: {maxSurge: "0", maxUnavailable: "1"}
+        # The kubelet finds the plugin's socket in a directory named after the
+        # driver. The plugin derives it from the Go constant; the chart writes
+        # the directory once more, as the hostPath it mounts there.
+        host_paths: ["<arg:--kubelet-root>/plugins/<csi.driver>"]
       - id: chart.aether.edge
         kind: Deployment
         name: aether-edge
@@ -403,7 +462,19 @@ charts:
           app.kubernetes.io/component: edge
       - id: chart.aether.csidriver
         kind: CSIDriver
-        name: csi.aether.io
+        name_from: csi.driver
+      # Not an object a harness addresses, so it has no name here: it is the
+      # render's one MutatingWebhookConfiguration. It is listed because the
+      # chart writes the mesh pod label once more in the selectors of these two
+      # webhooks, and both ignore failures: with another key there they would
+      # stop matching and nothing would say so.
+      - id: chart.aether.pod_webhooks
+        kind: MutatingWebhookConfiguration
+        webhooks:
+          # Namespaces labelled for the mesh: their pods are given the pod label.
+          namespace-inject.pods.aether.io: {namespaces: pod.label.managed}
+          # Pods that carry the label already.
+          ndots.pods.aether.io: {objects: pod.label.managed}
     checked_by: //test/harnesscontract:aether_chart_test
 
   - id: chart.aether.agent_surge
@@ -434,8 +505,13 @@ charts:
         containers:
           - name: prober
             resource_attributes: [resource.node]
+            code_resource_attributes: [resource.service_name.prober]
             env_contains:
               OTEL_RESOURCE_ATTRIBUTES: ["k8s.pod.name="]
+            # The chart's defaults (`probe.meshDomain`, `probe.egress`).
+            args:
+              --mesh-domain: mesh.default_domain
+              --egress: "127.0.0.1:<port.outbound_http>"
     checked_by: //test/harnesscontract:prober_chart_test
 
   # This chart puts its objects in the namespace its VALUE `namespace` names,
