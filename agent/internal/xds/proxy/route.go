@@ -50,39 +50,66 @@ const (
 )
 
 // outboundRetryPolicy returns the retry policy applied to every client-side
-// service route. It masks the sub-second windows inherent to endpoint churn —
-// a dial racing a pod that just received SIGTERM (connection refused before the
-// EDS removal propagates) or a 503 while a replacement endpoint finishes its
-// first health-check round — by retrying on a *different* host
-// (previous_hosts predicate).
+// route to a mesh service. It masks the sub-second windows inherent to
+// endpoint churn — a dial racing a pod that just received SIGTERM (connection
+// refused before the EDS removal propagates) or a 503 while a replacement
+// endpoint finishes its first health-check round — by retrying on a
+// *different* host (previous_hosts predicate).
 //
-// What is retried, whatever the method:
+// What is retried:
 //
-//   - connect-failure, refused-stream and reset-before-request: this proxy
-//     never sent the request;
-//   - a 503 response. That is the destination proxy saying it could not reach
-//     its application (connect refused or timed out, no healthy host, pool
-//     overflow), or the application answering 503 itself, which is the standard
-//     "try another endpoint" signal.
+//   - connect-failure, refused-stream and reset-before-request: THIS proxy
+//     never sent the request. Any method.
+//   - retriable-headers: a response whose outcome header, stamped by the
+//     destination proxy, says it is safe (outcomeRetriableRegex): the
+//     application answered 503 itself; the destination never began sending
+//     the request to its application; it had begun and the method is
+//     idempotent; or the application refused the stream. That covers a gRPC
+//     request too, whose failures come back as HTTP 200.
 //
-// What is NOT retried is a 503 the destination proxy generated after it had
-// begun sending the request to its application (the application closed or
-// reset the connection before answering), when the method is not idempotent:
-// the application may have run it. Nothing in this policy says so. The
-// destination marks that response with x-envoy-ratelimited, which Envoy's
-// retry state reads as "do not retry" ahead of every status-code condition;
-// see requestBegunHeader for why the mark is that header and why the status
-// code and this policy both stay as they are (aether#1641). Do not add
-// envoy-ratelimited to retry_on: it is the one condition that would retry the
-// marked response.
+// What is not: everything else, and in particular a request with a
+// non-idempotent method that the destination had already begun sending to its
+// application when the connection closed or reset. The application may have
+// run it (aether#1641).
 //
-// A route that carries this policy must also remove the mark from the response
-// (dropRequestBegunHeader), so that it never reaches the client application.
+// There is deliberately NO status-code condition (retriable-status-codes, 5xx,
+// gateway-error) and no reset condition. Retry conditions are OR-ed: with any
+// of them back in the list, the 503 of a begun POST is retried again whatever
+// its outcome header says. The price is that a response WITHOUT the header is
+// never retried: a destination proxy older than the header, for the length of
+// an agent upgrade (docs/runbook.md, "the request had begun").
+//
+// A route that carries this policy also removes the outcome header from the
+// response (stripOutcomeHeader), so that it never reaches the client
+// application.
 func outboundRetryPolicy() *routev3.RetryPolicy {
+	rp := baseRetryPolicy()
+	rp.RetryOn = "connect-failure,refused-stream,reset-before-request,retriable-headers"
+	rp.RetriableHeaders = []*routev3.HeaderMatcher{outcomeRetriableHeader()}
+	return rp
+}
+
+// nonMeshRetryPolicy is the retry policy of an edge route whose backends are
+// all cleartext Kubernetes Services (EdgeK8sClusterName). No destination proxy
+// stands in front of such a backend, so nothing stamps an outcome header and
+// the header rule would retry nothing. It is also not needed there: the edge
+// is the last proxy before the application, so a 503 RESPONSE it receives was
+// written by the application itself, and a connection the application drops
+// mid-request is a reset, which this policy does not retry.
+//
+// It must never be used on a route that can reach a mesh service.
+func nonMeshRetryPolicy() *routev3.RetryPolicy {
+	rp := baseRetryPolicy()
+	rp.RetryOn = "connect-failure,refused-stream,reset-before-request,retriable-status-codes"
+	rp.RetriableStatusCodes = []uint32{503}
+	return rp
+}
+
+// baseRetryPolicy is what the two policies share: how often, where and how
+// fast, but not on what.
+func baseRetryPolicy() *routev3.RetryPolicy {
 	return &routev3.RetryPolicy{
-		RetryOn:              "connect-failure,refused-stream,reset-before-request,retriable-status-codes",
-		NumRetries:           wrapperspb.UInt32(2),
-		RetriableStatusCodes: []uint32{503},
+		NumRetries: wrapperspb.UInt32(2),
 		RetryHostPredicate: []*routev3.RetryPolicy_RetryHostPredicate{{
 			Name: "envoy.retry_host_predicates.previous_hosts",
 			ConfigType: &routev3.RetryPolicy_RetryHostPredicate_TypedConfig{
@@ -194,7 +221,7 @@ func buildOnDemandCatchAllVirtualHost(meshDomain string, passthrough bool, known
 				DirectResponse: &routev3.DirectResponseAction{Status: 200},
 			},
 		},
-		dropRequestBegunHeader(&routev3.Route{
+		stripOutcomeHeader(&routev3.Route{
 			Match: &routev3.RouteMatch{
 				PathSpecifier: &routev3.RouteMatch_Prefix{Prefix: "/"},
 				Headers: []*routev3.HeaderMatcher{
@@ -235,7 +262,7 @@ func buildOnDemandCatchAllVirtualHost(meshDomain string, passthrough bool, known
 		if !passthrough || kt.AuthorityRegex == "" || kt.Cluster == "" {
 			continue
 		}
-		routes = append(routes, dropRequestBegunHeader(&routev3.Route{
+		routes = append(routes, stripOutcomeHeader(&routev3.Route{
 			Match: &routev3.RouteMatch{
 				PathSpecifier: &routev3.RouteMatch_Prefix{Prefix: "/"},
 				Headers: []*routev3.HeaderMatcher{
@@ -306,7 +333,7 @@ func BuildOutboundClusterVirtualHost(clusterName string, domains []string) *rout
 		Name:    clusterName,
 		Domains: domains,
 		Routes: []*routev3.Route{
-			dropRequestBegunHeader(&routev3.Route{
+			stripOutcomeHeader(&routev3.Route{
 				Match: &routev3.RouteMatch{
 					PathSpecifier: &routev3.RouteMatch_Prefix{
 						Prefix: "/",
@@ -491,7 +518,7 @@ func BuildOutboundServiceVirtualHost(name string, domains []string, rules []Gamm
 	for _, s := range scored {
 		routes = append(routes, s.route)
 	}
-	routes = append(routes, dropRequestBegunHeader(&routev3.Route{
+	routes = append(routes, stripOutcomeHeader(&routev3.Route{
 		Match: &routev3.RouteMatch{PathSpecifier: &routev3.RouteMatch_Prefix{Prefix: "/"}},
 		Action: &routev3.Route_Route{Route: &routev3.RouteAction{
 			ClusterSpecifier: &routev3.RouteAction_Cluster{Cluster: name},
@@ -532,7 +559,7 @@ func buildScoredRoutes(name string, rules []GammaRoute) []scoredRoute {
 				// A slice of its own: respRemove is shared by every match
 				// of the rule.
 				r.ResponseHeadersToRemove = slices.Clone(respRemove)
-				dropRequestBegunHeader(r)
+				stripOutcomeHeader(r)
 			}
 			scored = append(scored, scoredRoute{route: r, key: gammaMatchSpecificity(m)})
 		}

@@ -430,7 +430,12 @@ Client routes retry on a **different endpoint** (2 retries, 25–250ms backoff):
 | The destination's proxy could not reach your application and answered `503`: connection refused or timed out, no healthy host | yes, every method |
 | Your application answered `503` itself (the standard "try another endpoint" signal) | yes, every method |
 | The destination's proxy had sent the request to your application, and the application closed or reset the connection before answering (`503`) | **only** `GET`, `HEAD`, `OPTIONS`, `TRACE`, `PUT`, `DELETE` |
-| Any other application error (other 5xx), a timeout, a gRPC status | no |
+| Your HTTP/2 application refused the stream (`RST_STREAM` with `REFUSED_STREAM`: not processed, by the protocol) | yes, every method |
+| Any other application error (other 5xx), a timeout, a gRPC status your application returned | no |
+
+A gRPC call follows the same rows. The destination's proxy reports its own
+failures to a gRPC caller as `UNAVAILABLE`, and the mesh retries those it
+could not deliver and not those your application had received.
 
 The fourth row is the one to design for. A request your application has
 received may have been run, so the mesh replays it only when the method is
@@ -454,12 +459,19 @@ idempotent by definition (RFC 9110). What that means for you:
   methods are retried and never notice.
 - An application that answers `503` asks for another endpoint, for every
   method, `POST` included. Answer `503` only for a request you did not run.
-- gRPC calls are not retried on the destination-side rows: a proxy answers a
-  gRPC request with a `grpc-status`, not an HTTP `503`.
+- A gRPC `UNAVAILABLE` your application returns is yours: the mesh does not
+  retry it.
 
-The response header `x-envoy-ratelimited` carries the fourth row between
-proxies and is removed before a response reaches a client application. A
-header of that name set by your application does not reach the caller.
+The destination's proxy tells the caller's which row applies in the response
+header `x-aether-outcome`. It is removed before a response reaches a client
+application, anything your application puts under that name is overwritten,
+and sending it on a request does nothing. One header of Envoy's own still
+applies: a response that carries `x-envoy-ratelimited` is never retried.
+
+While the mesh itself is being upgraded across the release that introduced
+this, a caller on an upgraded node does not retry anything a destination on a
+not-yet-upgraded node answers (`docs/runbook.md`, "Upgrading across #1641").
+Do not roll workloads during that upgrade.
 
 ## Termination sequence (what actually happens)
 

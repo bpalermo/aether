@@ -6757,33 +6757,50 @@ A destination proxy answers `503` both when it never reached its application and
 it had already sent the request to the application and the application's connection
 then closed or reset before any response. The second kind must not be replayed for a
 method that is not idempotent, because the application may have run it. Until #1641
-the caller retried both on another endpoint, whatever the method.
+the caller retried "a 503" on another endpoint, whatever the method.
 
-Now the destination marks the second kind, and the caller does not retry a marked
-response. The status code is still `503`.
+Now the destination says what happened and the caller retries on that alone. Every
+response of a mesh inbound listener carries the response header `x-aether-outcome`:
 
-| At the destination (`reporter=destination`) | Method | What the caller does |
+```
+<code>;<flags>;<method>;<details>
+```
+
+`code` is the application's HTTP status, or `0` for a reply the proxy generated itself;
+`flags` and `details` are Envoy's response flags and response code details; `method` is
+the request's. The grammar and the rule live in one place,
+`agent/internal/xds/proxy/outcome.go`. The caller's retry policy is
+`connect-failure,refused-stream,reset-before-request,retriable-headers` with one matcher
+on that header. There is no status-code condition any more.
+
+| `x-aether-outcome` (destination) | Client sees, if nothing is retried | Caller |
 |---|---|---|
-| `503` with flag `UF`, `UH`, `UO` or `NC` (application never reached) | any | retries on another endpoint, as before |
-| `503` from the application itself (`response_flags` `-`, `response_code_details` `via_upstream`) | any | retries on another endpoint, as before |
-| `503` with flag `UC`, `UR` or `LR` (the request had begun) | `GET`, `HEAD`, `OPTIONS`, `TRACE`, `PUT`, `DELETE` | retries on another endpoint, as before |
-| `503` with flag `UC`, `UR` or `LR` (the request had begun) | anything else (`POST`, `PATCH`, …) | **does not retry**: the client gets the `503` |
+| `200;-;POST;via_upstream` (any application status but 503) | that status | does not retry |
+| `503;-;POST;via_upstream` (the application answered 503) | `503` | retries, any method |
+| `0;UF;POST;…` connect refused or timed out, `0;UH;…` no healthy host, `0;UO;…` overflow, `0;NC;…` app cluster gone | `503` | retries, any method |
+| `0;UC;GET;…{connection_termination}`, `0;UR;GET;…{remote_reset}`, `0;LR;…` with `GET`, `HEAD`, `OPTIONS`, `TRACE`, `PUT`, `DELETE` | `503` | retries |
+| the same with any other method (`POST`, `PATCH`, …) | `503` | **does not retry** |
+| `0;UR;POST;…{remote_refused_stream_reset}` (an HTTP/2 application refused the stream: not processed, by the protocol) | `503` | retries, any method |
+| anything else (`0;UT;…` timeout, `0;UPE;…`, a flag the rule does not know) | `504`, `502`, … | does not retry |
+| **no header** | whatever it is | does not retry |
 
-The mark is the response header `x-envoy-ratelimited`, added by the inbound connection
-manager's `local_reply_config` and removed by the caller's route before the response
-reaches the client application (and by the edge before it leaves the mesh). It is that
-header because it is the one Envoy's retry logic reads as "do not retry"; nothing is
-rate limited. It is on the wire between two proxies only, so it is in no access-log
-field. To find such a request:
+A gRPC request follows the same table (#1646): the destination's own failures go out
+as HTTP `200` with `grpc-status: 14`, the header is the same (`0;UF;POST;…`,
+`0;UC;POST;…`), so a call the destination could not deliver is now retried on another
+endpoint and one the application had received is not.
 
-- **Destination row**: `response_code=503`, `response_flags` one of `UC` / `UR` / `LR`,
-  `response_code_details` starting `upstream_reset_before_response_started{`,
-  `us_tx_beg_ms` a number (the request was written to the application; `-` means it
-  never was), and a `method` outside the idempotent six.
+The caller removes the header before the response reaches the client application, and
+the edge before it leaves the mesh, so it is in no access-log field on the caller's
+side. To find a request that was not retried:
+
+- **Destination row** (`reporter=destination`): `response_code=503`, `response_flags`
+  one of `UC` / `UR` / `LR`, `response_code_details` starting
+  `upstream_reset_before_response_started{`, `us_tx_beg_ms` a number (the request was
+  written to the application; `-` means it never was), and a `method` outside the
+  idempotent six. Those four fields are the header.
 - **Source row** with the same `x_request_id`: `response_code=503`, `response_flags`
   `-`, `response_code_details=via_upstream`, and `upstream_host` the pod of the
-  destination row. A retried request shows the last endpoint tried instead, and
-  usually a `200`.
+  destination row.
 
 What causes a `UC` at the destination: the application exited or was killed with the
 request in flight, or it closed an idle kept-alive connection at the instant the proxy
@@ -6793,30 +6810,56 @@ proxy keeps an idle HTTP/1.1 connection to the application for up to 1 h (Envoy'
 default; the app cluster sets none) and an idle HTTP/2 one for 30 s, so an application
 with a shorter keep-alive timeout always closes first. For idempotent methods the
 caller's retry hides that, as it always did. A `POST` that loses the race is now a
-`503` at the client where it used to be replayed, and in that case the application
-had not read it. The proxy cannot tell the two apart, which is the reason it does not
-replay. If a workload sees these outside its own restarts, raise the application's
-keep-alive (idle) timeout, or make the endpoint safe to retry and retry it in the
+`503` at the client where it used to be replayed, although in that case the
+application had not read it; the proxy cannot tell the two apart, which is the reason
+it does not replay. Measured with a harness aimed at the race (requests paced at the
+application's keep-alive timeout): 2 client-visible `503`s in 3,600 `POST`s. If a
+workload sees these outside its own restarts, raise the application's keep-alive
+(idle) timeout above an hour, or make the endpoint safe to retry and retry it in the
 client.
 
-Three things this does not change:
+Other things to know:
 
-- A **gRPC** call is never retried by the mesh on a destination failure of either
-  kind: the destination answers a gRPC request `200` with `grpc-status: 14`, which is
-  not a `503` response.
-- A destination proxy whose agent is older than #1641 marks nothing, and its `503`s
-  are retried as before, for every method. During an upgrade or a rollback the old
-  behaviour holds for requests to not-yet-upgraded (or rolled-back) nodes. Callers
-  need no upgrade to honour the mark; one that is not upgraded yet honours it and
-  forwards the header to its client application with the `503`.
-- An application can no longer switch its own `503` out of the retry by sending
-  `x-envoy-ratelimited` itself: the destination removes the header from the
-  application's response. Nothing documented that it could.
+- A cleartext Kubernetes Service behind the **edge** has no destination proxy and so
+  no header. A route whose backends are all of that kind keeps the status-code policy
+  (the edge is the last proxy before the application there, so a `503` response is the
+  application's own). A rule that splits between a mesh service and a cleartext
+  Service takes the mesh policy: the cleartext share of it loses the retry of an
+  application's `503`.
+- An application cannot write its own outcome: the destination overwrites the header.
+  A request header of that name does nothing.
+- `x-envoy-ratelimited` is Envoy's own: a response that carries it is never retried
+  by Envoy, whatever the policy. The mesh neither sets nor removes it, so an
+  application that answers `503` with that header is not retried and its client sees
+  both.
 
-The gate is `TestDownstreamIdleTimeoutFollowsWhoTheDownstreamIs` in
-`//agent/test/envoy_validate`: it reads both values off the generated config and
-fails on an HTTP connection manager it cannot classify. There is no timing test: with
-a 1 h timeout the race cannot be reproduced in CI.
+#### Upgrading across #1641: the agent roll is a window with fewer retries
+
+The header is a contract between a caller's proxy and a destination's proxy, and each
+node's proxy gets its half when **its own agent** is upgraded. There is no dual mode.
+While the agent DaemonSet rolls, and again during a rollback:
+
+| Caller's node | Destination's node | What happens |
+|---|---|---|
+| upgraded | not yet | The destination sends no header, so **nothing it answers is retried**: not a `503` for a connect failure behind it, not an application's `503`. Measured: a `POST` and a `GET` the application closed on, and an application `503`, all reach the client as `503`. The caller's own conditions still work (it could not connect to the destination pod, the stream was refused, the reset came before the request was sent). |
+| not yet | upgraded | The old behaviour, replay included: the old caller retries the `503` by its status. It also forwards `x-aether-outcome` to its client application on every response. |
+| upgraded | upgraded | As the table above. |
+
+What an operator sees in the first row: `503`s at clients for requests whose
+destination pod is being rolled, restarted or is failing readiness at that moment,
+on source rows with `response_code_details=via_upstream`; on the destination rows
+`response_flags` `UF` or `UH`. Outlier detection still ejects a failing endpoint after
+5 consecutive `5xx`, and EDS still withdraws a draining pod, so this is about
+individual requests in the sub-second windows the retry used to cover.
+
+The window is the agent rollout: from the first agent pod replaced to the last one
+Ready (for a roll that replaces one node's agent at a time, about the number of nodes
+times the time one agent takes to become Ready). To keep it harmless, **do not roll workloads
+while the agents roll**: with every application pod up and Ready there is nothing for
+the missing retry to cover. Clusters that exchange traffic (east-west waypoints,
+imported services) are in the same position: upgrade them together, back to back,
+and expect the first row for cross-cluster requests between an upgraded and a
+not-yet-upgraded cluster until both are done.
 
 ### Envoy SIGBUS/SEGV in `QuicConnection` after an h3 cluster removal (#1074)
 

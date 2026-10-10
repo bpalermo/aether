@@ -1332,7 +1332,10 @@ func TestQUICUpstreamsDetectADeadPeer(t *testing.T) {
 	}
 
 	// The route the twins are selected on: only pre-request conditions.
-	safe := map[string]bool{"connect-failure": true, "refused-stream": true, "reset-before-request": true, "retriable-status-codes": true}
+	// retriable-headers (the destination's outcome header, aether#1641) and
+	// retriable-status-codes (the edge's cleartext backends) act on a RESPONSE,
+	// never on a reset.
+	safe := map[string]bool{"connect-failure": true, "refused-stream": true, "reset-before-request": true, "retriable-status-codes": true, "retriable-headers": true}
 	var routes int
 	for _, l := range bs.GetStaticResources().GetListeners() {
 		for _, fc := range l.GetFilterChains() {
@@ -1403,7 +1406,10 @@ func TestH2MeshClustersDetectADeadPeer(t *testing.T) {
 		{"edge", EdgeBootstrapJSON, 1},
 		{"quic_outbound", QUICOutboundBootstrapJSON, 2},
 	}
-	safe := map[string]bool{"connect-failure": true, "refused-stream": true, "reset-before-request": true, "retriable-status-codes": true}
+	// retriable-headers (the destination's outcome header, aether#1641) and
+	// retriable-status-codes (the edge's cleartext backends) act on a RESPONSE,
+	// never on a reset.
+	safe := map[string]bool{"connect-failure": true, "refused-stream": true, "reset-before-request": true, "retriable-status-codes": true, "retriable-headers": true}
 	var total, routes int
 	for _, b := range builders {
 		data, err := b.fn()

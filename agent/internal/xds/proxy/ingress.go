@@ -140,7 +140,6 @@ func buildInboundCleartextFilterChain(cniPod *cniv1.CNIPod, emitStatsPod bool, e
 	rc := buildInboundRouteConfiguration(AppClusterName(cniPod, defaultPort))
 	applyInboundFilter(rc, inboundFilter)
 	hcm := buildHTTPConnectionManager("inbound", ReporterDestination, cniPod.GetName(), cniPod.GetNamespace(), rc, peerFacingIdleTimeout)
-	hcm.LocalReplyConfig = inboundRequestBegunLocalReply()
 	filters := []*http_connection_managerv3.HttpFilter{
 		buildLivenessHealthCheckFilter(),
 		buildReadinessHealthCheckFilter(HealthProbeClusterName(cniPod)),
@@ -288,9 +287,6 @@ func buildInboundHCM(cniPod *cniv1.CNIPod, chainPort uint16, emitStatsPod bool, 
 	rc := buildInboundRouteConfiguration(AppClusterName(cniPod, chainPort))
 	applyInboundFilter(rc, inboundFilter)
 	hcm := buildHTTPConnectionManager("inbound", ReporterDestination, cniPod.GetName(), cniPod.GetNamespace(), rc, peerFacingIdleTimeout)
-	// A 503 for a request that had already begun to the application is marked
-	// so that no caller replays it (aether#1641; see requestBegunHeader).
-	hcm.LocalReplyConfig = inboundRequestBegunLocalReply()
 	// Liveness/readiness are answered locally before the router; everything else
 	// passes through to the pod's application. The stats filter sits after the
 	// health-check filters (so locally-answered probe requests are not counted)
@@ -526,10 +522,10 @@ func buildHealthCheckFilter(name, path string, clusterMinHealthy map[string]*typ
 // buildInboundRouteConfiguration routes all inbound requests to the per-pod
 // application cluster, which forwards to the pod's own application on loopback.
 //
-// The virtual host removes the request-begun mark from whatever the
-// application answered: only this proxy may set it (requestBegunHeader). The
-// removal is evaluated before the connection manager's local-reply mapper adds
-// the mark, so it never removes the proxy's own.
+// The virtual host stamps the outcome header on every response, an
+// application's and the proxy's own local replies alike, overwriting anything
+// the application put under that name: it is what a caller's retry policy
+// reads (OutcomeHeader, aether#1641).
 func buildInboundRouteConfiguration(appClusterName string) *routev3.RouteConfiguration {
 	return &routev3.RouteConfiguration{
 		Name: "in_http",
@@ -539,9 +535,9 @@ func buildInboundRouteConfiguration(appClusterName string) *routev3.RouteConfigu
 		ValidateClusters: wrapperspb.Bool(false),
 		VirtualHosts: []*routev3.VirtualHost{
 			{
-				Name:                    "catch_all",
-				Domains:                 []string{"*"},
-				ResponseHeadersToRemove: []string{requestBegunHeader},
+				Name:                 "catch_all",
+				Domains:              []string{"*"},
+				ResponseHeadersToAdd: []*corev3.HeaderValueOption{inboundOutcomeHeader()},
 				Routes: []*routev3.Route{
 					{
 						Match: &routev3.RouteMatch{

@@ -670,16 +670,22 @@ func BuildEdgeRouteWeighted(prefix, exact string, headers []RouteHeaderMatch, me
 
 	var totalWeight uint32
 	clusters := make([]*routev3.WeightedCluster_ClusterWeight, 0, len(backends))
+	// One retry policy per route, so a rule that splits between a mesh
+	// service and a cleartext Kubernetes Service takes the mesh one: the
+	// status-code policy would replay a POST the mesh backend had begun. The
+	// cleartext share of such a rule loses the retry of an application's 503.
+	anyMesh := false
 	for _, b := range backends {
 		totalWeight += b.Weight
 		cw := &routev3.WeightedCluster_ClusterWeight{
 			Name:   b.Cluster,
 			Weight: wrapperspb.UInt32(b.Weight),
 		}
-		// Per backend, not per route: a rule may split between a mesh
-		// service and a cleartext Kubernetes Service.
+		// The removal is per backend: a header of that name from a backend
+		// that is not behind a destination proxy is the backend's own.
 		if isMeshBackendCluster(b.Cluster) {
-			cw.ResponseHeadersToRemove = []string{requestBegunHeader}
+			anyMesh = true
+			cw.ResponseHeadersToRemove = []string{OutcomeHeader}
 		}
 		clusters = append(clusters, cw)
 	}
@@ -690,7 +696,10 @@ func BuildEdgeRouteWeighted(prefix, exact string, headers []RouteHeaderMatch, me
 
 	ra := &routev3.RouteAction{
 		ClusterSpecifier: &routev3.RouteAction_WeightedClusters{WeightedClusters: wc},
-		RetryPolicy:      outboundRetryPolicy(),
+		RetryPolicy:      nonMeshRetryPolicy(),
+	}
+	if anyMesh {
+		ra.RetryPolicy = outboundRetryPolicy()
 	}
 	if timeout != nil {
 		ra.Timeout = timeout
@@ -737,7 +746,10 @@ func BuildEdgeRoute(prefix, exact string, headers []RouteHeaderMatch, method str
 	} else {
 		ra := &routev3.RouteAction{
 			ClusterSpecifier: &routev3.RouteAction_Cluster{Cluster: cluster},
-			RetryPolicy:      outboundRetryPolicy(),
+			RetryPolicy:      nonMeshRetryPolicy(),
+		}
+		if isMeshBackendCluster(cluster) {
+			ra.RetryPolicy = outboundRetryPolicy()
 		}
 		if timeout != nil {
 			ra.Timeout = timeout
@@ -745,7 +757,7 @@ func BuildEdgeRoute(prefix, exact string, headers []RouteHeaderMatch, method str
 		applyURLRewrite(ra, urlRewrite, prefix)
 		r.Action = &routev3.Route_Route{Route: ra}
 		if isMeshBackendCluster(cluster) {
-			dropRequestBegunHeader(r)
+			stripOutcomeHeader(r)
 		}
 	}
 	return r
