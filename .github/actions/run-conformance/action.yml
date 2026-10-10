@@ -28,7 +28,7 @@ inputs:
     description: The kind cluster to create (and delete afterwards).
     required: true
   gateway-api-version:
-    description: The gateway-api release whose CRDs are installed and whose suite runs, e.g. v1.6.2.
+    description: The gateway-api release whose CRDs are installed and whose suite runs, e.g. v1.6.3.
     required: true
   install-description:
     description: The aether install step's name in the log, e.g. "Install aether (edge, no SPIRE)".

@@ -1,7 +1,7 @@
 //go:build conformance
 
 // Drop-in runner for the upstream Kubernetes Gateway API conformance suite
-// (sigs.k8s.io/gateway-api/conformance @ v1.5.1) against a live aether cluster.
+// (sigs.k8s.io/gateway-api/conformance @ v1.6.3) against a live aether cluster.
 //
 // IMPORTANT — this file is NOT compiled as part of the aether Go module. The
 // gateway-api *conformance* package is a SEPARATE Go module whose go.mod carries a
@@ -10,7 +10,7 @@
 // (`go get sigs.k8s.io/gateway-api/conformance` fails to resolve the apis/* imports).
 // That is exactly why the prior runner lived in a /tmp gateway-api checkout.
 //
-// So this file is COPIED into a checked-out gateway-api@v1.5.1 tree at CI time
+// So this file is COPIED into a checked-out gateway-api@v1.6.3 tree at CI time
 // (alongside the suite's own conformance_test.go) and run there; the committed
 // `mesh/manifests.yaml` overlay is copied next to it. The `//go:build conformance`
 // tag keeps it out of `go test ./...` / `bazel test //...` in this repo. See
