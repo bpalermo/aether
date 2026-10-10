@@ -6,6 +6,7 @@ import (
 
 	"aethermesh.dev/agent/internal/edge/gatewayapi/attachment"
 	"aethermesh.dev/agent/internal/gatewaystatus"
+	"aethermesh.dev/common/l4project"
 	"aethermesh.dev/common/referencegrant"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -497,7 +498,7 @@ func (r *Reconciler) writeRouteStatuses(
 		tr := &tcpRoutes[i]
 		accepted := len(attachment.GatewayParentPorts(tr.Spec.ParentRefs, tr.Namespace, gateways, gatewayv1.TCPProtocolType, listenerKeys)) > 0
 		ar, am := acceptedReasonMsg(accepted)
-		resolved, reason, msg := r.backendsResolveL4(ctx, tr.Namespace, "TCPRoute", l4BackendObjectRefs(tr.Spec.Rules), grants)
+		resolved, reason, msg := r.backendsResolveL4(ctx, tr.Namespace, "TCPRoute", l4project.TCPRouteBackendRefs(tr.Spec.Rules), grants)
 		r.writeRouteParentStatus(ctx, tr, tr.Generation, &tr.Status.RouteStatus, attachment.OurGatewayParentRefs(tr.Spec.ParentRefs, tr.Namespace, gateways), accepted, ar, am, resolved, reason, msg, "TCPRoute")
 	}
 	for i := range tlsRoutes {
@@ -584,23 +585,7 @@ func (r *Reconciler) backendsResolveHTTP(ctx context.Context, ns string, rules [
 }
 
 func (r *Reconciler) backendsResolveTLS(ctx context.Context, ns string, rules []gatewayv1.TLSRouteRule, grants []gatewayv1beta1.ReferenceGrant) (bool, string, string) {
-	var refs []gatewayv1.BackendObjectReference
-	for _, rule := range rules {
-		for _, b := range rule.BackendRefs {
-			refs = append(refs, b.BackendObjectReference)
-		}
-	}
-	return r.backendsResolveL4(ctx, ns, "TLSRoute", refs, grants)
-}
-
-func l4BackendObjectRefs(rules []gatewayv1.TCPRouteRule) []gatewayv1.BackendObjectReference {
-	var refs []gatewayv1.BackendObjectReference
-	for _, rule := range rules {
-		for _, b := range rule.BackendRefs {
-			refs = append(refs, b.BackendObjectReference)
-		}
-	}
-	return refs
+	return r.backendsResolveL4(ctx, ns, "TLSRoute", l4project.TLSRouteBackendRefs(rules), grants)
 }
 
 // backendsResolveL4 reports whether every backendRef is resolvable, per the Gateway

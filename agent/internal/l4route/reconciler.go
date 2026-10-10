@@ -251,7 +251,7 @@ func (r *Reconciler) projectUDPRoutes(udpList *gatewayv1.UDPRouteList, grants []
 func (r *Reconciler) writeTCPRouteStatuses(ctx context.Context, tcpList *gatewayv1.TCPRouteList, grants []gatewayv1beta1.ReferenceGrant) {
 	for i := range tcpList.Items {
 		tr := &tcpList.Items[i]
-		resolved, reason, msg := referencegrant.ResolveBackends(tr.Namespace, "TCPRoute", tcpBackendRefs(tr.Spec.Rules), grants)
+		resolved, reason, msg := referencegrant.ResolveBackends(tr.Namespace, "TCPRoute", l4project.TCPRouteBackendRefs(tr.Spec.Rules), grants)
 		if err := r.writeRouteStatus(ctx, tr, tr.Generation, &tr.Status.RouteStatus, tr.Spec.ParentRefs, resolved, reason, msg); err != nil {
 			r.Log.WarnContext(ctx, "failed to write TCPRoute status", "route", tr.Name, "namespace", tr.Namespace, "error", err.Error())
 		}
@@ -262,7 +262,7 @@ func (r *Reconciler) writeTCPRouteStatuses(ctx context.Context, tcpList *gateway
 func (r *Reconciler) writeTLSRouteStatuses(ctx context.Context, tlsList *gatewayv1.TLSRouteList, grants []gatewayv1beta1.ReferenceGrant) {
 	for i := range tlsList.Items {
 		tr := &tlsList.Items[i]
-		resolved, reason, msg := referencegrant.ResolveBackends(tr.Namespace, "TLSRoute", tlsBackendRefs(tr.Spec.Rules), grants)
+		resolved, reason, msg := referencegrant.ResolveBackends(tr.Namespace, "TLSRoute", l4project.TLSRouteBackendRefs(tr.Spec.Rules), grants)
 		if err := r.writeRouteStatus(ctx, tr, tr.Generation, &tr.Status.RouteStatus, tr.Spec.ParentRefs, resolved, reason, msg); err != nil {
 			r.Log.WarnContext(ctx, "failed to write TLSRoute status", "route", tr.Name, "namespace", tr.Namespace, "error", err.Error())
 		}
@@ -273,7 +273,7 @@ func (r *Reconciler) writeTLSRouteStatuses(ctx context.Context, tlsList *gateway
 func (r *Reconciler) writeUDPRouteStatuses(ctx context.Context, udpList *gatewayv1.UDPRouteList, grants []gatewayv1beta1.ReferenceGrant) {
 	for i := range udpList.Items {
 		ur := &udpList.Items[i]
-		resolved, reason, msg := referencegrant.ResolveBackends(ur.Namespace, "UDPRoute", udpBackendRefs(ur.Spec.Rules), grants)
+		resolved, reason, msg := referencegrant.ResolveBackends(ur.Namespace, "UDPRoute", l4project.UDPRouteBackendRefs(ur.Spec.Rules), grants)
 		if err := r.writeRouteStatus(ctx, ur, ur.Generation, &ur.Status.RouteStatus, ur.Spec.ParentRefs, resolved, reason, msg); err != nil {
 			r.Log.WarnContext(ctx, "failed to write UDPRoute status", "route", ur.Name, "namespace", ur.Namespace, "error", err.Error())
 		}
@@ -331,36 +331,6 @@ func (r *Reconciler) writeRouteStatus(
 	return r.Status().Update(ctx, obj)
 }
 
-func tcpBackendRefs(rules []gatewayv1.TCPRouteRule) []gatewayv1.BackendObjectReference {
-	var refs []gatewayv1.BackendObjectReference
-	for _, rule := range rules {
-		for _, b := range rule.BackendRefs {
-			refs = append(refs, b.BackendObjectReference)
-		}
-	}
-	return refs
-}
-
-func tlsBackendRefs(rules []gatewayv1.TLSRouteRule) []gatewayv1.BackendObjectReference {
-	var refs []gatewayv1.BackendObjectReference
-	for _, rule := range rules {
-		for _, b := range rule.BackendRefs {
-			refs = append(refs, b.BackendObjectReference)
-		}
-	}
-	return refs
-}
-
-func udpBackendRefs(rules []gatewayv1.UDPRouteRule) []gatewayv1.BackendObjectReference {
-	var refs []gatewayv1.BackendObjectReference
-	for _, rule := range rules {
-		for _, b := range rule.BackendRefs {
-			refs = append(refs, b.BackendObjectReference)
-		}
-	}
-	return refs
-}
-
 // serviceParents returns the namespace-qualified "<ns>/<svc>" keys of the Service
 // parentRefs (kind=Service, core group — empty group string or nil group; 020
 // Part 1). A parentRef without an explicit namespace inherits the route's
@@ -414,19 +384,7 @@ func (r *Reconciler) buildUDPBackends(rule gatewayv1.UDPRouteRule, routeNamespac
 // "aether-tcp" (see TCPClusterName); the capture TCP floor chains already reference
 // "tcp:<svc>.<ns>.<domain>" clusters.
 func (r *Reconciler) buildL4Backends(refs []gatewayv1.BackendRef, routeNamespace, routeKind string, grants []gatewayv1beta1.ReferenceGrant) []proxy.L4Backend {
-	return l4project.Backends(refs, routeNamespace, routeKind, grants, func(key string, port uint32) string {
-		// Port-qualified since proposal 037 Phase 3: a backendRef naming a
-		// specific raw-TCP port resolves to that port's own cluster. A ref with
-		// no port yields 0 and the service's default floor cluster -- what every
-		// route written before Phase 3 gets.
-		//
-		// The cache publishes tcp:<fqdn>:<port> for EVERY TCP port including the
-		// primary (an alias sharing the floor's EDS), so a port-qualified name
-		// always resolves; naming a port the service does not serve as TCP is
-		// what does not, and that is caught by the chain-to-CDS gate rather than
-		// silently routed somewhere else.
-		return proxy.TCPPortClusterName(proxy.TCPClusterName(key, r.MeshDomain), port)
-	})
+	return l4project.Backends(refs, routeNamespace, routeKind, grants, proxy.TCPBackendClusterNamer(r.MeshDomain))
 }
 
 // buildUDPL4Backends converts a BackendRef slice into L4Backends with resolved

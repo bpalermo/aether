@@ -43,6 +43,42 @@ type Backend struct {
 // proposal 037 Phase 3 is in that case.
 type ClusterNameFunc func(serviceKey string, port uint32) string
 
+// TCPRouteBackendRefs returns every backendRef of a TCPRoute's rules, in rule
+// order, as the object references a ResolvedRefs check takes
+// (common/referencegrant.ResolveBackends). Nil when there is none.
+func TCPRouteBackendRefs(rules []gatewayv1.TCPRouteRule) []gatewayv1.BackendObjectReference {
+	var refs []gatewayv1.BackendObjectReference
+	for i := range rules {
+		refs = appendObjectRefs(refs, rules[i].BackendRefs)
+	}
+	return refs
+}
+
+// TLSRouteBackendRefs is TCPRouteBackendRefs for a TLSRoute's rules.
+func TLSRouteBackendRefs(rules []gatewayv1.TLSRouteRule) []gatewayv1.BackendObjectReference {
+	var refs []gatewayv1.BackendObjectReference
+	for i := range rules {
+		refs = appendObjectRefs(refs, rules[i].BackendRefs)
+	}
+	return refs
+}
+
+// UDPRouteBackendRefs is TCPRouteBackendRefs for a UDPRoute's rules.
+func UDPRouteBackendRefs(rules []gatewayv1.UDPRouteRule) []gatewayv1.BackendObjectReference {
+	var refs []gatewayv1.BackendObjectReference
+	for i := range rules {
+		refs = appendObjectRefs(refs, rules[i].BackendRefs)
+	}
+	return refs
+}
+
+func appendObjectRefs(refs []gatewayv1.BackendObjectReference, backendRefs []gatewayv1.BackendRef) []gatewayv1.BackendObjectReference {
+	for i := range backendRefs {
+		refs = append(refs, backendRefs[i].BackendObjectReference)
+	}
+	return refs
+}
+
 // Backends converts a backendRef slice into the data-plane backend list.
 //
 // Admission (identical for the mesh capture path and the edge, and aligned with the
