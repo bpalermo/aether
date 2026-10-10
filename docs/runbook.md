@@ -7178,6 +7178,45 @@ its full `type.googleapis.com/…` URL) and `other`, which nothing uses today. T
 has four. Agents before #1480 created each series on its first increment, so on those an
 absent series is the healthy state and cannot be told from an agent that reports nothing.
 
+**What the two waits mean (#1624).** The agent keeps what the proxy holds per xDS stream.
+A stream is one connection of one proxy process: a hot restart has two for a while, and
+a proxy that reconnects opens a new one. What a proxy holds is what it stated in its
+first Listener request on the stream (`initial_resource_versions`), with every response
+it acknowledged since. Everything goes with the stream when it closes. Read
+`aether_agent_xds_ack_wait_failures_total` with that in mind:
+
+- `present` is the wait of a pod ADD, and it is for a version, not for a name. A pod's
+  listeners are named after the pod (`outbound_http_<pod>`, `inbound_<pod>`), so a pod
+  recreated under the same name (a StatefulSet replica) publishes other content under a
+  name the proxy already holds. The wait is answered when one connected proxy holds the
+  version the agent publishes at that moment and has nothing unanswered about the name.
+  A proxy that states that version when it reconnects answers it, so a pod ADD retried
+  or a pod re-added after an agent restart no longer counts a `present`/`timeout` for a
+  listener that was there all along (#1511). `present`/`nack` is a connected proxy
+  rejecting the published version; a rejection of an older version, or by a proxy whose
+  stream has closed, fails nothing. During a hot restart one generation holding the
+  listener is enough, and either generation rejecting it fails the wait: the proxy's
+  `envoy NACKed delta response` line in the agent log says which, by time.
+- `absent` is the wait of a pod DEL, and it is for every connected proxy to be **known**
+  not to hold the listener. Each generation of a hot restart has its own sockets in the
+  pod's network namespace. A proxy is not known before the agent has answered its first
+  Listener request, and nothing is known with no proxy connected. So `absent`/`timeout`
+  now also counts every managed pod DEL that arrives while no proxy is connected (after
+  an agent restart, for as long as the proxy takes to reconnect; with the proxy down),
+  and every one that arrives while a new proxy generation is starting and has not asked
+  for its listeners yet. Before #1624 those returned at once and counted nothing,
+  because the agent read "I know of no such listener" as "the proxy has none" (#1572).
+  Each such DEL takes the full wait (2 s) and then proceeds, as any timed-out wait does.
+  A burst of `absent`/`timeout` at an agent roll or a proxy roll is this, and is not a
+  proxy that failed to remove a listener; outside those windows it is one.
+- A rejected response does not make a listener absent. The pinned proxy applies a
+  rejected Listener response in part (it keeps the listeners it could build), so the DEL
+  wait is for the acknowledged removal, which the agent still sends. One limit remains
+  and is pinned by a test (`//agent/test/mtlspool`,
+  `TestListenerOfARejectedResponseIsNotStatedAtReconnect`): such a listener is not in the
+  proxy's statement when it reconnects, so after an agent restart the agent has no word
+  of it.
+
 The label names are the OTLP attribute keys (`aether.xds.type_url`, `aether.xds.wait`,
 `aether.xds.reason`) with their dots turned into underscores by the OTLP ingest, like
 every other metric here. Read back from a test cluster's Prometheus on 2026-10-08:

@@ -135,7 +135,7 @@ func TestAckObserver_NotToldOfALaterEmptyResponse(t *testing.T) {
 	sendVersioned(tr, 1, resourcev3.ClusterType, "n3", "v2", nil)
 	ackDelta(tr, 1, "n3", "")
 	assert.Len(t, *got, 1, "an empty response that is not the first of its type on the stream says nothing about what the proxy holds")
-	assert.Empty(t, tr.inflight, "and is not kept waiting for an ACK")
+	assert.Empty(t, unanswered(tr), "and is not kept waiting for an ACK")
 }
 
 // TestAckObserver_AnAckIsOfTheResourcesItsResponseCarried is the tracker's
@@ -209,7 +209,7 @@ func TestAckObserver_AFirstResponseWithNoStatementIsNotAnOpening(t *testing.T) {
 	sendVersioned(tr, 1, resourcev3.ClusterType, "n1", "v1", nil)
 	ackDelta(tr, 1, "n1", "")
 	assert.Empty(t, *got)
-	assert.Empty(t, tr.inflight)
+	assert.Empty(t, unanswered(tr))
 
 	sendVersioned(tr, 2, resourcev3.ClusterType, "n1", "v1", []string{"c1"})
 	ackDelta(tr, 2, "n1", "")
@@ -228,7 +228,7 @@ func TestAckObserver_OpeningResponseThatIsNotAnswered(t *testing.T) {
 	tr.onDeltaStreamClosed(2, nil)
 	ackDelta(tr, 2, "n1", "")
 	assert.Empty(t, *got, "the stream ended before the ACK")
-	assert.Empty(t, tr.inflight)
+	assert.Empty(t, unanswered(tr))
 
 	// And a statement that was never answered at all.
 	open(tr, 3, resourcev3.ClusterType, map[string]string{"c1": "h1"})
@@ -247,12 +247,12 @@ func TestTrackerForgetsAClosedStream(t *testing.T) {
 		open(tr, stream, resourcev3.ClusterType, map[string]string{"c1": "h1"})
 		open(tr, stream, resourcev3.ListenerType, nil)
 		sendVersioned(tr, stream, resourcev3.ClusterType, "n1", "v1", nil)
-		assert.Nil(t, tr.streams[streamType{streamID: stream, typeURL: resourcev3.ClusterType}].stated,
+		assert.Nil(t, tr.streams[stream].types[resourcev3.ClusterType].stated,
 			"the statement moved to the response that answers it")
 		sendVersioned(tr, stream, resourcev3.ListenerType, "n2", "v1", []string{testListener})
 		ackDelta(tr, stream, "n1", "")
 		tr.onDeltaStreamClosed(stream, nil)
 	}
-	assert.Empty(t, tr.inflight)
+	assert.Empty(t, unanswered(tr))
 	assert.Empty(t, tr.streams)
 }

@@ -63,6 +63,7 @@ go_test(
     name = "server_test",
     size = "small",
     srcs = [
+        "ackwait_test.go",
         "dualregistration_test.go",
         "ghostsweep_lock_test.go",
         "ghostsweep_test.go",
@@ -100,6 +101,8 @@ go_test(
         "//common/udspath",
         "//registry",
         "@com_github_envoyproxy_go_control_plane//pkg/cache/types",
+        "@com_github_envoyproxy_go_control_plane//pkg/resource/v3:resource",
+        "@com_github_envoyproxy_go_control_plane_envoy//service/discovery/v3:discovery",
         "@com_github_stretchr_testify//assert",
         "@com_github_stretchr_testify//require",
         "@io_k8s_api//core/v1:core",
