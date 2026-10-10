@@ -26,7 +26,6 @@ import (
 // belongs here.
 var allowedModules = map[string]bool{
 	"github.com/spiffe/go-spiffe/v2":            true, // proto/spiffe/workload only
-	"github.com/golang/protobuf":                true, // go-spiffe's generated code
 	"google.golang.org/grpc":                    true,
 	"google.golang.org/protobuf":                true,
 	"google.golang.org/genproto/googleapis/rpc": true, // grpc status
