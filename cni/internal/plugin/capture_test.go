@@ -382,10 +382,11 @@ func TestPassthroughMarkAcceptExprs(t *testing.T) {
 	assert.Equal(t, expr.VerdictAccept, exprs[2].(*expr.Verdict).Kind)
 }
 
-// TestExcludePortAcceptExprs verifies the exclusion rule matches TCP to the given
-// dport and accepts (so the redirect that follows never sees it).
+// TestExcludePortAcceptExprs verifies the TCP half of a per-pod port exclusion
+// (dportAcceptExprs, as excludeRules calls it) matches TCP to the given dport
+// and accepts (so the divert that follows never sees it).
 func TestExcludePortAcceptExprs(t *testing.T) {
-	exprs := excludePortAcceptExprs(5432)
+	exprs := dportAcceptExprs(unix.IPPROTO_TCP, 5432)
 	require.Len(t, exprs, 5)
 	require.IsType(t, &expr.Meta{}, exprs[0])
 	assert.Equal(t, []byte{unix.IPPROTO_TCP}, exprs[1].(*expr.Cmp).Data)

@@ -450,8 +450,14 @@ func TestSignalChange_Coalesces(t *testing.T) {
 	}
 }
 
-// fakeWatchStream feeds canned events to processStream, then returns err.
-// Only Recv is used by processStream; the embedded nil interface panics on
+// processStream is consumeStream for a stream opened with last_version =
+// lastVersion over the full watch: the shape most tests here drive.
+func (r *RegistrarRegistry) processStream(ctx context.Context, stream registrarv1.RegistrarService_WatchEndpointsClient, lastVersion string) (string, error) {
+	return r.consumeStream(ctx, stream, lastVersion, streamOpen{lastVersion: lastVersion})
+}
+
+// fakeWatchStream feeds canned events to consumeStream, then returns err.
+// Only Recv is used by consumeStream; the embedded nil interface panics on
 // anything else, which would indicate a test assumption broke.
 type fakeWatchStream struct {
 	registrarv1.RegistrarService_WatchEndpointsClient

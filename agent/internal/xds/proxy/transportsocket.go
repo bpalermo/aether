@@ -361,20 +361,14 @@ func MeshUpstreamTransportSocket(nodeSpiffeID string, validationContextName stri
 		upstreamCertSelector(nodeSpiffeID, meshCertSelectorSDSSource()))
 }
 
-// UpstreamTCPTransportSocket creates a TLS transport socket for TCP-proxy upstream
-// connections (proposal 018, Phase 3a TCP floor). It is identical to
-// UpstreamTransportSocket except that it advertises NO ALPN (vs HTTP's "h2"). The
-// destination inbound listener's HTTP chains match application_protocols:["h2"], so
-// a no-ALPN mTLS connection falls through to the inbound TCP floor's DEFAULT chain —
-// demultiplexing TCP from HTTP with the standard h2 ALPN instead of a bespoke token.
-// sanURIs and sni semantics are unchanged.
-func UpstreamTCPTransportSocket(tlsCertificateSecretName string, validationContextName string, sanURIs []string, sni string) *corev3.TransportSocket {
-	return upstreamTransportSocket(tlsCertificateSecretName, validationContextName, sanURIs, sni, config.XDSConfigSourceADS(), nil, "")
-}
-
-// MeshUpstreamTCPTransportSocket is MeshUpstreamTransportSocket for the TCP
-// floor: the same per-connection certificate selector, with no ALPN so the
-// destination inbound demuxes to its TCP floor default chain.
+// MeshUpstreamTCPTransportSocket is MeshUpstreamTransportSocket for TCP-proxy
+// upstream connections (proposal 018, Phase 3a TCP floor): the same
+// per-connection certificate selector, but it advertises NO ALPN (vs HTTP's
+// "h2"). The destination inbound listener's HTTP chains match
+// application_protocols:["h2"], so a no-ALPN mTLS connection falls through to
+// the inbound TCP floor's DEFAULT chain — demultiplexing TCP from HTTP with the
+// standard h2 ALPN instead of a bespoke token. sanURIs and sni semantics are
+// unchanged.
 func MeshUpstreamTCPTransportSocket(nodeSpiffeID string, validationContextName string, sanURIs []string, sni string) *corev3.TransportSocket {
 	return upstreamTransportSocket("", validationContextName, sanURIs, sni,
 		config.XDSConfigSourceADS(),
@@ -391,7 +385,7 @@ func EdgeUpstreamTransportSocket(tlsCertificateSecretName string, validationCont
 }
 
 // EdgeUpstreamTCPTransportSocket is EdgeUpstreamTransportSocket for TCP floor
-// clusters: it advertises NO ALPN (like the east-west UpstreamTCPTransportSocket)
+// clusters: it advertises NO ALPN (like the east-west MeshUpstreamTCPTransportSocket)
 // and NO SNI so the destination inbound demuxes to the TCP floor's DEFAULT chain,
 // while still fetching the edge SVID and trust bundle directly from the SPIRE Agent
 // (not the agent's ADS stream). #304 removed the bespoke "aether-tcp" ALPN; #306
