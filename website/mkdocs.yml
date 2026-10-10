@@ -130,6 +130,7 @@ nav:
       - Charts: docs/charts.md
       - Verifying a release: docs/verifying-releases.md
       - Observability: docs/observability.md
+      - Metric labels: docs/metric-labels.md
       - Registry backends: docs/registry.md
   - Development:
       - Runbook: dev/runbook.md

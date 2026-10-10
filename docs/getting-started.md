@@ -8,7 +8,7 @@ A practical guide to installing Aether and onboarding your first workload.
 > an in-cluster **registrar** tracks service endpoints; and a **controller**
 > serves the admission webhooks. Every pod-to-pod hop is mTLS with SPIFFE
 > identities — including same-node hops. Interception is **transparent by
-> default**: managed pods' outbound traffic is redirected into the mesh by the
+> default**: managed pods' outbound traffic (TCP and UDP) is diverted into the mesh by the
 > CNI, mesh names resolve via a per-node mesh DNS, and apps simply dial
 > `http://<svc>.<ns>.<meshDomain>` (or the ordinary Kubernetes Service name).
 > An explicit local outbound listener (`127.0.0.1:18081` + `Host` header)
@@ -54,7 +54,7 @@ flowchart TB
 
     agent -->|"register / deregister<br/>at CNI ADD / DEL"| registrar
     registrar -->|endpoint stream| agent
-    proxy -->|"mTLS — SPIFFE identity per workload"| dest["destination pod<br/>(this or another node)"]
+    proxy -->|"mTLS — SPIFFE identity per workload<br/>HTTP/3 over QUIC (HTTP/2 where QUIC does not apply)"| dest["destination pod<br/>(this or another node)"]
 ```
 
 - **Identity = ServiceAccount, scoped by namespace.** A pod's mesh service is
@@ -70,6 +70,9 @@ flowchart TB
   generated Kubernetes Service name `<svc>.<ns>.svc.cluster.local:18081` —
   with no client changes. The explicit listener (`127.0.0.1:18081` +
   `Host: <svc>.<ns>.<meshDomain>`) still works everywhere.
+- **HTTP/3 between proxies.** HTTP requests cross the mesh over HTTP/3 (mTLS
+  over QUIC, UDP 18008) with nothing to enable; it needs two DNS SANs on every
+  workload SVID (see [HTTP/3 between proxies](#east-west-quic)).
 - **Demand-scoped.** Each node only receives the config for the services its
   local pods actually call (declared up front, or fetched on first use).
 
@@ -531,6 +534,34 @@ metadata:
   `aether.agent.upstreams.miss` — the signal to promote it to the annotation.
 - A pod's **own** service is always in scope; never declare it.
 
+<a name="east-west-quic"></a>
+### HTTP/3 between proxies (east-west QUIC)
+
+Between the caller's node proxy and the destination pod, HTTP requests ride
+HTTP/3 over QUIC, still mTLS with the caller's own SVID. UDP itself (a
+`UDPRoute`, §10) is carried in plaintext.
+
+**East-west QUIC (proposal 038) is unconditional — nothing to enable, one
+mesh-wide SPIRE requirement.** Every service is dialled over HTTP/3 (mTLS over
+QUIC, UDP 18008) by every caller, so the workloads' `ClusterSPIFFEID` must issue
+two DNS SANs per SVID, `<sa>.<ns>.<mesh domain>` and
+`*.<sa>.<ns>.<mesh domain>` (`dnsNameTemplates:
+["{{ .PodSpec.ServiceAccountName }}.{{ .PodMeta.Namespace }}.<mesh domain>",
+"*.{{ .PodSpec.ServiceAccountName }}.{{ .PodMeta.Namespace }}.<mesh domain>"]`;
+on the spiffe/spire chart:
+`spire-server.controllerManager.identities.clusterSPIFFEIDs.default.dnsNameTemplates`).
+Envoy's QUIC client checks the SNI against the leaf's DNS SANs after the
+SPIFFE pin (aether#957); the requirement stands until envoyproxy/envoy#47740 is
+in a plain proxy pin. Also open UDP:18008 wherever TCP:18008 is allowed.
+`e2e/l4routes.sh` shows the SPIRE shape; `e2e/eastwest-quic.sh` is the
+end-to-end proof (per-source HTTP/3 with the caller's own identity in XFCC,
+and a `QUIC_DNS_SANS=off` negative control), and the runbook's *East-west
+QUIC* section has the budget and the escape hatch. Two cases stay on h2 by
+design: a GAMMA rule with a **weighted split** (#961; a rule whose single
+backendRef is the parent Service rides QUIC like the default route), and any
+service with an endpoint behind the **east/west waypoint** (019), whose tunnel
+has no QUIC leg.
+
 ### Use keep-alive / HTTP-2 connections
 
 The mesh pools upstream mTLS connections **per downstream connection** (so one
@@ -729,30 +760,14 @@ spec:
 - **Addressing:** per-Gateway addressing is unconditional (proposal 021 Phase 2;
   the flag and chart value were retired in 031 round 2) — each `Gateway` gets its
   own LoadBalancer Service and external IP; pin one with `edge.gateway.address`.
+- **HTTP/3:** set `edge.config.http3.enabled=true` (default off) to add a QUIC
+  listener on the HTTPS port and advertise it with `alt-svc` (proposal 029); it
+  can also be set per `Gateway` through an `EdgeConfig` attached with
+  `parametersRef`.
 - **GeoIP:** set `edge.geoip.enabled=true` with a MaxMind mmdb Secret to emit
   `x-geo-*` request headers (proposal 028).
 - The edge gets its own SVID straight from SPIRE; with `spire.enabled` the chart
   can create its `ClusterSPIFFEID` (`edge.spire.clusterSpiffeID`).
-- **East-west QUIC (proposal 038) is unconditional — nothing to enable, one
-  mesh-wide SPIRE requirement.** Every service is dialled over HTTP/3 (mTLS over
-  QUIC, UDP 18008) by every caller, so the workloads' `ClusterSPIFFEID` must issue
-  two DNS SANs per SVID, `<sa>.<ns>.<mesh domain>` and
-  `*.<sa>.<ns>.<mesh domain>` (`dnsNameTemplates:
-  ["{{ .PodSpec.ServiceAccountName }}.{{ .PodMeta.Namespace }}.<mesh domain>",
-  "*.{{ .PodSpec.ServiceAccountName }}.{{ .PodMeta.Namespace }}.<mesh domain>"]`;
-  on the spiffe/spire chart:
-  `spire-server.controllerManager.identities.clusterSPIFFEIDs.default.dnsNameTemplates`).
-  Envoy's QUIC client checks the SNI against the leaf's DNS SANs after the
-  SPIFFE pin (aether#957); the requirement stands until envoyproxy/envoy#47740 is
-  in a plain proxy pin. Also open UDP:18008 wherever TCP:18008 is allowed.
-  `e2e/l4routes.sh` shows the SPIRE shape; `e2e/eastwest-quic.sh` is the
-  end-to-end proof (per-source HTTP/3 with the caller's own identity in XFCC,
-  and a `QUIC_DNS_SANS=off` negative control), and the runbook's *East-west
-  QUIC* section has the budget and the escape hatch. Two cases stay on h2 by
-  design: a GAMMA rule with a **weighted split** (#961; a rule whose single
-  backendRef is the parent Service rides QUIC like the default route), and any
-  service with an endpoint behind the **east/west waypoint** (019), whose tunnel
-  has no QUIC leg.
 
 ---
 

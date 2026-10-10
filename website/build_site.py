@@ -97,6 +97,7 @@ REQUIRED_FILES = (
     "docs/charts/index.html",
     "docs/verifying-releases/index.html",
     "docs/observability/index.html",
+    "docs/metric-labels/index.html",
     "docs/registry/index.html",
     # Development.
     "dev/runbook/index.html",
