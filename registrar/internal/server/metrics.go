@@ -248,10 +248,6 @@ func (m *Metrics) snapshotState(ctx context.Context, state State) {
 	m.snapshotVersion.Record(ctx, int64(state.Generation))
 }
 
-// attrContentHashLabel labels the deprecated snapshot-content info gauge with
-// the hash of the endpoint set this replica serves.
-const attrContentHashLabel = attribute.Key("content_hash")
-
 // ObserveSnapshot registers the asynchronous snapshot-identity instruments
 // (#1193), read from snap (and store, when the backend has revisions) at each
 // collection:
@@ -273,14 +269,12 @@ const attrContentHashLabel = attribute.Key("content_hash")
 //     two replicas may legitimately differ for a moment (health derives from
 //     each replica's clock), so the value is for reading by hand there, not
 //     for alerting.
-//   - aether.registrar.snapshot.content: DEPRECATED by the gauge above in chart 2.4.12
-//     (#1329), kept so a rule written on it keeps working while replicas of both images
-//     run. Removed in chart 2.6.0 at the earliest (one chart minor, AGENTS.md). An
-//     info gauge, always 1, labelled content_hash. Exactly one series per
-//     replica is exported at a time, but Prometheus still returns a
-//     superseded series for its 5-minute lookback (OTLP has no staleness
-//     marker), which is why a query on it must take the series with the
-//     newest sample per replica (#1322) and why the value gauge replaced it.
+//
+// The hash is exported only as that value. Until chart 2.5.9 it was also the
+// content_hash label of an info gauge (always 1), deprecated in chart 2.4.12:
+// a label that changes with the contents starts a new series at every change,
+// and Prometheus keeps returning the superseded one for its 5-minute lookback
+// (OTLP has no staleness marker, #1322). Do not bring a label like it back.
 //
 // All of them are observed in ONE callback from ONE Snapshot.State(), a single
 // critical section: the revision and the hash of a collection always belong to
@@ -303,11 +297,6 @@ func (m *Metrics) ObserveSnapshot(snap *Snapshot, store registry.RevisionedListe
 	if err != nil {
 		return fmt.Errorf("snapshot revision: %w", err)
 	}
-	content, err := m.meter.Int64ObservableGauge("aether.registrar.snapshot.content",
-		metric.WithDescription("Deprecated: use aether.registrar.snapshot.content_hash (the hash as the value); removed in the release after it. Always 1; the content_hash label names the endpoint set this replica serves"))
-	if err != nil {
-		return fmt.Errorf("snapshot content: %w", err)
-	}
 	contentHash, err := m.meter.Int64ObservableGauge("aether.registrar.snapshot.content_hash",
 		metric.WithDescription("Content hash of the endpoint set this replica serves, as a number: the first 13 hex digits (52 bits) of the hash in the snapshot version. Same snapshot_revision with a different value across replicas means divergence"))
 	if err != nil {
@@ -316,7 +305,11 @@ func (m *Metrics) ObserveSnapshot(snap *Snapshot, store registry.RevisionedListe
 	_, err = m.meter.RegisterCallback(func(_ context.Context, o metric.Observer) error {
 		// One State() per collection: everything below describes the same contents.
 		state := snap.State()
-		observeContent(o, state, content, contentHash)
+		// A hash ContentHashValue cannot read (never the case for a Snapshot's
+		// own) reports no value rather than an invented one.
+		if v, ok := snapshotversion.ContentHashValue(state.ContentHash); ok {
+			o.ObserveInt64(contentHash, v)
+		}
 		if state.Revision > 0 {
 			o.ObserveInt64(snapRev, state.Revision)
 		}
@@ -326,22 +319,11 @@ func (m *Metrics) ObserveSnapshot(snap *Snapshot, store registry.RevisionedListe
 			}
 		}
 		return nil
-	}, storeRev, snapRev, content, contentHash)
+	}, storeRev, snapRev, contentHash)
 	if err != nil {
 		return fmt.Errorf("register snapshot callback: %w", err)
 	}
 	return nil
-}
-
-// observeContent reports state's content hash twice: as the label of the
-// deprecated info gauge, and as the value of the content-hash gauge. A hash
-// ContentHashValue cannot read (never the case for a Snapshot's own) reports no
-// value rather than an invented one.
-func observeContent(o metric.Observer, state State, labelled, value metric.Int64ObservableGauge) {
-	o.ObserveInt64(labelled, 1, metric.WithAttributes(attrContentHashLabel.String(state.ContentHash)))
-	if v, ok := snapshotversion.ContentHashValue(state.ContentHash); ok {
-		o.ObserveInt64(value, v)
-	}
 }
 
 func (m *Metrics) syncFailed(ctx context.Context, seconds float64) {
