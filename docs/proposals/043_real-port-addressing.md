@@ -1109,6 +1109,115 @@ was not chosen is kept in one clause.
     Not chosen: one chain routed on `Host`, which would also have needed a
     per-port chain for every port number any service declares as raw TCP.
 
+## Phase 1 as built
+
+Added with the Phase 1 pull request (chart 2.7.0). What was built is the phase
+above. This section records where a measurement or the code contradicted this
+document, what was decided in each case and by whom it still has to be
+confirmed, and what the phase did not do. The text above is otherwise as
+accepted.
+
+### Measured
+
+- **The legs.** `e2e/multiprotocol.sh` on kind, both registry backends, the new
+  suite against images built from `main` at `7a9cca0a` and then against the
+  branch. On `main`: A2, A4, A5, A6, A7, A9, A10, A12 (through X4), X4, X5 and
+  M7 fail on both backends; on `etcd` also X1 and X2 (#1672); on `kubernetes`
+  also M4, X3, A1, A3 and A11 (the mixed shapes have no cluster for their
+  second class). A1 on `etcd` fails for `mp-nine` alone, which is A10. On the
+  branch every leg passes on both backends (M6 and X6 read registry keys and
+  are skipped on `kubernetes`).
+- **HTTP on a port number another service declares raw TCP leaves the mesh.**
+  Listed under *Not established* as measured in the rig only. Leg A10 measured
+  it on kind on `main`: `http://mp-nine...:9000/` gets no reply while
+  `mp-mixed` declares `9000=tcp`.
+- **The first-use path** (*Scale*, "not designed"; *Not established*, second
+  bullet). It needs no new mechanism. Every mesh Service with an address is in
+  the node's dependency set since 037, so its clusters are in the snapshot and
+  each table names them directly; the on-demand route of a table is kept for a
+  mesh authority this node holds no endpoint of yet, and it accepts only an
+  authority that spells the table's own port (the two legacy tables also the
+  port-less name). The pinned proxy's on-demand filter does fetch a cluster a
+  route names directly: the QUIC twins have relied on that since #1020.
+- **Conformance** on the branch: MESH-HTTP 7 passed, 0 failed; GATEWAY-HTTP
+  36 + 10 passed, 0 failed (Gateway API v1.6.3, the nightly workflow dispatched
+  on the branch).
+
+### Where this document was wrong, or silent
+
+1. **Scale: the chain count is one higher, and a raw-TCP-only service costs
+   more.** The table's `H` + 1 + `T` + default leaves out the chain of the
+   legacy table `cap_http_18081`, which the same row counts as a route table.
+   Measured for the worked example (200 services, HTTP on 80, 8080 and 9090,
+   20 raw-TCP ports beside an HTTP declared port, 50 pods): **26** chains per
+   pod listener with the default (25 stated), 1,300 per node (1,250), **5** HTTP
+   connection managers per pod and 250 per node (4 and 200), 6 route tables
+   (6). The capture listener is 24 KiB per pod and the five capture tables
+   1.3 MiB per node. If the 20 raw-TCP ports are instead the declared port of
+   20 services with no HTTP port, a listener has **146** chains: each such
+   service has its own port, `:18082`, the any-port chain and one copy of the
+   any-port chain per HTTP port number (item 2). By this document's own count that
+   shape is 62 on `main` (not measured there).
+2. **The any-port chain needs a copy on every HTTP port number.** The match
+   does not backtrack, so a connection to a port number that any chain names is
+   never offered to a port-less chain. With an HTTP chain per port number, a
+   pure-TCP service dialled on, say, 8080 would have stopped reaching its
+   declared port the day another service declared 8080 as HTTP. The copies
+   keep the legacy spelling working as it does on `main`, share the any-port
+   stat prefix so the counter that gates its removal sees every port, and go
+   with it in Phase 3. **Owner's call:** dropping the copies instead would save
+   `H` + 1 chains per raw-TCP-only service per pod and turn those connections
+   into a passthrough (raw bytes) or `421 no-http-port` (HTTP).
+3. **`TLSRoute` chains get the same treatment**, on every named port except
+   the ports the same service declares as HTTP (a per-address copy there would
+   take the service's own cleartext HTTP away from the HTTP chain).
+4. **A1 against A12 and decision 11, for a service that declares port 80
+   beside another declared port (`mp-eighty`).** A12 says a dial to port 80
+   "with any `Host`" reaches the legacy target; A1 says `<name>:80` with the
+   same `Host` reaches port 80's echo, and passes on `main`. Built: a
+   **port-less** `Host` on a dial to port 80 is the legacy target (decision
+   11), and `Host: <name>:80` spelled out is port 80, as on `main`.
+5. **A dial to `:18081` with a `Host` that names another port is refused
+   (`port-mismatch`).** A12's "any `Host`" would route it to the legacy
+   target; on `main` it was routed by `Host`. No documented spelling does this.
+6. **A bare name that two namespaces share is no longer answered.** The
+   known-target route matched a bare name for every namespace that had it and
+   took the first, so half the callers got another namespace's service. A
+   virtual-host domain cannot be claimed twice, and a table is shared by the
+   node's pods, so the bare name is a name only when one namespace owns it
+   (the rule *Names* states); otherwise the request is passed through and the
+   cluster refuses it. This is a client-visible change the phase's summary did
+   not list.
+7. **A `backendRef` port that is not an HTTP port of the backend routes to
+   nothing**, where it reached the backend's declared port. 18081, and 80 for a
+   generated Service that does not declare it, keep the legacy meaning. The
+   port is carried from the route to the agent beside the shared projection,
+   not in it: the proto field is Phase 2's.
+8. **The frozen annotation on `kubernetes`.** "The class of the declared port"
+   is not what a 2.6 registrar stamped for a pod whose pod-level protocol is
+   contradicted by a suffix on the declared port itself (`protocol: http`,
+   `port: 8080`, `ports: "8080=tcp"`): 2.6 listed by the pod-level value. The
+   row does not carry the pod-level annotation, so the registrar cannot
+   reproduce it; it stamps the class of the declared port, as written here.
+9. **Pods of one service that disagree** are decided once for the whole
+   service, over every listing, and every builder reads that answer (the
+   legacy target; the class of a port for the chains and the tables). Both
+   endpoint sets of a port still exist, as fact 4 says.
+
+### Not done in Phase 1
+
+- **A13** and the `filter_disabled` inspector change (optional).
+- **A named `targetPort` is reported as a WARN only**, not on the route's
+  status.
+- **The Service port map is read for the Services a route names** (as its
+  parent or as a backend). A user Service that owns a mesh service's name and
+  has no route is passed through, as on `main`.
+- **Edge:** the per-port raw-TCP clusters are published; an edge `TCPRoute`
+  backend still resolves to the floor cluster (row 19's "the port's cluster,
+  always" is not built).
+- **The skew table** was not re-measured on kind. What is stated for a roll is
+  read from the code and from #1677's table.
+
 ## Out of scope
 
 - TLS termination for `https://<svc>/` (037 option (b)); a TLS port is a
