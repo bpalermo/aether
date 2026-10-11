@@ -28,7 +28,8 @@
 # body through .github/actions/run-e2e-script (up -> verify -> diagnostics ->
 # down); each stays its own job rather than a matrix leg so `report-failure`
 # names the suite that failed, `only=<suite>` selects it, and its check name and
-# timeout are unchanged. A new suite is a job here, its name in the `only`
+# timeout are unchanged. (A matrix INSIDE one suite is fine and two have one:
+# first-install over the Helm majors, multiprotocol over the registry backends.) A new suite is a job here, its name in the `only`
 # options, in `report-failure`'s `needs` and in its RESULTS:
 # //e2e:suite_wiring_test fails on a job that misses one of them, and on an
 # e2e/*.sh harness that creates a kind cluster and that no job runs. The two conformance jobs share theirs the same way
@@ -529,28 +530,44 @@ jobs:
             # data path being broken (#873/#874).
             grep -i "UDPRoute input discarded" /tmp/l4-logs/agent.log > /tmp/l4-logs/udp-discards.log 2>&1 || true
 
-  # --- Proposal 037: HTTP and raw TCP on ONE pod (endpoint.aether.io/ports
-  # "8080,9000=tcp").
-  # ONE kind cluster, SPIRE on and the etcd registry, for l4-routes' reasons (no
-  # TCP path without mTLS; the backend that keys an endpoint by protocol). Two
-  # workloads with the same two listeners, one declaring the TCP port and one
-  # not (the control). Asserts by the marker of the container that answered:
-  # the undeclared :9000 is never reachable through the mesh; on the mixed
-  # service HTTP on :18081, portless and on :8080 reaches the HTTP container and
-  # raw TCP on :9000 the TCP one (the per-port capture chain and the inbound's
-  # per-port floor chain); :18082 names no port of an HTTP-primary service; the
-  # pod is registered under both protocol keys; the generated Service exposes
-  # both mesh ports. Harness: e2e/multiprotocol.sh (its header has the red
-  # half, MP_MIXED_PORTS=8080, and the mirror shape that is not in the gate;
-  # neither is run here).
+  # --- Proposals 037 and 043 Phase 1: several ports on ONE mesh service, each
+  # addressed by its real number.
+  # ONE kind cluster with SPIRE on (no TCP path without mTLS, as for l4-routes),
+  # once per registry backend: `etcd`, which keys an endpoint by protocol, and
+  # `kubernetes`, the chart default, which derives the listings from the pods.
+  # A matrix leg each, on its own runner, so the job keeps one name for
+  # `only=` and one result for `report-failure`; the harness reads the backend
+  # from MP_REGISTRY_BACKEND.
+  # Six workloads whose every listener answers with a marker naming the
+  # workload and the port, so reaching the wrong port fails: HTTP only (with an
+  # undeclared TCP listener, the control), two HTTP ports, three HTTP ports of
+  # which one is 80, HTTP with raw TCP, raw TCP with HTTP, and HTTP on the port
+  # number another service declares raw TCP. Two clients, one captured and one
+  # that only dials the loopback outbound listener. Legs M0..M7 and X1..X6 are
+  # proposal 037's (the undeclared port is never reachable; each declared port
+  # reaches its own listener on both mixed shapes; the generated Service has
+  # the real ports with their appProtocol; M6 and X6 read registry keys and are
+  # skipped, loudly, on `kubernetes`). Legs A1..A12 are the addressing rule: the
+  # dialled port decides on every name of the service, a port-less Host means
+  # the dialled port, a route without a parentRef port is on every port, and a
+  # mismatched, non-HTTP or undeclared port is refused at once with a 421 that
+  # names why; the legacy spellings are unchanged. Harness:
+  # e2e/multiprotocol.sh (its header has the red half, MP_MIXED_PORTS=8080,
+  # which is not run here, and how to run every leg of a red run).
   multiprotocol:
     needs: build
     if: github.event_name == 'schedule' || github.event.inputs.only == 'all' || github.event.inputs.only == 'multiprotocol'
     runs-on: ubuntu-latest
     timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        backend: [etcd, kubernetes]
     # Checkout only; the images arrive as an artifact of this same run.
     permissions:
       contents: read
+    env:
+      MP_REGISTRY_BACKEND: ${{ matrix.backend }}
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -560,24 +577,28 @@ jobs:
         with:
           script: multiprotocol.sh
           skip-build-var: MP_SKIP_BUILD
-          verify-description: Verify HTTP and raw TCP on one pod, the undeclared-port control, dual registration and the mesh Service
+          verify-description: Verify each port of a multi-port service is reached by its own number, on every name and both paths, and that a wrong port is refused by name
           soft: ${{ github.event.inputs.soft == 'true' }}
           logs-dir: /tmp/mp-logs
-          artifact-name: multiprotocol-e2e-logs
+          artifact-name: multiprotocol-e2e-logs-${{ matrix.backend }}
           diagnostics: |
             mkdir -p /tmp/mp-logs
             kubectl --context kind-multiprotocol get pods -A -o wide 2>&1 | tee /tmp/mp-logs/pods.txt || true
             kind export logs /tmp/mp-logs/kind --name multiprotocol || true
             kubectl --context kind-multiprotocol -n aether-test get deploy,pods,svc -o yaml > /tmp/mp-logs/workloads.yaml 2>&1 || true
+            kubectl --context kind-multiprotocol -n aether-test get httproutes.gateway.networking.k8s.io -o yaml > /tmp/mp-logs/httproutes.yaml 2>&1 || true
             kubectl --context kind-multiprotocol -n aether-system logs -l app.kubernetes.io/component=agent --all-containers --tail=400 > /tmp/mp-logs/agent.log 2>&1 || true
             kubectl --context kind-multiprotocol -n aether-system logs -l app.kubernetes.io/component=proxy -c proxy --tail=300 > /tmp/mp-logs/proxy.log 2>&1 || true
             kubectl --context kind-multiprotocol -n aether-system logs -l app.kubernetes.io/component=registrar --tail=200 > /tmp/mp-logs/registrar.log 2>&1 || true
             kubectl --context kind-multiprotocol -n aether-system logs -l app.kubernetes.io/component=mesh-dns --tail=100 > /tmp/mp-logs/mesh-dns.log 2>&1 || true
             kubectl --context kind-multiprotocol -n spire-mgmt logs -l app.kubernetes.io/name=agent --all-containers --tail=200 > /tmp/mp-logs/spire-agent.log 2>&1 || true
-            # The node proxy's admin (hostNetwork): the chains and the tcp:
-            # clusters, which is where a missing per-port chain shows.
+            # The node proxy's admin (hostNetwork): the chains, the route
+            # tables and the clusters, which is where a missing per-port chain
+            # or table shows.
             docker exec multiprotocol-control-plane curl -s --max-time 5 "http://127.0.0.1:9901/config_dump?resource=dynamic_listeners" > /tmp/mp-logs/envoy-listeners.json 2>&1 || true
+            docker exec multiprotocol-control-plane curl -s --max-time 5 "http://127.0.0.1:9901/config_dump?resource=dynamic_route_configs" > /tmp/mp-logs/envoy-routes.json 2>&1 || true
             docker exec multiprotocol-control-plane curl -s --max-time 5 http://127.0.0.1:9901/clusters > /tmp/mp-logs/envoy-clusters.txt 2>&1 || true
+            # Only the etcd leg has this container.
             docker exec aether-multiprotocol-etcd etcdctl get --prefix / --keys-only > /tmp/mp-logs/registry-keys.txt 2>&1 || true
 
   # --- East-west QUIC (proposal 038 Phase 4): the per-pod HTTP/3 inbound on
