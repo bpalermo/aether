@@ -4,7 +4,7 @@
 direction: issue #1672 is fixed by removing the per-service *primary* port and
 protocol, not by refining it. Nothing here is built. The facts were read from
 `main` at `2a132053`; the two measurements were made on the pinned proxy outside
-any cluster. Seven decisions are still open (see *Decisions for the owner*).
+any cluster. Eight decisions are still open (see *Decisions for the owner*).
 **Resolves:** #1672. The defect reported there is the per-service primary
 itself; the owner decided to remove it, not to patch it. Accepting this
 proposal closes the issue: the phases below are the work, and Phase 1 is where
