@@ -1,8 +1,9 @@
 # Proposal 043: A mesh service is addressed by its real ports, and nothing else
 
 **Status:** Accepted 2026-10-11 — by the owner, with all twelve decisions taken
-as recommended (see *Decisions*). No phase is built yet. Planned: Phase 1 in
-chart 2.7.0, Phase 2 in 2.8.0, Phase 3 in 2.9.0, Phase 4 in 2.10.0. The facts
+as recommended (see *Decisions*). Phase 1 is built (chart 2.7.0; what it
+measured against this document is under *Phase 1 as built*). Planned: Phase 2
+in 2.8.0, Phase 3 in 2.9.0, Phase 4 in 2.10.0. The facts
 were read from `main` at `2a132053`; the measurements were made on the pinned
 proxy outside any cluster.
 **Resolves:** #1672. The defect reported there is the per-service primary
