@@ -277,7 +277,9 @@ func (r *Reconciler) reconcileGatewayServices(
 		}
 
 		// CreateOrUpdate the per-Gateway Service.
-		err := r.createOrUpdateGatewayService(ctx, svc, gw.Namespace, gw.Name, ports, pinnedIP)
+		infra := gatewayInfrastructureMetadata(&gw)
+		r.logRefusedInfrastructureKeys(ctx, gk, infra)
+		err := r.createOrUpdateGatewayService(ctx, svc, gw.Namespace, gw.Name, ports, pinnedIP, infra)
 		if err != nil {
 			r.Log.WarnContext(ctx, "failed to reconcile per-Gateway Service",
 				"gateway", gw.Namespace+"/"+gw.Name, "service", svcName, "error", err.Error())
@@ -291,6 +293,8 @@ func (r *Reconciler) reconcileGatewayServices(
 		}
 	}
 
+	r.forgetRefusedInfrastructureKeys(ourGateways)
+
 	// GC: delete per-Gateway Services whose Gateway no longer exists. List all
 	// Services in the edge namespace with the LabelEdgeGateway label.
 	if err := r.gcStaleGatewayServices(ctx, currentGWKeys); err != nil {
@@ -302,16 +306,21 @@ func (r *Reconciler) reconcileGatewayServices(
 
 // createOrUpdateGatewayService creates or updates one per-Gateway LoadBalancer
 // Service. It applies the gateway selector labels, the per-Gateway label for GC,
-// the MetalLB IP annotation (if pinnedIP is set), and the port mapping.
+// the MetalLB IP annotation (if pinnedIP is set), the port mapping, and the
+// labels and annotations of the Gateway's spec.infrastructure (infra).
 func (r *Reconciler) createOrUpdateGatewayService(
 	ctx context.Context,
 	svc *corev1.Service,
 	gwNamespace, gwName string,
 	ports []corev1.ServicePort,
 	pinnedIP string,
+	infra infrastructureMetadata,
 ) error {
-	// apply stamps the desired labels/annotations/spec onto a Service object.
+	// apply stamps the desired labels/annotations/spec onto a Service object. The
+	// Gateway's spec.infrastructure metadata goes on first, so aether's own label
+	// and the address pin below always have the last word.
 	apply := func(s *corev1.Service) {
+		infra.applyTo(s)
 		if s.Labels == nil {
 			s.Labels = map[string]string{}
 		}

@@ -286,6 +286,14 @@ func (r *Reconciler) computeGatewayTopConditions(
 		programmedTop.Reason = string(gatewayv1.GatewayReasonInvalid)
 		programmedTop.Message = msg
 	}
+	// Refused spec.infrastructure keys are reported where the Gateway's owner can
+	// read them, without changing the condition's status or reason. Only when a
+	// per-Gateway Service exists: without one nothing is copied at all.
+	if acceptedTop.Status == metav1.ConditionTrue && r.EdgeServiceName != "" {
+		if msg := gatewayInfrastructureMetadata(gw).refusedMessage(); msg != "" {
+			acceptedTop.Message += "; " + msg
+		}
+	}
 	return acceptedTop, programmedTop
 }
 

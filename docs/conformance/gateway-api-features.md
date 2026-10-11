@@ -99,16 +99,44 @@ gRPC traffic through a Gateway the edge cannot serve (the tests run and fail/tim
 so it is omitted here while GAMMA continues to implement `GRPCRoute` for the mesh
 profile (see "Route types" above).
 
-`GatewayInfrastructure` is **not** advertised. The feature covers
-`spec.infrastructure` as a whole, and aether implements half of it: a Gateway whose
-`spec.infrastructure.parametersRef` is invalid or does not resolve is rejected with
-`Accepted=False`/`InvalidParameters`, but `spec.infrastructure.labels` and
-`annotations` are not propagated to the per-Gateway LoadBalancer Service. Since
-gateway-api v1.6.3 the suite gates both `GatewayInfrastructureMetadata` (the
-propagation test) and `GatewayInvalidParametersRef` on that one feature, so both are
-skipped. `GatewayInvalidParametersRef` was a Core test through v1.6.2 and passed
-there; the rejection itself is unchanged and stays covered by the edge reconciler's
-unit tests.
+`GatewayInfrastructure` is **not** advertised, although both things
+`spec.infrastructure` asks for are implemented:
+
+- `spec.infrastructure.labels` and `annotations` are propagated to the resource
+  the edge generates for a Gateway, its per-Gateway LoadBalancer Service, with
+  update and removal following the Gateway (`docs/configuration.md`, "Labelling
+  and annotating a Gateway's LoadBalancer Service").
+- A Gateway whose `spec.infrastructure.parametersRef` is invalid or does not
+  resolve is rejected with `Accepted=False`/`InvalidParameters`.
+
+The reason is where the generated resource lives. The suite's
+`GatewayInfrastructureMetadata` test looks **in the Gateway's own namespace** for
+a ServiceAccount, Pod or Service that carries the label
+`gateway.networking.k8s.io/gateway-name=<gateway>`, waits until it finds one, and
+checks the Gateway's labels and annotations on it. That is the model of an
+implementation that deploys a proxy per Gateway, next to the Gateway. Aether runs
+one shared edge Deployment for every Gateway, and the single resource it
+generates per Gateway is a Service in the **edge** namespace, because a Service
+can only select pods of its own namespace. The test therefore finds nothing in
+the Gateway's namespace and times out, however correctly the Service is
+labelled. The edge does not put the `gateway-name` label on that Service, and
+refuses it from `spec.infrastructure`, so that nothing claims a placement that is
+not true.
+
+Since gateway-api v1.6.3 the suite gates both `GatewayInfrastructureMetadata` and
+`GatewayInvalidParametersRef` on that one feature, so both are skipped.
+`GatewayInvalidParametersRef` was a Core test through v1.6.2 and passed there;
+the rejection is unchanged and, like the propagation, is covered by the edge
+reconciler's unit tests.
+
+Passing would need the per-Gateway Service to live in the Gateway's namespace:
+a Service without a selector, with EndpointSlices the edge controller writes from
+the edge pods' addresses. That brings an RBAC change (cluster-wide EndpointSlice
+writes), a migration of the addresses existing Gateways hold (a new Service is
+assigned a new address unless it is pinned), and a moved trust boundary (whoever
+can edit Services in the Gateway's namespace could then edit the load balancer's
+Service, which only the edge namespace can do today). It is recorded here as a
+design option. It is not planned.
 
 ### Data-plane / addressing
 

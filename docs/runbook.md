@@ -5221,6 +5221,40 @@ A worker count that is too low shows up as the edge Envoy's CPU approaching
 (`sum by (pod) (rate(container_cpu_usage_seconds_total{container="envoy", namespace="aether-ingress"}[5m]))`);
 at 12m it is over two orders of magnitude away.
 
+### Labels and annotations on a Gateway's LoadBalancer Service
+
+A Gateway's `spec.infrastructure.labels` and `.annotations` are copied to its
+per-Gateway LoadBalancer Service in the edge namespace
+(`docs/configuration.md`, "Labelling and annotating a Gateway's LoadBalancer
+Service"). To see what the edge copied, and what it refused:
+
+```bash
+# the Service of Gateway <ns>/<name>, its labels and annotations
+kubectl get svc -n aether-ingress -l aether.io/edge-gateway=<ns>.<name> \
+  -o jsonpath='{.items[0].metadata.labels}{"\n"}{.items[0].metadata.annotations}{"\n"}'
+# refused keys are named in the Gateway's Accepted condition (which stays True)
+kubectl get gateway -n <ns> <name> \
+  -o jsonpath='{.status.conditions[?(@.type=="Accepted")].message}{"\n"}'
+```
+
+- The annotation `aether.io/infrastructure-keys` on the Service is the edge's
+  record of the keys it copied. Do not edit it. If it is deleted or damaged, the
+  keys the Gateway still sets are re-applied and recorded again on the next
+  reconcile; a key that was removed from the Gateway in the meantime stays on
+  the Service until someone deletes it by hand, because the edge no longer knows
+  it put it there.
+- A label or annotation that is on the Service but not in that record was put
+  there by something else. The edge never removes it. If the Gateway later sets
+  the same key, the Gateway's value replaces it and the key is the Gateway's
+  from then on (removing it from the Gateway removes it from the Service).
+- The `aether.io/edge-gateway` label value is capped at 63 bytes, so for a long
+  `<ns>.<name>` select by the Service name instead; the edge logs it as
+  `created per-Gateway LoadBalancer Service`.
+- The edge logs `spec.infrastructure keys ignored on the per-Gateway Service`
+  once per change of the refused set, on each replica.
+- With `--edge-service-name` unset, or when a per-Gateway port cannot be
+  allocated, there is no per-Gateway Service and nothing is copied.
+
 ### What the proxy supervisor does on SIGTERM (`kubectl delete pod`, drain, eviction)
 
 The `aether-proxy` pod is `hostNetwork` with `maxSurge: 1`, so the node's Envoy is a
