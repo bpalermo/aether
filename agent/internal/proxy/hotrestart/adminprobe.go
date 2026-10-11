@@ -326,49 +326,90 @@ func (s *Supervisor) adminReady(ctx context.Context) (live, reachable bool) {
 // bound but never accepting, so requests time out). The admin watchdog keys off
 // reachable.
 //
+// live is about THIS supervisor's Envoy: LIVE, at epoch, and not carrying
+// another supervisor's identity (answerMayBeOurs). Whether some other pod's
+// Envoy is LIVE at an epoch is adminPeerLiveAtEpoch's question.
+//
 // It always runs on the unpooled authoritative client: the answer is only
 // meaningful if it came from the process listening on the admin port right now,
 // not from a connection pinned to a superseded or draining one. See
 // newAdminClients.
 func (s *Supervisor) adminServerInfo(ctx context.Context, epoch int) (live, reachable bool) {
-	ctx, cancel := context.WithTimeout(ctx, readyPollInterval)
-	defer cancel()
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://"+s.cfg.AdminAddress+"/server_info", nil)
-	if err != nil {
+	info, reachable, parsed := s.adminInfo(ctx)
+	if !reachable {
 		s.metrics.adminProbed(probeEndpointServerInfo, probeResultUnreachable)
 		return false, false
 	}
-	resp, err := s.adminAuthoritative.Do(req)
-	if err != nil {
-		s.metrics.adminProbed(probeEndpointServerInfo, probeResultUnreachable)
-		return false, false
-	}
-	body, readErr := io.ReadAll(io.LimitReader(resp.Body, adminServerInfoBodyLimit))
-	_ = resp.Body.Close()
-	var info adminServerInfoDoc
-	// Unmarshal (rather than Decoder.Decode) rejects trailing content the
-	// streaming decoder would ignore; Envoy emits exactly one protojson object,
-	// and reading the body whole is what a truncated transient response (a bare
-	// 503) already looked like: a decode failure, i.e. reachable-but-not-live.
-	if readErr != nil || json.Unmarshal(body, &info) != nil {
-		s.metrics.adminProbed(probeEndpointServerInfo, probeResultNotLive)
-		return false, true
-	}
-	s.noteAdminAnswer(info.CommandLineOptions.RestartEpoch)
-	live = info.State == adminLiveState && info.CommandLineOptions.RestartEpoch == epoch &&
+	live = parsed && info.State == adminLiveState && info.CommandLineOptions.RestartEpoch == epoch &&
 		s.answerMayBeOurs(info)
 	s.metrics.adminProbed(probeEndpointServerInfo, probeResult(live))
 	return live, true
 }
 
-// answerMayBeOurs is the identity half of adminServerInfo's LIVE verdict. It
-// only bites after a fresh lineage replaced a predecessor drained for a
-// worker-count change (issue #1136): the new lineage restarts at epoch 0, so
-// a predecessor that has not exited yet can answer LIVE at the very epoch
-// this supervisor is waiting on, and must not make this pod Ready.
+// adminPeerLiveAtEpoch reports whether the node's admin is answered LIVE at
+// epoch by ANY supervisor's Envoy. It is the question of a supervisor that
+// looks for an Envoy to hot-restart from (initStartEpoch, a superseded
+// supervisor answering a request): that Envoy is another pod's by definition.
+func (s *Supervisor) adminPeerLiveAtEpoch(ctx context.Context, epoch int) bool {
+	info, reachable, parsed := s.adminInfo(ctx)
+	if !reachable {
+		s.metrics.adminProbed(probeEndpointServerInfo, probeResultUnreachable)
+		return false
+	}
+	live := parsed && info.State == adminLiveState && info.CommandLineOptions.RestartEpoch == epoch
+	s.metrics.adminProbed(probeEndpointServerInfo, probeResult(live))
+	return live
+}
+
+// adminInfo reads /server_info once on the authoritative client. reachable is
+// false when the admin did not answer; parsed is false when it answered with
+// something that is not the document (a bare 503 from a transient state),
+// which callers treat as reachable and not LIVE.
+func (s *Supervisor) adminInfo(ctx context.Context) (info adminServerInfoDoc, reachable, parsed bool) {
+	ctx, cancel := context.WithTimeout(ctx, readyPollInterval)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://"+s.cfg.AdminAddress+"/server_info", nil)
+	if err != nil {
+		return info, false, false
+	}
+	resp, err := s.adminAuthoritative.Do(req)
+	if err != nil {
+		return info, false, false
+	}
+	body, readErr := io.ReadAll(io.LimitReader(resp.Body, adminServerInfoBodyLimit))
+	_ = resp.Body.Close()
+	// Unmarshal (rather than Decoder.Decode) rejects trailing content the
+	// streaming decoder would ignore; Envoy emits exactly one protojson object,
+	// and reading the body whole is what a truncated transient response (a bare
+	// 503) already looked like: a decode failure, i.e. reachable-but-not-live.
+	if readErr != nil || json.Unmarshal(body, &info) != nil {
+		return adminServerInfoDoc{}, true, false
+	}
+	s.noteAdminAnswer(info.CommandLineOptions.RestartEpoch)
+	return info, true, true
+}
+
+// answerMayBeOurs is the identity half of adminServerInfo's LIVE verdict.
+//
+// Epoch numbers are not identities: the node's proxy pods share one admin
+// address, and another lineage can be LIVE at the very epoch this supervisor
+// last ran. A pod whose Envoy a worker-count successor had stopped was at epoch
+// 0 with no Envoy, the successor's fresh lineage went LIVE at epoch 0, and the
+// pod marked itself Ready on that answer (issue #1679). Every Envoy a
+// supervisor forks carries its identity (--admin-address-path, #1127), so an
+// answer that names another supervisor's is never ours.
+//
+// An answer with no identity at all is accepted, as it always was, unless this
+// supervisor started a fresh lineage beside a predecessor it drained (#1136),
+// whose epoch numbers it reuses: no Envoy this supervisor forks answers so,
+// and the stub admins of the unit tests do.
 func (s *Supervisor) answerMayBeOurs(info adminServerInfoDoc) bool {
+	identity := info.CommandLineOptions.AdminAddressPath
+	if identity == s.adminIdentity {
+		return true
+	}
 	s.mu.Lock()
 	strict := s.readyRequiresOwnIdentity
 	s.mu.Unlock()
-	return !strict || info.CommandLineOptions.AdminAddressPath == s.adminIdentity
+	return identity == "" && !strict
 }

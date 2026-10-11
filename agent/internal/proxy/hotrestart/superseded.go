@@ -3,7 +3,6 @@ package hotrestart
 import (
 	"context"
 	"fmt"
-	"net"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -159,17 +158,9 @@ func (s *Supervisor) clearSuccessorWanted(epoch int) {
 // still initializing", until that Envoy is gone. A bound socket of ANY of the
 // three ids therefore forbids the fork.
 func (s *Supervisor) envoyHoldsBaseID() (socket string, held bool) {
-	for _, role := range []string{"parent", "child"} {
-		for id := 0; id < envoyMaxConcurrentEpochs; id++ {
-			name := fmt.Sprintf("%s_%s_%d", envoyHotRestartSocketPath, role, uint64(s.cfg.BaseID)*10+uint64(id))
-			// Envoy binds with the length of the whole sockaddr_un, so the
-			// abstract name is the text padded with NULs to all of sun_path.
-			name += strings.Repeat("\x00", envoySunPathLen-len(name))
-			conn, err := net.DialUnix("unixgram", nil, &net.UnixAddr{Name: name, Net: "unixgram"})
-			if err == nil {
-				_ = conn.Close()
-				return name, true
-			}
+	for id := 0; id < envoyMaxConcurrentEpochs; id++ {
+		if name, ok := s.hotRestartSocketHeld(id); ok {
+			return name, true
 		}
 	}
 	return "", false
@@ -359,7 +350,7 @@ func (s *Supervisor) awaitDeletion(ctx context.Context) (trigger string, peer in
 			return "", -1
 		case <-t.C:
 		}
-		if epoch, ok := s.readSuccessorWanted(); ok && s.supersededLost.mayAnswer(epoch) && s.adminLiveAtEpoch(ctx, epoch) {
+		if epoch, ok := s.readSuccessorWanted(); ok && s.supersededLost.mayAnswer(epoch) && s.adminPeerLiveAtEpoch(ctx, epoch) {
 			return triggerSuccessorTerminating, epoch
 		}
 		if s.nodeHasAnEnvoy(ctx) {
@@ -407,7 +398,9 @@ func (s *Supervisor) nodeHasAnEnvoy(ctx context.Context) bool {
 func (s *Supervisor) relaunchSuperseded(ctx context.Context, lastEpoch int, trigger string, peer int) (relaunched bool, err error) {
 	s.resetEpochForRetry()
 	if trigger == triggerSuccessorTerminating {
-		s.initStartEpochFrom(ctx, peer)
+		if err := s.initStartEpochFrom(ctx, peer); err != nil {
+			return false, err
+		}
 		if ctx.Err() != nil {
 			return false, nil
 		}

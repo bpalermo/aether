@@ -48,12 +48,19 @@ const initProbeInterval = 500 * time.Millisecond
 // The two signals must AGREE before a decision is made: the heartbeat is
 // LIVE-gated by construction, so a fresh heartbeat means the predecessor was
 // serving within the stale window — a single failed admin probe (transient
-// timeout under node load) must not send us to epoch 0, which bind-collides with
-// the live predecessor on the base-id domain socket (errno 98) and crash-loops.
-// While the file is fresh but admin unconfirmed, re-probe; the wait is bounded by
-// the heartbeat going stale.
-func (s *Supervisor) initStartEpoch(ctx context.Context) {
-	s.initStartEpochFrom(ctx, anyPredecessor)
+// timeout under node load) must not send us to epoch 0 beside the live
+// predecessor. While the file is fresh but admin unconfirmed, re-probe; the wait
+// is bounded by the heartbeat going stale.
+//
+// A stale heartbeat is not, on its own, "no predecessor" either (issue #1680):
+// it stops when the supervisor that writes it stalls, while its Envoy goes on
+// serving. Epoch 0 is chosen only when, in addition, no process holds a
+// hot-restart socket of the base id (see envoyWithoutHeartbeat).
+//
+// The error is envoyWithoutHeartbeat's: an Envoy has held the base id for
+// defaultUnheardEnvoyWait with no supervisor reporting it LIVE.
+func (s *Supervisor) initStartEpoch(ctx context.Context) error {
+	return s.initStartEpochFrom(ctx, anyPredecessor)
 }
 
 // anyPredecessor is initStartEpochFrom's "whichever epoch the node's heartbeat
@@ -67,63 +74,128 @@ const anyPredecessor = -1
 // probed, drained and gated nothing: the worker-count check below drains and
 // stops the Envoy it compares itself with, and that must never reach an Envoy
 // nobody asked to have replaced. The caller reads the outcome from nextEpoch.
-func (s *Supervisor) initStartEpochFrom(ctx context.Context, only int) {
+// Restricted, it never waits on an Envoy without a heartbeat: its caller makes
+// that check itself (relaunchSuperseded).
+func (s *Supervisor) initStartEpochFrom(ctx context.Context, only int) error {
+	var unheard unheardEnvoy
 	for {
-		epoch, hb, ok := s.readState()
-		if only != anyPredecessor && ok && epoch != only && time.Since(hb) < predecessorStale {
-			return
+		decided, err := s.chooseStartEpoch(ctx, only, &unheard)
+		if decided || err != nil {
+			return err
 		}
-		if !ok || time.Since(hb) >= predecessorStale {
-			// A retry that falls back to a fresh start has no successor epoch
-			// to re-anchor; drop any earlier attempt's so a later in-pod epoch
-			// that happens to reuse the number is never gated.
-			s.mu.Lock()
-			s.gatedEpoch = -1
-			s.handoffPeer = -1
-			s.mu.Unlock()
-			s.log.InfoContext(ctx, "no live predecessor; starting fresh at epoch 0", "statePresent", ok)
-			s.metrics.predecessorFound(false)
-			return
-		}
-		if s.adminLiveAtEpoch(ctx, epoch) {
-			if s.freshStartInsteadOfHotRestart(ctx, epoch) {
-				// The predecessor ran another worker count and has been
-				// drained and stopped (issue #1136): start a new lineage
-				// at epoch 0, ungated, exactly like a node with no
-				// predecessor.
-				s.mu.Lock()
-				s.nextEpoch = 0
-				s.gatedEpoch = -1
-				s.handoffPeer = -1
-				s.mu.Unlock()
-				s.metrics.predecessorFound(false)
-				return
-			}
-			// Publish the successor epoch and its readiness gate in ONE
-			// critical section. A watchLiveness tick that reads the new epoch
-			// must never be able to see a stale gate: it would find the
-			// PREDECESSOR's Envoy answering LIVE at exactly that epoch and
-			// mark the pod Ready before this pod's Envoy was forked (#132's
-			// hazard; see successorReadyGate).
-			s.mu.Lock()
-			s.nextEpoch = epoch + 1
-			s.readyGate = s.successorReadyGate()
-			s.gatedEpoch = epoch + 1
-			s.handoffPeer = epoch
-			gate := s.readyGate
-			s.mu.Unlock()
-			s.metrics.predecessorFound(true)
-			s.log.InfoContext(ctx, "live predecessor confirmed; starting cross-pod hot restart",
-				"predecessorEpoch", epoch, "startEpoch", epoch+1, "heartbeatAge", time.Since(hb).Round(time.Millisecond).String(),
-				"readyGateIn", gate.Sub(s.now()).Round(time.Millisecond).String(), "readyGateAnchor", "fork")
-			return
-		}
-		s.log.DebugContext(ctx, "fresh heartbeat but admin not confirming predecessor; re-probing",
-			"epoch", epoch, "heartbeatAge", time.Since(hb).Round(time.Millisecond).String())
 		select {
 		case <-ctx.Done():
-			return
+			return nil
 		case <-time.After(initProbeInterval):
+		}
+	}
+}
+
+// chooseStartEpoch is one pass of initStartEpochFrom over the heartbeat and
+// the admin. decided false means "ask again".
+func (s *Supervisor) chooseStartEpoch(ctx context.Context, only int, unheard *unheardEnvoy) (decided bool, err error) {
+	epoch, hb, ok := s.readState()
+	if !ok || time.Since(hb) >= predecessorStale {
+		return s.chooseWithoutHeartbeat(ctx, only, ok, unheard)
+	}
+	if only != anyPredecessor && epoch != only {
+		return true, nil
+	}
+	if s.adminPeerLiveAtEpoch(ctx, epoch) {
+		return s.startFromPredecessor(ctx, epoch, hb), nil
+	}
+	s.log.DebugContext(ctx, "fresh heartbeat but admin not confirming predecessor; re-probing",
+		"epoch", epoch, "heartbeatAge", time.Since(hb).Round(time.Millisecond).String())
+	return false, nil
+}
+
+// chooseWithoutHeartbeat decides for a stale or absent heartbeat: epoch 0,
+// unless an Envoy holds the base id (unheard.go), which the restricted form
+// leaves to its caller.
+func (s *Supervisor) chooseWithoutHeartbeat(ctx context.Context, only int, statePresent bool, unheard *unheardEnvoy) (decided bool, err error) {
+	if only == anyPredecessor {
+		if held, err := s.envoyWithoutHeartbeat(ctx, unheard); err != nil || held {
+			return false, err
+		}
+	}
+	s.startFresh(ctx, statePresent)
+	return true, nil
+}
+
+// startFresh records the decision "no predecessor: epoch 0". nextEpoch is
+// already 0 (a new supervisor, or resetEpochForRetry).
+func (s *Supervisor) startFresh(ctx context.Context, statePresent bool) {
+	// A retry that falls back to a fresh start has no successor epoch
+	// to re-anchor; drop any earlier attempt's so a later in-pod epoch
+	// that happens to reuse the number is never gated.
+	s.mu.Lock()
+	s.gatedEpoch = -1
+	s.handoffPeer = -1
+	s.mu.Unlock()
+	s.log.InfoContext(ctx, "no live predecessor; starting fresh at epoch 0", "statePresent", statePresent)
+	s.metrics.predecessorFound(false)
+}
+
+// startFromPredecessor records the decision for a predecessor confirmed LIVE at
+// epoch: a cross-pod hot restart at epoch+1, or, when its worker count differs,
+// a fresh lineage after it has been drained and stopped (issue #1136).
+//
+// It reports false when neither could be decided and the epoch has to be chosen
+// again: the predecessor was drained and an Envoy still holds the base id.
+func (s *Supervisor) startFromPredecessor(ctx context.Context, epoch int, hb time.Time) (decided bool) {
+	if s.freshStartInsteadOfHotRestart(ctx, epoch) {
+		if socket, held := s.baseIDHeldAfter(ctx, shutdownGrace); held {
+			// The drained predecessor did not exit (its stop failed, or it was
+			// hot-restarted in place meanwhile). A fresh epoch 0 beside it
+			// would replace its shared memory (unheard.go): choose again, which
+			// attaches to whatever is LIVE (it is never drained twice).
+			s.log.WarnContext(ctx, "an envoy still holds the base id after the predecessor was drained; "+
+				"not starting a fresh envoy at epoch 0 beside it, choosing the epoch again",
+				"predecessorEpoch", epoch, "heldSocket", strings.TrimRight(socket, "\x00"))
+			return false
+		}
+		// The predecessor ran another worker count and has been
+		// drained and stopped (issue #1136): start a new lineage
+		// at epoch 0, ungated, exactly like a node with no
+		// predecessor.
+		s.mu.Lock()
+		s.nextEpoch = 0
+		s.gatedEpoch = -1
+		s.handoffPeer = -1
+		s.mu.Unlock()
+		s.metrics.predecessorFound(false)
+		return true
+	}
+	// Publish the successor epoch and its readiness gate in ONE
+	// critical section. A watchLiveness tick that reads the new epoch
+	// must never be able to see a stale gate: it would find the
+	// PREDECESSOR's Envoy answering LIVE at exactly that epoch and
+	// mark the pod Ready before this pod's Envoy was forked (#132's
+	// hazard; see successorReadyGate).
+	s.mu.Lock()
+	s.nextEpoch = epoch + 1
+	s.readyGate = s.successorReadyGate()
+	s.gatedEpoch = epoch + 1
+	s.handoffPeer = epoch
+	gate := s.readyGate
+	s.mu.Unlock()
+	s.metrics.predecessorFound(true)
+	s.log.InfoContext(ctx, "live predecessor confirmed; starting cross-pod hot restart",
+		"predecessorEpoch", epoch, "startEpoch", epoch+1, "heartbeatAge", time.Since(hb).Round(time.Millisecond).String(),
+		"readyGateIn", gate.Sub(s.now()).Round(time.Millisecond).String(), "readyGateAnchor", "fork")
+	return true
+}
+
+// baseIDHeldAfter reports whether a process still holds a hot-restart socket
+// of the base id once within has passed, returning as soon as none does.
+func (s *Supervisor) baseIDHeldAfter(ctx context.Context, within time.Duration) (socket string, held bool) {
+	deadline := time.Now().Add(within)
+	for {
+		if socket, held = s.envoyHoldsBaseID(); !held || time.Now().After(deadline) {
+			return socket, held
+		}
+		if !sleepCtx(ctx, predecessorGonePoll) {
+			return socket, held
 		}
 	}
 }
@@ -215,6 +287,7 @@ func (s *Supervisor) writeState(epoch int) {
 func (s *Supervisor) watchLiveness(ctx context.Context) {
 	defer s.clearReady()
 	prober := newAdminProber(s)
+	listeners := newListenerWatch(s)
 	t := time.NewTicker(readyPollInterval)
 	defer t.Stop()
 	ready := false
@@ -238,7 +311,7 @@ func (s *Supervisor) watchLiveness(ctx context.Context) {
 			if live {
 				everLive = true
 				holding = false
-				ready = s.onLiveEpoch(ctx, epoch, ready)
+				ready = s.onLiveTick(ctx, listeners, epoch, ready)
 				continue
 			}
 			// Hold readiness while this supervisor's Envoy is still the serving
@@ -260,6 +333,33 @@ func (s *Supervisor) watchLiveness(ctx context.Context) {
 			}
 		}
 	}
+}
+
+// onLiveTick handles a tick where admin reports LIVE at the current epoch.
+// LIVE is not serving: an Envoy asked to drain keeps answering LIVE with its
+// listeners closed (issue #1679), so the listener watch is asked first.
+// Returns the updated ready state.
+func (s *Supervisor) onLiveTick(ctx context.Context, listeners *listenerWatch, epoch int, ready bool) bool {
+	if listeners.stopped(ctx, epoch, ready) {
+		return s.onListenersStopped(ctx, epoch, ready)
+	}
+	return s.onLiveEpoch(ctx, epoch, ready)
+}
+
+// onListenersStopped handles a tick where admin reports LIVE at the current
+// epoch and the listener watch found that Envoy's listeners stopped
+// (listenersstopped.go): it keeps the heartbeat, because a new pod that
+// hot-restarts from this Envoy binds the listeners again, and the pod is not
+// Ready. Returns the updated ready state.
+func (s *Supervisor) onListenersStopped(ctx context.Context, epoch int, ready bool) bool {
+	s.markEpochLive()
+	s.writeState(epoch)
+	if ready {
+		s.clearReady()
+		s.metrics.readyTransition(false)
+		s.log.WarnContext(ctx, "pod not ready: envoy is live at newest epoch but has stopped its listeners", "epoch", epoch)
+	}
+	return false
 }
 
 // onLiveEpoch handles a tick where admin reports LIVE at the current epoch:
@@ -404,16 +504,17 @@ func (s *Supervisor) setReady() {
 
 func (s *Supervisor) clearReady() { _ = os.Remove(s.cfg.ReadyMarkerPath) }
 
-// adminLiveAtEpoch reports whether the Envoy admin (the shared host-netns port)
-// reports state LIVE at the given restart epoch. During a cross-pod handoff the
-// predecessor answers admin at the old epoch until the new Envoy takes over.
+// adminLiveAtEpoch reports whether THIS supervisor's Envoy answers the admin
+// (the shared host-netns port) LIVE at the given restart epoch. During a
+// cross-pod handoff the predecessor answers admin at the old epoch until the
+// new Envoy takes over.
 //
-// Deliberately authoritative and unpooled: every caller (initStartEpoch,
-// handleDebounce) is making an epoch-identity decision. handleShutdown calls
-// adminServerInfo directly instead — the same probe on the same client — because
-// it must also tell "answered at another epoch" (a successor took over) apart
-// from "did not answer at all" (our Envoy is dead or wedged), which this
-// wrapper collapses into a single false.
+// Deliberately authoritative and unpooled: every caller (handleDebounce, a
+// terminating supervisor asking for a successor) is making an epoch-identity
+// decision. handleShutdown calls adminServerInfo directly instead — the same
+// probe on the same client — because it must also tell "answered at another
+// epoch" (a successor took over) apart from "did not answer at all" (our Envoy
+// is dead or wedged), which this wrapper collapses into a single false.
 func (s *Supervisor) adminLiveAtEpoch(ctx context.Context, epoch int) bool {
 	live, _ := s.adminServerInfo(ctx, epoch)
 	return live

@@ -5808,15 +5808,11 @@ recovered by `successor_gone` only.
   (`kubectl -n aether-system delete pod aether-proxy-<x>`), and its replacement starts
   fresh.
 - A reverted roll that also **changes the Envoy worker count** takes the #1136 path (the
-  surge pod drains the kept pod's Envoy instead of hot-restarting from it) and is not
-  covered here; it is tracked on its own.
-- The shared-memory poisoning above is also reachable without any of this, by the
-  supervisor's ordinary start: a new pod that finds the heartbeat stale while the
-  predecessor's Envoy is alive starts at epoch 0 (the node-load case the bind-collision
-  retry was written for, which only sees the collision one time in three). That is
-  unchanged by this section's recoveries and tracked on its own. The symptom is a surge
-  pod looping on `previous envoy process is still initializing`; the remedy is to delete
-  the **old** pod.
+  surge pod drains the kept pod's Envoy instead of hot-restarting from it): see "A
+  reverted roll that changes the Envoy worker count" below.
+- The shared-memory poisoning above was also reachable by the supervisor's ordinary
+  start, a new pod that found the heartbeat stale while the predecessor's Envoy was
+  alive: see "A new proxy pod beside an Envoy that has no heartbeat" below.
 - A surge pod that gets its SIGTERM in the few tens of milliseconds between its fork and
   its Envoy's admin coming up takes the `child_dead` branch and stops an Envoy that is
   mid-attach.
@@ -5824,6 +5820,139 @@ recovered by `successor_gone` only.
 A surge pod that gets its SIGTERM before its first fork (deleted while its image was still
 being pulled, started and stopped in the same moment) starts no Envoy at all:
 `termination requested before the first envoy was started; starting none`.
+
+### A reverted roll that changes the Envoy worker count (#1679)
+
+A roll that changes `proxy.concurrency` (or a CPU limit that changes Envoy's default
+worker count) is not a hot restart: the surge pod's supervisor asks the old pod's Envoy to
+drain its listeners (`POST /drain_listeners?graceful`), waits `proxy.hotRestart.drainTime`,
+stops it, and starts a fresh Envoy at epoch 0 (#1136; see `proxy.concurrency` under the chart
+values). Envoy cannot take a drain back, and an Envoy that has drained its listeners looks
+healthy: measured on the pinned Envoy with `--drain-time-s 3`, the listener served for 3 s
+after the request and then refused every connection, while `/server_info` and `/ready`
+went on answering `LIVE`. The one thing that changed on the admin was
+`listener_manager.listener_stopped`, from 0 to 1.
+
+So when such a roll was reverted while the surge pod started, the surge pod got its
+SIGTERM during the drain-time wait, stopped where it was and exited; the kept pod's Envoy
+closed its listeners a moment later, stayed `LIVE`, and the kept pod stayed **Ready** with
+a node that served nothing, until it was deleted by hand. Two things now prevent that, one
+on each side.
+
+**The surge pod finishes what it started.** A supervisor that has asked a predecessor to
+drain owns the node's listeners until its own Envoy has them. A termination requested in
+between is held back until that Envoy is LIVE, and then proceeds as for any pod terminated
+while it serves: it asks for a successor, and the kept pod takes the node back
+(`successor_terminating`, above; across a worker-count difference that take-back is again
+a drain and a fresh start, so the node has two short gaps with no listeners, each the
+fresh Envoy's start). A termination requested **before** the drain is sent is obeyed at
+once and nothing is drained.
+
+```
+# surge pod
+envoy worker count changes across this handoff; NOT hot-restarting: draining the predecessor, …
+termination requested while replacing a predecessor that was asked to drain its listeners …; finishing the replacement first   budget=…   (WARN)
+predecessor drained for a worker-count change; starting a fresh envoy lineage
+replacement finished: this pod's envoy is LIVE; proceeding with the termination   heldFor=…
+waiting for a successor before draining
+```
+
+The hold is bounded: twice the drain time plus 36 s (56 s at the defaults), and never more
+than the pod's `successor_wait` budget; the time it took comes off that budget. If it
+runs out (`the replacement of the drained predecessor did not finish in its budget;
+terminating anyway`, ERROR), the kept pod's side below is what recovers the node.
+
+**The kept pod does not report Ready with its listeners closed, and restores them.** Every
+supervisor now reads `listener_manager.listener_stopped` from its own Envoy (every
+`parentShutdownTime / 3`, 5 s at the defaults; on a fresh connection, after `/server_info`
+on that connection has shown the Envoy to be its own at its newest epoch). An increase
+while the Envoy is the pod's only one means its listeners were closed and no hot-restart
+child serves in its place:
+
+| what the kept pod sees | what it does |
+| --- | --- |
+| the counter rose | drops Ready at once: `this pod's envoy is LIVE on its admin but has stopped its listeners …` and `pod not ready: envoy is live at newest epoch but has stopped its listeners` (both WARN) |
+| the Envoy is stopped by the supervisor that drained it (the normal #1136 handoff) | nothing more: `newest epoch terminated cleanly by successor; awaiting pod deletion` |
+| 5 s later the Envoy is still there and still answers as its own | hot-restarts it in place: `nobody replaced the envoy whose listeners were stopped; hot-restarting it in place` (WARN), `aether_supervisor_restart_triggers_total{aether_supervisor_trigger="listeners_stopped"}`. The next epoch binds the listeners again (measured: serving within 0.5 s of the fork) and the pod goes Ready |
+
+This is the recovery for a surge pod that was killed outright after it had sent the drain,
+and for one whose supervisor is older than the fix above (a roll **to** an older image that
+is reverted). The node has no listeners from the end of the drain until that restart:
+up to 10 s plus the Envoy's start at the defaults. `listeners_stopped` is expected only
+then; anywhere else, something asked a proxy's Envoy to drain and did not replace it.
+
+A pod is also no longer made Ready by **another pod's** Envoy answering at its epoch
+number: a fresh lineage starts at epoch 0 again, so the kept pod (epoch 0, no Envoy)
+used to read the surge pod's `LIVE` at epoch 0 as its own. An answer on the shared admin
+address that carries another supervisor's identity (`admin_address_path`, #1127) is never
+counted as the pod's own.
+
+### A new proxy pod beside an Envoy that has no heartbeat (#1680)
+
+A new proxy pod chooses its restart epoch from the node epoch heartbeat (`epoch` in
+`--state-dir`): fresh and confirmed LIVE on the admin, it hot-restarts from that epoch;
+stale or absent, it used to start at epoch 0. But the heartbeat is written by the
+predecessor's **supervisor**, once a second while it sees its Envoy LIVE. A supervisor
+that is stalled, or whose admin probes time out on a starved node, stops writing it while
+its Envoy goes on serving, and an epoch 0 started beside that Envoy is the start described
+under "What the kept pod will not do" above: unless the live epoch is a multiple of 3 it
+replaces the shared memory and leaves it marked "initializing", and every later hot
+restart from the healthy Envoy exits with `previous envoy process is still initializing`.
+The next roll's pod then retried for minutes and crash-looped until the **old** pod was
+deleted by hand.
+
+Now a stale heartbeat is not enough. While any process holds a hot-restart socket of the
+base id, the new pod forks nothing:
+
+```
+the node epoch heartbeat is stale or absent, but an envoy holds this base id: not starting at epoch 0 beside it …
+    heldSocketIDs=[1] adminLive=true adminLiveEpoch=1 waitBound=4m30s        (WARN)
+```
+
+and waits for one of two things: the heartbeat becomes fresh again (`live predecessor
+confirmed; starting cross-pod hot restart`), or the sockets are released (`the envoy that
+held this base id without a heartbeat has exited`, then `no live predecessor; starting
+fresh at epoch 0`). It does not attach on the admin's word alone, although the admin gives
+the epoch: a stale heartbeat is also how a terminating pod says "do not attach to my
+Envoy" before it drains, and an Envoy attached to then loses its parent mid-handoff.
+The pod is NotReady while it waits. After 4.5 minutes (the time the bind-collision
+retries used to take) the supervisor exits with `an envoy has held hot-restart socket
+id(s) … and no supervisor reports it LIVE (no fresh heartbeat): not starting an envoy
+beside it`; the container restarts and waits again. That state is an Envoy whose
+supervisor never reports it: find the pod it belongs to (`heldSocketIDs` is its restart
+epoch modulo 3; `curl -s 127.0.0.1:9901/server_info` names the pod in
+`command_line_options.admin_address_path`) and delete it.
+
+The same check is the last thing before every fork at epoch 0, whatever chose it
+(`refusing to start envoy at epoch 0: a process holds …`), and the worker-count path no
+longer starts its fresh Envoy while the predecessor it drained still holds the base id:
+it chooses the epoch again (`an envoy still holds the base id after the predecessor was
+drained; …`).
+
+**A node that is already in that state repairs itself.** The flag is also left behind by
+a supervisor older than this, and by a hot-restart child that is killed while it
+initializes (the OOM killer, the handoff watchdog). Before it forks an Envoy at an epoch
+above 0, the supervisor reads the flag from the shared memory
+(`/dev/shm/envoy_shared_memory_<base id × 10>`). When it is set, the node's admin reports
+LIVE at the parent epoch, and the parent's is the only hot-restart socket id held, no
+Envoy of the base id is initializing: the flag is stale, and the supervisor clears it:
+
+```
+cleared a stale initializing flag in the hot-restart shared memory: an envoy of this base id died while it initialized …   (WARN)
+```
+
+counted as `aether_supervisor_restart_triggers_total{aether_supervisor_trigger="stale_initializing_flag_cleared"}`.
+The healthy Envoy serves throughout. The write is held to the pinned Envoy's layout (the
+segment's size field equals the file's size, its version field is the pinned
+`HOT_RESTART_VERSION`, the flags are its last 8 bytes; `//agent/test/hotrestartrevert`
+fails on a pin bump that changes it). A segment it does not recognise is left alone, with
+`cannot read the hot-restart shared memory's initializing flag …` (WARN); a flag that may
+be true (another Envoy of the base id exists) is left alone too, and the fork is retried
+as before. If a surge pod still loops on `suspected base-id bind collision with a live
+predecessor; retrying epoch detection in-process` with `sharedMemoryInitializing=true`,
+the manual remedy is unchanged: delete the **old** proxy pod
+(`kubectl -n aether-system delete pod aether-proxy-<x>`); the new one then starts fresh
+at epoch 0, which replaces the shared memory.
 
 ### The ext_authz sidecar across a proxy roll (#1275)
 
@@ -6481,6 +6610,10 @@ them with the commands in §7 "Pre-flight: node headroom before a roll (#812)".
   `aether_supervisor_handoff_mode_total{mode="fresh_after_drain"}` (expected once per
   node on the rollout that changes the count, 0 otherwise).
   `proxy.hotRestart.hotRestartOnConcurrencyChange: true` forces the old hot restart.
+  A surge pod deleted in the middle of this (the roll was reverted) finishes the
+  replacement before it terminates, and an Envoy left drained by a supervisor that died
+  is hot-restarted in place by its own: see "A reverted roll that changes the Envoy
+  worker count" (#1679).
   The kind reproduction, `proxy-concurrency-change.sh`, is maintained with an external harness, outside this repository.
 
   **What "its own" count is when `proxy.concurrency` is `0` (#1442).** The supervisor

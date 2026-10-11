@@ -207,18 +207,26 @@ func TestAlreadyDrainedPredecessorIsNotDrainedAgain(t *testing.T) {
 
 // Readiness in the new lineage: a predecessor still answering LIVE at the
 // epoch the fresh lineage reuses must not make this pod Ready; only our own
-// Envoy's answer may.
+// Envoy's answer may. An answer that names no supervisor at all is refused
+// there too; outside a fresh lineage it is accepted, as it always was.
+//
+// An answer that names ANOTHER supervisor is never this one's, fresh lineage
+// or not (issue #1679): TestAnotherLineageLiveAtOurEpochIsNotOurs.
 func TestFreshLineageReadinessRequiresOwnIdentity(t *testing.T) {
 	f := newFakeAdmin(t, adminLiveState, 0)
-	f.identity.Store(predecessorIdentity)
 	s := New(Config{AdminAddress: f.addr()}, slog.New(slog.DiscardHandler), nil)
 	ctx := context.Background()
 
 	live, _ := s.adminServerInfo(ctx, 0)
-	assert.True(t, live, "outside a fresh lineage the epoch alone decides, as before")
+	assert.True(t, live, "outside a fresh lineage an answer with no identity is decided by the epoch, as before")
 
 	s.readyRequiresOwnIdentity = true
 	live, reachable := s.adminServerInfo(ctx, 0)
+	assert.False(t, live, "an envoy with no identity at our epoch is not our fresh envoy")
+	assert.True(t, reachable)
+
+	f.identity.Store(predecessorIdentity)
+	live, reachable = s.adminServerInfo(ctx, 0)
 	assert.False(t, live, "a foreign envoy at our epoch is not our fresh envoy")
 	assert.True(t, reachable)
 
