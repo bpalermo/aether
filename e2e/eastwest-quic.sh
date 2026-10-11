@@ -174,12 +174,6 @@
 # EWQ_LOCAL_PROXY=1 runs the proxy image already in the local Docker daemon
 # (`make load-proxy-image`: <registry>/proxy:latest, e.g. a carried-patch build)
 # instead of the chart's digest-pinned release; read at `up`. Never built here.
-# EWQ_WORKER=1 (read at `up`) adds a kind worker node, pins every destination to
-# it and every source to the control-plane node, so a destination's proxy can
-# hot-restart while the sources' proxy keeps running: the cross-node shape of
-# aether#1054 (e2e/eastwest-quic-hotrestart.sh HR_MODE=sparse). This suite's own
-# `verify` reads destination-side counters from $NODE and needs the default
-# single node.
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -193,9 +187,6 @@ IMAGE_REGISTRY="$("$REPO_ROOT/scripts/image-registry.sh" prefix)"
 CLUSTER="${EWQ_CLUSTER:-eastwest-quic}"
 CTX="kind-$CLUSTER"
 NODE="$CLUSTER-control-plane"
-# The node the destinations run on: $NODE, or the worker with EWQ_WORKER=1.
-DST_NODE="$NODE"
-if [ "${EWQ_WORKER:-0}" = "1" ]; then DST_NODE="$CLUSTER-worker"; fi
 NS="aether-system"
 TEST_NS="aether-test"
 MESH_DOMAIN="aether.internal"
@@ -248,10 +239,6 @@ IMAGES=(agent mesh-dns proxy-supervisor cni-install registrar controller uds-csi
 # concurrent build cannot swap the images under it between build and load.
 IMAGE_TAG="${EWQ_IMAGE_TAG:-latest}"
 if [ "${EWQ_LOCAL_PROXY:-0}" = "1" ]; then IMAGES+=(proxy); fi
-# Extra `helm upgrade aether` arguments for a harness that sources this file
-# (e2e/eastwest-quic-hotrestart.sh adds the OTLP collector and access logs).
-# Empty for this suite's own runs.
-EWQ_EXTRA_HELM_ARGS=("${EWQ_EXTRA_HELM_ARGS[@]+"${EWQ_EXTRA_HELM_ARGS[@]}"}")
 
 log() { printf '\n\033[1;34m==> %s\033[0m\n' "$*"; }
 ok() { printf '\033[1;32m  ✓ %s\033[0m\n' "$*"; }
@@ -360,16 +347,9 @@ create_cluster() {
 		-e "s#POD_SUBNET#10.30.0.0/16#g" \
 		-e "s#SVC_SUBNET#10.130.0.0/16#g" \
 		"$REPO_ROOT/e2e/kind-cluster.yaml" >"$cfg"
-	if [ "${EWQ_WORKER:-0}" = "1" ]; then
-		printf '  - role: worker\n    labels:\n      topology.kubernetes.io/region: local\n      topology.kubernetes.io/zone: %s\n' "$CLUSTER" >>"$cfg"
-	fi
 	kind_require_binary || die "kind binary does not match e2e/kind-version.sh (see above)"
 	kind create cluster --image "$KIND_NODE_IMAGE" --config "$cfg" --wait 60s >/dev/null
 	rm -f "$cfg"
-	if [ "${EWQ_WORKER:-0}" = "1" ]; then
-		# kind taints the control plane once a worker exists; the sources run there.
-		kc taint nodes "$NODE" node-role.kubernetes.io/control-plane:NoSchedule- >/dev/null 2>&1 || true
-	fi
 	ok "cluster '$CLUSTER' ready"
 }
 
@@ -507,7 +487,6 @@ install_aether() {
 		--set edge.enabled=false \
 		"${gate[@]+"${gate[@]}"}" \
 		--set "debug=$([ "${EWQ_DEBUG:-0}" = "1" ] && echo true || echo false)" \
-		"${EWQ_EXTRA_HELM_ARGS[@]+"${EWQ_EXTRA_HELM_ARGS[@]}"}" \
 		$(img agent agent) $(img agent.meshDnsDaemon mesh-dns) \
 		$(img proxy.supervisor proxy-supervisor) $(img cniInstall cni-install) \
 		$(img registrar registrar) $(img controller controller) $(img udsCsi uds-csi) \
@@ -546,14 +525,6 @@ arm_negative_control() {
 	ok "negative control armed: SVIDs without DNS SANs, $QUIC_HOSTNAME_GUARD=false on the node proxy, quic:info pool:debug"
 }
 
-# node_pin NODE — a pod-spec nodeSelector line pinning to NODE with
-# EWQ_WORKER=1, and an empty line otherwise (one node: nothing to pin).
-node_pin() {
-	if [ "${EWQ_WORKER:-0}" = "1" ]; then
-		printf 'nodeSelector: {kubernetes.io/hostname: %s}' "$1"
-	fi
-}
-
 # A destination: agnhost netexec on :$APP_PORT, its own ServiceAccount (= its
 # mesh service name). No Kubernetes Service is written by hand: the registrar
 # generates the mesh VIP Service and skips a name another Service owns.
@@ -577,7 +548,6 @@ spec:
         endpoint.aether.io/port: "$APP_PORT"
     spec:
       serviceAccountName: $name
-      $(node_pin "$DST_NODE")
       containers:
         - name: app
           image: $AGNHOST_IMAGE
@@ -612,7 +582,6 @@ spec:
         config.aether.io/upstreams: "$ups"
     spec:
       serviceAccountName: $name
-      $(node_pin "$NODE")
       containers:
         - name: curl
           image: $CURL_IMAGE
@@ -924,8 +893,7 @@ YAML
 # gamma_split_up PHASE — apply the weighted canary and wait until it is live.
 # Converge on the DATA, not the status: the route is live once a request to the
 # parent is answered by the second backend's pod (agnhost /hostname). Since #979
-# this split is the one h2-by-design route, so e2e/eastwest-quic-hotrestart.sh
-# uses it as its h2 control too.
+# this split is the one h2-by-design route.
 gamma_split_up() {
 	local phase="$1" b_pod deadline=$((SECONDS + 180)) replies
 	apply_gamma_route
@@ -1191,7 +1159,6 @@ metadata:
 spec:
   serviceAccountName: $sa
   restartPolicy: Never
-  $(node_pin "$NODE")
   containers:
     - name: curl
       image: $CURL_IMAGE
@@ -1281,12 +1248,6 @@ up() {
 	install_aether
 	deploy_workloads
 }
-
-# Sourced (e2e/eastwest-quic-hotrestart.sh reuses the bring-up and readings):
-# define everything, run nothing.
-if [ "${BASH_SOURCE[0]}" != "$0" ]; then
-	return 0
-fi
 
 case "${1:-}" in
 up) up ;;
