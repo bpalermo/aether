@@ -1,0 +1,36 @@
+load("@rules_go//go:def.bzl", "go_test")
+
+# Runs REAL proxy supervisors and the pinned Envoy as the proxy pods of one
+# node (shared base id, state directory, admin address and listener), and
+# drives the handoffs a roll that does not complete leaves behind: see the
+# package comment of revert_test.go.
+#
+# Run with:
+#   bazel test //agent/test/hotrestartrevert:hotrestartrevert_test
+#   bazel test //agent/test/hotrestartrevert:hotrestartrevert_test --test_output=all
+#
+# Tagged "envoy-validate" alongside //agent/test/envoy_validate and
+# //agent/test/mtlspool: all need the pinned proxy binary and none needs Docker.
+# Every test waits out real timers (parent-shutdown time, the heartbeat's
+# staleness), 20 to 60 s each; one shard per test keeps the target's wall time
+# at the slowest one.
+go_test(
+    name = "hotrestartrevert_test",
+    size = "medium",
+    srcs = ["revert_test.go"],
+    data = ["//agent/test/envoybin:envoy_bin"],
+    shard_count = 6,
+    tags = [
+        "envoy-validate",
+        # The Envoy binary reads /proc on startup, the Envoys of a node find
+        # each other through abstract sockets and /dev/shm, and everything
+        # binds loopback; run outside the strict sandbox.
+        "no-sandbox",
+    ],
+    target_compatible_with = ["@platforms//os:linux"],
+    deps = [
+        "//agent/internal/proxy/hotrestart",
+        "//agent/test/envoybin",
+        "@com_github_stretchr_testify//require",
+    ],
+)

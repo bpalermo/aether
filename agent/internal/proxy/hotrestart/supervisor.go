@@ -278,6 +278,13 @@ type Supervisor struct {
 	// again after a successor had terminated its own and then gone away (-1:
 	// none; see superseded.go). Guarded by mu.
 	supersededRelaunchEpoch int
+	// supersededFromEpoch is the epoch this supervisor last ran before that
+	// relaunch, which a lost relaunch goes back to. Guarded by mu.
+	supersededFromEpoch int
+	// supersededLost counts the Envoys in a row that were started again after
+	// a successor went away and lost at once (see superseded). Read and
+	// written by the Run goroutine only.
+	supersededLost int
 
 	// drainedPredecessor is the admin identity of the predecessor this
 	// supervisor drained for a worker-count change (issue #1136), so the same
@@ -687,7 +694,7 @@ func (s *Supervisor) awaitSuccessor(ctx context.Context, midHandoff bool) {
 	// While we wait, say so: the pod that should take over may be one whose
 	// Envoy ours terminated, and it has no other way to learn that the
 	// DaemonSet deleted us and kept it (see superseded.go).
-	stopAdvertising := s.advertiseForSuccessor(ctx)
+	stopAdvertising := s.advertiseForSuccessor(ctx, budget)
 	tookOver := s.awaitProtocolTermination(budget)
 	stopAdvertising()
 	if tookOver {
@@ -832,17 +839,22 @@ func (s *Supervisor) handleChildExit(ctx context.Context, exit childExit, bindRe
 		// successor going away without this pod being deleted (superseded).
 		s.log.InfoContext(ctx, "newest epoch terminated cleanly by successor; awaiting pod deletion", "epoch", exit.epoch)
 		s.reap(exit.epoch)
+		s.supersededLost = 0
 		return s.superseded(ctx, exit.epoch)
 	}
 	if s.lostSupersededRelaunch(exit) {
-		// The Envoy started again after a successor went away could not bind:
-		// the node has an Envoy after all. Do not retry epoch detection, which
-		// would attach to it (see superseded.go); wait again.
-		s.metrics.childExited(exitBindCollision)
+		// The Envoy started again after a successor went away died at once.
+		// Not through retryBindCollision: its epoch detection has none of the
+		// limits a superseded supervisor is held to (see superseded.go). Wait
+		// again; superseded pauses first and gives up after a few.
+		s.metrics.childExited(exitUnexpected)
 		s.reap(exit.epoch)
-		s.log.InfoContext(ctx, "the envoy started again after the successor went away lost the base-id socket to another envoy; awaiting pod deletion again",
-			"epoch", exit.epoch, "error", exit.err.Error())
-		return s.superseded(ctx, exit.epoch)
+		s.supersededLost++
+		from := s.abandonSupersededRelaunch()
+		s.log.WarnContext(ctx, "the envoy started again after the successor went away exited at once; awaiting pod deletion again",
+			"epoch", exit.epoch, "error", exit.err.Error(), "crashSignal", isCrashSignal(exit.err),
+			"attempt", s.supersededLost, "budget", maxSupersededRelaunches)
+		return s.superseded(ctx, from)
 	}
 	if retried, retErr, done := s.retryBindCollision(ctx, exit, bindRetries, crashRetries); retried {
 		return retErr, done, ""

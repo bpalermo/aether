@@ -4,8 +4,15 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"math/rand/v2"
+	"net"
+	"net/http"
 	"os"
 	"path/filepath"
+	"runtime"
+	"strings"
+	"sync"
+	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
@@ -24,6 +31,32 @@ type handledExit struct {
 	done bool
 }
 
+// testBaseID returns a base id no other test (and no Envoy on the machine) is
+// likely to use: the successor_gone recovery asks the kernel whether any
+// process holds a hot-restart socket of the supervisor's base id.
+func testBaseID() uint32 { return 1_000_000 + rand.Uint32N(400_000_000) }
+
+// holdEnvoySocket binds the hot-restart domain socket a live Envoy of baseID
+// at the given restart epoch holds (role "parent"), until the returned
+// function is called. It is the kernel-side trace of an Envoy process, which
+// the stub Envoy does not leave.
+func holdEnvoySocket(t *testing.T, baseID uint32, epoch int) (release func()) {
+	t.Helper()
+	if runtime.GOOS != "linux" {
+		t.Skip("abstract unix sockets are Linux only")
+	}
+	// As Envoy binds it: sizeof(sockaddr_un) long, so NUL-padded to 108 bytes
+	// of sun_path (//agent/test/hotrestartrevert holds this to the real one).
+	name := fmt.Sprintf("@envoy_domain_socket_parent_%d", uint64(baseID)*10+uint64(epoch%3))
+	name += strings.Repeat("\x00", 108-len(name))
+	conn, err := net.ListenUnixgram("unixgram", &net.UnixAddr{Name: name, Net: "unixgram"})
+	require.NoError(t, err)
+	var once sync.Once
+	release = func() { once.Do(func() { _ = conn.Close() }) }
+	t.Cleanup(release)
+	return release
+}
+
 // newSupersededSupervisor returns a production-shaped supervisor (state
 // directory, admin address) in the state a completed cross-pod handoff leaves
 // the OLD pod in: its epoch-0 Envoy was started, and then exited 0, which is
@@ -34,6 +67,7 @@ func newSupersededSupervisor(t *testing.T, f *fakeAdminServer, envoyPath, stateD
 	s := New(Config{
 		EnvoyPath:                 envoyPath,
 		ConfigPath:                filepath.Join(t.TempDir(), "envoy.yaml"),
+		BaseID:                    testBaseID(),
 		DrainTime:                 1 * time.Second,
 		ParentShutdownTime:        1 * time.Second,
 		StateDir:                  stateDir,
@@ -346,8 +380,10 @@ func TestSupersededSupervisorLeavesAHealthySuccessorAlone(t *testing.T) {
 			},
 		},
 	} {
+		// Not parallel: every subtest writes a stub Envoy script and execs it,
+		// and a child forked by a sibling in between holds the script open for
+		// writing (exec fails with "text file busy").
 		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
 			stateDir := t.TempDir()
 			f := newFakeAdmin(t, adminLiveState, 1)
 			recordPath := filepath.Join(t.TempDir(), "epochs.txt")
@@ -361,7 +397,7 @@ func TestSupersededSupervisorLeavesAHealthySuccessorAlone(t *testing.T) {
 			select {
 			case got := <-handled:
 				t.Fatalf("the superseded supervisor stopped waiting for its deletion: %+v", got)
-			case <-time.After(5 * time.Second):
+			case <-time.After(6 * time.Second):
 			}
 			assert.Equal(t, []string{"0"}, recordedEpochs(t, recordPath),
 				"an envoy was started against a successor that serves the node")
@@ -381,14 +417,15 @@ func TestSupersededSupervisorLeavesAHealthySuccessorAlone(t *testing.T) {
 	}
 }
 
-// TestSupersededRelaunchThatCollidesGoesBackToWaiting covers the recovery
-// being wrong about the node: it starts a fresh Envoy, and the base-id socket
-// is held, so an Envoy is there after all (one whose admin was silent). The
-// ordinary answer to a bind collision is to retry epoch detection and attach
-// to whoever is LIVE by then. Here that would hot-restart from a healthy
-// successor and take the node from the new pod, so the supervisor goes back to
-// waiting for its deletion instead.
-func TestSupersededRelaunchThatCollidesGoesBackToWaiting(t *testing.T) {
+// TestSupersededRelaunchThatDiesAtOnceIsNotRetriedThroughEpochDetection covers
+// what the supervisor does when the Envoy it started again exits at once (the
+// stub exits 1; what a real Envoy does to the node in that position is another
+// matter, and the reason the fork is guarded: see envoyHoldsBaseID and
+// //agent/test/hotrestartrevert). The ordinary answer to a quick exit is
+// retryBindCollision: run epoch detection again and attach to whoever is LIVE
+// by then. Here that would hot-restart from a healthy successor and take the
+// node from the new pod, so the supervisor waits for its deletion again.
+func TestSupersededRelaunchThatDiesAtOnceIsNotRetriedThroughEpochDetection(t *testing.T) {
 	requireShell(t)
 
 	stateDir := t.TempDir()
@@ -432,8 +469,9 @@ func TestSupersededRelaunchThatCollidesGoesBackToWaiting(t *testing.T) {
 	case <-time.After(bindCollisionRetryPause + 3*time.Second):
 	}
 	assert.Equal(t, []string{"0", "0"}, recordedEpochs(t, recordPath),
-		"the collision was retried, attaching to the healthy successor's envoy")
+		"the exit was retried through epoch detection, attaching to the healthy successor's envoy")
 	assert.False(t, old.anyChildTracked())
+	assert.Equal(t, 1, old.supersededLost)
 
 	cancel()
 	select {
@@ -464,15 +502,23 @@ func TestSupersededRelaunchDoesNotAttachToAnEnvoyThatWentLiveMeanwhile(t *testin
 	} {
 		t.Run(tc.trigger, func(t *testing.T) {
 			stateDir := t.TempDir()
-			f := newFakeAdmin(t, adminLiveState, 5)
+			// The other Envoy runs another worker count: unrestricted epoch
+			// detection would drain it and stop it (issue #1136) before
+			// anything here could refuse.
+			f := newPredecessor(t, 4)
+			f.set(adminLiveState, 5)
 			recordPath := filepath.Join(t.TempDir(), "epochs.txt")
 			old, exit := newSupersededSupervisor(t, f, stubEnvoy(t, recordPath), stateDir)
+			old.cfg.ExtraArgs = []string{"--concurrency", "2"}
 			old.reap(exit.epoch)
 			old.writeState(5)
+			holdEnvoySocket(t, old.cfg.BaseID, 5)
 
 			relaunched, err := old.relaunchSuperseded(context.Background(), exit.epoch, tc.trigger, tc.peer)
 			require.NoError(t, err)
 			assert.False(t, relaunched)
+			assert.Zero(t, f.drainHits.Load(), "an envoy that did not ask for a successor was drained")
+			assert.Zero(t, f.quitHits.Load(), "an envoy that did not ask for a successor was stopped")
 			assert.Equal(t, []string{"0"}, recordedEpochs(t, recordPath), "an envoy was hot-restarted from a pod that serves the node")
 			assert.Equal(t, 0, old.currentEpoch(), "the epoch must be back at the one that was terminated")
 			old.mu.Lock()
@@ -512,4 +558,448 @@ func TestRunStartsNoEnvoyForAPodAlreadyTerminated(t *testing.T) {
 	}
 	assert.Empty(t, recordedEpochs(t, recordPath), "an envoy was forked for a pod that was already terminating")
 	assert.False(t, s.anyChildTracked())
+}
+
+// TestSupersededSupervisorStartsNoFreshEnvoyWhileAnEnvoyHoldsTheBaseID: the
+// node looks empty (the admin is silent, the heartbeat is stale) and is not: a
+// stopped or wedged Envoy answers nothing and is still there. A fresh epoch 0
+// beside it is not a harmless probe. Unless the live epoch is a multiple of 3
+// the new Envoy binds its own hot-restart sockets, replaces the base id's
+// shared memory, dies on the admin address and leaves the "initializing" flag
+// set, and no pod can hot-restart from the live Envoy again. So the recovery
+// waits for as long as any process holds a hot-restart socket of the base id,
+// and starts once none does.
+func TestSupersededSupervisorStartsNoFreshEnvoyWhileAnEnvoyHoldsTheBaseID(t *testing.T) {
+	requireShell(t)
+
+	for _, liveEpoch := range []int{1, 2, 3} {
+		t.Run(fmt.Sprintf("live epoch %d", liveEpoch), func(t *testing.T) {
+			stateDir := t.TempDir()
+			f := newFakeAdmin(t, adminLiveState, liveEpoch)
+			recordPath := filepath.Join(t.TempDir(), "epochs.txt")
+			old, exit := newSupersededSupervisor(t, f, stubEnvoy(t, recordPath), stateDir)
+			old.cfg.AdminUnresponsiveDeadline = 1 * time.Second
+			var logged syncBuffer
+			old.log = slog.New(slog.NewTextHandler(&logged, nil))
+			release := holdEnvoySocket(t, old.cfg.BaseID, liveEpoch)
+			f.hang.Store(true) // the live Envoy's admin answers nothing
+
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			handled := handleExit(ctx, old, exit)
+			select {
+			case got := <-handled:
+				t.Fatalf("the superseded supervisor stopped waiting: %+v", got)
+			case <-time.After(5 * time.Second):
+			}
+			require.Equal(t, []string{"0"}, recordedEpochs(t, recordPath),
+				"a fresh envoy was started beside one that holds the base id")
+			assert.Equal(t, 0, old.currentEpoch())
+			// And it did not get as far as deciding to: the held socket is
+			// part of what "the node has an Envoy" means.
+			assert.Zero(t, logged.count("not starting envoy again"))
+
+			// The Envoy exits: the kernel drops its socket with it.
+			release()
+			select {
+			case got := <-handled:
+				require.NoError(t, got.err)
+				require.False(t, got.done)
+			case <-time.After(15 * time.Second):
+				t.Fatal("no envoy was started once nothing held the base id")
+			}
+			require.Eventually(t, func() bool { return len(recordedEpochs(t, recordPath)) == 2 },
+				5*time.Second, 20*time.Millisecond)
+			assert.Equal(t, []string{"0", "0"}, recordedEpochs(t, recordPath))
+		})
+	}
+}
+
+// TestSupersededRelaunchForAStaleHeartbeatStartsNothingBesideTheAsker: a
+// request read just inside its age limit, and the heartbeat written with it
+// read just outside. Epoch detection then answers "no live predecessor, start
+// fresh at epoch 0", while the Envoy that asked is alive. That fresh start is
+// refused for the same reason as any other beside a live Envoy.
+func TestSupersededRelaunchForAStaleHeartbeatStartsNothingBesideTheAsker(t *testing.T) {
+	requireShell(t)
+
+	stateDir := t.TempDir()
+	f := newFakeAdmin(t, adminLiveState, 1)
+	recordPath := filepath.Join(t.TempDir(), "epochs.txt")
+	old, exit := newSupersededSupervisor(t, f, stubEnvoy(t, recordPath), stateDir)
+	old.reap(exit.epoch)
+	writeRawState(t, old, 1, predecessorStale+time.Second)
+	writeRawSuccessorWanted(t, stateDir, 1, predecessorStale-time.Second)
+	release := holdEnvoySocket(t, old.cfg.BaseID, 1)
+
+	relaunched, err := old.relaunchSuperseded(context.Background(), exit.epoch, triggerSuccessorTerminating, 1)
+	require.NoError(t, err)
+	assert.False(t, relaunched)
+	assert.Equal(t, []string{"0"}, recordedEpochs(t, recordPath), "a fresh epoch 0 was started beside the envoy that asked")
+	assert.Equal(t, 0, old.currentEpoch())
+
+	// The asker has exited: now the fresh start is the right answer.
+	release()
+	relaunched, err = old.relaunchSuperseded(context.Background(), exit.epoch, triggerSuccessorTerminating, 1)
+	require.NoError(t, err)
+	assert.True(t, relaunched)
+	require.Eventually(t, func() bool { return len(recordedEpochs(t, recordPath)) == 2 }, 5*time.Second, 20*time.Millisecond)
+	assert.Equal(t, []string{"0", "0"}, recordedEpochs(t, recordPath))
+}
+
+// crashingThenServingEnvoy is failingThenServingEnvoy dying on a fatal signal
+// instead of exiting 1.
+func crashingThenServingEnvoy(t *testing.T, recordPath, blockerPath string) string {
+	t.Helper()
+	script := "#!/bin/sh\n" +
+		"epoch=\"\"\n" +
+		"while [ $# -gt 0 ]; do\n" +
+		"  case \"$1\" in\n" +
+		"    --restart-epoch) epoch=\"$2\"; shift 2;;\n" +
+		"    *) shift;;\n" +
+		"  esac\n" +
+		"done\n" +
+		"echo \"$epoch\" >> \"" + recordPath + "\"\n" +
+		"if [ -e \"" + blockerPath + "\" ]; then\n" +
+		"  kill -SEGV $$\n" +
+		"fi\n" +
+		"trap 'exit 0' TERM INT\n" +
+		"while true; do sleep 0.05; done\n"
+	path := filepath.Join(t.TempDir(), "stub-envoy-crash.sh")
+	require.NoError(t, os.WriteFile(path, []byte(script), 0o755))
+	return path
+}
+
+// TestSupersededRelaunchLostAtOnceIsPacedAndBounded: an Envoy started again
+// that dies at once, by a fatal signal as much as by an exit, sends the
+// supervisor back to waiting and never through retryBindCollision; the next
+// attempt comes no sooner than bindCollisionRetryPause; and after
+// maxSupersededRelaunches in a row there is no further attempt, only the wait
+// for the pod's deletion.
+func TestSupersededRelaunchLostAtOnceIsPacedAndBounded(t *testing.T) {
+	requireShell(t)
+
+	stateDir := t.TempDir()
+	f := newFakeAdmin(t, adminLiveState, 1)
+	recordPath := filepath.Join(t.TempDir(), "epochs.txt")
+	blockerPath := filepath.Join(t.TempDir(), "crash")
+	old, exit := newSupersededSupervisor(t, f, crashingThenServingEnvoy(t, recordPath, blockerPath), stateDir)
+	old.cfg.AdminUnresponsiveDeadline = 1 * time.Second
+	require.NoError(t, os.WriteFile(blockerPath, []byte("x"), 0o644))
+	f.srv.Close() // nothing answers, nothing holds the base id: successor_gone
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	nextLoss := func(exit childExit, within time.Duration) childExit {
+		t.Helper()
+		handled := handleExit(ctx, old, exit)
+		select {
+		case got := <-handled:
+			require.NoError(t, got.err)
+			require.False(t, got.done)
+		case <-time.After(within):
+			t.Fatal("no envoy was started again")
+		}
+		select {
+		case lost := <-old.childExited:
+			require.True(t, isCrashSignal(lost.err), "the stub must die on a fatal signal, got %v", lost.err)
+			return lost
+		case <-time.After(10 * time.Second):
+			t.Fatal("the relaunched stub did not crash")
+			return childExit{}
+		}
+	}
+
+	first := nextLoss(exit, 20*time.Second)
+	require.Equal(t, []string{"0", "0"}, recordedEpochs(t, recordPath))
+
+	// The second attempt: after the pause, and again at epoch 0 (a crash
+	// retried through retryBindCollision would have come from there too, but
+	// with epoch detection; the count below is what tells them apart).
+	started := time.Now()
+	second := nextLoss(first, 20*time.Second)
+	// The pause, then the silence bound again (1 s here).
+	assert.GreaterOrEqual(t, time.Since(started), bindCollisionRetryPause+time.Second, "the next attempt did not wait")
+	assert.Equal(t, 1, old.supersededLost, "the first loss was not counted as a superseded relaunch")
+
+	// The budget: with all but one attempt spent, one more loss ends them.
+	old.supersededLost = maxSupersededRelaunches - 1
+	attempts := len(recordedEpochs(t, recordPath))
+	handled := handleExit(ctx, old, second)
+	select {
+	case got := <-handled:
+		t.Fatalf("handleChildExit returned with the budget spent: %+v", got)
+	case <-time.After(bindCollisionRetryPause + 4*time.Second):
+	}
+	assert.Len(t, recordedEpochs(t, recordPath), attempts, "an envoy was started after the budget was spent")
+	cancel()
+	select {
+	case got := <-handled:
+		assert.NoError(t, got.err)
+		assert.True(t, got.done)
+	case <-time.After(10 * time.Second):
+		t.Fatal("the supervisor did not exit when its pod was deleted")
+	}
+}
+
+// TestAdvertiseWindow: how long a terminating supervisor asks for a successor.
+func TestAdvertiseWindow(t *testing.T) {
+	s := New(Config{ParentShutdownTime: 15 * time.Second}, slog.New(slog.DiscardHandler), nil)
+	for _, tc := range []struct {
+		budget  time.Duration
+		window  time.Duration
+		bounded bool
+	}{
+		{budget: 0, window: 0, bounded: false},                                // an unbounded wait: no drain follows it
+		{budget: 155 * time.Second, window: 132 * time.Second, bounded: true}, // the chart's defaults
+		{budget: 23 * time.Second, window: 0, bounded: true},
+		{budget: 5 * time.Second, window: 0, bounded: true},
+	} {
+		window, bounded := s.advertiseWindow(tc.budget)
+		assert.Equal(t, tc.window, window, "budget %s", tc.budget)
+		assert.Equal(t, tc.bounded, bounded, "budget %s", tc.budget)
+	}
+}
+
+// TestTerminatingSupervisorStopsAskingBeforeItDrains: no successor comes. By
+// the time the supervisor drains its Envoy, the request is withdrawn and the
+// heartbeat is stale, so no pod that starts then is sent to hot-restart from an
+// Envoy that is about to be SIGTERMed under it. (Advertised up to the drain, a
+// new pod attached during it and its Envoy looped on "hot restart sendmsg()
+// connection refused" until its own watchdog killed it.)
+func TestTerminatingSupervisorStopsAskingBeforeItDrains(t *testing.T) {
+	requireShell(t)
+
+	f := newFakeAdmin(t, adminLiveState, 0)
+	s := newShutdownSupervisor(t, f)
+	// budget = 28s - (1s drain + 5s grace) - 10s margin = 12s;
+	// window = 12s - (8s stale + 1s parent shutdown) = 3s.
+	s.cfg.TerminationGrace = 28 * time.Second
+	require.Equal(t, 12*time.Second, s.successorWaitBudget())
+	wanted := filepath.Join(s.cfg.StateDir, successorWantedFile)
+
+	done := make(chan error, 1)
+	go func() { done <- s.handleShutdown(cancelledCtx()) }()
+
+	require.Eventually(t, func() bool { _, err := os.Stat(wanted); return err == nil },
+		2500*time.Millisecond, 20*time.Millisecond, "the request was never written")
+	require.Eventually(t, func() bool { _, err := os.Stat(wanted); return os.IsNotExist(err) },
+		6*time.Second, 20*time.Millisecond, "the request was not withdrawn when the window ended")
+
+	// The moment the drain is requested.
+	require.Eventually(t, func() bool { return f.drainHits.Load() > 0 }, 15*time.Second, 5*time.Millisecond,
+		"the supervisor never drained")
+	_, heartbeat, ok := s.readState()
+	require.True(t, ok)
+	assert.GreaterOrEqual(t, time.Since(heartbeat), predecessorStale,
+		"the heartbeat is fresh as the drain starts: a pod starting now would hot-restart from the draining envoy")
+	assert.NoFileExists(t, wanted)
+
+	select {
+	case err := <-done:
+		require.NoError(t, err)
+	case <-time.After(20 * time.Second):
+		t.Fatal("handleShutdown did not return")
+	}
+	assert.NoFileExists(t, wanted)
+}
+
+// switchAdmin is an Envoy admin on ONE fixed address that can go away and come
+// back, as the node's shared admin does when one Envoy dies and another starts.
+type switchAdmin struct {
+	address string
+	state   atomic.Value // string
+	epoch   atomic.Int64
+	mu      sync.Mutex
+	srv     *http.Server
+}
+
+func newSwitchAdmin(t *testing.T, state string, epoch int) *switchAdmin {
+	t.Helper()
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	a := &switchAdmin{address: l.Addr().String()}
+	a.set(state, epoch)
+	a.serve(l)
+	t.Cleanup(a.down)
+	return a
+}
+
+func (a *switchAdmin) set(state string, epoch int) {
+	a.state.Store(state)
+	a.epoch.Store(int64(epoch))
+}
+
+func (a *switchAdmin) serve(l net.Listener) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/server_info", func(w http.ResponseWriter, _ *http.Request) {
+		fmt.Fprintf(w, `{"state":%q,"command_line_options":{"restart_epoch":%d}}`,
+			a.state.Load().(string), a.epoch.Load())
+	})
+	mux.HandleFunc("/ready", func(w http.ResponseWriter, _ *http.Request) {
+		st := a.state.Load().(string)
+		if st != adminLiveState {
+			w.WriteHeader(http.StatusServiceUnavailable)
+		}
+		fmt.Fprintf(w, "%s\n", st)
+	})
+	srv := &http.Server{Handler: mux, ReadHeaderTimeout: 5 * time.Second}
+	a.mu.Lock()
+	a.srv = srv
+	a.mu.Unlock()
+	go func() { _ = srv.Serve(l) }()
+}
+
+func (a *switchAdmin) down() {
+	a.mu.Lock()
+	srv := a.srv
+	a.srv = nil
+	a.mu.Unlock()
+	if srv != nil {
+		_ = srv.Close()
+	}
+}
+
+func (a *switchAdmin) up(t *testing.T) {
+	t.Helper()
+	var l net.Listener
+	var err error
+	for i := 0; i < 50; i++ {
+		if l, err = net.Listen("tcp", a.address); err == nil {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	require.NoError(t, err)
+	a.serve(l)
+}
+
+// TestSuccessorGoneRelaunchIsNotKilledByItsOwnAdminWatchdog drives the real Run
+// loop, with watchLiveness running through the superseded wait as it does in
+// the pod, through the successor_gone recovery (from the adversarial review of
+// this change). The liveness loop has seen the node's admin silent for longer
+// than the bound by then: that silence is the very condition of the recovery.
+// Charged to the Envoy the recovery forks, it fired the admin watchdog on the
+// first tick, before that Envoy had opened its admin: the supervisor killed
+// what it had just started and exited 1. The fresh Envoy must get what any
+// fresh Envoy gets, and the pod must go Ready with it.
+func TestSuccessorGoneRelaunchIsNotKilledByItsOwnAdminWatchdog(t *testing.T) {
+	requireShell(t)
+
+	admin := newSwitchAdmin(t, adminLiveState, 0)
+	recordPath := filepath.Join(t.TempDir(), "epochs.txt")
+	marker := filepath.Join(t.TempDir(), "ready")
+	s := New(Config{
+		EnvoyPath:                 stubEnvoy(t, recordPath),
+		ConfigPath:                filepath.Join(t.TempDir(), "envoy.yaml"),
+		BaseID:                    testBaseID(),
+		DrainTime:                 1 * time.Second,
+		ParentShutdownTime:        1 * time.Second,
+		StateDir:                  t.TempDir(),
+		ReadyMarkerPath:           marker,
+		AdminAddress:              admin.address,
+		AdminUnresponsiveDeadline: 2 * time.Second,
+	}, slog.New(slog.DiscardHandler), nil)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- s.Run(ctx) }()
+	t.Cleanup(func() {
+		cancel()
+		for e := 0; e < 4; e++ {
+			s.signalEpoch(e, syscall.SIGKILL)
+		}
+	})
+
+	// The kept pod: epoch 0, LIVE, Ready.
+	require.Eventually(t, func() bool { _, err := os.Stat(marker); return err == nil },
+		10*time.Second, 20*time.Millisecond, "the kept pod never went Ready at epoch 0")
+
+	// The surge pod's Envoy (epoch 1) takes the node and terminates ours.
+	admin.set(adminLiveState, 1)
+	s.signalEpoch(0, syscall.SIGTERM)
+	require.Eventually(t, func() bool { return !s.anyChildTracked() }, 10*time.Second, 20*time.Millisecond)
+	require.Eventually(t, func() bool { _, err := os.Stat(marker); return os.IsNotExist(err) },
+		5*time.Second, 20*time.Millisecond, "a pod with no envoy stayed Ready")
+
+	// The surge pod is killed outright: nothing answers on the node any more.
+	admin.down()
+	require.Eventually(t, func() bool { return len(recordedEpochs(t, recordPath)) == 2 },
+		30*time.Second, 5*time.Millisecond, "successor_gone never started an envoy again")
+	require.Equal(t, []string{"0", "0"}, recordedEpochs(t, recordPath))
+
+	// The new Envoy's admin starts listening 1.2 s after its fork, LIVE at
+	// epoch 0: at least one liveness tick finds it silent first.
+	time.Sleep(1200 * time.Millisecond)
+	admin.set(adminLiveState, 0)
+	admin.up(t)
+
+	select {
+	case err := <-done:
+		t.Fatalf("Run returned %v: the admin watchdog killed the envoy that the successor_gone recovery had just started", err)
+	case <-time.After(4 * time.Second):
+	}
+	_, err := os.Stat(marker)
+	require.NoError(t, err, "the kept pod did not go Ready with its fresh envoy")
+	assert.True(t, s.childTracked(0))
+}
+
+// TestLostTakeBackLeavesTheSupervisorAtItsOwnEpoch: two superseded pods answer
+// the same request, both fork the next epoch, and one loses (its Envoy cannot
+// bind and exits). The loser must go back to the epoch it last ran. Left at
+// the epoch it forked, its liveness loop asks the node's admin about exactly
+// the epoch the winner now runs, reads LIVE, and marks a pod with no Envoy
+// Ready (seen with real Envoys in //agent/test/hotrestartrevert,
+// TestThreeGenerations).
+func TestLostTakeBackLeavesTheSupervisorAtItsOwnEpoch(t *testing.T) {
+	requireShell(t)
+
+	stateDir := t.TempDir()
+	f := newFakeAdmin(t, adminLiveState, 1)
+	recordPath := filepath.Join(t.TempDir(), "epochs.txt")
+	blockerPath := filepath.Join(t.TempDir(), "socket-held")
+	old, exit := newSupersededSupervisor(t, f, failingThenServingEnvoy(t, recordPath, blockerPath), stateDir)
+	require.NoError(t, os.WriteFile(blockerPath, []byte("x"), 0o644))
+
+	successor, _ := newTerminatingSuccessor(t, f, stateDir)
+	f.identity.Store(successor.adminIdentity)
+	successor.cfg.TerminationGrace = 60 * time.Second
+	go func() { _ = successor.handleShutdown(cancelledCtx()) }()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	handled := handleExit(ctx, old, exit)
+	select {
+	case got := <-handled:
+		require.NoError(t, got.err)
+		require.False(t, got.done)
+	case <-time.After(15 * time.Second):
+		t.Fatal("the request was not answered")
+	}
+	var lost childExit
+	select {
+	case lost = <-old.childExited:
+		require.Error(t, lost.err)
+		require.Equal(t, 2, lost.epoch)
+	case <-time.After(10 * time.Second):
+		t.Fatal("the relaunched stub did not exit")
+	}
+	require.Equal(t, 2, old.currentEpoch())
+
+	// The other pod won: its Envoy is LIVE at epoch 2.
+	f.set(adminLiveState, 2)
+	handled = handleExit(ctx, old, lost)
+	require.Eventually(t, func() bool { return old.currentEpoch() == 0 }, 2*time.Second, 10*time.Millisecond,
+		"the supervisor still asks about the epoch another pod's envoy runs")
+	old.mu.Lock()
+	gated, peer := old.gatedEpoch, old.handoffPeer
+	old.mu.Unlock()
+	assert.Equal(t, -1, gated)
+	assert.Equal(t, -1, peer)
+	select {
+	case got := <-handled:
+		t.Fatalf("handleChildExit returned: %+v", got)
+	case <-time.After(1 * time.Second):
+	}
+	successor.signalEpoch(1, syscall.SIGTERM)
 }
