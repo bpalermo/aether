@@ -280,7 +280,7 @@ func TestBindingLinesNameClusterResources(t *testing.T) {
 	}
 	c.clusterMu.Unlock()
 
-	clusters, _, _, pins := c.clustersEndpointsVhostsAndPins()
+	clusters, _, _, pins := c.clustersEndpointsVhostsAndPinsInto(nil, nil)
 	assert.Equal(t, []string{fqdn}, resourceNames(clusters), "fixture: the pass publishes the default cluster, by its FQDN")
 	assert.Equal(t, []string{fqdn}, pins.mtls, "and those are the names the binding log is given")
 

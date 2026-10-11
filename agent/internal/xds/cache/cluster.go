@@ -77,7 +77,7 @@ func (c *SnapshotCache) RemoveCluster(ctx context.Context, clusterName string) e
 	return c.generateClusterSnapshot(ctx)
 }
 
-// clustersEndpointsVhostsAndPins returns all cached cluster, endpoint, and virtual
+// clustersEndpointsVhostsAndPinsInto returns all cached cluster, endpoint, and virtual
 // host resources as separate slices, and the pin report. It returns the concrete vhost type to avoid
 // boxing/unboxing at the caller. Each service cluster speaks per-source mTLS to
 // the destination node; the upstream transport-socket matcher (selecting the
@@ -93,14 +93,10 @@ func (c *SnapshotCache) RemoveCluster(ctx context.Context, clusterName string) e
 // cluster with this pin state". Taken in a later read, a registry reload or an
 // identity change that landed in between would put the pin state of a cluster
 // the proxy was never sent under that version.
-func (c *SnapshotCache) clustersEndpointsVhostsAndPins() ([]types.Resource, []types.Resource, []*routev3.VirtualHost, pinReport) {
-	return c.clustersEndpointsVhostsAndPinsInto(nil, nil)
-}
-
-// clustersEndpointsVhostsAndPinsInto is clustersEndpointsVhostsAndPins with
-// the report's classes collected into buf and its mTLS cluster names into
+//
+// The report's classes are collected into buf and its mTLS cluster names into
 // mtlsBuf (each from its start), so a snapshot build can reuse the two buffers
-// across builds.
+// across builds; nil for either allocates.
 func (c *SnapshotCache) clustersEndpointsVhostsAndPinsInto(buf []entryClass, mtlsBuf []string) ([]types.Resource, []types.Resource, []*routev3.VirtualHost, pinReport) {
 	// The east-west QUIC fan-out inputs, snapshotted BEFORE clusterMu; their
 	// own locks (depMu, localMu) never nest inside it (see mtls.go's lock order).
@@ -1029,26 +1025,6 @@ func coldFillUDPEndpoints(ctx context.Context, log interface {
 			udpServiceEndpoints[svc] = eps
 		}
 	}
-}
-
-// serviceEntryLocked returns the entry carrying a service's service-level facts
-// (sni, sanURIs, the bare-name load assignment) for callers that do not care
-// which protocol classified it: the HTTP default entry when the service has one,
-// else its TCP floor entry, else its UDP one. Caller must hold clusterMu.
-//
-// The order is a preference, not a priority: a service registered under several
-// protocols has the SAME endpoints under each, and only one entry owns the
-// bare-name load assignment (see buildTCPEndpointsLocked's `owns`). The UDP
-// fallback exists for the service registered ONLY as PROTOCOL_UDP, which before
-// #931 could not be expressed at all.
-func (c *SnapshotCache) serviceEntryLocked(serviceName string) (clusterEntry, bool) {
-	if entry, ok := c.clusters[serviceName]; ok {
-		return entry, true
-	}
-	if entry, ok := c.tcpEntryLocked(serviceName); ok {
-		return entry, true
-	}
-	return c.udpEntryLocked(serviceName)
 }
 
 // retainAbsentClustersLocked re-inserts entries from prev that are no longer in
