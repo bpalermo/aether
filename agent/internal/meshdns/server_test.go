@@ -1,6 +1,7 @@
 package meshdns
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -65,9 +66,7 @@ func assertMeshMiss(t *testing.T, s *Server, qname string, msg ...string) {
 // its record table (and flips ready) before any SetRecords/reconcile.
 func TestWarmStartLoadsSnapshot(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "records.json")
-	data, err := json.Marshal(map[string]string{"team-a/svc-1": "10.111.0.5"})
-	require.NoError(t, err)
-	require.NoError(t, os.WriteFile(path, data, 0o644))
+	require.NoError(t, WriteSnapshot(path, map[string]string{"team-a/svc-1": "10.111.0.5"}, 1))
 
 	s := NewServer("aether.internal", "127.0.0.1:0", path, slog.New(slog.DiscardHandler))
 
@@ -137,39 +136,74 @@ func TestSnapshotRoundTrip(t *testing.T) {
 	assert.ErrorIs(t, err, os.ErrNotExist, "a missing snapshot is distinguishable as not-exist")
 }
 
-// TestReadSnapshotLegacyBareMap: a snapshot written by a pre-#586 agent is a BARE
-// record map with no envelope. ReadSnapshot must still accept it (an in-place upgrade
-// must never start the resolver cold) and back-fill writtenAt from the file mtime, so
-// the freshness gauge degrades gracefully instead of reading zero.
-func TestReadSnapshotLegacyBareMap(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "records.json")
-	want := map[string]string{"team-a/svc-1": "10.111.0.5", "default/echo": "10.111.0.6"}
-	data, err := json.Marshal(want)
-	require.NoError(t, err)
-	require.NoError(t, os.WriteFile(path, data, 0o644))
+// TestReadSnapshotBareMapIsParseError: the bare record map an agent wrote before the
+// envelope existed (#586, July 2026) is no longer a snapshot. Decoded as an envelope
+// it has no "records" object, and serving that as an empty table would answer
+// NXDOMAIN for the whole mesh, so it is a parse error like any other corrupt file.
+func TestReadSnapshotBareMapIsParseError(t *testing.T) {
+	for name, records := range map[string]map[string]string{
+		"service keys":          {"team-a/svc-1": "10.111.0.5", "default/echo": "10.111.0.6"},
+		"envelope-shaped keys":  {"generation/svc": "10.111.0.5", "writtenAt/svc": "10.111.0.6"},
+		"an empty JSON object":  {},
+		"a key called records":  {"records": "10.111.0.5"},
+		"only unrelated fields": {"foo": "bar"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "records.json")
+			data, err := json.Marshal(records)
+			require.NoError(t, err)
+			require.NoError(t, os.WriteFile(path, data, 0o644))
 
-	mtime := time.Now().Add(-90 * time.Second).Truncate(time.Second)
-	require.NoError(t, os.Chtimes(path, mtime, mtime))
-
-	got, err := ReadSnapshot(path)
-	require.NoError(t, err, "the legacy bare-map form is still readable")
-	assert.Equal(t, want, got.Records)
-	assert.Zero(t, got.Generation, "a legacy snapshot carries no generation")
-	assert.Equal(t, mtime.Unix(), got.WrittenAt, "writtenAt falls back to the file mtime")
+			snap, err := ReadSnapshot(path)
+			require.Error(t, err, "a file without the envelope's records object is not a snapshot")
+			assert.Nil(t, snap)
+			assert.ErrorIs(t, err, ErrSnapshotParse)
+			assert.Equal(t, reloadParseError, reloadResult(err), "counted as parse_error, which the reload alert reads")
+		})
+	}
 }
 
-// TestReadSnapshotLegacyEnvelopeShapedKeys: a legacy bare map whose service keys
-// happen to collide with envelope field names still decodes as the legacy form.
-func TestReadSnapshotLegacyEnvelopeShapedKeys(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "records.json")
-	want := map[string]string{"generation/svc": "10.111.0.5", "writtenAt/svc": "10.111.0.6"}
-	data, err := json.Marshal(want)
+// TestBareMapSnapshotFailsClosed: what a resolver does when the file it finds is the
+// pre-envelope bare map. At start it stays cold, so a mesh name answers SERVFAIL (the
+// client retries) and never NXDOMAIN from an empty table; on a reload it keeps the
+// table it already serves. Both leave a warning naming the file and the reason.
+func TestBareMapSnapshotFailsClosed(t *testing.T) {
+	bare, err := json.Marshal(map[string]string{"default/echo": "10.111.0.6"})
 	require.NoError(t, err)
-	require.NoError(t, os.WriteFile(path, data, 0o644))
 
-	got, err := ReadSnapshot(path)
-	require.NoError(t, err)
-	assert.Equal(t, want, got.Records)
+	t.Run("cold start", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "records.json")
+		require.NoError(t, os.WriteFile(path, bare, 0o644))
+		var logs bytes.Buffer
+		s := NewServer("aether.internal", "127.0.0.1:0", path, slog.New(slog.NewTextHandler(&logs, nil)))
+
+		st := s.observedState()
+		assert.False(t, st.ready, "a bare-map file must not make the resolver ready")
+		assert.Zero(t, st.records)
+		resp := serve(s, query("echo.default.aether.internal", dns.TypeA))
+		require.NotNil(t, resp)
+		assert.Equal(t, dns.RcodeServerFailure, resp.Rcode, "cold -> SERVFAIL, not NXDOMAIN and not the old file's answer")
+		assert.Empty(t, resp.Answer)
+		assert.Contains(t, logs.String(), "level=WARN")
+		assert.Contains(t, logs.String(), "no records object")
+	})
+
+	t.Run("reload keeps the served table", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "records.json")
+		require.NoError(t, WriteSnapshot(path, map[string]string{"default/echo": "10.222.0.9"}, 4))
+		var logs bytes.Buffer
+		s := NewServer("aether.internal", "127.0.0.1:0", path, slog.New(slog.NewTextHandler(&logs, nil)))
+
+		require.NoError(t, os.WriteFile(path, bare, 0o644))
+		s.ReloadFromSnapshot()
+
+		ip, ready := s.lookup("echo.default.aether.internal.")
+		assert.Equal(t, "10.222.0.9", ip, "the table read from the last good snapshot is still served")
+		assert.True(t, ready)
+		assert.Equal(t, uint64(4), s.observedState().generation)
+		assert.Contains(t, logs.String(), "level=WARN")
+		assert.Contains(t, logs.String(), "no records object")
+	})
 }
 
 // TestReadSnapshotCorrupt: a file that exists but does not decode is reported as a
