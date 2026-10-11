@@ -571,12 +571,16 @@ func TestGenerator_FrozenAnnotations(t *testing.T) {
 		{
 			// A 2.6 kubernetes HTTP listing held only the HTTP-declared pod,
 			// so its port is the one stamped, wherever the mixed pod sorts.
-			name: "pods that disagree, the mixed one listed first",
+			// On a write-based backend "the first endpoint" of a listing is
+			// the one with the lowest (cluster, address), whatever order the
+			// snapshot hands the rows over in: it does so in map order, and
+			// the annotation must not move with it.
+			name: "pods that disagree",
 			listings: map[registryv1.Service_Protocol][]*registryv1.ServiceEndpoint{
 				listHTTP: {tcpFirst, httpPod},
 				listTCP:  {tcpFirst},
 			},
-			firstListing: [2]string{"http", "9000"},
+			firstListing: [2]string{"http", "8080"},
 			declaredPort: [2]string{"http", "8080"},
 		},
 		{

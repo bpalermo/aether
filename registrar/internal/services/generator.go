@@ -161,8 +161,21 @@ func (g *Generator) buildDesiredServices(ctx context.Context) map[client.ObjectK
 	keys := map[string]struct{}{}
 	for i, protocol := range registry.ServedProtocols {
 		listings[i] = g.Snapshot.GetAll(protocol)
-		for svcKey := range listings[i] {
+		for svcKey, eps := range listings[i] {
 			keys[svcKey] = struct{}{}
+			// The snapshot hands a service's rows over in map order. Where
+			// "the first endpoint" decides something (the frozen annotations
+			// of a service whose pods disagree), a fixed order keeps the
+			// answer the same from one reconcile to the next: without it the
+			// Service was rewritten every time the order fell the other way.
+			// GetAll builds these slices for the caller, so sorting them in
+			// place touches nothing shared.
+			slices.SortStableFunc(eps, func(a, b *registryv1.ServiceEndpoint) int {
+				if c := strings.Compare(a.GetClusterName(), b.GetClusterName()); c != 0 {
+					return c
+				}
+				return strings.Compare(a.GetIp(), b.GetIp())
+			})
 		}
 	}
 
