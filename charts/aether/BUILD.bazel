@@ -1688,15 +1688,6 @@ helm_template_test(
 # stays in aether.pod; without either, every pod is a metric family of its own.
 # The namespace part is optional in the aether.pod extractor, so the prefixes an
 # agent older than #1584 writes (inbound_<pod>) still collapse during an upgrade.
-#
-# REMOVE IN CHART 2.6.0: that optional group, "(?:_[^_.]+)?", is the skew
-# tolerance of chart 2.5.0 (#1634) and lasts one chart minor (charts/README.md,
-# "Compatibility window"). In 2.6.0 the aether.pod pattern below loses the
-# group, the template comment that explains it goes, and so does the old-agent
-# case of TestChartStatsConfigOnNamespacedPodNames. Not earlier, and not as a
-# comment-only edit of the template in a 2.5.x chart: every byte of the
-# rendered bootstrap that changes hot-restarts every Envoy on upgrade, which is
-# why this note is here and not beside the regex.
 # //agent/test/envoy_validate (TestChartStatsConfigOnNamespacedPodNames) runs
 # the pinned proxy with this block and reads the labels it exports; this pins
 # the two extractors in the packaged chart. The same block's exclusions must
@@ -2109,10 +2100,8 @@ helm_template_test(
 # #1166: the CNI plugin exports no telemetry, so cni-install is handed no OTLP
 # endpoint even when the fleet has one (the agent container below it still
 # gets --otlp-endpoint; only cni-install's pin flag identifies its half). The
-# flags stay parseable as deprecated no-ops, pinned in
-# //cni/internal/cmd:TestOTLPFlagsDeprecatedNoOps. Deprecated in chart 2.4.0;
-# removable from chart 2.5.0 on (one chart minor: charts/README.md,
-# "Compatibility window").
+# binary no longer accepts either flag (//cni/internal/cmd:TestOTLPFlagsRejected),
+# so a template that passed one again would fail the init container.
 helm_template_absent_test(
     name = "aether_cni_no_otlp_test",
     absent = [

@@ -1,9 +1,12 @@
 package cmd
 
 import (
+	"bytes"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // TestRetiredFlagsGone pins proposal 031 (round 2): the per-pod capture
@@ -17,21 +20,42 @@ func TestRetiredFlagsGone(t *testing.T) {
 	}
 }
 
-// TestOTLPFlagsDeprecatedNoOps pins #1166: the plugin no longer exports
-// telemetry, so cni-install writes no otlp_endpoint. The two flags a pre-#1166
-// chart passes must still parse (deprecated, ignored) while they are registered,
-// or that chart's agent pods fail in their init container. Deprecated in chart
-// 2.4.0, removable from chart 2.5.0 on (one chart minor).
-func TestOTLPFlagsDeprecatedNoOps(t *testing.T) {
-	cmd := GetCommand()
-	for _, name := range []string{"otlp-endpoint", "otlp-pin-endpoint"} {
-		flag := cmd.Flags().Lookup(name)
-		if assert.NotNil(t, flag, "--%s must stay parseable until it is removed (chart 2.5.0 or later)", name) {
-			assert.NotEmpty(t, flag.Deprecated, "--%s must be marked deprecated", name)
-		}
-	}
-	assert.NoError(t, cmd.Flags().Parse([]string{
-		"--otlp-endpoint=otel-collector.o11y.svc.cluster.local:4317",
+// TestOTLPFlagsRejected pins the end of the #1166 compatibility window: the
+// plugin exports no telemetry, the chart has passed cni-install no OTLP flag
+// since 2.4.0, and the two flags that were kept as deprecated no-ops for one
+// release are gone. Cobra must refuse them by name, before the installer runs:
+// the source and target directories do not exist, so an error that is not
+// "unknown flag" means the run got past flag parsing.
+func TestOTLPFlagsRejected(t *testing.T) {
+	for _, arg := range []string{
+		"--otlp-endpoint=otel-collector.example.com:4317",
 		"--otlp-pin-endpoint=false",
-	}))
+	} {
+		t.Run(arg, func(t *testing.T) {
+			cmd := GetCommand()
+			var out bytes.Buffer
+			cmd.SetOut(&out)
+			cmd.SetErr(&out)
+			cmd.SetArgs([]string{arg, "--cni-bin-dir", "/nonexistent/src", "--cni-bin-target-dir", "/nonexistent/dst"})
+			t.Cleanup(func() {
+				// The command is a package global: leave it as other tests expect it.
+				cmd.SetOut(nil)
+				cmd.SetErr(nil)
+				cmd.SetArgs(nil)
+				for _, name := range []string{"cni-bin-dir", "cni-bin-target-dir"} {
+					if f := cmd.Flags().Lookup(name); f != nil {
+						_ = f.Value.Set(f.DefValue)
+						f.Changed = false
+					}
+				}
+			})
+
+			err := cmd.Execute()
+			require.Error(t, err)
+			name, _, _ := strings.Cut(arg, "=")
+			assert.Equal(t, "unknown flag: "+name, err.Error())
+			assert.Nil(t, cmd.Flags().Lookup(strings.TrimPrefix(name, "--")),
+				"flag %s was retired and must not be re-registered", name)
+		})
+	}
 }
