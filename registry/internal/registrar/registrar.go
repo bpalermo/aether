@@ -1049,13 +1049,6 @@ func isServerDrainGoaway(err error) bool {
 	return strings.Contains(status.Convert(err).Message(), goawayNoErrorDetail)
 }
 
-// processStream reads events from a stream opened with last_version =
-// lastVersion over the full watch, and updates the local cache. See
-// consumeStream.
-func (r *RegistrarRegistry) processStream(ctx context.Context, stream registrarv1.RegistrarService_WatchEndpointsClient, lastVersion string) (string, error) {
-	return r.consumeStream(ctx, stream, lastVersion, streamOpen{lastVersion: lastVersion})
-}
-
 // consumeStream reads events from the stream and updates the local cache.
 // lastVersion is the resume token the cache held when the stream was opened
 // (whatever open actually presented), and open how the stream was opened.

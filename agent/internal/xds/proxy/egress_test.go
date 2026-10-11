@@ -648,7 +648,7 @@ func TestMeshCertSelectorSDSSourceIsNotSharedWithAnyStaticSecret(t *testing.T) {
 	for name, ts := range map[string]*corev3.TransportSocket{
 		"DownstreamTransportSocket":        DownstreamTransportSocket(pod, bundle, "example.org"),
 		"UpstreamTransportSocket":          UpstreamTransportSocket(node, bundle, []string{pod}, "8080"),
-		"UpstreamTCPTransportSocket":       UpstreamTCPTransportSocket(node, bundle, []string{pod}, "8080"),
+		"MeshUpstreamTCPTransportSocket":   MeshUpstreamTCPTransportSocket(node, bundle, []string{pod}, "8080"),
 		"InboundReadyProbeTransportSocket": InboundReadyProbeTransportSocket(node, bundle, pod),
 		"MeshUpstreamTransportSocket":      mesh.GetTransportSocket(),
 	} {

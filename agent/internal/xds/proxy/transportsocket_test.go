@@ -196,7 +196,7 @@ func TestUpstreamTransportSocket_NoSessionResumption(t *testing.T) {
 
 	for name, ts := range map[string]*corev3.TransportSocket{
 		"http":     UpstreamTransportSocket("spiffe://aether.internal/ns/x/sa/client", "spiffe://aether.internal", sans, "8080"),
-		"tcp":      UpstreamTCPTransportSocket("spiffe://aether.internal/ns/x/sa/client", "spiffe://aether.internal", sans, "8080"),
+		"tcp":      MeshUpstreamTCPTransportSocket("spiffe://aether.internal/ns/x/sa/client", "spiffe://aether.internal", sans, "8080"),
 		"edge":     EdgeUpstreamTransportSocket("spiffe://aether.internal/ns/x/sa/edge", "spiffe://aether.internal", sans, "8080"),
 		"edge-tcp": EdgeUpstreamTCPTransportSocket("spiffe://aether.internal/ns/x/sa/edge", "spiffe://aether.internal", sans),
 		// The inbound-readiness probe dials each local pod's inbound listener in

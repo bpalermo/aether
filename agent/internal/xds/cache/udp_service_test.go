@@ -94,10 +94,11 @@ func TestLoadClustersFromRegistry_UDPOnlyServiceGetsAnEntry(t *testing.T) {
 	assert.Empty(t, udpEntry.sanNamespaces, "the UDP floor has no mTLS, so there is nothing to pin")
 }
 
-// TestUDPOnlyServiceResolvesThroughServiceEntry pins the lookup fallback.
-// serviceEntryLocked tries HTTP, then TCP, then UDP; without the third arm a
-// UDP-only service's facts were unreachable even once its entry existed.
-func TestUDPOnlyServiceResolvesThroughServiceEntry(t *testing.T) {
+// TestUDPOnlyServiceResolvesThroughItsUDPEntry pins the lookups a UDP-only
+// service is reached by: its entry is found under the udp: cluster key
+// (udpEntryLocked) and udpClusterForLocked names that cluster. Before #931 a
+// service registered ONLY as PROTOCOL_UDP had no entry to find.
+func TestUDPOnlyServiceResolvesThroughItsUDPEntry(t *testing.T) {
 	c := newTestCache("node-1")
 	c.SetCaptureEnabled(true)
 	ctx := context.Background()
@@ -116,11 +117,11 @@ func TestUDPOnlyServiceResolvesThroughServiceEntry(t *testing.T) {
 	require.NoError(t, c.LoadClustersFromRegistry(ctx, "cluster-1", "node-1", reg))
 
 	c.clusterMu.RLock()
-	entry, ok := c.serviceEntryLocked("aether-test/udponly2")
+	entry, ok := c.udpEntryLocked("aether-test/udponly2")
 	udpCluster := c.udpClusterForLocked("aether-test/udponly2")
 	c.clusterMu.RUnlock()
 
-	require.True(t, ok, "serviceEntryLocked must fall through to the UDP entry")
+	require.True(t, ok, "a UDP-only service must be found by its UDP entry")
 	assert.Equal(t, "5353", entry.sni)
 	assert.Equal(t, proxy.UDPClusterName("aether-test/udponly2", c.meshDomain), udpCluster,
 		"udpClusterForLocked must now name a cluster for a UDP-only service")
