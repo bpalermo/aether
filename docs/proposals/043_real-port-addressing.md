@@ -4,7 +4,7 @@
 direction: issue #1672 is fixed by removing the per-service *primary* port and
 protocol, not by refining it. Nothing here is built. The facts were read from
 `main` at `2a132053`; the two measurements were made on the pinned proxy outside
-any cluster. Eight decisions are still open (see *Decisions for the owner*).
+any cluster. Eleven decisions are still open (see *Decisions for the owner*).
 **Resolves:** #1672. The defect reported there is the per-service primary
 itself; the owner decided to remove it, not to patch it. Accepting this
 proposal closes the issue: the phases below are the work, and Phase 1 is where
@@ -12,7 +12,8 @@ the reported behaviour is fixed.
 **Author:** Bruno Palermo
 **Date:** 2026-10-11
 **Related:** #1672 (a raw-TCP primary with an HTTP secondary has no TCP path),
-#1677 (draft fix, on hold: it measured both registry backends, and this proposal
+#1682 (a `cluster.local` name with a non-primary port reaches the primary
+port; the same rule broken, fixed in Phase 1), #1677 (draft fix, on hold: it measured both registry backends, and this proposal
 says which parts of it survive), proposals
 [037](037_multi-protocol-per-service.md) (per-port protocol; its Phase 4 is
 subsumed here), [038](038_udp-tproxy-capture.md) (TPROXY capture; why UDP binds
@@ -436,8 +437,104 @@ becomes supportable as a side effect and is not claimed here.
    host of every HTTP port of the Service; with a port, to that port's. A
    backendRef port is a Service port, resolved through the port map to
    `<backend fqdn>:<pod port>`.
-7. **A port nobody declared is refused**: HTTP by a `421` naming the service's
-   ports, TCP by the Service having no such port (`ECONNREFUSED`).
+7. **A port nobody declared is not routed.** HTTP is refused with a `421`
+   that lists the service's ports (the authority rule, below). Raw TCP has no
+   chain and falls to the passthrough, where the answer is the cluster's: a
+   port the Service does not have (decision 10).
+
+### The authority rule
+
+Stated once. Everything else in this document that mentions a `Host` header
+follows from this table.
+
+**Names.** A mesh service answers to two families of authority, each with or
+without `:<port>`:
+
+- the mesh name `<svc>.<ns>.<mesh-domain>`;
+- the Kubernetes names `<svc>.<ns>.svc.cluster.local`, `<svc>.<ns>.svc`,
+  `<svc>.<ns>`, and the bare `<svc>` when exactly one namespace owns it
+  (today's rule, `cache/capture.go:1144-1156`, read).
+
+The rule is the same for both families. Today it is not: a Kubernetes name
+with a non-primary port reaches the primary port (#1682, measured on kind),
+because the known-target route accepts any `:port` and sends it to the default
+cluster. Phase 1 fixes #1682.
+
+**Entry paths.**
+
+- *(a) Captured*: the pod dialled a Service address and port; the per-pod
+  capture listener's HCM chain took the connection because the bytes are
+  cleartext HTTP. Both name families.
+- *(b) Loopback*: the pod dialled `127.0.0.1:18081` and wrote the service into
+  `Host`. No capture rule is involved (loopback is accepted before the marks),
+  so this works identically with capture on and with
+  `capture.aether.io/redirect-all: "false"`. Mesh names only, as today
+  (`out_http` has no Kubernetes-name domains, `cache/cluster.go:528`, read).
+- *(c) Edge to a mesh backend*: **the request's authority selects nothing in
+  the mesh.** The virtual host is chosen by the Gateway listener's hostnames,
+  and the backend port by the route's `backendRef.port`, a Service port
+  resolved through the port map. Listed so that nobody looks for an authority
+  rule there.
+
+**The port in `Host` is the port.** `P` is the port written in the authority;
+a port-less authority has `P` = 80.
+
+| Authority | (a) captured | (b) loopback | Today |
+|---|---|---|---|
+| `<name>:P`, the Service declares `P` as HTTP | the virtual host of port `P` → cluster `<fqdn>:<pod port of P>` | the same | mesh name: reaches `P`, with no GAMMA rule unless a route's parentRef names `P` (inferred). Kubernetes name: reaches the **primary** (#1682). Loopback: reaches `P` |
+| `<name>:P`, the Service declares `P` as raw TCP or UDP | `421`, `x-aether-error: port-not-http` | the same | an h2 cluster is built to the port regardless of its class (`cache/cluster.go:671-686`, inferred); the answer was not measured |
+| `<name>:P`, the Service does not declare `P` | `421`, `x-aether-error: port-not-declared` | the same | mesh name: 503 after the 2 s on-demand timeout (`proxy/httpfilter.go:32`). Kubernetes name: the primary, silently |
+| `<name>` (port-less), the Service declares 80 as HTTP | the virtual host of port 80 | the same | the primary |
+| `<name>` (port-less), the Service does not declare 80 | `421`, `x-aether-error: port-required` | the same | the primary |
+| an authority that names no mesh service | passthrough to the original destination | `404` | the same |
+
+Every refusal is immediate (a `direct_response`, no on-demand wait), status
+`421 Misdirected Request`, with one of three `x-aether-error` values and a body
+that lists the service's ports and their classes. `421` is the status 037
+chose for "no response for this combination of scheme and authority", and no
+application behind the mesh produces it. A refusal, not a passthrough, because
+passing a request for a known mesh service to the cluster's own routing fails
+open: for a user Service with a selector it reaches the pod without the mesh.
+(The existing `no-http-port` answer for a service with no HTTP port at all
+stays through Phase 2 and becomes `port-not-http` or `port-required` in
+Phase 3.)
+
+**When the dialled port and the `Host` port disagree, `Host` wins.** On the
+captured path the HCM chain does not look at the destination port, and it
+cannot be made to in the route table: the pinned proxy rejects a route matcher
+on the destination port (measured, point 4). Consequences, each a gate leg:
+
+- A client that dials `<svc>:8080` and sends `Host: <svc>:9090` is answered by
+  port 9090.
+- A client that dials `<svc>:8080` and sends a **port-less** `Host` is asking
+  for port 80. It is answered by port 80 if the Service declares it, which may
+  be a different application from the one on 8080, and refused with
+  `port-required` if not. A mainstream HTTP client never does this: it omits
+  the port from `Host` only when it dialled the scheme's default. A client
+  that sets `Host` by hand does, and must write the port.
+- The exception is not an exception to the rule but a different chain: a
+  connection to a port the Service declares as **raw TCP** matches that port's
+  `/32 + destination_port` chain before the HCM is considered, so its bytes go
+  to the TCP port whatever they are. The `port-not-http` row is therefore only
+  reachable through a mismatch or through the loopback listener.
+
+**The default port is 80, and `:scheme` does not change it** (decision 9).
+The HCM chains on both paths see cleartext only: the capture chain matches
+`raw_buffer` with HTTP/1.x or h2c (`proxy/capture.go:409-417`, read), and the
+loopback listener is plaintext. A client that speaks TLS is not HTTP to the
+mesh; its connection is raw TCP on the port it dialled. So a port-less
+authority on a request the mesh can parse is always a request over cleartext,
+and its default port is 80 even when an h2c request carries `:scheme: https`
+(a client-asserted header; a proxy in the pod forwarding a decrypted request
+can send it). HTTP/3 is not seen at all on these paths: QUIC from an
+application is UDP.
+
+**443.** The generated Service's `https` 443 port is a placeholder, like `http`
+80: it carries no data path (`generator.go:157-176`, read). It goes in Phase 3
+with the others. After that, `https://<svc>/` reaches an application only if a
+pod declares 443 as raw TCP, in which case it is an ordinary TCP port carrying
+the application's own TLS inside the mesh's; otherwise it is an undeclared TCP
+port (decision 10). 443 is never a default port for an authority.
 
 ### What stays
 
@@ -515,8 +612,10 @@ Agent:
   for a port declared raw TCP (`cache/cluster.go:671-686` builds one today,
   inferred).
 - A virtual host per HTTP port on `cap_http` and `out_http`, carrying the GAMMA
-  rules; the known-target safety net becomes per-port. This closes the
-  "real ports bypass the routes" gap.
+  rules, for both name families; the known-target safety net becomes
+  per-port, which fixes #1682. The refusals of the authority rule for a named
+  port (`port-not-http`, `port-not-declared`). This closes the "real ports
+  bypass the routes" gap.
 - The Service port map: the agent reads the ports of the Service that owns
   each mesh name and resolves parentRef and backendRef ports through it.
 - Destination: an explicit chain for every port, including the declared one
@@ -545,11 +644,51 @@ What of #1677 this phase keeps, and what it must not ship:
 | The edits to `workload-requirements.md`, the runbook and proposal 037 that define the spellings by the primary | **Drop**; Phase 2 rewrites those pages |
 
 - **Gate (can fail):** `multiprotocol` M0 to M7 and X1 to X6 on **both**
-  backends in CI (today: `etcd` only); MESH-HTTP 7/7 and GATEWAY-HTTP 46/46;
-  a new leg asserting that a GAMMA rule applies on a real port; the skew table
-  re-measured on kind for both backends and both roll orders with zero cells
-  worse than 2.6. M7 changes meaning: it asserts the real ports as well as the
-  legacy four.
+  backends in CI (today: `etcd` only; M6 and X6 read registry keys and run on
+  `etcd` alone); MESH-HTTP 7/7 and GATEWAY-HTTP 46/46; the authority legs
+  below; the skew table re-measured on kind for both backends and both roll
+  orders with zero cells worse than 2.6. M7 changes meaning: it asserts the
+  real ports as well as the legacy four.
+
+**Authority legs (Phase 1).** In `e2e/multiprotocol.sh`, which already has the
+client, the per-port echo and three of the five workloads. Each echo answers
+with a string naming its own port, so "reached the wrong port" is a failure
+and not a 200.
+
+| Workload | Declares | In the suite today |
+|---|---|---|
+| `mp-httponly` | 8080 HTTP | yes |
+| `mp-multi` | 8080, 9090 HTTP | new |
+| `mp-eighty` | 80, 8080, 9090 HTTP | new (its container binds 80) |
+| `mp-mixed` | 8080 HTTP, 9000 raw TCP | yes |
+| `mp-tcpfirst` | 9000 raw TCP (declared port), 8080 HTTP | yes, ungated today |
+
+Two clients: the existing captured one, and `mp-client-nocapture`, a managed
+pod with `capture.aether.io/redirect-all: "false"`, which dials only
+`127.0.0.1:18081`.
+
+| Leg | Dial and `Host` | Path | Workloads | Must answer | On `main` |
+|---|---|---|---|---|---|
+| A1 | `<mesh name>:P`, `Host` the same, each HTTP port `P` | captured | all five | port `P`'s echo | passes |
+| A2 | `<svc>.<ns>.svc.cluster.local:P` and `<svc>.<ns>:P`, each HTTP port `P` | captured | `mp-multi`, `mp-eighty`, `mp-mixed` | port `P`'s echo | **fails**: the primary answers (#1682) |
+| A3 | `127.0.0.1:18081`, `Host: <mesh name>:P`, each HTTP port `P` | loopback, capture off | all five | port `P`'s echo | expected to pass; guards decision 5 |
+| A4 | an HTTPRoute with a port-less parentRef adds a response header; request `<mesh name>:9090` | captured and loopback | `mp-multi` | the header is present | **fails** (inferred): the rule is not on the port's virtual host |
+| A5 | dial `<mesh name>:8080`, `Host: <mesh name>:9090` | captured | `mp-multi` | port 9090's echo (`Host` wins) | expected to pass |
+| A6 | `Host: <mesh name>:9000` (a raw-TCP port), dialled on 8080 and on loopback | both | `mp-mixed`, `mp-tcpfirst` | `421`, `x-aether-error: port-not-http`, under 1 s | not measured |
+| A7 | `Host: <name>:7777`, both name families | both | `mp-multi` | `421`, `x-aether-error: port-not-declared`, under 1 s | **fails**: 503 after 2 s (mesh name), the primary's echo (Kubernetes name) |
+| A8 | raw TCP to `<mesh name>:7777` | captured | `mp-mixed` | no application answers | passes for a service that declares HTTP; what the client sees is the cluster's (decision 10) and is not asserted |
+| A9 | port-less `Host` | both | all five | **unchanged in this phase**: the legacy target, and for `mp-tcpfirst` `421`, `x-aether-error: port-required` | `mp-tcpfirst`: **fails** (502) |
+
+A9 is where this phase deliberately does not yet apply the rule: a port-less
+authority keeps meaning the legacy target until Phase 3. For `mp-eighty` that
+is port 8080 now and port 80 later (decision 11).
+
+Runner time (estimate, not measured): the `multiprotocol` job took 2m24s with
+both shapes in #1677, of which `verify` was 29 s for 14 legs. Two more
+Deployments, one more client and about 40 more requests should add under a
+minute to one backend. Running the suite on both backends doubles the job,
+which is the larger cost: about 7 minutes of nightly runner time in place of
+2.5.
 - **Skew:** a 2.6 agent behind a 2.7 registrar sees the same annotation and
   extra Service ports it does not read; on `kubernetes` it also sees pods in
   more listings, which #1677 measured as "nothing gets worse" in that order. A
@@ -591,10 +730,15 @@ What of #1677 this phase keeps, and what it must not ship:
   cluster name.
 - **UDP, if decision 1 is (d):** the registrar writes `EndpointSlice`s for UDP
   ports; `:18082/udp` keeps working and is counted.
-- **Gate (can fail):** every suite green on real ports only; a leg that dials
-  each legacy spelling once and asserts its counter **moved** (a zero is
-  evidence only if the counter can be seen to count); the UDP leg of
-  `l4-routes` dials the real port on both backends; MESH-HTTP 7/7.
+- **Gate (can fail):** every suite green on real ports only; the Phase 1
+  authority legs unchanged in their answers (nothing about the rule changes in
+  this phase); in `multiprotocol`, leg D1: each legacy spelling dialled once
+  (`:18081`, a port-less `Host` on both paths, `:18082`, an undeclared port of
+  a pure-TCP service) and its counter asserted to have **moved** (a zero is
+  evidence only if the counter can be seen to count); leg D2: a port-less
+  `Host` to `mp-eighty` moves the counter of decision 11 and not the plain
+  one; in `l4-routes`, the UDP leg dials the real port on both backends;
+  MESH-HTTP 7/7. D1 and D2 add a few seconds.
 - **Skew:** none new on the wire. A 2.7 importer ignores the new `port` field.
 - **Operator sees:** WARN lines naming clients on a legacy spelling; a
   dashboard row per spelling; the deprecation in the runbook.
@@ -630,9 +774,8 @@ Deleted:
 - Sources switch to SNI = port for every TCP port; destinations have had the
   explicit chains since 2.7.
 
-- **Gate (can fail):** a leg per removed spelling asserting the documented
-  refusal (`421 port-required`, `ECONNREFUSED`) and not a hang; conformance
-  unchanged; an 8-hour soak on real ports.
+- **Gate (can fail):** conformance unchanged; an 8-hour soak on real ports;
+  and the authority legs below, where the answer changes in this phase.
 - **Skew:** a 2.8 agent beside a 2.9 registrar loses the legacy Service ports
   and the annotation; it stopped reading both in 2.7. A 2.8 source beside a
   2.9 destination still sends the no-SNI forms, which the destination keeps
@@ -644,6 +787,19 @@ Deleted:
 - **Harness contract:** version 5 (entries removed).
 - **Rollback:** to 2.8.x restores every spelling; clients moved in 2.8 keep
   working on both.
+
+**Authority legs (Phase 3).** In `e2e/multiprotocol.sh`.
+
+| Leg | Dial and `Host` | Path | Workloads | Must answer |
+|---|---|---|---|---|
+| R1 | port-less `Host`, both name families | captured (dials 80) and loopback | `mp-eighty` | port **80**'s echo (it was 8080's through 2.8) |
+| R2 | port-less `Host`, both name families | captured and loopback | the other four | `421`, `x-aether-error: port-required`, under 1 s, the body listing the ports |
+| R3 | dial `<mesh name>:8080`, port-less `Host` | captured | `mp-httponly`, `mp-eighty` | `mp-httponly`: `421 port-required`. `mp-eighty`: port 80's echo, not 8080's |
+| R4 | `Host: <name>:18081` | captured and loopback | `mp-httponly` | `421`, `x-aether-error: port-not-declared` |
+| R5 | raw TCP to `<mesh name>:18082` and to an undeclared port | captured | `mp-tcpfirst` | no application answers (A8's assertion; decision 10 says what else may be asserted) |
+| R6 | A1 to A7 | | | unchanged |
+
+A9 is retired by R1 and R2. No new workload; a few seconds of runner time.
 
 ### Phase 4 (chart 2.10.0): receiver-side tolerances
 
@@ -675,10 +831,16 @@ as the liveness probe port.
    routing, no second node. #1677's tables are single-node kind; its
    agent-first order was not run on the kubernetes backend. The reference
    cluster has run none of this.
-6. **The authority rule.** A client that dials port 8080 and sends a portless
-   `Host` is routed as port 80 and refused. No mainstream client does this; the
-   prober does on purpose and moves in Phase 2. If it turns out to matter, the
-   fallback is a chain per port, with its cost in filter chains per pod.
+6. **The authority rule** (*Design*, *The authority rule*). The port in `Host`
+   is the port, and a port-less `Host` is port 80, whatever port was dialled.
+   A client that dials 8080 and sends a port-less `Host` is refused with
+   `421 port-required`, or, on a service that also declares 80, **answered by
+   a different port than the one it dialled**. No mainstream client does this;
+   a client that sets `Host` by hand does, and the prober does on purpose
+   (it moves in Phase 2). The same rule holds on the loopback listener, where
+   there is no dialled service port to disagree with. Legs A5, R1 and R3 hold
+   it. If it turns out to matter, the fallback is a chain and a route table per
+   port, with its cost in filter chains per pod.
 7. **The Service port map is a new reader.** A user Service with a named
    `targetPort`, or with a selector that is not the ServiceAccount's pods,
    resolves to nothing or to the wrong set. It is reported, not guessed.
@@ -708,8 +870,14 @@ as the liveness probe port.
    either way.
 5. **The loopback listener `127.0.0.1:18081`.** It is a mesh-specific port,
    but it addresses the proxy, not a service; the CNI readiness probe and the
-   prober's liveness tier use it. *Recommended: keep it, require a port in
-   `Host`.* Removing it is a separate proposal.
+   prober's liveness tier use it. *Recommended: keep it, under the authority
+   rule unchanged:* `Host: <mesh name>:<port>` with a port the Service declares
+   as HTTP is matched by that port's virtual host; a port-less `Host` means
+   port 80 and is served only when the Service declares 80, else
+   `421 port-required`. It works the same for a pod with
+   `capture.aether.io/redirect-all: "false"` (decision 3), which is that pod's
+   only way into the mesh (legs A3, R1, R2). Removing the listener is a
+   separate proposal.
 6. **`endpoint.aether.io/port`.** With no primary it is one more declared port
    and the liveness probe port. *Recommended: keep the name and say so.* The
    alternative is a new `health-port` annotation and a contract bump.
@@ -719,6 +887,29 @@ as the liveness probe port.
 8. **Pace.** Phases 1 and 2 could share 2.7.x, with removal in 2.8.0.
    *Recommended: three minors as written*; Phase 1 fixes a bug and should not
    wait for the prober and the harness to move.
+9. **`:scheme: https` on a cleartext request with a port-less authority.**
+   Port 80 (the transport the mesh saw), or 443 (the scheme the client
+   asserted)? *Recommended: 80, and `:scheme` is never consulted.* The mesh
+   parses only cleartext; 443 as a default would route on a header the client
+   controls to a port that is raw TCP whenever it exists.
+10. **Raw TCP to a port the Service does not declare**, once the placeholder
+    ports are gone. With no chain it reaches the passthrough and then a
+    ClusterIP port that does not exist, which 037 describes as CNI-dependent
+    and typically a hang; 037 added the placeholders to get a refusal for four
+    ports. A deterministic refusal for every port needs a per-service chain
+    with no destination port, which outranks the HCM chain, so each HTTP port
+    of the service then needs its own `/32 + destination_port` HCM chain: the
+    per-port shape of risk 6, for mesh addresses only. *Recommended: accept
+    the cluster's answer in Phase 3 and assert only that no application
+    answers; build the refusal chain if a hang is reported.* HTTP, the common
+    case, is refused by name either way.
+11. **A service that declares port 80 and whose legacy target is another
+    port** (`mp-eighty`). Its port-less name means the legacy target through
+    2.8 and port 80 from 2.9: two working answers, so the change is silent.
+    *Recommended: keep the legacy meaning through 2.8, count these requests
+    under their own name (`legacy_portless_shadows_80`), WARN once per source,
+    and name the service in the 2.9 runbook section.* The alternative, port 80
+    from 2.7 when declared, changes behaviour with no deprecation window.
 
 ## Out of scope
 
