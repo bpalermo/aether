@@ -98,6 +98,14 @@ jobs:
       - name: The image registry is one setting
         run: scripts/check-registry-config.sh
 
+      # The aether_stats C++ tests rebuild the chart's stats_tags by hand (the
+      # proxy workspace cannot read charts/). //scripts:proxy_stats_tags_test
+      # holds them to the chart in the `ci` workflow, which a proxy-only PR
+      # skips: the same comparison here, for a change to the tests alone. No
+      # Bazel, no build.
+      - name: The proxy tests build the stats tags the chart ships
+        run: scripts/check-proxy-stats-tags.sh
+
       # ShellCheck over every proxy shell script, discovered from git — no
       # mirror to keep complete. Exit 2 if it finds nothing to lint.
       - name: Lint the proxy workspace's shell

@@ -73,9 +73,11 @@ bazel_dep(name = "envoy_api", version = "1.40.0-dev.20261009.189f198.envoy")
 #   the drain sequence. Carries its tests (test/server:hot_restarting_child_test,
 #   test/common/http:conn_manager_impl_test), run by //bazel/patches:carried_patch_tests;
 #   its quic_http_integration_test case only builds in the Envoy workspace.
-#   aether#1054, second patch (not yet proposed upstream; the maintainer's call),
-#   applied AFTER aether1054: a draining hot-restart parent (QUIC dispatcher not
-#   accepting) forwarded EVERY packet without a live session to the child, before
+#   aether#1054, second patch (proposed upstream as envoyproxy/envoy#48206, still
+#   open: the same source change behind the same runtime guard; it goes away with
+#   the first pin that contains it), applied AFTER aether1054: a draining
+#   hot-restart parent (QUIC dispatcher not accepting) forwarded EVERY packet
+#   without a live session to the child, before
 #   quiche's own time-wait check, so packets for connections the parent had just
 #   closed reached the child, which never knew them and answered with a stateless
 #   reset. EnvoyQuicDispatcher::OnFailedToDispatchPacket now leaves connection IDs

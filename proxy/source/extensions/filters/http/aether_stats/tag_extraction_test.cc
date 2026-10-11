@@ -78,11 +78,16 @@ private:
   const bool previous_;
 };
 
-// The stats_tags the chart keeps after aether#695: aether.cluster,
-// aether.namespace and aether.pod only, all extracted from Envoy's OWN stat names. Deliberately no
-// regex for any aether_stats programmatic key — that is the invariant under
-// test. Envoy tag semantics: the first capture group is removed from the stat
-// name, the tag value is the second group.
+// The stats_tags the chart ships (stats_config.stats_tags in
+// charts/aether/templates/agent-proxy-configmap.yaml): aether.cluster,
+// aether.namespace, aether.pod and aether.transport_socket_match, all extracted
+// from Envoy's OWN stat names. Deliberately no regex for any aether_stats
+// programmatic key — that is the invariant under test. Envoy tag semantics: the
+// first capture group is removed from the stat name, the tag value is the
+// second group.
+//
+// The four add() lines below are compared with that template, text for text, by
+// //scripts:proxy_stats_tags_test in the root workspace: change them together.
 Stats::TagProducerPtr productionTagProducer() {
   envoy::config::metrics::v3::StatsConfig config;
   config.mutable_use_all_default_tags()->set_value(false);
@@ -93,10 +98,12 @@ Stats::TagProducerPtr productionTagProducer() {
   };
   add("aether.cluster", "^cluster\\.(([^.]+)\\.)");
   // The listener stat prefixes are inbound_<namespace>_<pod> and
-  // out_http_<namespace>_<pod> since aether#1584; the namespace part is
-  // optional in the pod extractor for an agent older than that.
+  // out_http_<namespace>_<pod> since aether#1584. Both extractors REQUIRE the
+  // namespace part since chart 2.6.0; chart 2.5.x made it optional in the pod
+  // extractor, for an agent older than aether#1584.
   add("aether.namespace", "^listener\\.(?:inbound|out_http)(_([^_.]+))_[^.]+\\.");
-  add("aether.pod", "^listener\\.(?:inbound|out_http)(?:_[^_.]+)?(_([^.]+))\\.");
+  add("aether.pod", "^listener\\.(?:inbound|out_http)_[^_.]+(_([^.]+))\\.");
+  add("aether.transport_socket_match", "\\.((spiffe://.+)\\.)total_match_count$");
   return Stats::TagProducerImpl::createTagProducer(config, {}).value();
 }
 
@@ -337,43 +344,85 @@ TEST_F(HotRestartTagPropagationTest, TagsLostWhenPropagationDisabled) {
   EXPECT_TRUE(absl::StrContains(merged->tagExtractedName(), ".reporter."));
 }
 
-// The two stats_tags the chart keeps are unrelated to aether_stats: they lift
+// The stats_tags the chart ships are unrelated to aether_stats: they lift
 // Envoy's own cluster/listener name segments out of the stat name. They must
 // keep working, and they must NOT touch aether.requests_total.
 TEST_F(HotRestartTagPropagationTest, RetainedChartRegexesStillExtract) {
   Stats::TagProducerPtr producer = productionTagProducer();
 
-  Stats::TagVector cluster_tags;
-  const std::string cluster_extracted =
-      producer->produceTags("cluster.svc-1.upstream_rq_total", cluster_tags);
-  EXPECT_EQ(cluster_extracted, "cluster.upstream_rq_total");
-  ASSERT_EQ(cluster_tags.size(), 1);
-  EXPECT_EQ(cluster_tags[0].name_, "aether.cluster");
-  EXPECT_EQ(cluster_tags[0].value_, "svc-1");
-
-  Stats::TagVector listener_tags;
-  const std::string listener_extracted =
-      producer->produceTags("listener.inbound_svc-1-abc123.downstream_cx_total", listener_tags);
-  EXPECT_EQ(listener_extracted, "listener.inbound.downstream_cx_total");
-  ASSERT_EQ(listener_tags.size(), 1);
-  EXPECT_EQ(listener_tags[0].name_, "aether.pod");
-  EXPECT_EQ(listener_tags[0].value_, "svc-1-abc123");
-
-  // Since aether#1584 the agent writes inbound_<namespace>_<pod>: two tags, and
-  // the same collapsed name.
-  Stats::TagVector namespaced_tags;
-  const std::string namespaced_extracted = producer->produceTags(
-      "listener.inbound_shop_svc-1-abc123.downstream_cx_total", namespaced_tags);
-  EXPECT_EQ(namespaced_extracted, "listener.inbound.downstream_cx_total");
-  ASSERT_EQ(namespaced_tags.size(), 2);
-  for (const Stats::Tag& tag : namespaced_tags) {
-    if (tag.name_ == "aether.namespace") {
-      EXPECT_EQ(tag.value_, "shop");
-    } else {
-      EXPECT_EQ(tag.name_, "aether.pod");
-      EXPECT_EQ(tag.value_, "svc-1-abc123");
+  // What the producer makes of one stat name: the tag-extracted name and the
+  // tags, by name.
+  using Tags = std::map<std::string, std::string>;
+  struct Extracted {
+    std::string name_;
+    Tags tags_;
+  };
+  const auto extract = [&producer](const std::string& stat_name) {
+    Stats::TagVector tags;
+    Extracted extracted;
+    extracted.name_ = producer->produceTags(stat_name, tags);
+    for (const Stats::Tag& tag : tags) {
+      EXPECT_TRUE(extracted.tags_.emplace(tag.name_, tag.value_).second)
+          << "tag " << tag.name_ << " extracted twice from " << stat_name;
     }
-  }
+    return extracted;
+  };
+
+  const Extracted cluster = extract("cluster.svc-1.upstream_rq_total");
+  EXPECT_EQ(cluster.name_, "cluster.upstream_rq_total");
+  EXPECT_EQ(cluster.tags_, (Tags{{"aether.cluster", "svc-1"}}));
+
+  // A SPIFFE-ID-named transport socket match under a cluster: both extractors
+  // take their own segment and its trailing dot, and the name keeps no double
+  // dot.
+  const Extracted socket_match =
+      extract("cluster.svc-1.spiffe://aether.internal/ns/shop/sa/web.total_match_count");
+  EXPECT_EQ(socket_match.name_, "cluster.total_match_count");
+  EXPECT_EQ(socket_match.tags_,
+            (Tags{{"aether.cluster", "svc-1"},
+                  {"aether.transport_socket_match", "spiffe://aether.internal/ns/shop/sa/web"}}));
+
+  // Since aether#1584 the agent writes inbound_<namespace>_<pod> and
+  // out_http_<namespace>_<pod>: two tags, and one collapsed name per family.
+  const Extracted inbound = extract("listener.inbound_shop_svc-1-abc123.downstream_cx_total");
+  EXPECT_EQ(inbound.name_, "listener.inbound.downstream_cx_total");
+  EXPECT_EQ(inbound.tags_, (Tags{{"aether.namespace", "shop"}, {"aether.pod", "svc-1-abc123"}}));
+
+  const Extracted outbound = extract("listener.out_http_shop_svc-1-abc123.downstream_cx_total");
+  EXPECT_EQ(outbound.name_, "listener.out_http.downstream_cx_total");
+  EXPECT_EQ(outbound.tags_, (Tags{{"aether.namespace", "shop"}, {"aether.pod", "svc-1-abc123"}}));
+
+  // The pod's QUIC inbound listener, inbound_<namespace>_<pod>_h3: the "_h3"
+  // stays in the pod tag, which is all that tells a pod's two inbound listeners
+  // apart once the name no longer carries the pod.
+  const Extracted quic = extract("listener.inbound_shop_svc-1-abc123_h3.downstream_cx_total");
+  EXPECT_EQ(quic.name_, "listener.inbound.downstream_cx_total");
+  EXPECT_EQ(quic.tags_, (Tags{{"aether.namespace", "shop"}, {"aether.pod", "svc-1-abc123_h3"}}));
+
+  // A pod name may contain dots, and a dot is the stat name separator: the
+  // agent writes each one as '~' in a stat name (aether#1636), so the whole pod
+  // name is one segment and comes out as the tag value, tildes included.
+  const Extracted dotted = extract("listener.inbound_team-a_web~external-7d9f.downstream_cx_total");
+  EXPECT_EQ(dotted.name_, "listener.inbound.downstream_cx_total");
+  EXPECT_EQ(dotted.tags_,
+            (Tags{{"aether.namespace", "team-a"}, {"aether.pod", "web~external-7d9f"}}));
+
+  // The prefix an agent older than aether#1584 writes, inbound_<pod>, has no
+  // namespace part. Chart 2.5.x still read it as aether.pod; since chart 2.6.0
+  // neither extractor matches it, so the name is left as it is, pod and all,
+  // and carries no tag. (That agent is outside the compatibility window.)
+  const std::string unnamespaced = "listener.inbound_svc-1-abc123.downstream_cx_total";
+  const Extracted old_agent = extract(unnamespaced);
+  EXPECT_EQ(old_agent.name_, unnamespaced);
+  EXPECT_TRUE(old_agent.tags_.empty());
+
+  // The same agent's QUIC listener, inbound_<pod>_h3, does have an underscore
+  // after the prefix, and reads as namespace "<pod>", pod "h3": the documented
+  // misreading of an unsupported agent, pinned so a change to it is seen.
+  const Extracted old_agent_quic = extract("listener.inbound_svc-1-abc123_h3.downstream_cx_total");
+  EXPECT_EQ(old_agent_quic.name_, "listener.inbound.downstream_cx_total");
+  EXPECT_EQ(old_agent_quic.tags_,
+            (Tags{{"aether.namespace", "svc-1-abc123"}, {"aether.pod", "h3"}}));
 
   // No regex re-derives the programmatic keys any more: extraction alone leaves
   // the mangled name untouched. Propagation, not regex, is what recovers them.

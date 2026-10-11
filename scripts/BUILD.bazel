@@ -141,6 +141,34 @@ sh_test(
     env = {"JQ_RLOCATIONPATH": "$(rlocationpath @jq_toolchains//:resolved_toolchain)"},
 )
 
+# The stats tag extractors the proxy workspace's C++ tests build are the ones
+# the chart ships (stats_config.stats_tags of the node proxy's bootstrap), text
+# for text. Chart 2.6.0 made the aether.pod extractor strict and the two tests
+# kept the 2.5.x regex, passing against a tag producer no proxy ran any more.
+#
+# //.bazelignore hides `proxy`, so no label can name a file there: the two
+# files under proxy_stats_tags/ are symlinks into it (as
+# //website:staged/proxy-README.md is). Bazel reads through them, so the test is
+# impacted by a change on either side. A pull request that touches nothing but
+# proxy/ skips the `ci` workflow, so proxy.yml's `shell` job runs the same
+# check-proxy-stats-tags.sh as a step.
+sh_test(
+    name = "proxy_stats_tags_test",
+    size = "small",
+    srcs = ["proxy_stats_tags_test.sh"],
+    args = [
+        "$(rootpath //charts/aether:templates/agent-proxy-configmap.yaml)",
+        "$(rootpath proxy_stats_tags/tag_extraction_test.cc)",
+        "$(rootpath proxy_stats_tags/aether_stats_integration_test.cc)",
+    ],
+    data = [
+        "check-proxy-stats-tags.sh",
+        "proxy_stats_tags/aether_stats_integration_test.cc",
+        "proxy_stats_tags/tag_extraction_test.cc",
+        "//charts/aether:templates/agent-proxy-configmap.yaml",
+    ],
+)
+
 # The shell-lint coverage check (#853) against a fake `bazel query` and fake
 # `git ls-files`, including the #1297 SIGPIPE trap: a covered set larger than
 # the pipe buffer, on which the old `printf | grep -q` lookup must fail.
