@@ -12,10 +12,10 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// allowedModules is the COMPLETE set of modules cni-install may link: the 9 it
-// linked when this guard was added. It is an allow-list, so a new module fails
-// the build by name, including one that arrives transitively through a
-// dependency bump.
+// allowedModules is the COMPLETE set of modules cni-install may link. It is an
+// allow-list, so a new module fails the build by name, including one that
+// arrives transitively through a dependency bump. 9 when this guard was added;
+// 8 since the binary copy moved from renameio to //common/file.
 //
 // cni-install is the agent pod's init container: it runs on every agent start,
 // ahead of the agent, with the host's CNI directories mounted read-write. It
@@ -23,12 +23,12 @@ import (
 // path to a node's agent serving. Adding a module is a deliberate act: justify
 // it in the PR.
 var allowedModules = map[string]bool{
-	// The installer itself: CLI, atomic file replacement, the conflist watch.
-	"github.com/spf13/cobra":        true,
-	"github.com/spf13/pflag":        true,
-	"github.com/google/renameio/v2": true,
-	"github.com/fsnotify/fsnotify":  true,
-	"golang.org/x/sys":              true,
+	// The installer itself: CLI and the conflist watch. Atomic file replacement
+	// is //common/file (stdlib and x/sys), which the rest of the tree uses.
+	"github.com/spf13/cobra":       true,
+	"github.com/spf13/pflag":       true,
+	"github.com/fsnotify/fsnotify": true,
+	"golang.org/x/sys":             true,
 
 	// libcni, which //cni/conflist uses to find and parse the node's conflists
 	// (libcni.ConfFiles, libcni.ConfListFromFile).
@@ -48,7 +48,7 @@ var allowedModules = map[string]bool{
 // maxModules is the module budget: the size of the allow-list above. It is
 // asserted separately so a change to the list has to change this number too,
 // which makes a growing budget visible in review.
-const maxModules = 9
+const maxModules = 8
 
 // forbiddenPackages must never be reachable from cni-install, under any
 // module. It reads a directory and writes two files: no Kubernetes client

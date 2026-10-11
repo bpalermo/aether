@@ -12,7 +12,6 @@ import (
 	"syscall"
 
 	"aethermesh.dev/common/file"
-	"github.com/google/renameio/v2"
 )
 
 // Installer copies the CNI plugin binaries onto the host and chains the aether
@@ -91,7 +90,7 @@ func (in *Installer) copyBinaries(srcDir string, targetDir string) ([]string, er
 
 		targetPath := filepath.Join(targetDir, entry.Name())
 
-		// Copy file using renameio for atomic writes
+		// Copy the file atomically (//common/file)
 		if err := in.copyFileAtomic(srcPath, targetPath); err != nil {
 			return nil, fmt.Errorf("failed to copy %s to %s: %w", srcPath, targetPath, err)
 		}
@@ -139,44 +138,20 @@ func (in *Installer) copyFileAtomic(src, dst string) error {
 		return fmt.Errorf("failed to rewind source file: %w", err)
 	}
 
-	// Create a temporary file with renameio
-	t, err := renameio.TempFile("", dst)
-	if err != nil {
-		return fmt.Errorf("failed to create temp file: %w", err)
-	}
-	defer func(t *renameio.PendingFile) {
-		err := t.Cleanup()
-		if err != nil {
-			in.logger.Error("failed to cleanup temp file", "error", err)
-		}
-	}(t)
-
-	// Copy content
-	if _, err := io.Copy(t, srcFile); err != nil {
-		return fmt.Errorf("failed to copy content: %w", err)
-	}
-
-	// Set permissions
-	if err := t.Chmod(srcInfo.Mode()); err != nil {
-		return fmt.Errorf("failed to set permissions: %w", err)
-	}
-
-	// Set ownership to root (UID 0, GID 0)
-	if err := t.Chown(binOwner.uid, binOwner.gid); err != nil {
-		return fmt.Errorf("failed to set ownership to root: %w", err)
-	}
-
-	// Atomic rename to final destination
-	if err := t.CloseAtomicallyReplace(); err != nil {
+	// One writer for every file this installer puts on the host (the conflist
+	// goes through the same package): a temp file in dst's own directory, given
+	// src's mode and the install owner, written, fsynced, renamed over dst, and
+	// the directory fsynced after the rename. The directory fsync is what makes
+	// the new entry durable: without it a power cut can leave the host CNI bin
+	// dir without the plugin it was just told it had (#645, issue #772).
+	//
+	// KeepInPageCache: the container runtime execs this file on the next pod
+	// ADD, so its pages are wanted, not evicted.
+	if err := file.AtomicWriteReader(dst, srcFile, srcInfo.Mode(),
+		file.WithOwner(binOwner.uid, binOwner.gid),
+		file.KeepInPageCache(),
+	); err != nil {
 		return fmt.Errorf("failed to atomically replace file: %w", err)
-	}
-
-	// renameio fsyncs the file before the rename but never the parent directory, so the
-	// new directory entry is not itself durable. Without this, a power cut can leave the
-	// host CNI bin dir without the plugin it was just told it had — the class of loss
-	// that took the fleet out on 2026-08-29 (#645, issue #772).
-	if err := file.SyncDir(filepath.Dir(dst)); err != nil {
-		return fmt.Errorf("failed to sync target directory: %w", err)
 	}
 
 	return nil

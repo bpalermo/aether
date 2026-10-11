@@ -299,16 +299,46 @@ func TestParseTaskState(t *testing.T) {
 	}
 }
 
-func TestParseSchedstat(t *testing.T) {
-	cpu, runq, err := parseSchedstat([]byte("807472818 798485462 3329\n"))
+// TestProcReaderThreadSchedstat: the sampler takes a thread's on-CPU and
+// runqueue-wait nanoseconds from the first two schedstat fields, in that order
+// and in nanoseconds, and a thread whose schedstat does not parse is an error
+// (the sampler skips it for that tick). The parser itself is
+// //common/procsched's and is tested there; this pins what the supervisor does
+// with it.
+func TestProcReaderThreadSchedstat(t *testing.T) {
+	proc := newFakeProc(t)
+	proc.thread(testPID, testPID, "envoy", 'R', 0, 0, "")
+	schedstat := filepath.Join(strconv.Itoa(testPID), "task", strconv.Itoa(testPID), "schedstat")
+	r := procReader{root: proc.root}
+
+	proc.write(schedstat, "807472818 798485462 3329\n")
+	st, err := r.thread(testPID, testPID)
 	require.NoError(t, err)
-	assert.EqualValues(t, 807472818, cpu)
-	assert.EqualValues(t, 798485462, runq)
+	assert.Equal(t, threadStat{state: 'R', cpuNs: 807472818, runqNs: 798485462}, st)
 
 	for _, bad := range []string{"", "1", "x 1 1", "1 y 1"} {
-		_, _, err := parseSchedstat([]byte(bad))
+		proc.write(schedstat, bad)
+		_, err := r.thread(testPID, testPID)
 		assert.Error(t, err, "%q", bad)
 	}
+}
+
+// TestProcReaderTaskIDs: the numeric entries of the task directory, and an
+// error wrapping os.ErrNotExist for a process that is gone (the sampler drops
+// that epoch's threads on it).
+func TestProcReaderTaskIDs(t *testing.T) {
+	proc := newFakeProc(t)
+	proc.thread(testPID, testPID, "envoy", 'S', 0, 0, "")
+	proc.thread(testPID, 4001, "wrk:worker_0", 'S', 0, 0, "")
+	proc.write(filepath.Join(strconv.Itoa(testPID), "task", "not-a-tid", "comm"), "x\n")
+	r := procReader{root: proc.root}
+
+	tids, err := r.taskIDs(testPID)
+	require.NoError(t, err)
+	assert.ElementsMatch(t, []int{testPID, 4001}, tids)
+
+	_, err = r.taskIDs(testPID + 1)
+	assert.ErrorIs(t, err, os.ErrNotExist)
 }
 
 func TestParsePressureTotal(t *testing.T) {

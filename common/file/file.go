@@ -35,6 +35,30 @@ type syncFile interface {
 	Close() error
 	// Fd is the descriptor tryMarkLargeFileAsNotNeeded hands to fadvise(2).
 	Fd() uintptr
+	// Chown is fchown(2) on the temp file, for WithOwner.
+	Chown(uid, gid int) error
+}
+
+// fileOwner is the uid:gid WithOwner asks for.
+type fileOwner struct{ uid, gid int }
+
+// WriteOption adjusts one AtomicWriteReader call.
+type WriteOption func(*atomicWriteOpts)
+
+// WithOwner gives the written file the owner uid:gid. The temp file is chowned
+// through its descriptor, after the chmod and before any byte is written, so the
+// destination name never points at a file with another owner: a failed chown
+// fails the write and leaves the destination as it was.
+func WithOwner(uid, gid int) WriteOption {
+	return func(o *atomicWriteOpts) { o.owner = &fileOwner{uid: uid, gid: gid} }
+}
+
+// KeepInPageCache leaves the written file's pages in the page cache. By default
+// AtomicWriteReader marks a large file FADV_DONTNEED once it is synced, which is
+// right for a file this process only copies; it is wrong for a file that is read
+// or exec'd straight afterwards, such as a binary installed onto the host.
+func KeepInPageCache() WriteOption {
+	return func(o *atomicWriteOpts) { o.fadvise = false }
 }
 
 // atomicWriteOpts carries the per-caller knobs plus the two seams (temp-file creation
@@ -48,6 +72,8 @@ type atomicWriteOpts struct {
 	mode os.FileMode
 	// fadvise marks large files FADV_DONTNEED after the copy (page-cache hygiene).
 	fadvise bool
+	// owner, when set, is fchown'ed onto the temp file before it is published.
+	owner *fileOwner
 
 	createTemp func(dir, pattern string) (syncFile, error)
 	syncDir    func(dir string) error
@@ -75,15 +101,6 @@ func WriteFileAtomic(filePath string, data []byte) error {
 	})
 }
 
-// SyncDir fsyncs a directory so that renames into it survive a power cut.
-//
-// Both writers in this package already do it. It is exported for the one caller that
-// cannot use them — cni/internal/install publishes the plugin binary through renameio,
-// which fsyncs the file before the rename but never the parent directory.
-func SyncDir(dir string) error {
-	return syncDir(dir)
-}
-
 // Exists checks if a file or directory exists at the given path.
 // It returns false only if the file does not exist; other errors (such as permission denied) return true.
 func Exists(name string) bool {
@@ -103,15 +120,41 @@ func AtomicWrite(path string, data []byte, mode os.FileMode) error {
 // It uses a temporary file and atomically renames it, marking large files as not needed for cache
 // optimization. The temp file is fsynced before the rename and the parent directory after it: this
 // path publishes the mesh-DNS record snapshot and the CNI conflist, both of which must survive an
-// unclean power loss.
-func AtomicWriteReader(path string, data io.Reader, mode os.FileMode) error {
-	return writeAtomic(path, data, atomicWriteOpts{
+// unclean power loss. It also installs binaries (the proxy supervisor onto its shared volume, the
+// CNI plugin onto the host); WithOwner and KeepInPageCache are for those.
+func AtomicWriteReader(path string, data io.Reader, mode os.FileMode, options ...WriteOption) error {
+	return writeAtomic(path, data, readerOpts(path, mode, options))
+}
+
+// readerOpts is AtomicWriteReader's configuration: its defaults, then the caller's options.
+func readerOpts(path string, mode os.FileMode, options []WriteOption) atomicWriteOpts {
+	opts := atomicWriteOpts{
 		pattern:    filepath.Base(path) + ".tmp.",
 		mode:       mode,
 		fadvise:    true,
 		createTemp: osCreateTemp,
 		syncDir:    syncDir,
-	})
+	}
+	for _, option := range options {
+		option(&opts)
+	}
+	return opts
+}
+
+// setModeAndOwner gives the still-empty temp file the mode and the owner the caller
+// asked for, in that order: chown(2) clears the set-id bits of the file it is applied to.
+func setModeAndOwner(tmpFile syncFile, opts atomicWriteOpts) error {
+	if opts.mode != 0 {
+		if err := os.Chmod(tmpFile.Name(), opts.mode); err != nil {
+			return err
+		}
+	}
+	if opts.owner != nil {
+		if err := tmpFile.Chown(opts.owner.uid, opts.owner.gid); err != nil {
+			return fmt.Errorf("failed to set owner of temp file: %w", err)
+		}
+	}
+	return nil
 }
 
 // writeAtomic is the one implementation behind both exported entry points. Keeping a
@@ -141,11 +184,9 @@ func writeAtomic(path string, data io.Reader, opts atomicWriteOpts) (retErr erro
 		}
 	}
 
-	if opts.mode != 0 {
-		if err := os.Chmod(tmpPath, opts.mode); err != nil {
-			closeTemp()
-			return err
-		}
+	if err := setModeAndOwner(tmpFile, opts); err != nil {
+		closeTemp()
+		return err
 	}
 
 	n, err := io.Copy(tmpFile, data)
