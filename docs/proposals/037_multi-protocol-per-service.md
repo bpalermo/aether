@@ -7,7 +7,11 @@ per-port protocol, port-qualified L4 routes, the any-port shim and the soak's
 per-port TCP leg); L4 observability shipped (#1043, per-service `tcp_`/`udp_`
 floor stat keys and the `aether_l4_access_logs` stream). Phase 4 (remove the
 portless floor chain) is pending: the any-port shim (`cap_tcp_anyport_<svc>`)
-is still emitted for a TCP-primary service. One Phase 3 item was not built: the
+is still emitted for a TCP-primary service. Phase 4 will not be done as written
+here: it is superseded in that respect by
+[proposal 043](043_real-port-addressing.md) (Draft), which removes the shim
+together with the mesh-port spellings and the per-service primary port that
+this proposal kept. One Phase 3 item was not built: the
 GAMMA projector does not reject an HTTPRoute `backendRef.port` that names a
 raw-TCP port (see *Open questions*).
 **Author:** Bruno Palermo
@@ -968,6 +972,14 @@ than build an h2 cluster to it — open question below on whether the projector
 can see the protocol.
 
 ### Phase 4 — remove the portless floor chain
+
+> **Superseded in this respect (2026-10-11) by
+> [proposal 043](043_real-port-addressing.md) (Draft).** The shim is still
+> emitted, and the counter below has no reader in the agent: the hourly WARN
+> Phase 2 describes was not built. Proposal 043 removes the shim in its own
+> Phase 3, together with `:18081`, `:18082`, the portless spelling and the
+> per-service primary port, behind one deprecation window and one set of
+> counters. The text below is kept as the record of what this proposal planned.
 
 One release after Phase 2, if `cap_tcp_anyport_*` stayed at zero on the reference cluster for
 the whole release: delete the shim. If it did not, the counter names the
