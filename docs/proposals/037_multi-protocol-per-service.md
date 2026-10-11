@@ -9,7 +9,7 @@ floor stat keys and the `aether_l4_access_logs` stream). Phase 4 (remove the
 portless floor chain) is pending: the any-port shim (`cap_tcp_anyport_<svc>`)
 is still emitted for a TCP-primary service. Phase 4 will not be done as written
 here: it is superseded in that respect by
-[proposal 043](043_real-port-addressing.md) (Draft), which removes the shim
+[proposal 043](043_real-port-addressing.md) (accepted 2026-10-11), which removes the shim
 together with the mesh-port spellings and the per-service primary port that
 this proposal kept. One Phase 3 item was not built: the
 GAMMA projector does not reject an HTTPRoute `backendRef.port` that names a
@@ -974,7 +974,7 @@ can see the protocol.
 ### Phase 4 — remove the portless floor chain
 
 > **Superseded in this respect (2026-10-11) by
-> [proposal 043](043_real-port-addressing.md) (Draft).** The shim is still
+> [proposal 043](043_real-port-addressing.md) (accepted 2026-10-11).** The shim is still
 > emitted, and the counter below has no reader in the agent: the hourly WARN
 > Phase 2 describes was not built. Proposal 043 removes the shim in its own
 > Phase 3, together with `:18081`, `:18082`, the portless spelling and the

@@ -1,20 +1,20 @@
 # Proposal 043: A mesh service is addressed by its real ports, and nothing else
 
-**Status:** Draft — written 2026-10-11 for an owner decision already taken in
-direction: issue #1672 is fixed by removing the per-service *primary* port and
-protocol, not by refining it. Nothing here is built. The facts were read from
-`main` at `2a132053`; the two measurements were made on the pinned proxy outside
-any cluster. Twelve decisions are still open (see *Decisions for the owner*).
+**Status:** Accepted 2026-10-11 — by the owner, with all twelve decisions taken
+as recommended (see *Decisions*). No phase is built yet. Planned: Phase 1 in
+chart 2.7.0, Phase 2 in 2.8.0, Phase 3 in 2.9.0, Phase 4 in 2.10.0. The facts
+were read from `main` at `2a132053`; the measurements were made on the pinned
+proxy outside any cluster.
 **Resolves:** #1672. The defect reported there is the per-service primary
-itself; the owner decided to remove it, not to patch it. Accepting this
-proposal closes the issue: the phases below are the work, and Phase 1 is where
-the reported behaviour is fixed.
+itself; the owner decided to remove it, not to patch it. The acceptance of
+this proposal closes the issue: the phases below are the work, and Phase 1 is
+where the reported behaviour is fixed.
 **Author:** Bruno Palermo
 **Date:** 2026-10-11
 **Related:** #1672 (a raw-TCP primary with an HTTP secondary has no TCP path),
 #1682 (a `cluster.local` name with a non-primary port reaches the primary
-port; the same rule broken, fixed in Phase 1), #1677 (draft fix, on hold: it measured both registry backends, and this proposal
-says which parts of it survive), proposals
+port; the same rule broken, fixed in Phase 1), #1677 (the first fix, closed; its branch is kept for Phase 1: it measured both
+registry backends, and this proposal says which parts of it survive), proposals
 [037](037_multi-protocol-per-service.md) (per-port protocol; its Phase 4 is
 subsumed here), [038](038_udp-tproxy-capture.md) (TPROXY capture; why UDP binds
 18082), [022](022_arbitrary-service-interception.md) (redirect-all),
@@ -294,7 +294,8 @@ The options:
   repaired by the same machinery that repairs every other Service. This is the
   prior art's position.
 
-**Recommendation: (d), with (b) as the state until it ships.** The evidence:
+**Decided (decision 1): (d), with (b) as the state until it ships.** The
+evidence the recommendation rested on:
 
 1. Every proxy-based option needs either a bind the pod can collide with
    (measured) or a new per-pod dynamic kernel mechanism plus a listener family
@@ -311,12 +312,15 @@ The options:
 What (d) costs: the per-service UDP stats and the UDP lines of
 `aether_l4_access_logs`; `UDPRoute` served by the proxy (it becomes "the
 parent Service's slices carry the chosen backend's endpoints", written by the
-registrar, or it is withdrawn: decision 1); a registrar that writes
+registrar, for the single-backend shape only: decision 1); a registrar that
+writes
 `EndpointSlice`s (new RBAC); endpoint freshness at the speed of the cluster's
 service routing instead of EDS. East-west QUIC is not affected: it is mesh
 transport on 18008, not application UDP. None of the carried patches goes away:
 they serve the QUIC listeners. **(d) is not measured.** It is stock Kubernetes
-behaviour, but no aether cluster has run it, and its gate is in Phase 2.
+behaviour, but no aether cluster has run it. Its work in Phase 2 therefore
+starts with a measurement on kind, on both registry backends, before anything
+is built on it.
 
 ### 4. The generated Service as an ordinary multi-port Service
 
@@ -354,7 +358,8 @@ behaviour, but no aether cluster has run it, and its gate is in Phase 2.
   name under redirect-all. With real ports this case matters more: see fact 5.
 - **One number, two transports.** `port_protocols` is `map<uint32, PortProtocol>`
   (`endpoint.proto:117`): a port number has one class. A pod cannot declare
-  53/TCP **and** 53/UDP. Not solved here (decision 7).
+  53/TCP **and** 53/UDP. Not solved here; it is its own change, due before
+  Phase 3 (decision 7).
 - **The two backends.** They differ in one way that matters: `etcd` lists a
   pod under every protocol it was registered under (the agent registers once
   per distinct class, `agent/internal/cni/server/dualregistration.go:36-48`);
@@ -904,8 +909,11 @@ which is the larger cost: about 7 minutes of nightly runner time in place of
   dormant, never forgotten, as #1036 requires). `GammaBackend` and the
   projection gain an additive `port`; exporters write it beside the legacy
   cluster name.
-- **UDP, if decision 1 is (d):** the registrar writes `EndpointSlice`s for UDP
-  ports; `:18082/udp` keeps working and is counted.
+- **UDP (decision 1):** first a measurement on kind of a generated Service
+  with a UDP port and registrar-written `EndpointSlice`s, on both backends
+  (delivery, the reply's source, drain on a terminating pod). If it holds, the
+  registrar writes the slices; `:18082/udp` keeps working and is counted. If
+  it does not, 18082 stays for UDP and the finding comes back to the owner.
 - **Gate (can fail):** every suite green on real ports only; the Phase 1
   addressing legs unchanged in their answers (nothing about the rule changes in
   this phase); in `multiprotocol`, leg D1: each legacy spelling dialled once
@@ -946,7 +954,7 @@ Deleted:
 - Scoped capture: the chart value, the CNI flag's effect (the flag is accepted
   and ignored for this minor, because a 2.8 chart still passes it), the scoped
   listener shape and its `blackhole` cluster.
-- UDP per decision 1: under (d), the per-pod UDP listener, the `udp:` clusters,
+- UDP (decision 1), if the Phase 2 measurement held: the per-pod UDP listener, the `udp:` clusters,
   `UDPStatKey`, the UDP mark rule.
 - Sources switch to SNI = port for every TCP port; destinations have had the
   explicit chains since 2.7.
@@ -995,10 +1003,10 @@ as the liveness probe port.
    that is almost none. The two ways back are to listen on 80, or to own the
    name with a Service that maps 80 to the pod's port, which only covers the
    `cluster.local` name today (fact 4, *Collisions*).
-3. **UDP.** Under (d) the mesh stops seeing application UDP: no per-service
-   UDP stats, no L4 log line, and `UDPRoute` changes hands or goes. Under (b)
-   the decision has a standing exception. Under (c) there is a new mechanism in
-   every pod's network namespace. None of the three has run in a cluster.
+3. **UDP.** The mesh stops seeing application UDP: no per-service UDP stats,
+   no L4 log line, and `UDPRoute` is served by registrar-written slices for one
+   backend only. The option has not run in any cluster. Until it has, port
+   18082 stays for UDP, which is a standing exception to the decision.
 4. **Multi-cluster peers.** A peer more than one chart minor behind exports
    routes with no port; at Phase 3 those backends cannot be resolved and are
    dropped with a counted WARN. Clusters must cross 2.8 together or within the
@@ -1030,77 +1038,75 @@ as the liveness probe port.
 9. **Two transports on one port number** cannot be declared (fact 4). DNS is
    the obvious case, and under (d) it is the first thing a user will try.
 
-## Decisions for the owner
+## Decisions
 
-1. **UDP.** (b) keep 18082 for UDP, (c) port translation to reserved listener
-   ports, or (d) stop proxying application UDP. *Recommended: (d), with (b)
-   until it ships.* If (d): is `UDPRoute` kept (registrar-written slices) or
-   withdrawn? *Recommended: kept for the single-backend shape it supports
-   today, withdrawn otherwise.*
-2. **Port 80.** Is the plain break accepted, or should the generated Service
-   be able to map 80 to a declared port? *Recommended: accept the break.* A
-   mapping is a second port vocabulary on the pod; a user who wants 80 writes
-   a Service, as in Kubernetes.
-3. **`capture.aether.io/redirect-all: "false"`** after Phase 3: "outbound not
-   captured", or the annotation is removed and the value rejected?
-   *Recommended: keep it, meaning not captured.*
-4. **The legacy target when a service's pods disagree** during Phases 1 and 2:
-   the order-independent vote from #1677, private to the legacy path, or
-   today's `endpoints[0]`? *Recommended: the vote.* It is deleted in Phase 3
-   either way.
-5. **The loopback listener `127.0.0.1:18081`.** It is a mesh-specific port,
-   but it addresses the proxy, not a service; the CNI readiness probe and the
-   prober's liveness tier use it. *Recommended: keep it. Nothing is dialled
-   there, so the port in `Host` is the port:* `Host: <mesh name>:<port>` with
-   a port the Service declares as HTTP is matched by that port's virtual host;
-   a port-less `Host` means port 80 and is served only when the Service
-   declares 80, else `421 port-required`. It works the same for a pod with
-   `capture.aether.io/redirect-all: "false"` (decision 3), which is that pod's
-   only way into the mesh (legs A3, A6, R1, R3). Removing the listener is a
-   separate proposal.
-6. **`endpoint.aether.io/port`.** With no primary it is one more declared port
-   and the liveness probe port. *Recommended: keep the name and say so.* The
-   alternative is a new `health-port` annotation and a contract bump.
-7. **TCP and UDP on one port number.** Needs an additive registry field.
-   *Recommended: out of scope, its own change, before Phase 3 if decision 1 is
-   (d).*
-8. **Pace.** Phases 1 and 2 could share 2.7.x, with removal in 2.8.0.
-   *Recommended: three minors as written*; Phase 1 fixes a bug and should not
+Decided by the owner on 2026-10-11, each as recommended. The alternative that
+was not chosen is kept in one clause.
+
+1. **Application UDP is no longer proxied.** The generated Service's UDP ports
+   get `EndpointSlice`s written by the registrar, and the cluster's own service
+   routing carries them. Port 18082 stays for UDP until that ships. `UDPRoute`
+   is kept for the single-backend shape it supports today and withdrawn
+   otherwise. Not chosen: keeping 18082 for UDP for good, and conntrack port
+   translation to reserved listener ports. **This option is not measured**, so
+   its phase starts with a measurement (Phase 2).
+2. **The port 80 break is accepted.** `http://<svc>/` works only for a service
+   with a port 80; a user who wants 80 listens on it or writes a Service that
+   maps it. Not chosen: a way for the generated Service to map 80 to a
+   declared port.
+3. **`capture.aether.io/redirect-all: "false"` is kept and means "outbound not
+   captured"** after Phase 3. Not chosen: removing the annotation and rejecting
+   the value.
+4. **When a service's pods disagree about the legacy target** during Phases 1
+   and 2, the order-independent vote from #1677 decides, private to the legacy
+   path and deleted in Phase 3. Not chosen: today's `endpoints[0]`.
+5. **The loopback listener `127.0.0.1:18081` is kept.** It addresses the
+   proxy, not a service; the CNI readiness probe and the prober's liveness
+   tier use it. Nothing is dialled there, so the port in `Host` is the port:
+   `Host: <mesh name>:<port>` with a port the Service declares as HTTP is
+   matched by that port's virtual host; a port-less `Host` means port 80 and
+   is served only when the Service declares 80, else `421 port-required`. It
+   works the same for a pod with `capture.aether.io/redirect-all: "false"`
+   (decision 3), which is that pod's only way into the mesh (legs A3, A6, R1,
+   R3). Not chosen: removing the listener, which would be a separate proposal.
+6. **`endpoint.aether.io/port` keeps its name.** With no primary it is one more
+   declared port and the liveness probe port, and the documentation says so.
+   Not chosen: a new `health-port` annotation and a contract bump.
+7. **TCP and UDP on one port number is out of scope here.** It needs an
+   additive registry field and is its own change, due before Phase 3 because
+   of decision 1. Not chosen: solving it inside this proposal.
+8. **Three chart minors:** Phase 1 in 2.7.0, Phase 2 in 2.8.0, Phase 3 in
+   2.9.0, and the receiver-side tolerances in 2.10.0. Not chosen: Phases 1 and
+   2 sharing 2.7.x with removal in 2.8.0; Phase 1 fixes a bug and does not
    wait for the prober and the harness to move.
-9. **`:scheme: https` with a port-less `Host` on the loopback listener.**
-   Port 80 (the transport the mesh saw), or 443 (the scheme the client
-   asserted)? *Recommended: 80, and `:scheme` is never consulted.* The
-   question no longer exists on the captured path, where nothing is defaulted.
-10. **Raw TCP to a port the Service does not declare**, once the placeholder
-    ports are gone. With no chain it reaches the passthrough and then a
-    ClusterIP port that does not exist, which 037 describes as CNI-dependent
-    and typically a hang; 037 added the placeholders to get a refusal for four
-    ports. A deterministic refusal for every port needs a per-service chain
-    with no destination port. Under the per-port layout that chain only
-    catches port numbers no chain names; a port number that another service
-    uses still falls to the passthrough for non-HTTP bytes, so the refusal
-    would be partial without an HCM chain per (service, port). *Recommended: accept
-    the cluster's answer in Phase 3 and assert only that no application
-    answers; build the refusal chain if a hang is reported.* HTTP, the common
-    case, is refused by name either way.
-11. **A service that declares port 80 and whose legacy target is another
-    port** (`mp-eighty`). A dial to its port 80 reaches the legacy target
-    through 2.8 and port 80 from 2.9: two working answers, so the change is
-    silent. The per-port layout does not remove this: the client dials 80
-    either way.
-    *Recommended: keep the legacy meaning through 2.8, count these requests
-    under their own name (`legacy_portless_shadows_80`), WARN once per source,
-    and name the service in the 2.9 runbook section.* The alternative, port 80
-    from 2.7 when declared, changes behaviour with no deprecation window.
-12. **Per-port HCM chains on the capture listener** (the dialled port decides)
-    in place of one chain routed on `Host`. *Recommended: adopt; this document
-    is written that way.* It is the only layout in which a port number one
-    service declares as raw TCP still carries HTTP for another (measured), and
-    it makes a port-less `Host` mean what it means to any HTTP server. It costs
-    `H` + 1 HCM chains per pod and as many route tables per node, with the
-    resource-lifetime and first-use questions under *Scale*. Rejecting it
-    means keeping `Host`-wins **and** adding a per-port chain for every port
-    number any service declares as raw TCP, which is two rules.
+9. **A port-less `Host` on the loopback listener is port 80 whatever `:scheme`
+   says;** `:scheme` is never consulted. Not chosen: 443 for `:scheme: https`,
+   which would route on a header the client controls. The question does not
+   exist on the captured path, where nothing is defaulted.
+10. **Raw TCP to a port the Service does not declare gets the cluster's
+    answer** once the placeholder ports are gone: it reaches the passthrough
+    and then a ClusterIP port that does not exist, which 037 describes as
+    CNI-dependent and typically a hang. Phase 3 asserts only that no
+    application answers. Not chosen: a per-service refusal chain, which under
+    the per-port layout would catch only port numbers no chain names and so be
+    partial without an HCM chain per (service, port); it is built if a hang is
+    reported. HTTP, the common case, is refused by name either way.
+11. **A service that declares port 80 while its legacy target is another
+    port** (`mp-eighty`) keeps the legacy meaning of a dial to port 80 through
+    2.8. Those requests are counted under their own name
+    (`legacy_portless_shadows_80`), logged once per source, and the service is
+    named in the 2.9 runbook section, because the change at 2.9 is from one
+    working answer to another and would otherwise be silent. Not chosen: port
+    80 from 2.7 when declared, which changes behaviour with no deprecation
+    window.
+12. **The capture listener has an HCM chain and a route table per HTTP port
+    number; the dialled port decides.** It is the only layout in which a port
+    number one service declares as raw TCP still carries HTTP for another
+    (measured), and it makes a port-less `Host` mean what it means to any HTTP
+    server. It costs `H` + 1 HCM chains per pod and as many route tables per
+    node, with the resource-lifetime and first-use questions under *Scale*.
+    Not chosen: one chain routed on `Host`, which would also have needed a
+    per-port chain for every port number any service declares as raw TCP.
 
 ## Out of scope
 
