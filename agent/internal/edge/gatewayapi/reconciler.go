@@ -11,6 +11,7 @@ import (
 	"log/slog"
 	"slices"
 	"strings"
+	"sync"
 
 	"aethermesh.dev/common/serviceref"
 
@@ -111,6 +112,11 @@ type Reconciler struct {
 	// MeshDomain is the mesh DNS domain used to build TCP cluster names.
 	MeshDomain string
 	Log        *slog.Logger
+
+	// infraRefused is, per Gateway, the refused spec.infrastructure keys last
+	// logged (infrastructure.go), so a refusal is logged when it changes.
+	infraRefusedMu sync.Mutex
+	infraRefused   map[gatewayKey]string
 }
 
 // SetupWithManager registers the reconciler to watch HTTPRoutes, TCPRoutes,

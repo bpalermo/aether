@@ -5,6 +5,7 @@ go_library(
     srcs = [
         "edgeconfig_resolve.go",
         "features.go",
+        "infrastructure.go",
         "reconciler.go",
         "service.go",
         "status.go",
@@ -31,6 +32,7 @@ go_library(
         "@io_k8s_apimachinery//pkg/apis/meta/v1:meta",
         "@io_k8s_apimachinery//pkg/types",
         "@io_k8s_apimachinery//pkg/util/intstr",
+        "@io_k8s_apimachinery//pkg/util/validation",
         "@io_k8s_client_go//util/retry",
         "@io_k8s_sigs_controller_runtime//:controller-runtime",
         "@io_k8s_sigs_controller_runtime//pkg/client",
@@ -50,6 +52,7 @@ go_test(
     srcs = [
         "edge_cases_test.go",
         "edgeconfig_resolve_test.go",
+        "infrastructure_test.go",
         "options_test.go",
         "reconciler_test.go",
         "service_test.go",
