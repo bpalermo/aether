@@ -124,6 +124,7 @@ func take(fields map[string]any, keys ...string) {
 //     pairs of a render. Adding to such a value changes it;
 //   - where the contract itself says the set is open, each member is its own
 //     promise: the fields of a log line (with whether the field is a time),
+//     the fields of an access log (with the format that renders each),
 //     the components of a resource attribute, an object's pod labels, its
 //     containers, and what each container is held to;
 //   - the order of a list is not a promise.
@@ -163,6 +164,9 @@ func (c *Contract) promised() promises {
 	}
 	for _, l := range c.LogLines {
 		l.promises(p)
+	}
+	for _, a := range c.AccessLogs {
+		a.promises(p)
 	}
 	for _, s := range c.EnvoyStats {
 		p.rest(fieldsOf(s), s.ID)
@@ -210,6 +214,18 @@ func (l LogLine) promises(p promises) {
 		p.put(kind, l.ID, "fields", f)
 	}
 	p.rest(fields, l.ID)
+}
+
+func (a AccessLog) promises(p promises) {
+	fields := fieldsOf(a)
+	take(fields, "fields")
+	// Each field with what renders it: another format under the same name is a
+	// field that means something else.
+	for _, f := range sortedKeys(a.Fields) {
+		p.put(a.Fields[f], a.ID, "fields", f)
+	}
+	fields["reporters"] = sorted(a.Reporters)
+	p.rest(fields, a.ID)
 }
 
 func (r Render) promises(p promises) {

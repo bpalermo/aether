@@ -64,6 +64,13 @@ func SetAccessLogConfig(c AccessLogConfig) { accessLogConfig = c }
 // destination pod on inbound — disambiguate via reporter), or nil when access
 // logging is disabled. The logger pushes OTLP logs to the collector cluster; the
 // filter logs all failures plus a SuccessSampleRate sample of successes.
+//
+// Some of these fields are read by a harness outside this repository: the log
+// name, `reporter` and its two values, and the fields listed under
+// `access_logs` in test/harnesscontract/external-harness.yaml, each with the
+// format operator that renders it. TestExternalHarnessContract_AccessLog holds
+// this function to that file: renaming or dropping one of them, or rendering it
+// with another operator, is a change of the contract.
 func buildAccessLog(reporter, podName, podNamespace string) []*accesslogv3.AccessLog {
 	if !accessLogConfig.Enabled {
 		return nil
