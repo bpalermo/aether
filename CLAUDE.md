@@ -191,3 +191,5 @@ The proxy image (`proxy/`, its own Bazel workspace) builds a pinned Envoy plus s
 - Integration test targets use `size = "medium"` and `tags = ["integration"]` in BUILD.bazel.
 - Tests guarded with `testing.Short()` skip to allow running unit-only with `--test_arg=-test.short`.
 - Never modify production code when asked to add or fix tests only. Never remove existing test cases unless explicitly asked.
+- The one exception (`AGENTS.md`, "Tests and findings"): an agent MAY remove a production function that only tests reference, together with the test that only calls it, when the PR shows (by whole-module analysis, not grep alone) that nothing else references it.
+- "One release" of compatibility means one minor version of the `aether` chart: deprecated in 2.5.x, removable in 2.6.0, never within the same minor (`AGENTS.md`, "Compatibility window").
