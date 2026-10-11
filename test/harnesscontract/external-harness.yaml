@@ -282,7 +282,7 @@ access_logs:
     reporters: [source, destination]
     fields:
       method: "%REQ(:METHOD)%"
-      authority: "%REQ(:AUTHORITY)%"
+      user_agent: "%REQ(USER-AGENT)%"
       x_request_id: "%REQ(X-REQUEST-ID)%"
       response_code: "%RESPONSE_CODE%"
       response_flags: "%RESPONSE_FLAGS%"
@@ -290,6 +290,9 @@ access_logs:
       us_tx_beg_ms: "%COMMON_DURATION(DS_RX_BEG:US_TX_BEG:ms)%"
     notes: >-
       Every field is a string, and one Envoy had no value for reads `-`.
+      `method` and `user_agent` are the request's own, as this proxy received
+      them: the mesh rewrites neither, so one client's requests are selected
+      by them on the records of both reporters.
       `response_flags` is `-` for a response the next hop sent and a
       comma-separated set of Envoy's short response flags otherwise.
       `us_tx_beg_ms` is the time from the request's first byte to the first
