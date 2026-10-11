@@ -923,8 +923,7 @@ unconditional (no `--transparent-capture`; per-pod `capture.aether.io/*`
 annotations opt out). There is no `--otlp-endpoint` or `--otlp-pin-endpoint`: the
 plugin exports no telemetry (#1166), the chart has passed neither since `2.4.0`,
 and the binary rejects both as unknown flags (they were deprecated no-ops for the
-releases in between; see `docs/runbook.md`, "cni-install no longer accepts the
-OTLP flags"). (The `cni` plugin binary itself is configured via CNI-spec stdin,
+releases in between; see `docs/runbook.md`, "Chart 2.5.8"). (The `cni` plugin binary itself is configured via CNI-spec stdin,
 not flags.)
 
 Netconf keys the plugin reads but `cni-install` does not write (edit the conflist to

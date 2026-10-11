@@ -3149,6 +3149,16 @@ under a 2.5.0 agent exports `aether_pod="<namespace>_<pod>"`. Neither puts a
 pod into a metric name. The first of the two was measured on the pinned
 proxy, the second follows from the old extractor.
 
+The first of those two exists only because the namespace part of the
+`aether.pod` extractor is optional. That tolerance is for this minor: **chart
+2.6.0 removes it** (the extractor then requires the namespace). An upgrade to
+2.6.0 or later therefore starts from a 2.5.x chart whose agents have all
+rolled; from an older chart, upgrade to 2.5.x first. Skipping that step breaks
+no traffic. It leaves one metric family per pod in the metrics store's name
+index for as long as the store keeps names, which is what the tolerance
+prevents. The compatibility window is defined in `charts/README.md`,
+"Compatibility window".
+
 **What an upgrade does on a node.** When the node's agent is replaced, the
 proxy's stream reconnects and the first snapshot removes every per-pod
 listener and cluster under its old name and adds it under the new one, at
@@ -3503,6 +3513,100 @@ count by (job, revision) (
 # half hour that follows it.
 max_over_time(ALERTS{alertstate="firing", alertname=~"AetherMeshCluster.*|AetherProxyHoldsUnpinnedClusters|AetherProxyPinStateUnknown|AetherRegistrarSnapshotDiverged"}[30m])
 ```
+
+#### Chart 2.5.7: the compatibility window is one chart minor; mesh-DNS reads only the snapshot envelope
+
+**The rule, now written down.** "Supported for one release" was said in several
+places and defined in none. It means **one minor version of the `aether`
+chart**: something deprecated in a 2.5.x chart is still there in every 2.5.x and
+may be removed in 2.6.0, never earlier. `charts/README.md`, "Compatibility
+window", has the operator's side (which chart and image skew is supported, and
+where a deprecation is announced); `AGENTS.md`, "Rules for agents", has the
+contributor's. Nothing changes on a cluster because of the rule itself.
+
+What is deprecated today, and the first chart that may be without it:
+
+| Deprecated | Since chart | May be removed in | Use instead |
+|---|---|---|---|
+| The optional namespace group of the proxy bootstrap's `aether.pod` stats extractor (the tolerance for an agent older than #1584) | 2.5.0 | 2.6.0 | nothing to do: see "Chart 2.5.0" |
+| `aether_registrar_snapshot_content{content_hash}` | 2.4.12 | 2.6.0 at the earliest | `aether_registrar_snapshot_content_hash` ("Stored vs in place vs applied") |
+| `cni-install --otlp-endpoint`, `--otlp-pin-endpoint` (ignored) | 2.4.0 | any chart from 2.5.0 on; still accepted in this one | nothing: the chart has not passed them since 2.4.0 |
+
+**What was removed: the pre-envelope mesh-DNS snapshot.** The node agent writes
+the mesh-DNS record table to `--mesh-dns-snapshot-path`, and the resolver (the
+`aether-mesh-dns` daemon) reads it, at start and on every change. Since chart 0.87.0 (#586, July 2026) the file is an envelope,
+`{"writtenAt":…,"generation":…,"records":{…}}`, and every agent since has
+written only that. Until this chart the reader also accepted what agents wrote
+before it: the bare map `{"<ns>/<svc>":"<ip>"}`. That reader is gone.
+
+**A node that still carries a snapshot file written before chart 0.87.0 is not
+supported.** An agent from 0.87.0 on replaces the file with an envelope on its
+first projection and re-writes it on every heartbeat, so such a file is left
+only where no such agent has run with mesh-DNS on. What a resolver from this
+chart does with one:
+
+- it does **not** serve it, and does not serve an empty table either;
+- at start it stays cold: mesh names answer `SERVFAIL` (clients retry) until the
+  agent writes a snapshot, which it does on its first projection and then on
+  every heartbeat;
+- on a reload it keeps the table it is serving;
+- each attempt logs `failed to read mesh-DNS snapshot; starting cold` or
+  `failed to reload mesh-DNS snapshot; keeping current records` with
+  `no records object`, and counts
+  `aether_mesh_dns_snapshot_reloads_total{result="parse_error"}`, which the
+  shipped `docs/observability/mesh-dns-alerts.yml` rule on `result!="success"`
+  reads.
+
+A file that is valid JSON without a `records` object (an empty `{}` included)
+is treated the same way. Before, such a file was read as an empty table, and a
+reload of it answered `NXDOMAIN` for every mesh name.
+
+**Check, after the upgrade.**
+
+```promql
+# 0 on every node. Non-zero: read that node's mesh-dns log for the reason.
+sum by (node) (increase(aether_mesh_dns_snapshot_reloads_total{result="parse_error"}[15m]))
+```
+
+**What the upgrade rolls.** The agent and mesh-dns images changed (both link
+the snapshot package), so those two DaemonSets roll, and so does the controller,
+whose `--identity-gate-image` flag names the agent image. The node proxy does
+not: its bootstrap ConfigMap is the same but for the `helm.sh/chart` label
+(compared by rendering the 2.5.6 and 2.5.7 charts offline).
+
+Measured: unit tests of the reader and of a resolver started on, and reloaded
+onto, a bare-map file. Not run on a cluster.
+
+#### Chart 2.5.8: cni-install no longer accepts the OTLP flags
+
+The last row of the table under "Chart 2.5.7" is closed: `cni-install
+--otlp-endpoint` and `--otlp-pin-endpoint`, deprecated no-ops since chart
+`2.4.0` (#1166) and removable from `2.5.0` on, are gone from the binary.
+
+**A chart older than `2.4.0` cannot run a `cni-install` image from chart `2.5.8`
+on.** Charts before `2.4.0` passed both flags to the agent pod's `cni-install`
+init container whenever an OTLP endpoint was configured (`otel.endpoint` or
+`cniInstall.otlpEndpoint`), and neither when none was. Any chart from `2.4.0`
+on passes neither, whatever `otel.endpoint` is
+(`//charts/aether:aether_cni_no_otlp_test`).
+
+What it looks like: the init container exits 1 with
+`Error: unknown flag: --otlp-endpoint`, the agent pod sits in
+`Init:CrashLoopBackOff`, and the node's agent never starts.
+
+Who can hit it: only someone who overrides `cniInstall.image` on a chart older
+than `2.4.0` with an image built from this release or later, and has an OTLP
+endpoint configured. That is outside the one-chart-minor window. A chart pins
+its own images by digest, so installing, upgrading to, or rolling back to any
+released chart is unaffected, in either direction: an old chart runs its own
+old image, which still has the flags. If you are in that combination, upgrade
+the chart rather than the image.
+
+**What the upgrade rolls.** The `cni-install` image changed, so the agent
+DaemonSet rolls (it is that pod's init container). No template changed.
+
+Measured: a unit test that the binary refuses each flag by name before the
+installer runs. Not run on a cluster.
 
 #### The prober chart (#1372, #1373, #1374)
 
@@ -4010,31 +4114,6 @@ kubectl get csinode -o jsonpath='{range .items[*]}{.metadata.name}{": "}{.spec.d
 Talos needs nothing extra (the default `udsCsi.kubeletRoot`, `/var/lib/kubelet`,
 is right). On k0s / microk8s set `udsCsi.kubeletRoot`. Rolling back to `1.x`
 requires reverting the workloads to `emptyDir` too.
-
-### cni-install no longer accepts the OTLP flags (chart `2.5.7`)
-
-**A chart older than `2.4.0` cannot run a `cni-install` image from chart `2.5.7`
-on.** Charts before `2.4.0` passed `--otlp-endpoint` and `--otlp-pin-endpoint`
-to the agent pod's `cni-install` init container whenever an OTLP endpoint was
-configured (`otel.endpoint` or `cniInstall.otlpEndpoint`), and neither when none
-was. #1166 (chart `2.4.0`) took telemetry out of the CNI
-plugin, stopped the chart passing either flag, and kept both in the binary as
-deprecated no-ops so an older chart could still start a newer image. That window
-is closed: the binary now rejects both.
-
-What it looks like: the init container exits 1 with
-`Error: unknown flag: --otlp-endpoint`, the agent pod sits in
-`Init:CrashLoopBackOff`, and the node's agent never starts.
-
-Who can hit it: only someone who overrides `cniInstall.image` on a chart older
-than `2.4.0` with an image built from this release or later, and has an OTLP
-endpoint configured. A chart pins its
-own images by digest, so installing, upgrading to, or rolling back to any
-released chart is unaffected, in either direction: an old chart runs its own
-old image, which still has the flags. Any chart from `2.4.0` on passes neither
-flag (`//charts/aether:aether_cni_no_otlp_test`), whatever `otel.endpoint` is.
-
-If you are in that combination, upgrade the chart rather than the image.
 
 ### East-west QUIC (proposal 038 Phase 4): prerequisites, verifying, escape hatch
 
@@ -6494,9 +6573,10 @@ soak of 2026-10-06 (66 revisions, none diverged) it was true at 108 of 1,920
 whose `timestamp()` is the newest. The value gauge has no label to go stale and
 needs no such filter.
 
-The labelled metric is still exported by the release that introduced the value
-gauge and is removed in the release after it. That one release exists for the
-upgrade. A rule on the new metric cannot see a replica still on the older image
+The labelled metric was deprecated in chart 2.4.12, the chart that introduced
+the value gauge, and is still exported. It is removed in chart 2.6.0 at the
+earliest (one chart minor after its deprecation: `charts/README.md`,
+"Compatibility window"). That window exists for the upgrade. A rule on the new metric cannot see a replica still on the older image
 (it would compare the new replicas among themselves and miss a divergence
 against the old one), so while both images can run, keep the #1328 expression as
 a second arm. Both arms return `{job, revision}`, so `or` yields one alert:
