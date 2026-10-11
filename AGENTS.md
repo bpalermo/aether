@@ -175,7 +175,8 @@ assume this section has been read.
 - New Go code needs tests: the `coverage` workflow fails a pull request whose
   total line coverage drops by more than 1.0 point against `main`.
 - Protos are edition 2023 (never proto3) and change additively; an agent and a
-  registrar one release apart must keep working.
+  registrar one chart minor apart (the compatibility window, below) must keep
+  working.
 - Some names are read by a harness outside this repository: the agent's pin
   metrics and their `reason` values, the prober's counter and its
   `AETHER_PROBE_FAIL` line, the any-port stat prefix, the mesh annotations and
@@ -187,6 +188,29 @@ assume this section has been read.
   `test/harnesscontract/README.md` says so (a test says so too: it compares
   the file with `external-harness.lock.yaml` and prints what that file needs),
   and say in the description that the contract changed.
+
+**Compatibility window**
+- "One release" means **one minor version of the `aether` chart**, wherever the
+  repository says it. Something deprecated in a 2.5.x chart stays in every
+  2.5.x and may be removed in 2.6.0: never within the minor that deprecated it,
+  and never without having been deprecated in a published chart first. This
+  covers flags, chart values, metrics and their labels, wire and file formats,
+  and any tolerance one component keeps for an older peer.
+- Skew to design and test for: components of two adjacent chart minors in one
+  cluster, in both directions (a roll is not atomic, and a rollback is a roll).
+  A flag the chart passes must be accepted, or ignored harmlessly, by the
+  images of the previous minor, and the reverse.
+- A deprecation is announced in two places, in the pull request that makes it:
+  the runbook's "Chart X.Y.Z" section of the chart that ships it (what is
+  deprecated, what replaces it, the chart minor that removes it), and where the
+  thing is defined (the flag's help text, the metric's description, the comment
+  on the value, the template or the code). Write the removing minor as a
+  version ("removed in chart 2.6.0"), not as "for one release" or "in the next
+  release": those cannot be dated by whoever reads them later.
+- The removal goes in the runbook section of the chart that makes it, with what
+  an operator who skipped the window sees. `charts/README.md`, "Compatibility
+  window", is the operator-facing statement of the same rule; change both
+  together.
 
 **Workflows**
 - Every action pinned by full commit SHA with the version in a trailing
@@ -220,6 +244,14 @@ assume this section has been read.
 
 **Tests and findings**
 - A test-only task never changes production code and never removes a test case.
+- The one exception to "never remove a test case unless asked": an agent MAY
+  remove a production function that only tests reference, together with the
+  test that only calls it, when the pull request shows by whole-module analysis
+  (`deadcode ./...` against `deadcode -test ./...`, or a `go/packages` reference
+  count, over the module after `make materialize-go`; not grep alone) that
+  nothing else references it. The description names the tool, the command and
+  its output for each function. A test that also asserts behaviour production
+  still has is moved to the function production calls, not removed.
   A flaky-test fix is proven twice: a stress run with zero failures, and a
   temporary mutation showing the test can still fail.
 - One issue per finding, with the evidence in it; never an umbrella issue. Do

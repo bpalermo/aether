@@ -26,7 +26,7 @@ Read `AGENTS.md` § *Rules for agents* and `CLAUDE.md` first.
 - **Ordering between containers is a pod-spec fact, not a hope.** The kubelet starts regular containers in order without waiting; something that must be up first is a native sidecar (an init container with `restartPolicy: Always` and a startup probe) and is stopped after the main container. The proxy pod is on the host network: a port probe can be answered by another pod, so probes there are exec probes on a pod-local socket or marker.
 - **Fail the render on a cluster too old for a feature** rather than fall back silently, when the fallback would reintroduce the bug.
 - **Surge rolls double a pod per node** for the length of a roll: check node headroom when raising a request.
-- **Chart and image are one release apart at most**: a new flag the chart passes must be accepted, or ignored harmlessly, by the previous image, and the reverse.
+- **Chart and image are one chart minor apart at most** (`AGENTS.md`, "Compatibility window"): a new flag the chart passes must be accepted, or ignored harmlessly, by the previous image, and the reverse.
 - Never `--reuse-values` in any command you document; read values back and pass them with `-f`.
 
 ## What you do not do
