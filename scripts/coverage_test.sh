@@ -21,7 +21,8 @@
 #   - unrecorded.txt is the tracked non-test component .go files with no record;
 #   - every way of reporting on nothing is refused: a failed query, an empty
 #     test or library list, a failed `bazel coverage`, a missing combined
-#     report, a test that left no coverage.dat.
+#     report, a test that left no coverage.dat (a sharded test leaves one per
+#     shard: all of them count as its own, and one missing is refused).
 #
 # The real thing is `make coverage` and the `report` job of
 # .github/workflows/coverage.yaml.
@@ -323,6 +324,27 @@ reset_fake
 rm "$FAKE/testlogs/cni/p/p_test/coverage.dat"
 refuse "a test that left no coverage.dat" "1 test(s) left no coverage.dat" run --out "$TMP/r7"
 check "a short tests-only set writes no XML" test ! -e "$TMP/r7/coverage.xml"
+
+# A sharded test (shard_count on the go_test) leaves one coverage.dat per shard
+# and none of its own: all of them are its tracefile.
+reset_fake
+rm "$FAKE/testlogs/cni/p/p_test/coverage.dat"
+mkdir -p "$FAKE/testlogs/cni/p/p_test/shard_1_of_2" "$FAKE/testlogs/cni/p/p_test/shard_2_of_2"
+printf 'SF:cni/p/p.go\nDA:5,1\nLH:1\nLF:1\nend_of_record\n' >"$FAKE/testlogs/cni/p/p_test/shard_1_of_2/coverage.dat"
+printf 'SF:cni/p/p.go\nDA:6,3\nLH:1\nLF:1\nend_of_record\n' >"$FAKE/testlogs/cni/p/p_test/shard_2_of_2/coverage.dat"
+if run --out "$TMP/r8" >"$TMP/log" 2>&1; then
+	pass "a sharded test's per-shard tracefiles are accepted"
+else
+	fail "a sharded test's per-shard tracefiles are accepted: $(cat "$TMP/log")"
+fi
+check "every shard's records are in the tests-only tracefile" \
+	test "$(grep -c '^DA:[56],' "$TMP/r8/tests-only.lcov" 2>/dev/null)" = 2
+# One shard without a tracefile is a short set, like a test without one.
+reset_fake
+rm "$FAKE/testlogs/cni/p/p_test/coverage.dat"
+mkdir -p "$FAKE/testlogs/cni/p/p_test/shard_1_of_2" "$FAKE/testlogs/cni/p/p_test/shard_2_of_2"
+printf 'SF:cni/p/p.go\nDA:5,1\nLH:1\nLF:1\nend_of_record\n' >"$FAKE/testlogs/cni/p/p_test/shard_1_of_2/coverage.dat"
+refuse "a shard that left no coverage.dat" "1 test(s) left no coverage.dat" run --out "$TMP/r9"
 
 refuse "an unknown argument" "usage:" run --bogus
 
