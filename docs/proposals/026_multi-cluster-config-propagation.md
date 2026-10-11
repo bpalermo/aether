@@ -326,5 +326,6 @@ recorded deliberately:
   propagation-lag/skew signal). Class-2 drift visibility not built.
 - **e2e:** channel + export proven live (the reference cluster as a single cluster with a simulated peer origin; two-kind
   harness `e2e/multicluster_config.sh` proves the export side cross-cluster). The spoke
-  agent-import hop on kind is gated on host `fs.inotify` limits; 025 M3 (Service-`targetRef`)
+  agent-import hop on kind was gated on host `fs.inotify` limits then; since the harness
+  became a nightly job it asserts the import too, on the importing cluster's data path; 025 M3 (Service-`targetRef`)
   shipped on this channel (#459).

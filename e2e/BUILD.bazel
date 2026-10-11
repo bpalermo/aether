@@ -85,3 +85,17 @@ sh_test(
         "//:go.mod",
     ],
 )
+
+# Every kind harness here is run by the nightly workflow, every job of that
+# workflow is wired like its siblings (needs, `if:`, the `only` choices,
+# report-failure's needs and RESULTS, a body that is run-e2e-script or
+# run-conformance), and every install of the aether chart names its cluster.
+# Hermetic: it only reads files.
+sh_test(
+    name = "suite_wiring_test",
+    size = "small",
+    srcs = ["suite_wiring_test.sh"],
+    data = glob(["*.sh"]) + [
+        "//:ci_definitions",
+    ],
+)

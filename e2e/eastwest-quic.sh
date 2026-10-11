@@ -482,6 +482,7 @@ install_aether() {
 	helm --kube-context "$CTX" upgrade --install aether "$charts/aether" \
 		-n "$NS" --create-namespace \
 		--set namespace.create=false \
+		--set "clusterName=$CLUSTER" \
 		--set "meshDomain=$MESH_DOMAIN" \
 		--set spire.enabled=true \
 		--set edge.enabled=false \

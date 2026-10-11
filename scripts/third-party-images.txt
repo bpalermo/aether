@@ -26,7 +26,6 @@ pin curlimages/curl 8.22.0 sha256:58adaa4e8dca9c988bae2aba4ab3434a0bb2da16bbe3f9
 
 # e2e backends.
 pin hashicorp/http-echo 1.0 sha256:fcb75f691c8b0414d670ae570240cbf95502cc18a9ba57e982ecac589760a186
-pin istio/tcp-echo-server 1.3 sha256:782259608d5ce934e1a07ce4a3f2664934b6806d50430fd20b7bf429ea500272
 pin registry.k8s.io/e2e-test-images/agnhost 2.53 sha256:99c6b4bb4a1e1df3f0b3752168c89358794d02258ebebc26bf21c29399011a85
 pin registry.k8s.io/pause 3.10 sha256:ee6521f290b2168b6e0935a181d4cff9be1ac3f505666ef0e3c98fae8199917a
 
