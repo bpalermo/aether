@@ -921,8 +921,10 @@ The egress identity gate (#1053/#1055), rendered from
 `--mesh-dns`, `--host-ip`, `--debug`. The per-pod capture redirect is
 unconditional (no `--transparent-capture`; per-pod `capture.aether.io/*`
 annotations opt out). `--otlp-endpoint` and `--otlp-pin-endpoint` are deprecated
-no-ops since #1166 (the plugin exports no telemetry), kept parseable for one release
-so an older chart still starts a newer image. (The `cni` plugin binary itself is
+no-ops since #1166 (chart 2.4.0; the plugin exports no telemetry), kept parseable
+so an older chart still starts a newer image. Under the one-chart-minor
+compatibility window (`charts/README.md`) any chart from 2.5.0 on may ship an
+image without them. (The `cni` plugin binary itself is
 configured via CNI-spec stdin, not flags.)
 
 Netconf keys the plugin reads but `cni-install` does not write (edit the conflist to
