@@ -287,9 +287,17 @@ func (s *Supervisor) freshStartInsteadOfHotRestart(ctx context.Context, epoch in
 		"successorConcurrencyFrom", oursFrom, "predecessorEpoch", epoch, "predecessor", adminIdentityLabel(pred.identity),
 		"drainTime", s.cfg.DrainTime)
 	start := time.Now()
+	// From the drain on, the node keeps its listeners only if this supervisor
+	// goes on to start its Envoy: a termination requested meanwhile is held
+	// back until it has (replacement.go, issue #1679). One requested already
+	// is obeyed instead, and nothing is drained.
+	if !s.beginReplacement() {
+		return s.hotRestartAnyway(ctx, epoch, "this pod's termination was requested: not draining the predecessor")
+	}
 	// The drain rides the connection whose answer was just checked.
 	status, body, err := conn.do(probeCtx, http.MethodPost, adminDrainPath, adminDrainBodyLimit)
 	if err != nil || status != http.StatusOK {
+		s.endReplacement()
 		return s.hotRestartAnyway(ctx, epoch, fmt.Sprintf("predecessor did not accept the graceful drain (status %d, body %q, error %v)",
 			status, strings.TrimSpace(string(body)), err))
 	}

@@ -17,9 +17,13 @@ load("@rules_go//go:def.bzl", "go_test")
 go_test(
     name = "hotrestartrevert_test",
     size = "medium",
-    srcs = ["revert_test.go"],
+    srcs = [
+        "revert_test.go",
+        "staleheartbeat_test.go",
+        "workercount_test.go",
+    ],
     data = ["//agent/test/envoybin:envoy_bin"],
-    shard_count = 8,
+    shard_count = 12,
     tags = [
         "envoy-validate",
         # The Envoy binary reads /proc on startup, the Envoys of a node find

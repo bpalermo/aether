@@ -80,6 +80,10 @@ type fakeAdminServer struct {
 	// quitHits counts POST /quitquitquit; the fake then stops answering, as an
 	// Envoy that exits does.
 	quitHits atomic.Int64
+	// listenersStopped is listener_manager.listener_stopped in /stats, and
+	// statsHits counts the requests for it (issue #1679).
+	listenersStopped atomic.Int64
+	statsHits        atomic.Int64
 }
 
 // recordRequest appends r to the log of the connection it arrived on.
@@ -155,6 +159,14 @@ func newFakeAdmin(t *testing.T, state string, epoch int) *fakeAdminServer {
 			w.WriteHeader(http.StatusServiceUnavailable)
 		}
 		fmt.Fprintf(w, "%s\n", state)
+	})
+
+	mux.HandleFunc("/stats", func(w http.ResponseWriter, r *http.Request) {
+		f.statsHits.Add(1)
+		f.recordRequest(r)
+		// As Envoy answers a filter that is a regular expression: every stat
+		// it matches, one per line.
+		fmt.Fprintf(w, "listener_manager.listener_stopped: %d\n", f.listenersStopped.Load())
 	})
 
 	mux.HandleFunc("/drain_listeners", func(w http.ResponseWriter, r *http.Request) {

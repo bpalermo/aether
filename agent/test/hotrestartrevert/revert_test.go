@@ -74,12 +74,34 @@ func pinnedEnvoy(t *testing.T) string {
 	return bin
 }
 
+// nextPort is where freePort looks next: below the kernel's range for ports it
+// assigns itself (32768 and up on Linux), starting at a place of this process's
+// own.
+var nextPort atomic.Int64
+
+// freePort returns a loopback port nothing listens on, for an Envoy to bind a
+// moment later.
+//
+// Not a port the kernel hands out for ":0". The test's shards run side by side
+// and every one of them makes a connection per request from such a port, so a
+// port found free that way was sometimes taken before the Envoy bound it: its
+// admin failed with "Address already in use", and the test went on to read
+// another shard's Envoy on that port as its own.
 func freePort(t *testing.T) int {
 	t.Helper()
-	l, err := net.Listen("tcp", "127.0.0.1:0")
-	require.NoError(t, err)
-	defer l.Close()
-	return l.Addr().(*net.TCPAddr).Port
+	const lo, span = 10000, 20000
+	nextPort.CompareAndSwap(0, int64(lo+(os.Getpid()*7919)%span))
+	for range span {
+		port := lo + int(nextPort.Add(1))%span
+		l, err := net.Listen("tcp", "127.0.0.1:"+strconv.Itoa(port))
+		if err != nil {
+			continue
+		}
+		require.NoError(t, l.Close())
+		return port
+	}
+	t.Fatal("no free loopback port below the ephemeral range")
+	return 0
 }
 
 // node is what two proxy pods share on a host.
@@ -638,14 +660,35 @@ func TestEnvoyStartedAtEpochZeroBesideALiveOnePoisonsItsHotRestart(t *testing.T)
 	require.Equal(t, 1, n.adminEpoch())
 }
 
+// holdHotRestartSocket binds the hot-restart domain socket an Envoy of the
+// node's base id at the given restart epoch would bind (role "parent"), as
+// Envoy does: the abstract name NUL-padded to all of sun_path. An Envoy started
+// at that epoch then exits on the bind. The returned function releases it.
+func (n *node) holdHotRestartSocket(epoch int) (release func()) {
+	n.t.Helper()
+	name := fmt.Sprintf("@envoy_domain_socket_parent_%d", uint64(n.baseID)*10+uint64(epoch%3))
+	name += strings.Repeat("\x00", 108-len(name))
+	conn, err := net.ListenUnixgram("unixgram", &net.UnixAddr{Name: name, Net: "unixgram"})
+	require.NoError(n.t, err)
+	var once sync.Once
+	release = func() { once.Do(func() { _ = conn.Close() }) }
+	n.t.Cleanup(release)
+	return release
+}
+
 // TestTakeBackThatCannotWorkEndsInAFreshEnvoy (from the second review pass):
-// the successor's Envoy cannot be hot-restarted from (its shared memory was
-// poisoned by a stray epoch 0, as in the test above), and the successor is
-// then deleted. Every answer to its request exits at once with "previous envoy
-// process is still initializing", so the kept pod spends its budget of answers
-// while the successor still asks. That must stop the answers and nothing else:
-// when the successor has drained and exited the node is empty, and the kept
-// pod must start a fresh Envoy, which replaces the shared memory and serves.
+// the successor's Envoy cannot be hot-restarted from, and the successor is
+// then deleted. Every answer to its request exits at once, so the kept pod
+// spends its budget of answers while the successor still asks. That must stop
+// the answers and nothing else: when the successor has drained and exited the
+// node is empty, and the kept pod must start a fresh Envoy, which serves.
+//
+// What makes the hot restart impossible here is the next epoch's hot-restart
+// socket, held by another process, so the Envoy forked at that epoch exits on
+// the bind. It used to be a shared memory left marked "initializing" by a
+// stray epoch 0; the supervisor repairs that now
+// (TestStaleInitializingFlagIsClearedBeforeAHotRestart), and the take-back
+// from such a node simply works.
 func TestTakeBackThatCannotWorkEndsInAFreshEnvoy(t *testing.T) {
 	n := newNode(t)
 	// B: budget = 56 - (3 + 5) - 10 = 38 s, of which it asks 38 - (8 + 6) = 24 s:
@@ -654,15 +697,15 @@ func TestTakeBackThatCannotWorkEndsInAFreshEnvoy(t *testing.T) {
 	require.Eventually(t, func() bool { return a.liveEnvoys() == 0 }, 30*time.Second, 50*time.Millisecond)
 	require.Eventually(t, b.ready, 30*time.Second, 50*time.Millisecond, "B never Ready")
 
-	n.note("a stray epoch 0 beside B's live epoch 1")
-	stray := n.runEnvoy(0, lockedWriter{n, "[stray 0]"})
-	require.Error(t, stray.Wait())
+	n.note("something holds the hot-restart socket of epoch 2: no envoy can start at it")
+	release := n.holdHotRestartSocket(2)
 	require.Equal(t, 1, n.adminEpoch())
 
 	n.note("deleting pod B")
 	b.cancel()
 	require.Eventually(t, func() bool { _, ok := b.returned(); return ok }, 90*time.Second, 50*time.Millisecond,
 		"B's supervisor never exited")
+	release()
 	gone := time.Now()
 	n.note("B exited; the node has no envoy")
 	require.True(t, n.logged("no longer answering its requests"), "A did not spend its budget of answers: this test no longer tests that")

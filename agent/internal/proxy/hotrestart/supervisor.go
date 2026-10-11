@@ -20,6 +20,7 @@ package hotrestart
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -299,6 +300,22 @@ type Supervisor struct {
 	// lineage replaces a drained predecessor, whose epoch numbers it reuses.
 	// Guarded by mu.
 	readyRequiresOwnIdentity bool
+	// replacing is set from the moment a predecessor is asked to drain for a
+	// worker-count change until this supervisor's own Envoy is LIVE, and
+	// terminationAt is when this pod's termination was requested (zero: it has
+	// not been). See replacement.go. Guarded by mu.
+	replacing     bool
+	terminationAt time.Time
+	// unheardEnvoyWait bounds initStartEpoch's wait on an Envoy that holds the
+	// base id without a fresh heartbeat (unheard.go). Set by New; tests
+	// shorten it.
+	unheardEnvoyWait time.Duration
+	// shmDir is where Envoy's hot-restart shared memory lives (sharedmemory.go);
+	// swapped in tests.
+	shmDir string
+	// selfTrigger carries a hot-restart trigger the liveness loop decided on
+	// (listenersstopped.go) to Run, which arms it like any other.
+	selfTrigger chan string
 	// cpus is what Envoy's default worker count is computed from (#1442);
 	// swapped in tests.
 	cpus cpuSources
@@ -414,6 +431,9 @@ func New(cfg Config, log *slog.Logger, metrics *SupervisorMetrics) *Supervisor {
 		supersededRelaunchEpoch: -1,
 		handoffWaitEpoch:        -1,
 		cpus:                    systemCPUSources{},
+		unheardEnvoyWait:        defaultUnheardEnvoyWait,
+		shmDir:                  envoyShmDir,
+		selfTrigger:             make(chan string, 1),
 		newConfigWatcher:        fsnotify.NewWatcher,
 		now:                     time.Now,
 		childExited:             make(chan childExit, 8),
@@ -434,6 +454,12 @@ func (s *Supervisor) Run(ctx context.Context) error {
 	s.removeStaleAdminIdentities()
 	s.log.InfoContext(ctx, "envoy admin identity for state-changing admin requests",
 		"adminIdentity", s.adminIdentity, "adminAddress", s.cfg.AdminAddress)
+
+	// The termination request reaches the supervisor through this context,
+	// which holds it back while a replacement it started is unfinished
+	// (replacement.go, issue #1679).
+	ctx, stopDeferring := s.deferTermination(ctx)
+	defer stopDeferring()
 
 	sigCh := make(chan os.Signal, 4)
 	signal.Notify(sigCh, syscall.SIGHUP, syscall.SIGUSR1)
@@ -457,8 +483,10 @@ func (s *Supervisor) Run(ctx context.Context) error {
 
 	// Pick the start epoch from a confirmed-live predecessor (if any), then
 	// maintain the readiness marker and the LIVE-gated node epoch heartbeat.
-	s.initStartEpoch(ctx)
-	if ctx.Err() != nil {
+	if err := s.initStartEpoch(ctx); err != nil {
+		return fmt.Errorf("choosing the first envoy epoch: %w", err)
+	}
+	if ctx.Err() != nil || (s.terminationRequestedFor() > 0 && !s.replacementUnfinished()) {
 		// Terminated before the first fork (a surge pod deleted while its
 		// image was pulled is started and stopped in the same moment). An
 		// Envoy forked now would take the node over from a live predecessor
@@ -515,6 +543,9 @@ func (lp *restartLoop) run(sigCh <-chan os.Signal, trigger <-chan struct{}) erro
 
 		case <-trigger:
 			lp.arm("config_change")
+
+		case reason := <-lp.s.selfTrigger:
+			lp.arm(reason)
 
 		case <-lp.debounceC:
 			lp.debounceC = nil
@@ -911,8 +942,13 @@ func (s *Supervisor) retryBindCollision(ctx context.Context, exit childExit, bin
 	if crash {
 		kind = "envoy crashed on launch (fatal signal)"
 	}
+	// With the flag set, an Envoy above epoch 0 exits at once with "previous
+	// envoy process is still initializing", whatever else is true
+	// (sharedmemory.go): say so, it is not a collision.
+	shmInitializing, _ := s.shmInitializing()
 	s.log.InfoContext(ctx, kind+"; retrying epoch detection in-process",
-		"epoch", exit.epoch, "attempt", attempt, "budget", budget, "crashSignal", crash, "error", exit.err.Error())
+		"epoch", exit.epoch, "attempt", attempt, "budget", budget, "crashSignal", crash, "error", exit.err.Error(),
+		"sharedMemoryInitializing", shmInitializing)
 	select {
 	case <-ctx.Done():
 		s.shutdown()
@@ -920,12 +956,18 @@ func (s *Supervisor) retryBindCollision(ctx context.Context, exit childExit, bin
 	case <-time.After(bindCollisionRetryPause):
 	}
 	s.resetEpochForRetry()
-	s.initStartEpoch(ctx)
+	if err := s.initStartEpoch(ctx); err != nil {
+		return true, fmt.Errorf("choosing the epoch to retry at: %w", err), true
+	}
 	if err := s.hotRestart(); err != nil {
 		return true, fmt.Errorf("relaunching envoy after retry: %w", err), true
 	}
 	return true, nil, false
 }
+
+// errEpochZeroBesideEnvoy is hotRestart's refusal to fork restart epoch 0
+// while a process holds a hot-restart socket of the base id (unheard.go).
+var errEpochZeroBesideEnvoy = errors.New("refusing to start envoy at epoch 0")
 
 // reserveEpoch picks the restart epoch for the next launch: nextEpoch, advanced
 // past any epoch whose child is STILL TRACKED.
@@ -964,6 +1006,17 @@ func (s *Supervisor) reserveEpoch() int {
 // shutdown of the previous one after ParentShutdownTime.
 func (s *Supervisor) hotRestart() error {
 	epoch := s.reserveEpoch()
+	if epoch == 0 && s.cfg.AdminAddress != "" {
+		// The last line of defence of unheard.go: whatever chose epoch 0, it
+		// is never forked beside an Envoy of the base id.
+		if socket, held := s.envoyHoldsBaseID(); held {
+			return fmt.Errorf("%w: a process holds %s, and an epoch 0 beside a live envoy "+
+				"replaces its hot-restart shared memory", errEpochZeroBesideEnvoy, strings.TrimRight(socket, "\x00"))
+		}
+	}
+	// An Envoy that died while it initialized leaves a flag that makes this one
+	// exit at once (sharedmemory.go, issue #1680).
+	s.clearStaleInitializing(context.Background(), epoch)
 
 	cmd := s.buildEnvoyCmd(epoch)
 	s.log.Info("starting envoy", "epoch", epoch, "args", cmd.Args)
@@ -1213,6 +1266,9 @@ func (s *Supervisor) markEpochLive() {
 		s.epochLiveAt = s.now()
 	}
 	s.epochLive = true
+	// This supervisor's own Envoy is LIVE: a replacement it started for a
+	// worker-count change is finished (replacement.go).
+	s.replacing = false
 	s.mu.Unlock()
 }
 
@@ -1337,6 +1393,12 @@ func (s *Supervisor) successorWaitBudget() time.Duration {
 	budget := s.cfg.TerminationGrace - (s.cfg.DrainTime + shutdownGrace) - terminationFallbackMargin
 	if budget <= 0 {
 		return 0
+	}
+	// A termination that was held back for an unfinished replacement
+	// (replacement.go) has already spent part of the grace period. Never 0,
+	// which means "no bound".
+	if held := s.terminationRequestedFor(); held > time.Second {
+		budget = max(budget-held, time.Millisecond)
 	}
 	return budget
 }
