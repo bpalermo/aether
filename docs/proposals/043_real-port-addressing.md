@@ -4,7 +4,7 @@
 direction: issue #1672 is fixed by removing the per-service *primary* port and
 protocol, not by refining it. Nothing here is built. The facts were read from
 `main` at `2a132053`; the two measurements were made on the pinned proxy outside
-any cluster. Eleven decisions are still open (see *Decisions for the owner*).
+any cluster. Twelve decisions are still open (see *Decisions for the owner*).
 **Resolves:** #1672. The defect reported there is the per-service primary
 itself; the owner decided to remove it, not to patch it. Accepting this
 proposal closes the issue: the phases below are the work, and Phase 1 is where
@@ -422,119 +422,267 @@ becomes supportable as a side effect and is not claimed here.
 3. **One cluster family per port.** HTTP `<fqdn>:<p>` (005), raw TCP
    `tcp:<fqdn>:<p>` (037), QUIC `quic:<fqdn>:<p>@<ns>/<sa>`. No default
    cluster, no floor cluster, no alias cluster.
-4. **HTTP is still routed on `:authority`.** A portless authority is port 80,
-   because that is what an HTTP client means when it omits the port, and every
-   mainstream client writes any other port into `Host`. This keeps one HCM chain
-   and one route table per pod. Routing on the connection's destination port
-   was tested and is **not available in a route table on the pinned proxy**
-   (measured: a virtual-host `matcher` on `DestinationPortInput` is rejected at
-   load with "Route table can only match on request headers"). The alternative,
-   one HCM chain and one route table per distinct port, is the prior art's
-   shape and stays open if the authority rule proves wrong (*Risks*, 6).
-5. **Raw TCP is matched on the destination port**, as today for non-primary
-   ports: address `/32` plus `destination_port`.
+4. **For captured HTTP, the dialled port is the port; `Host` names the
+   service.** The capture listener has one HCM chain and one route table per
+   distinct HTTP port number in the mesh, selected by the connection's
+   destination port and the sniffed application protocol. This is the prior
+   art's shape, and it is the adopted design because the single-chain layout
+   was measured not to work (*The addressing rule*, below).
+5. **Raw TCP is matched on the destination address and port**, as today for
+   non-primary ports: `/32 + destination_port`. The declaration decides; the
+   bytes are not consulted.
 6. **Routes.** A parentRef without a port attaches the rules to the virtual
-   host of every HTTP port of the Service; with a port, to that port's. A
-   backendRef port is a Service port, resolved through the port map to
-   `<backend fqdn>:<pod port>`.
+   host of the Service in the table of every HTTP port it has; with a port, in
+   that port's table. A backendRef port is a Service port, resolved through
+   the port map to `<backend fqdn>:<pod port>`.
 7. **A port nobody declared is not routed.** HTTP is refused with a `421`
-   that lists the service's ports (the authority rule, below). Raw TCP has no
-   chain and falls to the passthrough, where the answer is the cluster's: a
-   port the Service does not have (decision 10).
+   that lists the service's ports. Raw TCP has no chain and falls to the
+   passthrough, where the answer is the cluster's: a port the Service does not
+   have (decision 10).
 
-### The authority rule
+### The addressing rule
 
-Stated once. Everything else in this document that mentions a `Host` header
-follows from this table.
+Stated once. Everything else in this document that mentions a dialled port or
+a `Host` header follows from this section.
 
-**Names.** A mesh service answers to two families of authority, each with or
-without `:<port>`:
+#### Why the dialled port decides (measured)
+
+The first version of this proposal kept one HCM chain for all captured HTTP and
+selected the port from `Host` ("`Host` wins; a port-less `Host` is port 80").
+The owner asked whether the filter-chain match could do it instead: the
+dialled port and the sniffed protocol choose the chain, as the prior art does
+(from general knowledge of Istio's sidecar; not verified against its source).
+It can, and the single-chain layout turns out to be broken, today, on `main`.
+
+Measured on the pinned proxy (Envoy 1.40.0-dev, proxy commit `3119155a`),
+Linux 6.8, one network namespace, a transparent TCP listener on 18001 with the
+shipped capture listener's filters and timeouts (`original_dst`,
+`http_inspector`, `tls_inspector`; `listener_filters_timeout` 1 s, continue on
+timeout; `proxy/capture.go:196-215,274-280`, read) and TCP diverted to it with
+the shipped rule shape (mark on output, `tproxy to :18001` on prerouting).
+Service A declares 9000 and 3306 as raw TCP; service B serves HTTP; address C
+is not in the mesh. The method is in the appendix.
+
+| # | Layout | Connection | Selected | First byte |
+|---|---|---|---|---|
+| L1 | **today**: one HCM chain with no destination port, plus A's `/32 + 9000` chain | HTTP to B:8080 | the HCM | 1 ms |
+| L1 | | **HTTP to B:9000** | **the passthrough, not the HCM** | 2 ms |
+| L1 | | raw bytes to A:9000; HTTP bytes to A:9000 | A's TCP chain, both | 2 ms |
+| L2 | **per port**: an HCM chain for 8080 and for 9000 (destination port + sniffed HTTP), A's TCP chains, the port-less HCM chain, the passthrough | HTTP to B:8080, `Host` port-less or `:8080` | table 8080, B's virtual host | 1 ms |
+| L2 | | HTTP to B:9000, `Host` port-less | table 9000, B's virtual host | 1 ms |
+| L2 | | HTTP to B:8080, `Host: b:9000` | table 8080, no virtual host: the table's `421` | 1 ms |
+| L2 | | raw bytes to A:9000; HTTP bytes to A:9000 | A's TCP chain, both | 2 ms |
+| L2 | | non-HTTP bytes to B:9000 | the passthrough | 2 ms |
+| L2 | | HTTP to B:7777 (no chain names 7777) | the port-less HCM chain | 1 ms |
+| L2 | | h2c with prior knowledge to B:8080 | table 8080 (the proxy answers with HTTP/2 SETTINGS) | 1 ms |
+| L2 | | a TLS ClientHello to B:8080 | the passthrough | |
+| L2 | | `GET mykey\r\n` (no HTTP version) to B:8080 | the passthrough: not detected as HTTP | 1 ms |
+
+The second row is the finding. Envoy's filter-chain match is a tree walked one
+criterion at a time (destination port, then address, then server name,
+transport protocol, application protocol), and **it does not backtrack**: once
+any chain names destination port 9000, a connection to port 9000 is matched
+only among chains that name 9000. One raw-TCP declaration of a port number by
+any service therefore takes that port number away from the port-less HCM chain
+for **every** service on that listener, and the HTTP request leaves through the
+passthrough, outside the mesh. TCP chains are built for every mesh Service
+with an address, not only for the pod's dependencies
+(`cache/capture.go:329-336`, read), so the effect is mesh-wide. This holds on
+`main` today for any port number that some service declares as raw TCP (a
+non-primary `=tcp` port, or a TCP primary), and it is reported as a finding
+with this pull request. The repository uses `filter_chain_match`; the unified
+`filter_chain_matcher` is not used anywhere (grep) and was not measured.
+
+Keeping one HCM chain would therefore need a per-port HCM chain anyway for
+every port number that any service declares as raw TCP. Two rules for "which
+port" depending on what an unrelated service declared is worse than either
+rule alone, so the per-port layout is adopted for every HTTP port number.
+
+Also measured: the route table itself cannot branch on the destination port
+(a virtual-host `matcher` on `DestinationPortInput` is rejected at load:
+"Route table can only match on request headers"), so the port has to be chosen
+by the chain, with a route table per port.
+
+#### The chains of a capture listener
+
+| Chain | Match | Does |
+|---|---|---|
+| `cap_http_<P>`, one per distinct HTTP port number `P` in the mesh | destination port `P`, `raw_buffer`, sniffed `http/1.0`, `http/1.1` or `h2c` | HCM with route table `cap_http_<P>` |
+| `cap_tcp_<cluster>_<P>`, one per (service, raw-TCP port) | destination port `P`, the service's address `/32` | `tcp_proxy` to `tcp:<fqdn>:<P>` (exists today, `proxy/capture.go:297-318`) |
+| `cap_http_other` | `raw_buffer`, sniffed HTTP, no destination port | HCM for HTTP on a port number no service declares as HTTP: refuses mesh names, passes everything else through |
+| default | none | passthrough to the original destination |
+
+"Port number in the mesh" is read from the Services (generated ones carry
+real ports from Phase 1; a user Service that owns a mesh name contributes its
+own ports), which the agent already lists for every namespace
+(`capture/reconciler.go:145`, read). It is not demand-scoped, so a first call
+to a service the pod has never used still finds its port's chain.
+
+Inside the tree for port `P`, an address with a `/32` chain is raw TCP whatever
+the bytes are, and every other address is offered to the HCM chain if the
+bytes are HTTP and to the passthrough if they are not.
+
+#### Names
+
+A mesh service answers to two families of name, with or without `:<port>`:
 
 - the mesh name `<svc>.<ns>.<mesh-domain>`;
 - the Kubernetes names `<svc>.<ns>.svc.cluster.local`, `<svc>.<ns>.svc`,
   `<svc>.<ns>`, and the bare `<svc>` when exactly one namespace owns it
   (today's rule, `cache/capture.go:1144-1156`, read).
 
-The rule is the same for both families. Today it is not: a Kubernetes name
-with a non-primary port reaches the primary port (#1682, measured on kind),
-because the known-target route accepts any `:port` and sends it to the default
-cluster. Phase 1 fixes #1682.
+The rule is the same for both. Today it is not: a Kubernetes name with a
+non-primary port reaches the primary port (#1682, measured on kind), because
+the known-target route accepts any `:port` and sends it to the default
+cluster. Phase 1 fixes #1682, and under this layout it cannot recur: the
+request to `:9090` is in table 9090, which has no route to anything else.
 
-**Entry paths.**
+#### The rule, per entry path
 
-- *(a) Captured*: the pod dialled a Service address and port; the per-pod
-  capture listener's HCM chain took the connection because the bytes are
-  cleartext HTTP. Both name families.
-- *(b) Loopback*: the pod dialled `127.0.0.1:18081` and wrote the service into
+- *(a) Captured.* The pod dialled a Service address and port `D`. Table
+  `cap_http_<D>` holds, for each service with HTTP on `D`, one virtual host
+  whose domains are every name of the service, port-less and with `:D`.
+- *(b) Loopback.* The pod dialled `127.0.0.1:18081` and wrote the service into
   `Host`. No capture rule is involved (loopback is accepted before the marks),
-  so this works identically with capture on and with
-  `capture.aether.io/redirect-all: "false"`. Mesh names only, as today
-  (`out_http` has no Kubernetes-name domains, `cache/cluster.go:528`, read).
-- *(c) Edge to a mesh backend*: **the request's authority selects nothing in
-  the mesh.** The virtual host is chosen by the Gateway listener's hostnames,
-  and the backend port by the route's `backendRef.port`, a Service port
-  resolved through the port map. Listed so that nobody looks for an authority
-  rule there.
+  so this is identical with capture on and with
+  `capture.aether.io/redirect-all: "false"`. There is no dialled service port,
+  so the port in `Host` is the port. Mesh names only, as today.
+- *(c) Edge to a mesh backend.* The request's authority selects nothing in the
+  mesh: the virtual host comes from the Gateway listener's hostnames and the
+  port from the route's `backendRef.port`, through the port map.
 
-**The port in `Host` is the port.** `P` is the port written in the authority;
-a port-less authority has `P` = 80.
-
-| Authority | (a) captured | (b) loopback | Today |
+| Request | (a) captured, dialled `D` | (b) loopback | Today |
 |---|---|---|---|
-| `<name>:P`, the Service declares `P` as HTTP | the virtual host of port `P` → cluster `<fqdn>:<pod port of P>` | the same | mesh name: reaches `P`, with no GAMMA rule unless a route's parentRef names `P` (inferred). Kubernetes name: reaches the **primary** (#1682). Loopback: reaches `P` |
-| `<name>:P`, the Service declares `P` as raw TCP or UDP | `421`, `x-aether-error: port-not-http` | the same | an h2 cluster is built to the port regardless of its class (`cache/cluster.go:671-686`, inferred); the answer was not measured |
-| `<name>:P`, the Service does not declare `P` | `421`, `x-aether-error: port-not-declared` | the same | mesh name: 503 after the 2 s on-demand timeout (`proxy/httpfilter.go:32`). Kubernetes name: the primary, silently |
-| `<name>` (port-less), the Service declares 80 as HTTP | the virtual host of port 80 | the same | the primary |
-| `<name>` (port-less), the Service does not declare 80 | `421`, `x-aether-error: port-required` | the same | the primary |
-| an authority that names no mesh service | passthrough to the original destination | `404` | the same |
+| `Host: <name>:P`, the Service declares `P` as HTTP | `P` = `D`: port `D`. `P` ≠ `D`: `421`, `x-aether-error: port-mismatch` | port `P` | mesh name: reaches `P`, without GAMMA rules unless a parentRef names `P` (inferred). Kubernetes name: the **primary** (#1682) |
+| port-less `Host: <name>` | port `D`, if the Service declares `D` as HTTP | port 80 if the Service declares it, else `421`, `x-aether-error: port-required` | the primary, on both paths |
+| the Service does not declare the port as HTTP (`D` on the captured path, `P` on loopback) and has no raw-TCP chain for it | `421`, `x-aether-error: port-not-declared` | `421`: `port-not-declared`, or `port-not-http` if `P` is raw TCP or UDP | mesh name: 503 after the 2 s on-demand timeout. Kubernetes name: the primary, silently |
+| `D` is a raw-TCP port of the Service | the TCP chain: the bytes go to the port, `Host` is never read | not applicable | the same for a non-primary TCP port |
+| non-HTTP bytes to a port the Service declares as HTTP | the passthrough | not applicable (the listener is HTTP) | the same |
+| a name that is no mesh service | passthrough to the original destination | `404` | the same |
 
-Every refusal is immediate (a `direct_response`, no on-demand wait), status
-`421 Misdirected Request`, with one of three `x-aether-error` values and a body
-that lists the service's ports and their classes. `421` is the status 037
-chose for "no response for this combination of scheme and authority", and no
-application behind the mesh produces it. A refusal, not a passthrough, because
-passing a request for a known mesh service to the cluster's own routing fails
-open: for a user Service with a selector it reaches the pod without the mesh.
+Every refusal is an immediate `direct_response`, status `421 Misdirected
+Request`, with one of four `x-aether-error` values and a body listing the
+service's ports and classes. A refusal, not a passthrough, because passing an
+HTTP request for a known mesh service to the cluster's own routing fails open.
 (The existing `no-http-port` answer for a service with no HTTP port at all
-stays through Phase 2 and becomes `port-not-http` or `port-required` in
-Phase 3.)
+stays through Phase 2 and becomes one of these in Phase 3.)
 
-**When the dialled port and the `Host` port disagree, `Host` wins.** On the
-captured path the HCM chain does not look at the destination port, and it
-cannot be made to in the route table: the pinned proxy rejects a route matcher
-on the destination port (measured, point 4). Consequences, each a gate leg:
+What changed from the first version of this table, and why it is better:
 
-- A client that dials `<svc>:8080` and sends `Host: <svc>:9090` is answered by
-  port 9090.
-- A client that dials `<svc>:8080` and sends a **port-less** `Host` is asking
-  for port 80. It is answered by port 80 if the Service declares it, which may
-  be a different application from the one on 8080, and refused with
-  `port-required` if not. A mainstream HTTP client never does this: it omits
-  the port from `Host` only when it dialled the scheme's default. A client
-  that sets `Host` by hand does, and must write the port.
-- The exception is not an exception to the rule but a different chain: a
-  connection to a port the Service declares as **raw TCP** matches that port's
-  `/32 + destination_port` chain before the HCM is considered, so its bytes go
-  to the TCP port whatever they are. The `port-not-http` row is therefore only
-  reachable through a mismatch or through the loopback listener.
+- **A port-less `Host` means the port that was dialled**, as it does to every
+  HTTP server. Dialling 8080 with a port-less `Host` works. Port 80 is not
+  special on the captured path, and `port-required` does not exist there.
+- **A `Host` port that disagrees with the dialled port is refused**, not
+  obeyed. The first version let `Host` win, which meant a request could be
+  answered by a port the client never connected to.
+- **`:scheme` is irrelevant on the captured path**: nothing is defaulted.
+- **Loopback is the one place a default is needed**, because nothing was
+  dialled: port-less is port 80 when the Service declares it, else refused
+  (decisions 5 and 9).
 
-**The default port is 80, and `:scheme` does not change it** (decision 9).
-The HCM chains on both paths see cleartext only: the capture chain matches
-`raw_buffer` with HTTP/1.x or h2c (`proxy/capture.go:409-417`, read), and the
-loopback listener is plaintext. A client that speaks TLS is not HTTP to the
-mesh; its connection is raw TCP on the port it dialled. So a port-less
-authority on a request the mesh can parse is always a request over cleartext,
-and its default port is 80 even when an h2c request carries `:scheme: https`
-(a client-asserted header; a proxy in the pod forwarding a decrypted request
-can send it). HTTP/3 is not seen at all on these paths: QUIC from an
-application is UDP.
+**Conformance.** The dialled port is the **Service** port. `http://echo/`
+dials 80, lands in table 80, matches the virtual host of `echo`, and the
+route's cluster comes from the Service port map (80 → `targetPort` 8080 →
+`<fqdn>:8080`). Tables are keyed by Service port numbers, which for a
+generated Service are the pod's.
 
 **443.** The generated Service's `https` 443 port is a placeholder, like `http`
-80: it carries no data path (`generator.go:157-176`, read). It goes in Phase 3
-with the others. After that, `https://<svc>/` reaches an application only if a
-pod declares 443 as raw TCP, in which case it is an ordinary TCP port carrying
-the application's own TLS inside the mesh's; otherwise it is an undeclared TCP
-port (decision 10). 443 is never a default port for an authority.
+80 (`generator.go:157-176`, read), and goes in Phase 3. After that,
+`https://<svc>/` reaches an application only if a pod declares 443 as raw TCP:
+an ordinary TCP port carrying the application's own TLS inside the mesh's. A
+TLS connection to a port declared HTTP is not `raw_buffer`, matches no HCM
+chain and is passed through (measured). 443 is never a default for anything.
+
+**UDP** is a different listener with no filter chains. None of this applies to
+it (fact 3).
+
+#### What sniffing is trusted for
+
+Sniffing chooses between the HCM chain and the passthrough for a connection to
+a port number that some service declares as HTTP, on an address that has no
+raw-TCP chain for it. It is never the source of a port's class:
+
+- A port declared raw TCP is `tcp_proxy` whatever the bytes are (measured:
+  HTTP bytes to A:9000 reach A's TCP port).
+- A port number that is HTTP for one service and raw TCP for another on the
+  same listener is unambiguous: the address decides (measured, L2).
+- h2c with prior knowledge, which is how cleartext gRPC arrives, is detected
+  (measured). HTTP/1.1 is detected from its request line.
+- A client that does TLS itself is not HTTP to the mesh: passthrough, or a
+  `TLSRoute` chain on the service's address if one exists.
+- Bytes that only resemble HTTP (a request line with no version) are not
+  detected and are passed through (measured). Bytes that are a valid HTTP
+  request line on a port declared HTTP are HTTP, by declaration.
+- Non-HTTP bytes to a port declared HTTP are **passed through, not refused**.
+  For a generated Service that ends at a Service port with no endpoints, which
+  the cluster's routing rejects (inferred). For a user Service with a selector
+  it reaches the pod without the mesh. That is true today and is not closed
+  here: closing it needs an HCM chain per (service, port), which is the cost
+  this layout avoids. Policy that must not be bypassed belongs on the
+  destination's inbound side, which no client byte pattern can avoid.
+
+#### The inspectors and server-first protocols (measured)
+
+`http_inspector` and `tls_inspector` wait for client bytes before any chain is
+chosen. A server-first protocol (MySQL, SMTP) sends none.
+
+| Connection | Today's listener | Per-port layout | With the inspectors disabled for that destination port |
+|---|---|---|---|
+| server-first to A:3306, a declared raw-TCP port | first byte after **1.00 s** | 1.00 s | **1 ms** |
+| server-first to C:5432, not in the mesh | 1.00 s | 1.00 s | 1.00 s (5432 was not disabled) |
+| a 4-byte first write to A:9000 | 1.00 s | not re-measured | |
+| a silent client on B:8080, an HTTP port | | 1.00 s, then the passthrough | |
+
+The shipped listener disables nothing per port: it bounds the wait at 1 s and
+continues (`proxy/capture.go:200-215`, read). So every server-first connection
+through the mesh pays one second today, declared or not, and the per-port
+layout neither adds to that nor removes it. A listener filter's
+`filter_disabled` predicate does remove it, and it does see the recovered
+destination port (measured, layout L3). The predicate matches a port, not an
+address, so it can only be used for a port number that no service declares as
+HTTP and no `TLSRoute` needs. This is an improvement that the per-port set
+makes possible; it is listed in Phase 1 as optional and gated on its own leg.
+
+#### Scale
+
+`S` services with an address, `H` distinct HTTP port numbers in the mesh, `T`
+(service, raw-TCP port) pairs, `N` pods on the node. Route tables are shared by
+name across the node's pods (`cap_http` is one resource, `proxy/capture.go:29`,
+read).
+
+| | Chains per pod listener | HCM configs per pod | Route tables per node |
+|---|---|---|---|
+| Today | 1 + `T'` + default (`T'` counts three chains for a TCP-primary service) | 1 | 2 (`cap_http`, `out_http`) |
+| One HCM chain (first version) | 1 + `T` + default | 1 | 2 |
+| Per port (adopted) | `H` + 1 + `T` + default | `H` + 1 | `H` + 3 (`cap_http_<P>` × `H`, `cap_http_other`, `out_http`, and `cap_http_18081` until Phase 3) |
+
+Worked: 200 services, 3 HTTP port numbers (80, 8080, 9090), 20 raw-TCP pairs,
+50 pods on a node. Chains per pod: 22 today (if none of the 20 is a primary),
+22 with one chain, **25** per port. Per node: 1,100 against **1,250** (+14%).
+HCM configs per node: 50 against **200**. Route tables per node: 2 against
+**6**, 5 after Phase 3. `H` grows with distinct port numbers, not with
+services: 2,000 services on the same three numbers add nothing to the chain
+count and lengthen the three tables.
+
+What changes on RDS:
+
+- **Fan-out is narrower.** A route change for one service rewrites the tables
+  of that service's ports, not one table every HCM on the node holds.
+- **Each table is a resource with a lifetime.** A chain that names a route
+  table the snapshot does not carry leaves the listener warming until the
+  initial-fetch timeout, and a table is torn down with the last chain that
+  names it (#817, #844). A port number appearing in or leaving the mesh must
+  add or remove its chain and its table in one snapshot. The ACK tracker
+  follows `H` more resources.
+- **The first-use path is not designed.** Today's catch-all turns `:authority`
+  into a cluster name verbatim. With a port-less `Host` in table `P` the
+  cluster is `<fqdn>:<P>`, which no header spells. The intended answer is an
+  explicit virtual host per mesh Service in each of its ports' tables (the
+  Service list is not demand-scoped), leaving the on-demand filter to fetch
+  the named cluster; whether the pinned proxy's on-demand filter does that for
+  a route that names its cluster directly was **not established**.
+- GAMMA rules per port are what this proposal wants in any case (fact 1,
+  row 10).
 
 ### What stays
 
@@ -560,15 +708,20 @@ are broken, by one rule that names no service-level protocol:
 > is declared HTTP**; `:18082` reaches it **if that port is declared raw TCP**
 > (or UDP, for the UDP listener). Otherwise the spelling names nothing.
 
+On the capture listener these are a dial to port 18081 (its own table,
+`cap_http_18081`) and a dial to port 80 of a service that does not declare 80
+(a legacy virtual host in table 80); on the loopback listener, a port-less
+`Host` or one that names `:18081`.
+
 - For a single-protocol service this is exactly today's behaviour.
 - For a mixed service whose legacy target is HTTP it is today's behaviour too:
   legs M0 to M5 keep their meaning.
 - For a mixed service whose legacy target is raw TCP (#1672), `:18082` starts
   working, and `:18081` and the bare name are **refused at once** with `421`
   and `x-aether-error: port-required`, the body listing the service's ports,
-  where `main` answers 502. That header and body are the ones Phase 3 gives
-  every service for a spelling that names no port, so the refusal does not
-  describe a primary and does not have to be unlearned.
+  where `main` answers 502. It is one of the refusals of the addressing rule,
+  with the same body, so it does not describe a primary and does not have to
+  be unlearned.
 - No any-port chain for a service that declares any HTTP port. On `main` the
   portless `/32` chain of a TCP-primary mixed service outranks the HCM and takes
   the service's HTTP ports (measured in #1677 on the kubernetes backend).
@@ -611,11 +764,17 @@ Agent:
 - HTTP clusters and endpoint sets are built per (port, class): no h2 cluster
   for a port declared raw TCP (`cache/cluster.go:671-686` builds one today,
   inferred).
-- A virtual host per HTTP port on `cap_http` and `out_http`, carrying the GAMMA
-  rules, for both name families; the known-target safety net becomes
-  per-port, which fixes #1682. The refusals of the authority rule for a named
-  port (`port-not-http`, `port-not-declared`). This closes the "real ports
-  bypass the routes" gap.
+- The capture listener gets an HCM chain and a route table per HTTP port
+  number (*The addressing rule*), each table holding a virtual host per
+  service with HTTP on that port, for both name families, carrying the GAMMA
+  rules. `out_http` gets a virtual host per HTTP port. The known-target safety
+  net goes: its job is done by the per-port tables, which fixes #1682. The
+  refusals for a named or dialled port (`port-mismatch`, `port-not-http`,
+  `port-not-declared`). This closes the "real ports bypass the routes" gap
+  and the passthrough of HTTP on a port number another service declares raw
+  TCP.
+- Optional, with its own leg (A13): `filter_disabled` on both inspectors for
+  destination ports that no service declares as HTTP and no `TLSRoute` uses.
 - The Service port map: the agent reads the ports of the Service that owns
   each mesh name and resolves parentRef and backendRef ports through it.
 - Destination: an explicit chain for every port, including the declared one
@@ -645,15 +804,15 @@ What of #1677 this phase keeps, and what it must not ship:
 
 - **Gate (can fail):** `multiprotocol` M0 to M7 and X1 to X6 on **both**
   backends in CI (today: `etcd` only; M6 and X6 read registry keys and run on
-  `etcd` alone); MESH-HTTP 7/7 and GATEWAY-HTTP 46/46; the authority legs
+  `etcd` alone); MESH-HTTP 7/7 and GATEWAY-HTTP 46/46; the addressing legs
   below; the skew table re-measured on kind for both backends and both roll
   orders with zero cells worse than 2.6. M7 changes meaning: it asserts the
   real ports as well as the legacy four.
 
-**Authority legs (Phase 1).** In `e2e/multiprotocol.sh`, which already has the
-client, the per-port echo and three of the five workloads. Each echo answers
-with a string naming its own port, so "reached the wrong port" is a failure
-and not a 200.
+**Addressing legs (Phase 1).** In `e2e/multiprotocol.sh`, which already has
+the client, the per-port echo and three of the five workloads. Each echo
+answers with a string naming its own port, so "reached the wrong port" is a
+failure and not a 200.
 
 | Workload | Declares | In the suite today |
 |---|---|---|
@@ -662,6 +821,7 @@ and not a 200.
 | `mp-eighty` | 80, 8080, 9090 HTTP | new (its container binds 80) |
 | `mp-mixed` | 8080 HTTP, 9000 raw TCP | yes |
 | `mp-tcpfirst` | 9000 raw TCP (declared port), 8080 HTTP | yes, ungated today |
+| `mp-nine` | 9000 **HTTP** | new: the port number `mp-mixed` declares raw TCP |
 
 Two clients: the existing captured one, and `mp-client-nocapture`, a managed
 pod with `capture.aether.io/redirect-all: "false"`, which dials only
@@ -669,26 +829,38 @@ pod with `capture.aether.io/redirect-all: "false"`, which dials only
 
 | Leg | Dial and `Host` | Path | Workloads | Must answer | On `main` |
 |---|---|---|---|---|---|
-| A1 | `<mesh name>:P`, `Host` the same, each HTTP port `P` | captured | all five | port `P`'s echo | passes |
+| A1 | `<mesh name>:P`, `Host` the same, each HTTP port `P` | captured | all six | port `P`'s echo | passes, except `mp-nine` (A10) |
 | A2 | `<svc>.<ns>.svc.cluster.local:P` and `<svc>.<ns>:P`, each HTTP port `P` | captured | `mp-multi`, `mp-eighty`, `mp-mixed` | port `P`'s echo | **fails**: the primary answers (#1682) |
-| A3 | `127.0.0.1:18081`, `Host: <mesh name>:P`, each HTTP port `P` | loopback, capture off | all five | port `P`'s echo | expected to pass; guards decision 5 |
+| A3 | `127.0.0.1:18081`, `Host: <mesh name>:P`, each HTTP port `P` | loopback, capture off | all six | port `P`'s echo | expected to pass; guards decision 5 |
 | A4 | an HTTPRoute with a port-less parentRef adds a response header; request `<mesh name>:9090` | captured and loopback | `mp-multi` | the header is present | **fails** (inferred): the rule is not on the port's virtual host |
-| A5 | dial `<mesh name>:8080`, `Host: <mesh name>:9090` | captured | `mp-multi` | port 9090's echo (`Host` wins) | expected to pass |
-| A6 | `Host: <mesh name>:9000` (a raw-TCP port), dialled on 8080 and on loopback | both | `mp-mixed`, `mp-tcpfirst` | `421`, `x-aether-error: port-not-http`, under 1 s | not measured |
-| A7 | `Host: <name>:7777`, both name families | both | `mp-multi` | `421`, `x-aether-error: port-not-declared`, under 1 s | **fails**: 503 after 2 s (mesh name), the primary's echo (Kubernetes name) |
-| A8 | raw TCP to `<mesh name>:7777` | captured | `mp-mixed` | no application answers | passes for a service that declares HTTP; what the client sees is the cluster's (decision 10) and is not asserted |
-| A9 | port-less `Host` | both | all five | **unchanged in this phase**: the legacy target, and for `mp-tcpfirst` `421`, `x-aether-error: port-required` | `mp-tcpfirst`: **fails** (502) |
+| A5 | dial `<mesh name>:8080`, `Host: <mesh name>:9090` | captured | `mp-multi` | `421`, `x-aether-error: port-mismatch` | answers from 9090 (inferred) |
+| A6 | `Host: <mesh name>:9000`, a raw-TCP port | loopback | `mp-mixed`, `mp-tcpfirst` | `421`, `x-aether-error: port-not-http`, under 1 s | not measured |
+| A7 | dial and `Host` `<name>:7777`, both name families; and `Host: <mesh name>:7777` on loopback | both | `mp-multi` | `421`, `x-aether-error: port-not-declared`, under 1 s | **fails**: 503 after 2 s (mesh name), the primary's echo (Kubernetes name) |
+| A8 | raw TCP to `<mesh name>:7777` | captured | `mp-mixed` | no application answers | passes; what the client sees is the cluster's (decision 10) and is not asserted |
+| A9 | dial `<name>:P` with a **port-less** `Host`, each HTTP port `P` other than 80 | captured | `mp-multi`, `mp-eighty`, `mp-mixed` | port `P`'s echo | **fails** for every `P` but the primary: the primary answers |
+| A10 | `<mesh name>:9000`, HTTP | captured | `mp-nine` | `mp-nine`'s echo | **fails** (measured in the rig): `mp-mixed`'s raw-TCP 9000 sends it to the passthrough |
+| A11 | HTTP bytes to `mp-mixed:9000`; non-HTTP bytes to `mp-nine:9000` | captured | | the first reaches `mp-mixed`'s TCP echo; the second reaches no application | |
+| A12 | dial port 80 or `:18081` with any `Host`; port-less `Host` on loopback | both | all six | **unchanged in this phase**: the legacy target, and for `mp-tcpfirst` `421`, `x-aether-error: port-required` | `mp-tcpfirst`: **fails** (502) |
+| A13 (optional, with the inspector change) | a server-first exchange on a declared raw-TCP port whose number no service declares as HTTP | captured | a new server-first echo | first byte in under 200 ms | **fails**: 1 s |
 
-A9 is where this phase deliberately does not yet apply the rule: a port-less
-authority keeps meaning the legacy target until Phase 3. For `mp-eighty` that
-is port 8080 now and port 80 later (decision 11).
+A9 is a client-visible change in this phase: a port-less `Host` on a dialled
+real port other than 80 reaches that port, where `main` sends it to the
+primary. It is the same defect as #1682 seen through `Host`, and the answer on
+`main` is the wrong application, so it is fixed and not deprecated.
+
+A12 is where this phase deliberately does not yet apply the rule. The legacy
+spellings are whole tables: `cap_http_18081`, and in table 80 a virtual host
+per service that does not declare 80, both routing to the legacy target. For
+`mp-eighty`, port 80 dialled is port 8080's echo now and port 80's later
+(decision 11).
 
 Runner time (estimate, not measured): the `multiprotocol` job took 2m24s with
-both shapes in #1677, of which `verify` was 29 s for 14 legs. Two more
-Deployments, one more client and about 40 more requests should add under a
+both shapes in #1677, of which `verify` was 29 s for 14 legs. Three more
+Deployments, one more client and about 60 more requests should add about a
 minute to one backend. Running the suite on both backends doubles the job,
 which is the larger cost: about 7 minutes of nightly runner time in place of
 2.5.
+
 - **Skew:** a 2.6 agent behind a 2.7 registrar sees the same annotation and
   extra Service ports it does not read; on `kubernetes` it also sees pods in
   more listings, which #1677 measured as "nothing gets worse" in that order. A
@@ -696,7 +868,11 @@ which is the larger cost: about 7 minutes of nightly runner time in place of
   address. Inferred from #1677's table for the parts that differ from it; the
   gate measures it.
 - **Operator sees:** more ports on generated Services; `kubectl get svc` shows
-  what a service serves. No client changes.
+  what a service serves; more filter chains and route tables per proxy
+  (*Scale*). Two behaviours change for clients, both from a wrong answer to a
+  right one or a refusal: a port-less `Host` on a dialled real port reaches
+  that port (leg A9), and a `Host` port that contradicts the dialled port is
+  refused (leg A5).
 - **Harness contract:** version 3, unchanged (new facts only).
 - **Rollback:** to 2.6.x. The extra Service ports are removed by the 2.6
   registrar's own convergence.
@@ -731,12 +907,12 @@ which is the larger cost: about 7 minutes of nightly runner time in place of
 - **UDP, if decision 1 is (d):** the registrar writes `EndpointSlice`s for UDP
   ports; `:18082/udp` keeps working and is counted.
 - **Gate (can fail):** every suite green on real ports only; the Phase 1
-  authority legs unchanged in their answers (nothing about the rule changes in
+  addressing legs unchanged in their answers (nothing about the rule changes in
   this phase); in `multiprotocol`, leg D1: each legacy spelling dialled once
-  (`:18081`, a port-less `Host` on both paths, `:18082`, an undeclared port of
+  (a dial to `:18081`, a dial to port 80, a port-less `Host` on loopback, `:18082`, an undeclared port of
   a pure-TCP service) and its counter asserted to have **moved** (a zero is
-  evidence only if the counter can be seen to count); leg D2: a port-less
-  `Host` to `mp-eighty` moves the counter of decision 11 and not the plain
+  evidence only if the counter can be seen to count); leg D2: a dial to port
+  80 of `mp-eighty` moves the counter of decision 11 and not the plain
   one; in `l4-routes`, the UDP leg dials the real port on both backends;
   MESH-HTTP 7/7. D1 and D2 add a few seconds.
 - **Skew:** none new on the wire. A 2.7 importer ignores the new `port` field.
@@ -754,8 +930,9 @@ counter names the client and the removal waits a minor, as 037 did.
 
 Deleted:
 
-- The `:18081` and `:18082` domains, chains and alias clusters; the 421 body's
-  mesh-port spellings; `ProxyL4OutboundPort`; the scoped mark rules for both.
+- The `cap_http_18081` chain and table, the legacy virtual hosts in table 80,
+  the `:18082` chains and the alias clusters; the 421 body's mesh-port
+  spellings; `ProxyL4OutboundPort`; the scoped mark rules for both.
 - The any-port chain and its contract entry (037 Phase 4).
 - The default cluster `<fqdn>`, the floor cluster `tcp:<fqdn>`, the bare EDS
   name's special owner, the default virtual host, `aliasAuthorityPorts`.
@@ -775,7 +952,7 @@ Deleted:
   explicit chains since 2.7.
 
 - **Gate (can fail):** conformance unchanged; an 8-hour soak on real ports;
-  and the authority legs below, where the answer changes in this phase.
+  and the addressing legs below, where the answer changes in this phase.
 - **Skew:** a 2.8 agent beside a 2.9 registrar loses the legacy Service ports
   and the annotation; it stopped reading both in 2.7. A 2.8 source beside a
   2.9 destination still sends the no-SNI forms, which the destination keeps
@@ -788,18 +965,18 @@ Deleted:
 - **Rollback:** to 2.8.x restores every spelling; clients moved in 2.8 keep
   working on both.
 
-**Authority legs (Phase 3).** In `e2e/multiprotocol.sh`.
+**Addressing legs (Phase 3).** In `e2e/multiprotocol.sh`.
 
 | Leg | Dial and `Host` | Path | Workloads | Must answer |
 |---|---|---|---|---|
-| R1 | port-less `Host`, both name families | captured (dials 80) and loopback | `mp-eighty` | port **80**'s echo (it was 8080's through 2.8) |
-| R2 | port-less `Host`, both name families | captured and loopback | the other four | `421`, `x-aether-error: port-required`, under 1 s, the body listing the ports |
-| R3 | dial `<mesh name>:8080`, port-less `Host` | captured | `mp-httponly`, `mp-eighty` | `mp-httponly`: `421 port-required`. `mp-eighty`: port 80's echo, not 8080's |
-| R4 | `Host: <name>:18081` | captured and loopback | `mp-httponly` | `421`, `x-aether-error: port-not-declared` |
+| R1 | dial port 80 (`http://<name>/`), both name families; port-less `Host` on loopback | captured and loopback | `mp-eighty` | port **80**'s echo (it was 8080's through 2.8) |
+| R2 | dial port 80, both name families | captured | the other five | `421`, `x-aether-error: port-not-declared`, under 1 s, the body listing the ports |
+| R3 | port-less `Host` | loopback | the other five | `421`, `x-aether-error: port-required`, under 1 s |
+| R4 | dial `<name>:18081`; `Host: <mesh name>:18081` on loopback | captured and loopback | `mp-httponly` | `421`, `x-aether-error: port-not-declared` |
 | R5 | raw TCP to `<mesh name>:18082` and to an undeclared port | captured | `mp-tcpfirst` | no application answers (A8's assertion; decision 10 says what else may be asserted) |
-| R6 | A1 to A7 | | | unchanged |
+| R6 | A1 to A11 | | | unchanged |
 
-A9 is retired by R1 and R2. No new workload; a few seconds of runner time.
+A12 is retired by R1 to R4. No new workload; a few seconds of runner time.
 
 ### Phase 4 (chart 2.10.0): receiver-side tolerances
 
@@ -831,22 +1008,25 @@ as the liveness probe port.
    routing, no second node. #1677's tables are single-node kind; its
    agent-first order was not run on the kubernetes backend. The reference
    cluster has run none of this.
-6. **The authority rule** (*Design*, *The authority rule*). The port in `Host`
-   is the port, and a port-less `Host` is port 80, whatever port was dialled.
-   A client that dials 8080 and sends a port-less `Host` is refused with
-   `421 port-required`, or, on a service that also declares 80, **answered by
-   a different port than the one it dialled**. No mainstream client does this;
-   a client that sets `Host` by hand does, and the prober does on purpose
-   (it moves in Phase 2). The same rule holds on the loopback listener, where
-   there is no dialled service port to disagree with. Legs A5, R1 and R3 hold
-   it. If it turns out to matter, the fallback is a chain and a route table per
-   port, with its cost in filter chains per pod.
+6. **The addressing rule** (*Design*, *The addressing rule*). The dialled
+   port decides and `Host` names the service. A client that sends a `Host`
+   port different from the port it dialled is refused (`port-mismatch`), where
+   today it is routed by `Host`; a proxy inside the pod that forwards requests
+   with their original `Host` to a different port is the case to watch for.
+   On the loopback listener a port-less `Host` is port 80 or refused. The cost
+   is `H` + 1 HCM chains per pod and `H` + 1 capture route tables per node in
+   place of one each, each table a resource whose chain and table must appear
+   and disappear together (the #817 class), and a first-use path that is not
+   designed yet. Legs A5, A9, A10, R1 to R3 hold the rule.
 7. **The Service port map is a new reader.** A user Service with a named
    `targetPort`, or with a selector that is not the ServiceAccount's pods,
    resolves to nothing or to the wrong set. It is reported, not guessed.
 8. **Capture listener churn.** More per-port chains mean more reasons to
-   update a per-pod listener, which drains it (037, Risk 4). The trigger must
-   stay edge-triggered on the derived port set.
+   update a per-pod listener, which 037 (Risk 4) says drains it. The HTTP
+   chains change only when a port **number** enters or leaves the mesh, which
+   is rarer than a service changing; the trigger must stay edge-triggered on
+   the derived sets. Whether the pinned proxy applies a change of filter
+   chains alone without draining the unchanged ones was not measured.
 9. **Two transports on one port number** cannot be declared (fact 4). DNS is
    the obvious case, and under (d) it is the first thing a user will try.
 
@@ -870,13 +1050,13 @@ as the liveness probe port.
    either way.
 5. **The loopback listener `127.0.0.1:18081`.** It is a mesh-specific port,
    but it addresses the proxy, not a service; the CNI readiness probe and the
-   prober's liveness tier use it. *Recommended: keep it, under the authority
-   rule unchanged:* `Host: <mesh name>:<port>` with a port the Service declares
-   as HTTP is matched by that port's virtual host; a port-less `Host` means
-   port 80 and is served only when the Service declares 80, else
-   `421 port-required`. It works the same for a pod with
+   prober's liveness tier use it. *Recommended: keep it. Nothing is dialled
+   there, so the port in `Host` is the port:* `Host: <mesh name>:<port>` with
+   a port the Service declares as HTTP is matched by that port's virtual host;
+   a port-less `Host` means port 80 and is served only when the Service
+   declares 80, else `421 port-required`. It works the same for a pod with
    `capture.aether.io/redirect-all: "false"` (decision 3), which is that pod's
-   only way into the mesh (legs A3, R1, R2). Removing the listener is a
+   only way into the mesh (legs A3, A6, R1, R3). Removing the listener is a
    separate proposal.
 6. **`endpoint.aether.io/port`.** With no primary it is one more declared port
    and the liveness probe port. *Recommended: keep the name and say so.* The
@@ -887,29 +1067,40 @@ as the liveness probe port.
 8. **Pace.** Phases 1 and 2 could share 2.7.x, with removal in 2.8.0.
    *Recommended: three minors as written*; Phase 1 fixes a bug and should not
    wait for the prober and the harness to move.
-9. **`:scheme: https` on a cleartext request with a port-less authority.**
+9. **`:scheme: https` with a port-less `Host` on the loopback listener.**
    Port 80 (the transport the mesh saw), or 443 (the scheme the client
-   asserted)? *Recommended: 80, and `:scheme` is never consulted.* The mesh
-   parses only cleartext; 443 as a default would route on a header the client
-   controls to a port that is raw TCP whenever it exists.
+   asserted)? *Recommended: 80, and `:scheme` is never consulted.* The
+   question no longer exists on the captured path, where nothing is defaulted.
 10. **Raw TCP to a port the Service does not declare**, once the placeholder
     ports are gone. With no chain it reaches the passthrough and then a
     ClusterIP port that does not exist, which 037 describes as CNI-dependent
     and typically a hang; 037 added the placeholders to get a refusal for four
     ports. A deterministic refusal for every port needs a per-service chain
-    with no destination port, which outranks the HCM chain, so each HTTP port
-    of the service then needs its own `/32 + destination_port` HCM chain: the
-    per-port shape of risk 6, for mesh addresses only. *Recommended: accept
+    with no destination port. Under the per-port layout that chain only
+    catches port numbers no chain names; a port number that another service
+    uses still falls to the passthrough for non-HTTP bytes, so the refusal
+    would be partial without an HCM chain per (service, port). *Recommended: accept
     the cluster's answer in Phase 3 and assert only that no application
     answers; build the refusal chain if a hang is reported.* HTTP, the common
     case, is refused by name either way.
 11. **A service that declares port 80 and whose legacy target is another
-    port** (`mp-eighty`). Its port-less name means the legacy target through
-    2.8 and port 80 from 2.9: two working answers, so the change is silent.
+    port** (`mp-eighty`). A dial to its port 80 reaches the legacy target
+    through 2.8 and port 80 from 2.9: two working answers, so the change is
+    silent. The per-port layout does not remove this: the client dials 80
+    either way.
     *Recommended: keep the legacy meaning through 2.8, count these requests
     under their own name (`legacy_portless_shadows_80`), WARN once per source,
     and name the service in the 2.9 runbook section.* The alternative, port 80
     from 2.7 when declared, changes behaviour with no deprecation window.
+12. **Per-port HCM chains on the capture listener** (the dialled port decides)
+    in place of one chain routed on `Host`. *Recommended: adopt; this document
+    is written that way.* It is the only layout in which a port number one
+    service declares as raw TCP still carries HTTP for another (measured), and
+    it makes a port-less `Host` mean what it means to any HTTP server. It costs
+    `H` + 1 HCM chains per pod and as many route tables per node, with the
+    resource-lifetime and first-use questions under *Scale*. Rejecting it
+    means keeping `Host`-wins **and** adding a per-port chain for every port
+    number any service declares as raw TCP, which is two rules.
 
 ## Out of scope
 
@@ -925,6 +1116,14 @@ as the liveness probe port.
 ## Not established
 
 - Listener and filter-chain counts on a real cluster, for any option.
+- Whether the pinned proxy's on-demand filter fetches a cluster that a route
+  names directly (the per-port first-use path depends on it).
+- The filter-chain measurements on a cluster, with a real CNI, more than one
+  worker, or the unified `filter_chain_matcher`. The passthrough of HTTP on a
+  port number another service declares raw TCP was measured in the rig with
+  the shipped chain shapes, not on `main` in a cluster.
+- What a client sees for non-HTTP bytes to a declared HTTP port of a generated
+  Service (inferred: the cluster rejects a Service port with no endpoints).
 - Whether `aether_stats` can tag a request with its route's name without a
   filter change (the C++ was not read).
 - Whether anything can program a pod's capture rules after CNI ADD (option
@@ -969,6 +1168,30 @@ uses an explicit `tproxy` port rewrite where the shipped CNI rule uses a bare
 `accept` to a listener on the dialled port; the kernel delivers to the same
 socket either way, and T1c is the shipped shape. The bind cases (C1, C2, S) use
 no rule: a plain socket binds the port before or after the proxy starts. The
-HTTP check in *Design* point 4 is two listeners sharing one inline route table
+route-table check in *The addressing rule* is two listeners sharing one inline route table
 whose virtual host carries a `matcher` on `DestinationPortInput`; the proxy
 refuses the configuration at load.
+
+## Appendix: the filter-chain measurement
+
+The same network namespace, with TCP to `10.96.0.0/16` marked on output and
+`iif lo meta mark 1 meta l4proto tcp tproxy to :18001 accept` on prerouting. One
+static listener on `0.0.0.0:18001`, `transparent: true`, `use_original_dst:
+false`, listener filters `original_dst`, `http_inspector`, `tls_inspector`,
+`listener_filters_timeout: 1s`, `continue_on_listener_filters_timeout: true`,
+and a `default_filter_chain`. HCM chains answer with a `direct_response` that
+names their route table and virtual host; `tcp_proxy` chains and the default
+chain lead to three local servers that tag what they receive, two of which
+send a greeting on accept (the server-first application and the stand-in for
+the original destination). Each case records which server accepted, the HTTP
+status and body if any, and the time from `connect` to the first byte.
+
+- L1: `{raw_buffer, HTTP}` → HCM; `{9000, A/32}` and `{3306, A/32}` → `tcp_proxy`.
+- L2: L1 plus `{8080, raw_buffer, HTTP}` and `{9000, raw_buffer, HTTP}` → an HCM
+  each, with a virtual host for `b`, `b:<port>` and a `*` virtual host that
+  answers `421`.
+- L3: L2 with `filter_disabled: {destination_port_range: [3306, 3307)}` on
+  `http_inspector` and `tls_inspector`.
+
+The TLS case is a real ClientHello from a TLS client; the h2c case is the
+client preface and an empty SETTINGS frame.
