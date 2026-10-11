@@ -1042,10 +1042,17 @@ def _conformance_headline(config: MkDocsConfig, staging: Staging) -> str:
         f'"Hard gate ({_workflow_gate(workflow, "gateway-http")})".',
         "**MESH-HTTP (east-west GAMMA) — a hard CI gate at "
         f'{_workflow_gate(workflow, "mesh-http")}.** The nightly workflow runs the mesh profile '
-        "through the full capture path on its own cluster, and a regression fails it. The "
-        "committed baselines predate that gate and are not where the mesh profile stands today: "
-        f"{run} still records MESH-HTTP core at {mesh_passed} passed / {mesh_failed} failed, "
-        "blocked at the time on proposal 022.",
+        "through the full capture path on its own cluster, and a regression fails it. "
+        + (
+            # A baseline older than the gate (rev21 and before) recorded the
+            # mesh profile with failures; say so instead of quoting it as today.
+            "The committed baselines predate that gate and are not where the mesh profile "
+            f"stands today: {run} still records MESH-HTTP core at {mesh_passed} passed / "
+            f"{mesh_failed} failed, blocked at the time on proposal 022."
+            if mesh_failed
+            else f"On a real cluster{suite_note}, {run} measured MESH-HTTP Core "
+            f"{score('MESH-HTTP', 'core')}."
+        ),
     ]
 
     caveat = _CAVEAT_RE.search(" ".join(markdown.replace("\n>", "\n").split()))

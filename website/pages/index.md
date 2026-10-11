@@ -78,8 +78,8 @@ recorded 37 timeouts on one node.
 
 No bespoke routing CRDs. East-west traffic uses GAMMA — `HTTPRoute`,
 `GRPCRoute`, `TCPRoute`, `TLSRoute` and `UDPRoute` parented to a Service — and
-north-south uses the same API against the optional edge gateway. The GATEWAY-HTTP profile is fully conformant, Core 33/33 and
-Extended 10/10, and conformance is gated in CI.
+north-south uses the same API against the optional edge gateway. The GATEWAY-HTTP profile passes Core 36/36 and Extended 10/10 and
+the MESH-HTTP profile Core 7/7, and conformance is gated in CI.
 [Proposal 018 →](proposals/018-gateway-api-gamma.md) ·
 [Proposal 024 →](proposals/024-conformance-ci.md)
 
