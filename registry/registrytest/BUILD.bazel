@@ -1,4 +1,4 @@
-load("@rules_go//go:def.bzl", "go_library")
+load("@rules_go//go:def.bzl", "go_library", "go_test")
 
 go_library(
     name = "registrytest",
@@ -9,4 +9,11 @@ go_library(
         "//api/aether/registry/v1:registry",
         "//common/serviceref",
     ],
+)
+
+go_test(
+    name = "registrytest_test",
+    srcs = ["contract_test.go"],
+    embed = [":registrytest"],
+    deps = ["//api/aether/registry/v1:registry"],
 )

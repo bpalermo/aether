@@ -31,6 +31,7 @@ go_test(
         "//api/aether/registry/v1:registry",
         "//registry",
         "//registry/etcdtest",
+        "//registry/registrytest",
         "@com_github_stretchr_testify//assert",
         "@com_github_stretchr_testify//require",
         "@com_github_testcontainers_testcontainers_go_modules_etcd//:etcd",

@@ -7,6 +7,8 @@
 package registrytest
 
 import (
+	"maps"
+	"slices"
 	"testing"
 
 	registryv1 "aethermesh.dev/api/aether/registry/v1"
@@ -42,36 +44,100 @@ func RequireNamespaceQualifiedKeys(t testing.TB, services map[string][]*registry
 	}
 }
 
-// RequireProtocolDisjoint asserts the second cross-backend invariant: a service
-// serves exactly ONE protocol, so the HTTP and TCP ListAllEndpoints maps must not
-// share a service key.
+// RequirePerPortProtocols asserts the per-port contract of the protocol
+// listings, which every backend must satisfy (proposals 037 and 043). It
+// replaces the older "a service is HTTP xor TCP" check: a service has ports, a
+// port has a class, and a pod that serves ports of two classes is in both
+// listings on every backend.
 //
-// STATUS (proposal 037): this is now a CONVENTION, not an invariant. The registry
-// key is <ns>/<serviceAccount> and the protocol is a per-POD annotation, so a
-// ServiceAccount whose pods disagree legitimately appears under both protocols —
-// on etcd because the CNI registers each pod under its own protocol key, and on
-// the kubernetes backend since #878. The agent no longer breaks in that case
-// (037 Phase 1 keys TCP cache entries by their Envoy cluster name, so the two
-// passes stop colliding), which is exactly why this assertion is no longer
-// load-bearing.
+// listings is ListAllEndpoints' output per protocol. Pass every protocol the
+// test listed; a protocol left out is simply not checked.
 //
-// It is kept rather than deleted because the replacement 037 specifies — every
-// endpoint returned under protocol P advertises at least one P port, and the two
-// listings' port_protocols agree for the same (service, ip) — needs the
-// ServiceEndpoint.port_protocols field that Phase 2 adds. Retiring it now would
-// drop a working cross-backend guard and put nothing in its place. Swap it in
-// Phase 2, not before. The agent's LoadClustersFromRegistry relies on this — it
-// builds a service's HTTP cluster + GAMMA cap_http vhost from the HTTP listing,
-// then OVERWRITES the same map key with a vhost-less tcp:true entry from the TCP
-// listing (cluster.go: "HTTP or TCP, never both"). A backend that returns a service
-// under both protocols (the kubernetes backend before #430, which ignored the
-// protocol arg) makes every such service collapse to TCP-only — its cluster + vhost
-// vanish. Call it with both protocols' ListAllEndpoints output.
-func RequireProtocolDisjoint(t testing.TB, httpServices, tcpServices map[string][]*registryv1.ServiceEndpoint) {
+//  1. Every endpoint returned under protocol P advertises at least one port of
+//     class P in port_protocols. A listing is "who serves a port of P", so a
+//     row with no P port is a row some reader would put behind the wrong kind
+//     of cluster. A row with an EMPTY port_protocols is exempt: it was written
+//     before the field existed, and its meaning is "every port is the protocol
+//     of the key I was read from".
+//  2. The same endpoint (service key, cluster, IP) returned under two protocols
+//     carries the same row: the same port, ports and port_protocols. A reader
+//     takes a port's class from the row, so two listings that disagree about
+//     one pod give two readers two different services.
+//
+// Call it from each backend's listing tests (the kubernetes unit tests and the
+// etcd integration test).
+func RequirePerPortProtocols(t testing.TB, listings map[registryv1.Service_Protocol]map[string][]*registryv1.ServiceEndpoint) {
 	t.Helper()
-	for key := range tcpServices {
-		if _, both := httpServices[key]; both {
-			t.Errorf("service %q appears under BOTH HTTP and TCP — a backend must honor the protocol arg (a service is HTTP xor TCP)", key)
+
+	seen := map[rowIdentity]rowSighting{}
+	// A fixed order, so a violation is reported the same way on every run.
+	for _, protocol := range slices.Sorted(maps.Keys(listings)) {
+		services := listings[protocol]
+		for _, key := range slices.Sorted(maps.Keys(services)) {
+			for _, ep := range services[key] {
+				requirePerPortRow(t, seen, protocol, key, ep)
+			}
 		}
 	}
+}
+
+// rowIdentity is one endpoint of one service; rowSighting is the first listing
+// it was seen in, and the row it had there.
+type (
+	rowIdentity struct{ service, cluster, ip string }
+	rowSighting struct {
+		protocol registryv1.Service_Protocol
+		endpoint *registryv1.ServiceEndpoint
+	}
+)
+
+// requirePerPortRow applies both rules of RequirePerPortProtocols to one row.
+func requirePerPortRow(t testing.TB, seen map[rowIdentity]rowSighting, protocol registryv1.Service_Protocol, key string, ep *registryv1.ServiceEndpoint) {
+	t.Helper()
+	if !servesClass(ep, protocol) {
+		t.Errorf("service %q endpoint %s is listed under %v but advertises no %v port (port_protocols=%v)",
+			key, ep.GetIp(), protocol, protocol, ep.GetPortProtocols())
+	}
+	id := rowIdentity{service: key, cluster: ep.GetClusterName(), ip: ep.GetIp()}
+	first, dup := seen[id]
+	if !dup {
+		seen[id] = rowSighting{protocol: protocol, endpoint: ep}
+		return
+	}
+	if !sameRow(first.endpoint, ep) {
+		t.Errorf("service %q endpoint %s differs between the %v and %v listings: "+
+			"port %d vs %d, ports %v vs %v, port_protocols %v vs %v",
+			key, ep.GetIp(), first.protocol, protocol,
+			first.endpoint.GetPort(), ep.GetPort(),
+			first.endpoint.GetPorts(), ep.GetPorts(),
+			first.endpoint.GetPortProtocols(), ep.GetPortProtocols())
+	}
+}
+
+// servesClass reports whether ep advertises a port of the class protocol
+// names. An empty port_protocols is a row from before the field existed and
+// serves whatever listing it is in.
+func servesClass(ep *registryv1.ServiceEndpoint, protocol registryv1.Service_Protocol) bool {
+	if len(ep.GetPortProtocols()) == 0 {
+		return true
+	}
+	for _, class := range ep.GetPortProtocols() {
+		// The two enums are numerically identical (endpointmeta pins it).
+		if registryv1.Service_Protocol(class) == protocol {
+			return true
+		}
+	}
+	return false
+}
+
+// sameRow compares what a reader derives a service's ports from. The served
+// set is compared as a set: its order carries no meaning.
+func sameRow(a, b *registryv1.ServiceEndpoint) bool {
+	if a.GetPort() != b.GetPort() || !maps.Equal(a.GetPortProtocols(), b.GetPortProtocols()) {
+		return false
+	}
+	pa, pb := slices.Clone(a.GetPorts()), slices.Clone(b.GetPorts())
+	slices.Sort(pa)
+	slices.Sort(pb)
+	return slices.Equal(pa, pb)
 }
