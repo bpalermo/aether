@@ -171,7 +171,7 @@ func TestWriteBehindSupersede(t *testing.T) {
 // every cross-replica drain mark waited up to 500 ms before it even left this
 // replica: 0.5-0.9 s from mark to the last request a source selected the
 // endpoint for, against 0.2 s when source and destination agents shared a
-// replica (kind, e2e/drain-propagation.sh).
+// replica (measured on kind when #1124 was fixed).
 //
 // Red on main: nothing is written until the first tick, 500 ms after Start.
 func TestWriteBehindFlushesANewIntentWithoutWaitingForTheTick(t *testing.T) {
