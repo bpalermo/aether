@@ -5735,7 +5735,7 @@ Now the kept pod's supervisor takes the node back, in one of two ways:
 | `restart_triggers` value | when | what happens | data-plane cost |
 | --- | --- | --- | --- |
 | `successor_terminating` | the terminating supervisor asks for a successor: while it waits with its Envoy LIVE it refreshes the node epoch heartbeat and writes `successor-wanted` beside it (in `--state-dir`, `/run/aether/hotrestart` by default), every second | the kept pod hot-restarts from that Envoy as a new pod would (epoch N+1, the usual readiness gate), and from no other epoch; the terminating pod then ends on the `successor_wait` branch | none (with the pinned Envoy on both sides, one request every 20 ms through the take-back: 0 failed, `//agent/test/hotrestartrevert`) |
-| `successor_gone` | nothing asks, and nothing is there: the node's admin has not answered for the admin watchdog's bound (30 s), the epoch heartbeat is stale, and no process holds a hot-restart socket of the base id. The successor was killed outright, or its supervisor is older than this | a fresh Envoy at epoch 0 | the node has no proxy from the successor's exit until that Envoy is up |
+| `successor_gone` | nothing asks, and nothing is there: no process holds a hot-restart socket of the base id, the epoch heartbeat is stale (8 s after its last refresh) and the admin is silent, on every poll for 3 s. The successor was killed outright, its supervisor is older than this, or its Envoy could not be hot-restarted from | a fresh Envoy at epoch 0 | the node has no proxy from the successor's exit until that Envoy is up: about 12 s after a successor killed outright (measured with the pinned Envoy), 3 to 4 s after one that drained and exited |
 
 ```
 # kept pod
@@ -5776,11 +5776,21 @@ taking the node, and is worth reading that pod's last lines for.
   every pod on the node (`hostNetwork`). While one is held it starts nothing, and logs
   `not starting envoy again; still awaiting pod deletion reason="an envoy holds …"` if it
   had got as far as deciding.
-- *Keep trying.* An Envoy it started that exits within 5 s without going LIVE (a lost
-  race for the next epoch against another pod, a crash) sends it back to waiting, after a
-  3 s pause, with `the envoy started again after the successor went away exited at once …
-  attempt=n budget=5`. After five in a row it logs one ERROR and only waits for its
-  deletion, as every supervisor did before: delete the pod.
+- *Keep trying, or give up on the node.* An Envoy it started that exits within 5 s
+  without going LIVE (a lost race for the next epoch against another pod, a crash) sends
+  it back to waiting, after a 3 s pause, with `the envoy started again after the successor
+  went away exited at once … trigger=… attempt=n budget=5`. Five in a row end differently
+  for the two recoveries, and neither ends the watch for an empty node:
+  - *answers to one asker* (`successor_terminating`): it logs one ERROR, `every hot restart
+    from the terminating successor's envoy exited at once; no longer answering its
+    requests, and starting a fresh envoy once it is gone`, ignores that epoch's requests,
+    and takes the `successor_gone` path when the asker has drained and exited. That
+    Envoy cannot be hot-restarted from (see the limits), and a fresh start, which
+    replaces the shared memory, is what works.
+  - *fresh starts on an empty node* (`successor_gone`): the supervisor exits 1 (`… fresh
+    envoys in a row, started on a node with no envoy, exited at once: exiting for a
+    container restart`). An Envoy that cannot start on an empty node is a pod crash like
+    any other: the container restarts, and the kubelet's backoff paces it.
 
 **What the terminating pod does about it.** It asks for the first
 `successorWaitBudget − (8 s + --parent-shutdown-time)` of its wait, 132 s of 155 s at the

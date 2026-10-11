@@ -284,9 +284,9 @@ func TestTerminatingSupervisorAsksForASuccessorWhileItsEnvoyIsLive(t *testing.T)
 // TestSupersededSupervisorStartsAgainWhenNoEnvoyIsLeftOnTheNode is the other
 // recovery: the successor is gone and never said so (its pod was killed
 // outright, or its supervisor does not write the request). Nothing answers the
-// node's admin and no supervisor confirms a LIVE Envoy, so after
-// AdminUnresponsiveDeadline the superseded supervisor starts a fresh Envoy at
-// epoch 0. Before the fix it never did.
+// node's admin, no supervisor confirms a LIVE Envoy and no process holds the
+// base id, so after supersededEmptyConfirm the superseded supervisor starts a
+// fresh Envoy at epoch 0. Before the fix it never did.
 func TestSupersededSupervisorStartsAgainWhenNoEnvoyIsLeftOnTheNode(t *testing.T) {
 	requireShell(t)
 
@@ -302,8 +302,8 @@ func TestSupersededSupervisorStartsAgainWhenNoEnvoyIsLeftOnTheNode(t *testing.T)
 	gone := time.Now()
 	handled := handleExit(ctx, old, exit)
 
-	// Not at once: an admin that is silent for a moment is what a successor
-	// starting up looks like. The bound is the admin watchdog's (2s here).
+	// Not at once: the node must look empty on every poll of the
+	// confirmation interval.
 	time.Sleep(1500 * time.Millisecond)
 	require.Len(t, recordedEpochs(t, recordPath), 1, "an envoy was started before the node was known to have none")
 
@@ -314,7 +314,7 @@ func TestSupersededSupervisorStartsAgainWhenNoEnvoyIsLeftOnTheNode(t *testing.T)
 	case <-time.After(20 * time.Second):
 		t.Fatal("the superseded supervisor never started an envoy again on a node that has none")
 	}
-	assert.GreaterOrEqual(t, time.Since(gone), 2*time.Second)
+	assert.GreaterOrEqual(t, time.Since(gone), supersededEmptyConfirm)
 	require.Eventually(t, func() bool { return len(recordedEpochs(t, recordPath)) == 2 },
 		5*time.Second, 20*time.Millisecond)
 	assert.Equal(t, []string{"0", "0"}, recordedEpochs(t, recordPath), "a fresh lineage starts at epoch 0")
@@ -476,7 +476,7 @@ func TestSupersededRelaunchThatDiesAtOnceIsNotRetriedThroughEpochDetection(t *te
 	assert.Equal(t, []string{"0", "0"}, recordedEpochs(t, recordPath),
 		"the exit was retried through epoch detection, attaching to the healthy successor's envoy")
 	assert.False(t, old.anyChildTracked())
-	assert.Equal(t, 1, old.supersededLost)
+	assert.Equal(t, 1, old.supersededLost.gone)
 
 	cancel()
 	select {
@@ -675,12 +675,14 @@ func crashingThenServingEnvoy(t *testing.T, recordPath, blockerPath string) stri
 	return path
 }
 
-// TestSupersededRelaunchLostAtOnceIsPacedAndBounded: an Envoy started again
-// that dies at once, by a fatal signal as much as by an exit, sends the
-// supervisor back to waiting and never through retryBindCollision; the next
-// attempt comes no sooner than bindCollisionRetryPause; and after
-// maxSupersededRelaunches in a row there is no further attempt, only the wait
-// for the pod's deletion.
+// TestSupersededRelaunchLostAtOnceIsPacedAndBounded: a fresh Envoy started on
+// an empty node that dies at once, by a fatal signal as much as by an exit,
+// sends the supervisor back to waiting and never through retryBindCollision;
+// the next attempt comes no sooner than bindCollisionRetryPause; and after
+// maxSupersededRelaunches in a row the supervisor exits non-zero. An Envoy
+// that cannot start on an empty node is a pod crash, and the kubelet's backoff
+// paces the retries from there: the node is not left to a supervisor that has
+// stopped trying.
 func TestSupersededRelaunchLostAtOnceIsPacedAndBounded(t *testing.T) {
 	requireShell(t)
 
@@ -723,27 +725,209 @@ func TestSupersededRelaunchLostAtOnceIsPacedAndBounded(t *testing.T) {
 	// with epoch detection; the count below is what tells them apart).
 	started := time.Now()
 	second := nextLoss(first, 20*time.Second)
-	// The pause, then the silence bound again (1 s here).
-	assert.GreaterOrEqual(t, time.Since(started), bindCollisionRetryPause+time.Second, "the next attempt did not wait")
-	assert.Equal(t, 1, old.supersededLost, "the first loss was not counted as a superseded relaunch")
+	// The pause, then the confirmation interval again.
+	assert.GreaterOrEqual(t, time.Since(started), bindCollisionRetryPause+supersededEmptyConfirm, "the next attempt did not wait")
+	assert.Equal(t, 1, old.supersededLost.gone, "the first loss was not counted as a superseded relaunch")
 
 	// The budget: with all but one attempt spent, one more loss ends them.
-	old.supersededLost = maxSupersededRelaunches - 1
+	old.supersededLost.gone = maxSupersededRelaunches - 1
 	attempts := len(recordedEpochs(t, recordPath))
 	handled := handleExit(ctx, old, second)
 	select {
 	case got := <-handled:
-		t.Fatalf("handleChildExit returned with the budget spent: %+v", got)
-	case <-time.After(bindCollisionRetryPause + 4*time.Second):
-	}
-	assert.Len(t, recordedEpochs(t, recordPath), attempts, "an envoy was started after the budget was spent")
-	cancel()
-	select {
-	case got := <-handled:
-		assert.NoError(t, got.err)
+		require.Error(t, got.err, "a spent budget of fresh starts must end in a container restart")
+		assert.Contains(t, got.err.Error(), "container restart")
 		assert.True(t, got.done)
 	case <-time.After(10 * time.Second):
-		t.Fatal("the supervisor did not exit when its pod was deleted")
+		t.Fatal("the supervisor neither tried again nor exited: an empty node is left without a proxy for good")
+	}
+	assert.Len(t, recordedEpochs(t, recordPath), attempts, "an envoy was started after the budget was spent")
+}
+
+// refreshRequest keeps a terminating successor's request and heartbeat for
+// epoch fresh in stateDir until the returned function is called.
+func refreshRequest(t *testing.T, s *Supervisor, stateDir string, epoch int) (stop func()) {
+	t.Helper()
+	quit := make(chan struct{})
+	finished := make(chan struct{})
+	go func() {
+		defer close(finished)
+		for {
+			s.writeState(epoch)
+			data := fmt.Sprintf("%d %d\n", epoch, time.Now().UnixMilli())
+			_ = os.WriteFile(filepath.Join(stateDir, successorWantedFile+".tmp"), []byte(data), 0o644)
+			_ = os.Rename(filepath.Join(stateDir, successorWantedFile+".tmp"), filepath.Join(stateDir, successorWantedFile))
+			select {
+			case <-quit:
+				return
+			case <-time.After(200 * time.Millisecond):
+			}
+		}
+	}()
+	var once sync.Once
+	stop = func() {
+		once.Do(func() {
+			close(quit)
+			<-finished
+			_ = os.Remove(filepath.Join(stateDir, successorWantedFile))
+		})
+	}
+	t.Cleanup(stop)
+	return stop
+}
+
+// TestSpentTakeBackBudgetStillRecoversAnEmptyNode is the second review pass's
+// finding. Every hot restart from the terminating successor's Envoy exits at
+// once (its shared memory is poisoned, say), so the budget of answers to that
+// epoch is spent while it still asks. That must stop the answers and nothing
+// else: when the successor has drained and exited the node is empty, a fresh
+// epoch 0 serves it, and the kept pod must start one. With one budget for
+// everything it had stopped looking at the node, which is the state this whole
+// file exists to end.
+func TestSpentTakeBackBudgetStillRecoversAnEmptyNode(t *testing.T) {
+	requireShell(t)
+
+	stateDir := t.TempDir()
+	f := newFakeAdmin(t, adminLiveState, 1)
+	recordPath := filepath.Join(t.TempDir(), "epochs.txt")
+	old, exit := newSupersededSupervisor(t, f, stubEnvoy(t, recordPath), stateDir)
+	old.reap(exit.epoch)
+	// Five hot restarts from epoch 1 were lost in a row.
+	old.supersededLost = supersededLosses{asked: maxSupersededRelaunches, askedBy: 1}
+	stop := refreshRequest(t, old, stateDir, 1)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	type result struct {
+		err  error
+		done bool
+	}
+	out := make(chan result, 1)
+	go func() {
+		err, done, _ := old.superseded(ctx, exit.epoch)
+		out <- result{err, done}
+	}()
+
+	// The successor still asks, and is no longer answered.
+	select {
+	case got := <-out:
+		t.Fatalf("the spent budget did not stop the answers to the asking epoch: %+v", got)
+	case <-time.After(3 * time.Second):
+	}
+	require.Equal(t, []string{"0"}, recordedEpochs(t, recordPath))
+
+	// It drains and exits: no request, no admin, and the heartbeat goes stale.
+	stop()
+	f.srv.Close()
+	select {
+	case got := <-out:
+		require.NoError(t, got.err)
+		require.False(t, got.done, "the supervisor must keep running, with an envoy again")
+	case <-time.After(predecessorStale + supersededEmptyConfirm + 10*time.Second):
+		t.Fatal("the node is empty and stays without a proxy: the kept pod gave up for good after " +
+			"five lost relaunches, although the successor that made them fail is gone")
+	}
+	require.Eventually(t, func() bool { return len(recordedEpochs(t, recordPath)) == 2 }, 5*time.Second, 20*time.Millisecond)
+	assert.Equal(t, []string{"0", "0"}, recordedEpochs(t, recordPath))
+}
+
+// TestTakeBackBudgetIsPerAskingEpochAndPerSupersession: the spent budget is
+// for the epoch whose Envoy could not be hot-restarted from. A request from
+// another epoch is answered, and so is any request once the supervisor has
+// been superseded anew (it ran an Envoy in between: the count is of losses in
+// a row).
+func TestTakeBackBudgetIsPerAskingEpochAndPerSupersession(t *testing.T) {
+	requireShell(t)
+
+	t.Run("another epoch asks", func(t *testing.T) {
+		stateDir := t.TempDir()
+		f := newFakeAdmin(t, adminLiveState, 2)
+		recordPath := filepath.Join(t.TempDir(), "epochs.txt")
+		old, exit := newSupersededSupervisor(t, f, stubEnvoy(t, recordPath), stateDir)
+		old.reap(exit.epoch)
+		old.supersededLost = supersededLosses{asked: maxSupersededRelaunches, askedBy: 1}
+		refreshRequest(t, old, stateDir, 2)
+
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		done := make(chan error, 1)
+		go func() {
+			err, _, _ := old.superseded(ctx, exit.epoch)
+			done <- err
+		}()
+		select {
+		case err := <-done:
+			require.NoError(t, err)
+		case <-time.After(15 * time.Second):
+			t.Fatal("a request from an epoch with no lost relaunch was not answered")
+		}
+		require.Eventually(t, func() bool { return len(recordedEpochs(t, recordPath)) == 2 }, 5*time.Second, 20*time.Millisecond)
+		assert.Equal(t, []string{"0", "3"}, recordedEpochs(t, recordPath))
+	})
+
+	t.Run("superseded anew", func(t *testing.T) {
+		stateDir := t.TempDir()
+		f := newFakeAdmin(t, adminLiveState, 1)
+		recordPath := filepath.Join(t.TempDir(), "epochs.txt")
+		old, exit := newSupersededSupervisor(t, f, stubEnvoy(t, recordPath), stateDir)
+		// Counts left over from an earlier supersession; the clean exit that
+		// handleChildExit is about to be given starts a new one.
+		old.supersededLost = supersededLosses{asked: maxSupersededRelaunches, askedBy: 1, gone: maxSupersededRelaunches}
+		refreshRequest(t, old, stateDir, 1)
+
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		handled := handleExit(ctx, old, exit)
+		select {
+		case got := <-handled:
+			require.NoError(t, got.err, "an old budget of fresh starts ended a new supersession")
+			require.False(t, got.done)
+		case <-time.After(15 * time.Second):
+			t.Fatal("the budget of an earlier supersession still silences this one")
+		}
+		require.Eventually(t, func() bool { return len(recordedEpochs(t, recordPath)) == 2 }, 5*time.Second, 20*time.Millisecond)
+		assert.Equal(t, []string{"0", "2"}, recordedEpochs(t, recordPath))
+	})
+}
+
+// TestEmptyNodeMustStayEmptyForTheConfirmationInterval: a node that looks
+// empty on one poll is not empty. An Envoy that holds the base id again within
+// the confirmation interval (another pod's start, a restart in place) puts the
+// count back to nothing, however often that repeats.
+func TestEmptyNodeMustStayEmptyForTheConfirmationInterval(t *testing.T) {
+	requireShell(t)
+
+	stateDir := t.TempDir()
+	f := newFakeAdmin(t, adminLiveState, 1)
+	recordPath := filepath.Join(t.TempDir(), "epochs.txt")
+	old, exit := newSupersededSupervisor(t, f, stubEnvoy(t, recordPath), stateDir)
+	f.srv.Close() // no admin, no heartbeat: only the socket says an Envoy is there
+
+	release := holdEnvoySocket(t, old.cfg.BaseID, 1)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	handled := handleExit(ctx, old, exit)
+	// Empty for 1.5 s (at least one poll sees it), held for 1 s, four times.
+	for i := 0; i < 4; i++ {
+		time.Sleep(1 * time.Second)
+		release()
+		time.Sleep(1500 * time.Millisecond)
+		release = holdEnvoySocket(t, old.cfg.BaseID, 1)
+	}
+	select {
+	case got := <-handled:
+		t.Fatalf("a fresh envoy was started on a node that was never empty for the confirmation interval: %+v", got)
+	default:
+	}
+	require.Equal(t, []string{"0"}, recordedEpochs(t, recordPath))
+
+	release()
+	select {
+	case got := <-handled:
+		require.NoError(t, got.err)
+		require.False(t, got.done)
+	case <-time.After(15 * time.Second):
+		t.Fatal("no envoy was started once the node stayed empty")
 	}
 }
 
@@ -1038,4 +1222,99 @@ func TestLostTakeBackLeavesTheSupervisorAtItsOwnEpoch(t *testing.T) {
 		t.Fatalf("handleChildExit returned: %+v", got)
 	case <-time.After(1 * time.Second):
 	}
+}
+
+// TestWedgedSuccessorGoneRelaunchIsStillKilled is the other side of the test
+// above (from the second review pass): the relaunched Envoy's admin never
+// comes up. The admin watchdog must fire one bound after the fork: not on the
+// first tick, and not never, which is what charging the streak from "now"
+// instead of from the launch would mean.
+func TestWedgedSuccessorGoneRelaunchIsStillKilled(t *testing.T) {
+	requireShell(t)
+
+	admin := newSwitchAdmin(t, adminLiveState, 0)
+	recordPath := filepath.Join(t.TempDir(), "epochs.txt")
+	marker := filepath.Join(t.TempDir(), "ready")
+	s := New(Config{
+		EnvoyPath:                 stubEnvoy(t, recordPath),
+		ConfigPath:                filepath.Join(t.TempDir(), "envoy.yaml"),
+		BaseID:                    testBaseID(),
+		DrainTime:                 1 * time.Second,
+		ParentShutdownTime:        1 * time.Second,
+		StateDir:                  t.TempDir(),
+		ReadyMarkerPath:           marker,
+		AdminAddress:              admin.address,
+		AdminUnresponsiveDeadline: 3 * time.Second,
+	}, slog.New(slog.DiscardHandler), nil)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	returned := make(chan struct{})
+	go func() {
+		defer close(returned)
+		done <- s.Run(ctx)
+	}()
+	t.Cleanup(func() {
+		cancel()
+		deadline := time.After(20 * time.Second)
+		for {
+			for e := 0; e < 4; e++ {
+				s.signalEpoch(e, syscall.SIGKILL)
+			}
+			select {
+			case <-returned:
+				return
+			case <-deadline:
+				t.Error("Run did not return after the test")
+				return
+			case <-time.After(50 * time.Millisecond):
+			}
+		}
+	})
+
+	require.Eventually(t, func() bool { _, err := os.Stat(marker); return err == nil },
+		10*time.Second, 20*time.Millisecond)
+	admin.set(adminLiveState, 1)
+	s.signalEpoch(0, syscall.SIGTERM)
+	require.Eventually(t, func() bool { return !s.anyChildTracked() }, 10*time.Second, 20*time.Millisecond)
+	admin.down()
+	require.Eventually(t, func() bool { return len(recordedEpochs(t, recordPath)) == 2 },
+		30*time.Second, 5*time.Millisecond, "successor_gone never started an envoy again")
+	forked := time.Now()
+
+	select {
+	case err := <-done:
+		after := time.Since(forked)
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "admin watchdog")
+		require.GreaterOrEqual(t, after, 3*time.Second, "fired before the relaunched envoy had its bound")
+	case <-time.After(12 * time.Second):
+		t.Fatal("a relaunched envoy whose admin never answers is never killed")
+	}
+}
+
+// TestSupersededLosses: the two budgets are counted apart, and the one for
+// answers belongs to the epoch that asked.
+func TestSupersededLosses(t *testing.T) {
+	var l supersededLosses
+	l.reset()
+	assert.True(t, l.mayAnswer(1))
+	for i := 1; i <= maxSupersededRelaunches; i++ {
+		assert.Equal(t, i, l.note(triggerSuccessorTerminating, 1))
+	}
+	assert.False(t, l.mayAnswer(1), "the asker whose envoy could not be hot-restarted from is still answered")
+	assert.True(t, l.mayAnswer(2))
+	assert.Zero(t, l.gone, "lost answers were counted against the fresh starts")
+	assert.True(t, l.pause)
+
+	// Another epoch asks and its first answer is lost: a count of its own.
+	assert.Equal(t, 1, l.note(triggerSuccessorTerminating, 2))
+	assert.True(t, l.mayAnswer(2))
+
+	assert.Equal(t, 1, l.note(triggerSuccessorGone, -1))
+	assert.Equal(t, 2, l.note(triggerSuccessorGone, -1))
+	assert.Equal(t, 1, l.asked, "lost fresh starts were counted against the answers")
+
+	l.reset()
+	assert.Equal(t, supersededLosses{askedBy: -1}, l)
 }

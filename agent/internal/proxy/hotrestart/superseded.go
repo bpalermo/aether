@@ -40,12 +40,13 @@ import (
 //     supervisor that reads a fresh one, and finds the admin LIVE at the epoch
 //     it names, hot-restarts from that Envoy exactly as a new pod would: the
 //     node never goes without a proxy.
-//   - successor_gone: nobody says anything and nothing is there. The admin has
-//     been unreachable for AdminUnresponsiveDeadline, the heartbeat is stale,
-//     and no process holds a hot-restart socket of this base id (see
-//     envoyHoldsBaseID). Start a fresh Envoy at epoch 0. This is the recovery
-//     for a successor that was killed outright, and for one whose supervisor
-//     predates the request file.
+//   - successor_gone: nobody says anything and nothing is there. No process
+//     holds a hot-restart socket of this base id (see envoyHoldsBaseID), the
+//     heartbeat is stale and the admin is silent, all three for
+//     supersededEmptyConfirm. Start a fresh Envoy at epoch 0. This is the
+//     recovery for a successor that was killed outright, for one whose
+//     supervisor predates the request file, and for one whose Envoy could not
+//     be hot-restarted from.
 //
 // Neither may take a node from a successor that is healthy: that would leave
 // the NEW pod superseded and NotReady, and the roll waiting on it for good.
@@ -56,7 +57,9 @@ import (
 // hot restart is from the epoch that asked and no other. A relaunch that still
 // dies at once is not retried through retryBindCollision, which re-runs epoch
 // detection without those limits: the supervisor waits again, with a pause and
-// a budget (maxSupersededRelaunches).
+// a budget per recovery (supersededLosses). A spent budget never leaves an
+// empty node without a proxy: it stops the answers to one asker, or hands the
+// retries of a fresh start to the kubelet, and nothing else.
 
 const (
 	// successorWantedFileName is the file, beside the epoch heartbeat in
@@ -72,11 +75,21 @@ const (
 	triggerSuccessorGone        = "successor_gone"
 
 	// maxSupersededRelaunches bounds how many Envoys in a row a superseded
-	// supervisor may start and lose at once (quickNonLiveExit) before it stops
-	// trying and only waits for its deletion, which is what every supervisor
-	// did before it could recover at all. Each attempt is preceded by
-	// bindCollisionRetryPause.
+	// supervisor may start for one recovery and lose at once
+	// (quickNonLiveExit); see supersededLosses for what happens then. Each
+	// further attempt is preceded by bindCollisionRetryPause.
 	maxSupersededRelaunches = 5
+
+	// supersededEmptyConfirm is how long the node must have looked empty, on
+	// every poll, before successor_gone starts a fresh Envoy. "Empty" already
+	// includes a heartbeat nobody refreshed for predecessorStale, which is
+	// what covers the moment between a supervisor's fork and its Envoy binding
+	// the hot-restart sockets; this is on top of it. It is not the admin
+	// watchdog's bound, which it was at first: once no process holds the base
+	// id there is no Envoy whose silence could be waited out, only a node
+	// without a proxy. Two fresh starts that still coincide are both epoch 0:
+	// the second fails on the socket bind, before it touches anything.
+	supersededEmptyConfirm = 3 * time.Second
 
 	// Envoy's hot-restart domain sockets, at the pinned version
 	// (source/server/hot_restarting_base.cc): the abstract address
@@ -243,22 +256,69 @@ func (s *Supervisor) advertiseOnce(ctx context.Context, epoch int) {
 	s.writeSuccessorWanted(epoch)
 }
 
+// supersededLosses counts, for a superseded supervisor, the Envoys it started
+// again and lost at once, in a row, per recovery. The two budgets end
+// differently, and neither ends the watch for an empty node:
+//
+//   - answering one asker (successor_terminating): after
+//     maxSupersededRelaunches the requests of THAT epoch are ignored. Its Envoy
+//     cannot be hot-restarted from, and asking again will not change that.
+//     Another epoch's request starts a new count, and successor_gone still
+//     applies once the asker has drained and exited.
+//   - a fresh start on an empty node (successor_gone): after
+//     maxSupersededRelaunches the supervisor exits non-zero. An Envoy that
+//     cannot start on an empty node is the pod crash it has always been, and
+//     the kubelet's backoff is the pacing for it. The restarted container
+//     starts as any does.
+//
+// Owned by the Run goroutine.
+type supersededLosses struct {
+	// pause: the last relaunch was lost; wait before the next.
+	pause bool
+	// gone counts fresh starts lost in a row.
+	gone int
+	// asked counts hot restarts from epoch askedBy lost in a row.
+	asked   int
+	askedBy int
+}
+
+func (l *supersededLosses) reset() { *l = supersededLosses{askedBy: -1} }
+
+// note records a lost relaunch of the given recovery.
+func (l *supersededLosses) note(trigger string, peer int) (attempt int) {
+	l.pause = true
+	if trigger == triggerSuccessorGone {
+		l.gone++
+		return l.gone
+	}
+	if peer != l.askedBy {
+		l.asked, l.askedBy = 0, peer
+	}
+	l.asked++
+	return l.asked
+}
+
+// mayAnswer reports whether a request from epoch may still be answered.
+func (l *supersededLosses) mayAnswer(epoch int) bool {
+	return epoch != l.askedBy || l.asked < maxSupersededRelaunches
+}
+
 // superseded is where a supervisor waits once a successor's hot-restart
 // protocol has terminated its newest Envoy at lastEpoch, or once the Envoy it
-// started again was lost at once (s.supersededLost counts those in a row). It
-// returns done when the pod is deleted, which is how a completed roll ends, or
-// after it has started an Envoy because the successor went away (see the top
-// of this file). The values are handleChildExit's.
+// started again was lost at once (see supersededLosses). It returns done when
+// the pod is deleted, which is how a completed roll ends, or after it has
+// started an Envoy because the successor went away (see the top of this file).
+// The values are handleChildExit's.
 func (s *Supervisor) superseded(ctx context.Context, lastEpoch int) (retErr error, done bool, rearmReason string) {
-	if s.supersededLost >= maxSupersededRelaunches {
-		s.log.ErrorContext(ctx, "every envoy started again after the successor went away was lost at once; "+
-			"not trying again, awaiting pod deletion (delete this pod to replace it)",
-			"attempts", s.supersededLost, "lastEpoch", lastEpoch)
-		<-ctx.Done()
-		return nil, true, ""
+	if s.supersededLost.gone >= maxSupersededRelaunches {
+		return fmt.Errorf("%d fresh envoys in a row, started on a node with no envoy, exited at once: "+
+			"exiting for a container restart", s.supersededLost.gone), true, ""
 	}
-	if s.supersededLost > 0 && !sleepCtx(ctx, bindCollisionRetryPause) {
-		return nil, true, ""
+	if s.supersededLost.pause {
+		s.supersededLost.pause = false
+		if !sleepCtx(ctx, bindCollisionRetryPause) {
+			return nil, true, ""
+		}
 	}
 	for {
 		trigger, peer := s.awaitDeletion(ctx)
@@ -292,25 +352,25 @@ func (s *Supervisor) awaitDeletion(ctx context.Context) (trigger string, peer in
 	}
 	t := time.NewTicker(readyPollInterval)
 	defer t.Stop()
-	var silentSince time.Time
+	var emptySince time.Time
 	for {
 		select {
 		case <-ctx.Done():
 			return "", -1
 		case <-t.C:
 		}
-		if epoch, ok := s.readSuccessorWanted(); ok && s.adminLiveAtEpoch(ctx, epoch) {
+		if epoch, ok := s.readSuccessorWanted(); ok && s.supersededLost.mayAnswer(epoch) && s.adminLiveAtEpoch(ctx, epoch) {
 			return triggerSuccessorTerminating, epoch
 		}
 		if s.nodeHasAnEnvoy(ctx) {
-			silentSince = time.Time{}
+			emptySince = time.Time{}
 			continue
 		}
 		now := s.now()
-		if silentSince.IsZero() {
-			silentSince = now
+		if emptySince.IsZero() {
+			emptySince = now
 		}
-		if now.Sub(silentSince) >= s.adminUnresponsiveDeadline() {
+		if now.Sub(emptySince) >= supersededEmptyConfirm {
 			return triggerSuccessorGone, -1
 		}
 	}
@@ -384,7 +444,7 @@ func (s *Supervisor) relaunchSuperseded(ctx context.Context, lastEpoch int, trig
 	}
 	s.log.WarnContext(ctx, "the successor that terminated our envoy is going away and this pod was not deleted; starting envoy again",
 		"trigger", trigger, "lastEpoch", lastEpoch, "startEpoch", next,
-		"hotRestartFromEpoch", next-1, "adminUnresponsiveDeadline", s.adminUnresponsiveDeadline().String())
+		"hotRestartFromEpoch", next-1)
 	s.metrics.restartTriggered(trigger)
 	if err := s.hotRestart(); err != nil {
 		return false, fmt.Errorf("starting envoy again after its successor went away: %w", err)
@@ -393,6 +453,7 @@ func (s *Supervisor) relaunchSuperseded(ctx context.Context, lastEpoch int, trig
 	s.supersededRelaunchEpoch = s.nextEpoch - 1
 	s.supersededFromEpoch = lastEpoch
 	s.mu.Unlock()
+	s.supersededRelaunchTrigger, s.supersededRelaunchPeer = trigger, peer
 	return true, nil
 }
 

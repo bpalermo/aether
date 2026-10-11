@@ -12,14 +12,14 @@ load("@rules_go//go:def.bzl", "go_test")
 # Tagged "envoy-validate" alongside //agent/test/envoy_validate and
 # //agent/test/mtlspool: all need the pinned proxy binary and none needs Docker.
 # Every test waits out real timers (parent-shutdown time, the heartbeat's
-# staleness), 20 to 60 s each; one shard per test keeps the target's wall time
+# staleness), 5 to 80 s each; one shard per test keeps the target's wall time
 # at the slowest one.
 go_test(
     name = "hotrestartrevert_test",
     size = "medium",
     srcs = ["revert_test.go"],
     data = ["//agent/test/envoybin:envoy_bin"],
-    shard_count = 6,
+    shard_count = 8,
     tags = [
         "envoy-validate",
         # The Envoy binary reads /proc on startup, the Envoys of a node find

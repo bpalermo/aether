@@ -281,10 +281,13 @@ type Supervisor struct {
 	// supersededFromEpoch is the epoch this supervisor last ran before that
 	// relaunch, which a lost relaunch goes back to. Guarded by mu.
 	supersededFromEpoch int
-	// supersededLost counts the Envoys in a row that were started again after
-	// a successor went away and lost at once (see superseded). Read and
-	// written by the Run goroutine only.
-	supersededLost int
+	// supersededLost counts the Envoys that were started again after a
+	// successor went away and lost at once, and supersededRelaunchTrigger and
+	// supersededRelaunchPeer say which recovery the last one was for (see
+	// supersededLosses). Read and written by the Run goroutine only.
+	supersededLost            supersededLosses
+	supersededRelaunchTrigger string
+	supersededRelaunchPeer    int
 
 	// drainedPredecessor is the admin identity of the predecessor this
 	// supervisor drained for a worker-count change (issue #1136), so the same
@@ -407,6 +410,7 @@ func New(cfg Config, log *slog.Logger, metrics *SupervisorMetrics) *Supervisor {
 		adminHeardLatest:        -1,
 		handoffPeer:             -1,
 		childSilentEpoch:        -1,
+		supersededLost:          supersededLosses{askedBy: -1},
 		supersededRelaunchEpoch: -1,
 		handoffWaitEpoch:        -1,
 		cpus:                    systemCPUSources{},
@@ -839,7 +843,7 @@ func (s *Supervisor) handleChildExit(ctx context.Context, exit childExit, bindRe
 		// successor going away without this pod being deleted (superseded).
 		s.log.InfoContext(ctx, "newest epoch terminated cleanly by successor; awaiting pod deletion", "epoch", exit.epoch)
 		s.reap(exit.epoch)
-		s.supersededLost = 0
+		s.supersededLost.reset()
 		return s.superseded(ctx, exit.epoch)
 	}
 	if s.lostSupersededRelaunch(exit) {
@@ -849,11 +853,16 @@ func (s *Supervisor) handleChildExit(ctx context.Context, exit childExit, bindRe
 		// again; superseded pauses first and gives up after a few.
 		s.metrics.childExited(exitUnexpected)
 		s.reap(exit.epoch)
-		s.supersededLost++
+		attempt := s.supersededLost.note(s.supersededRelaunchTrigger, s.supersededRelaunchPeer)
 		from := s.abandonSupersededRelaunch()
 		s.log.WarnContext(ctx, "the envoy started again after the successor went away exited at once; awaiting pod deletion again",
 			"epoch", exit.epoch, "error", exit.err.Error(), "crashSignal", isCrashSignal(exit.err),
-			"attempt", s.supersededLost, "budget", maxSupersededRelaunches)
+			"trigger", s.supersededRelaunchTrigger, "attempt", attempt, "budget", maxSupersededRelaunches)
+		if s.supersededRelaunchTrigger == triggerSuccessorTerminating && !s.supersededLost.mayAnswer(s.supersededRelaunchPeer) {
+			s.log.ErrorContext(ctx, "every hot restart from the terminating successor's envoy exited at once; "+
+				"no longer answering its requests, and starting a fresh envoy once it is gone",
+				"askingEpoch", s.supersededRelaunchPeer, "attempts", attempt)
+		}
 		return s.superseded(ctx, from)
 	}
 	if retried, retErr, done := s.retryBindCollision(ctx, exit, bindRetries, crashRetries); retried {

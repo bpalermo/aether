@@ -637,3 +637,73 @@ func TestEnvoyStartedAtEpochZeroBesideALiveOnePoisonsItsHotRestart(t *testing.T)
 		"the pinned Envoy no longer refuses to hot-restart after a stray epoch 0: see this test's comment")
 	require.Equal(t, 1, n.adminEpoch())
 }
+
+// TestTakeBackThatCannotWorkEndsInAFreshEnvoy (from the second review pass):
+// the successor's Envoy cannot be hot-restarted from (its shared memory was
+// poisoned by a stray epoch 0, as in the test above), and the successor is
+// then deleted. Every answer to its request exits at once with "previous envoy
+// process is still initializing", so the kept pod spends its budget of answers
+// while the successor still asks. That must stop the answers and nothing else:
+// when the successor has drained and exited the node is empty, and the kept
+// pod must start a fresh Envoy, which replaces the shared memory and serves.
+func TestTakeBackThatCannotWorkEndsInAFreshEnvoy(t *testing.T) {
+	n := newNode(t)
+	// B: budget = 56 - (3 + 5) - 10 = 38 s, of which it asks 38 - (8 + 6) = 24 s:
+	// room for more than five answers, one every 4 s or so.
+	a, b := rollUntilSuperseded(t, n, podOpts{}, podOpts{terminationGrace: 56 * time.Second})
+	require.Eventually(t, func() bool { return a.liveEnvoys() == 0 }, 30*time.Second, 50*time.Millisecond)
+	require.Eventually(t, b.ready, 30*time.Second, 50*time.Millisecond, "B never Ready")
+
+	n.note("a stray epoch 0 beside B's live epoch 1")
+	stray := n.runEnvoy(0, lockedWriter{n, "[stray 0]"})
+	require.Error(t, stray.Wait())
+	require.Equal(t, 1, n.adminEpoch())
+
+	n.note("deleting pod B")
+	b.cancel()
+	require.Eventually(t, func() bool { _, ok := b.returned(); return ok }, 90*time.Second, 50*time.Millisecond,
+		"B's supervisor never exited")
+	gone := time.Now()
+	n.note("B exited; the node has no envoy")
+	require.True(t, n.logged("no longer answering its requests"), "A did not spend its budget of answers: this test no longer tests that")
+
+	require.Eventually(t, func() bool { return a.ready() && a.liveEnvoys() == 1 && n.listenerAccepts() },
+		40*time.Second, 100*time.Millisecond,
+		"the node is empty and stays without a proxy: the kept pod gave up after its lost relaunches, "+
+			"although the successor that made them fail is gone")
+	t.Logf("node had a proxy again %s after the successor exited", time.Since(gone).Round(100*time.Millisecond))
+	require.True(t, n.logged("trigger=successor_gone"))
+	_, aReturned := a.returned()
+	require.False(t, aReturned, "A's supervisor exited")
+}
+
+// TestTwoFreshStartsCollideOnTheSocketAndHarmNothing pins the other half of
+// what the supervisor relies on in the pinned Envoy. A fresh start is only
+// made on a node where no process holds the base id, so the one thing it can
+// still meet is another fresh start in the same instant. Both are epoch 0:
+// the second fails on the bind of the socket of id 0, which comes before the
+// shared memory is touched, and the first can be hot-restarted from as if
+// nothing had happened.
+func TestTwoFreshStartsCollideOnTheSocketAndHarmNothing(t *testing.T) {
+	n := newNode(t)
+	n.runEnvoy(0, lockedWriter{n, "[envoy 0]"})
+	n.waitAdminEpoch(0, 20*time.Second, "epoch 0 never LIVE")
+
+	var out bytes.Buffer
+	second := n.runEnvoy(0, io.MultiWriter(&out, lockedWriter{n, "[second 0]"}))
+	done := make(chan error, 1)
+	go func() { done <- second.Wait() }()
+	select {
+	case err := <-done:
+		require.Error(t, err)
+	case <-time.After(20 * time.Second):
+		t.Fatal("a second epoch 0 is running beside the first")
+	}
+	require.Contains(t, out.String(), "unable to bind domain socket",
+		"the second epoch 0 did not fail on the hot-restart socket: it got further, see this test's comment")
+	require.Equal(t, 0, n.adminEpoch())
+	require.True(t, n.listenerAccepts())
+
+	n.runEnvoy(1, lockedWriter{n, "[envoy 1]"})
+	n.waitAdminEpoch(1, 20*time.Second, "the first epoch 0 could not be hot-restarted from after the collision")
+}
