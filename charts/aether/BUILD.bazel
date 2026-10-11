@@ -17,8 +17,12 @@ load(":test_defs.bzl", "helm_pod_template_file_test", "helm_pod_template_version
 # series again.
 # uds-csi-daemonset.yaml is exported so //agent/cmd/uds-csi asserts every flag
 # it passes (args and the liveness probe's command) exists on the binary.
+# _helpers.tpl is exported so //agent/internal/proxy/hotrestart holds the fixed
+# part of the smallest proxy termination grace period the chart renders
+# (aether.proxy.terminationGraceFixedSeconds) to the supervisor's constants.
 exports_files([
     "values.yaml",
+    "templates/_helpers.tpl",
     "templates/agent-daemonset.yaml",
     "templates/agent-proxy-daemonset.yaml",
     "templates/agent-proxy-configmap.yaml",
@@ -2575,6 +2579,126 @@ helm_template_test(
             "- \"--shutdown-drain-immediately\"",
         ],
     },
+)
+
+# proxy.terminationGracePeriodSeconds must leave room for the supervisor's own
+# drain: more than proxy.hotRestart.drainTime + 15 s (the helper
+# aether.proxy.terminationGracePeriodSeconds says why). The default renders, on
+# the pod and on the supervisor's flag...
+helm_template_test(
+    name = "aether_proxy_termination_grace_default_test",
+    chart = ":aether",
+    opts = [
+        "--set",
+        "controller.webhook.spire=true",
+    ],
+    template_patterns = {
+        "aether/templates/agent-proxy-daemonset.yaml": [
+            "\\n      terminationGracePeriodSeconds: 180\\n",
+            "- \"--drain-time=10s\"",
+            "- \"--termination-grace=180s\"",
+        ],
+    },
+)
+
+# ...a grace period at or below the minimum is refused, and the message names
+# both values and the smallest grace period that renders. The boundary follows
+# drainTime in every form the supervisor's --drain-time accepts (a Go duration:
+# several components, a fraction, sub-second units, a bare 0), and
+# proxy.shutdownDrainImmediately does not lift it. Each tuple is (name,
+# drainTime, a refused grace period, the smallest that renders, extra opts).
+[
+    helm_template_fail_test(
+        name = "aether_proxy_termination_grace_%s_refused_test" % name,
+        chart = ":aether",
+        expected_message = "proxy.terminationGracePeriodSeconds (%s) must be greater than proxy.hotRestart.drainTime (%s) + 15s: set it to at least %s." % (grace, drain, minimum),
+        opts = [
+            "--set",
+            "proxy.hotRestart.drainTime=%s" % drain,
+            "--set",
+            "proxy.terminationGracePeriodSeconds=%s" % grace,
+        ] + extra,
+    )
+    for name, drain, grace, minimum, extra in [
+        ("too_small", "10s", 20, 26, []),
+        ("boundary", "10s", 25, 26, []),
+        ("drain_30s_boundary", "30s", 45, 46, []),
+        ("drain_5s_boundary", "5s", 20, 21, []),
+        ("drain_components_boundary", "1m30s", 105, 106, []),
+        ("drain_fraction_boundary", "1.5s", 16, 17, []),
+        ("drain_millis_boundary", "500ms", 15, 16, []),
+        ("drain_zero_boundary", "0", 15, 16, []),
+        (
+            "drain_immediately_boundary",
+            "10s",
+            25,
+            26,
+            [
+                "--set",
+                "proxy.shutdownDrainImmediately=true",
+            ],
+        ),
+    ]
+]
+
+# ...the smallest grace period above each boundary renders, and reaches the pod
+# and the supervisor as it was written...
+[
+    helm_template_test(
+        name = "aether_proxy_termination_grace_%s_renders_test" % name,
+        chart = ":aether",
+        opts = [
+            "--set",
+            "proxy.hotRestart.drainTime=%s" % drain,
+            "--set",
+            "proxy.terminationGracePeriodSeconds=%s" % grace,
+            "--set",
+            "controller.webhook.spire=true",
+        ],
+        template_patterns = {
+            "aether/templates/agent-proxy-daemonset.yaml": [
+                "\\n      terminationGracePeriodSeconds: %s\\n" % grace,
+                "- \"--drain-time=%s\"" % drain,
+                "- \"--termination-grace=%ss\"" % grace,
+            ],
+        },
+    )
+    for name, drain, grace in [
+        ("boundary", "10s", 26),
+        ("drain_30s_boundary", "30s", 46),
+        ("drain_5s_boundary", "5s", 21),
+        ("drain_components_boundary", "1m30s", 106),
+        ("drain_fraction_boundary", "1.5s", 17),
+        ("drain_millis_boundary", "500ms", 16),
+        ("drain_zero_boundary", "0", 16),
+    ]
+]
+
+# ...a drainTime the supervisor's flag parser refuses (no unit) is refused here
+# too, instead of at every proxy start...
+helm_template_fail_test(
+    name = "aether_proxy_drain_time_no_unit_refused_test",
+    chart = ":aether",
+    # No apostrophe: the rule writes this into a single-quoted shell string.
+    expected_message = "--drain-time accepts nothing else), got \"10\"",
+    opts = [
+        "--set",
+        "proxy.hotRestart.drainTime=10",
+    ],
+)
+
+# ...and with no proxy DaemonSet there is nothing to check.
+helm_template_absent_test(
+    name = "aether_proxy_termination_grace_unchecked_without_proxy_test",
+    absent = ["--termination-grace"],
+    chart = ":aether",
+    control = "kind: DaemonSet",
+    opts = [
+        "--set",
+        "proxy.enabled=false",
+        "--set",
+        "proxy.terminationGracePeriodSeconds=20",
+    ],
 )
 
 # cni.binDir / cni.confDir: the host CNI dirs. The defaults are exactly what the

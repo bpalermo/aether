@@ -68,7 +68,9 @@ spec:
       # The same value is passed to the supervisor as --termination-grace so it
       # knows its own deadline and can fall back to draining Envoy itself when
       # no successor can ever appear (#771).
-      terminationGracePeriodSeconds: {{ .Values.proxy.terminationGracePeriodSeconds }}
+      {{- /* Validated against proxy.hotRestart.drainTime: the render fails on a
+      grace period the supervisor's own drain cannot fit in. */}}
+      terminationGracePeriodSeconds: {{ include "aether.proxy.terminationGracePeriodSeconds" . }}
       initContainers:
         # The runtime container is the Envoy image (it carries Envoy and its
         # shared libraries); inject the statically linked supervisor by having it
@@ -265,7 +267,7 @@ spec:
             - "--admin-unresponsive-deadline={{ .Values.proxy.hotRestart.adminUnresponsiveDeadline }}"
             # Must equal terminationGracePeriodSeconds above: it is how the
             # supervisor knows how long it has before the kubelet's SIGKILL.
-            - "--termination-grace={{ .Values.proxy.terminationGracePeriodSeconds }}s"
+            - "--termination-grace={{ include "aether.proxy.terminationGracePeriodSeconds" . }}s"
             {{- if .Values.proxy.shutdownDrainImmediately }}
             # Escape hatch (#795): drain on SIGTERM instead of waiting for a
             # surge replacement to hot-restart this Envoy.

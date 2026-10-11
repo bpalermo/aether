@@ -877,6 +877,84 @@ crash-loop every proxy pod at rollout time instead of failing here.
 {{- end -}}
 
 {{/*
+aether.goDurationNanos: a Go duration string, as time.ParseDuration reads it
+and therefore as a Go binary's duration flag does, in nanoseconds: an optional
+sign, then one or more components of a decimal number (with or without a
+fraction) and a unit (ns, us, µs, ms, s, m, h), or a bare "0". Fails the render
+on anything else, naming the value: the flag would refuse it too. A fraction is
+read to six places. Takes (dict "name" <values path> "value" <value> "flag"
+<what reads it>).
+*/}}
+{{- define "aether.goDurationNanos" -}}
+{{- $s := toString .value -}}
+{{- $body := regexReplaceAll "^[-+]" $s "" -}}
+{{- $total := 0 -}}
+{{- if ne $body "0" -}}
+{{- $parts := regexFindAll "([0-9]+\\.?[0-9]*|\\.[0-9]+)(ns|us|µs|μs|ms|s|m|h)" $body -1 -}}
+{{- if or (not $parts) (ne (join "" $parts) $body) -}}
+{{- fail (printf "%s must be a Go duration like 10s, 1m30s or 1.5s (%s accepts nothing else), got %q" .name .flag $s) -}}
+{{- end -}}
+{{- $unit := dict "ns" 1 "us" 1000 "µs" 1000 "μs" 1000 "ms" 1000000 "s" 1000000000 "m" 60000000000 "h" 3600000000000 -}}
+{{- range $parts -}}
+{{- $per := get $unit (regexFind "[^0-9.]+$" .) -}}
+{{- $num := regexFind "^[0-9.]+" . -}}
+{{- $total = add $total (mul (atoi (regexFind "^[0-9]+" $num | default "0")) $per) -}}
+{{- $frac := trunc 6 (regexReplaceAll "^[0-9]*\\.?" $num "") -}}
+{{- if $frac -}}
+{{- $total = add $total (div (mul (atoi $frac) $per) (atoi (printf "1%s" (repeat (len $frac) "0")))) -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+{{- if hasPrefix "-" $s -}}
+{{- $total = sub 0 $total -}}
+{{- end -}}
+{{- $total -}}
+{{- end -}}
+
+{{/*
+The fixed part, in seconds, of what a proxy pod's termination grace period must
+exceed (aether.proxy.terminationGracePeriodSeconds, below): shutdownGrace (5 s,
+agent/internal/proxy/hotrestart/supervisor.go), the time Envoy gets to exit
+after its drain, plus terminationFallbackMargin (10 s, same file).
+TestChartTerminationGraceFloorMatchesTheSupervisor in that package fails when
+this number and those two constants disagree. Keep it a bare integer.
+*/}}
+{{- define "aether.proxy.terminationGraceFixedSeconds" -}}15{{- end -}}
+
+{{/*
+proxy.terminationGracePeriodSeconds, validated: it must be greater than
+proxy.hotRestart.drainTime + aether.proxy.terminationGraceFixedSeconds.
+
+The supervisor is given this value as --termination-grace and works out from it
+when to stop waiting and drain Envoy itself:
+  grace - (drainTime + shutdownGrace) - terminationFallbackMargin
+(successorWaitBudget and replacementFinishBudget, agent/internal/proxy/hotrestart).
+When that is not positive there is no such moment and it applies no bound at
+all: a pod terminated with no successor is SIGKILLed with its connections open
+(#771), and one terminated while it replaces a predecessor it has already asked
+to drain (a proxy.concurrency change, #1679) holds its termination for the
+uncapped 56 s and is SIGKILLed with the node's listeners closed. A grace period
+like that never worked, so the render refuses it instead.
+
+proxy.shutdownDrainImmediately does not change the requirement: it skips the
+wait for a successor, not the drain (drainTime, then up to shutdownGrace for
+Envoy to exit), and the hold of an unfinished replacement is the same with it.
+
+drainTime is read as the supervisor's --drain-time reads it (a Go duration);
+the grace period as whole seconds. Renders the value as it was written.
+*/}}
+{{- define "aether.proxy.terminationGracePeriodSeconds" -}}
+{{- $raw := .Values.proxy.terminationGracePeriodSeconds -}}
+{{- $drain := include "aether.goDurationNanos" (dict "name" "proxy.hotRestart.drainTime" "value" .Values.proxy.hotRestart.drainTime "flag" "the supervisor's --drain-time") | int64 -}}
+{{- $fixed := include "aether.proxy.terminationGraceFixedSeconds" . | int64 -}}
+{{- $floor := add $drain (mul $fixed 1000000000) -}}
+{{- if le (mul (int64 $raw) 1000000000) $floor -}}
+{{- fail (printf "proxy.terminationGracePeriodSeconds (%v) must be greater than proxy.hotRestart.drainTime (%v) + %ds: set it to at least %d. The proxy supervisor needs the drain time, 5s for Envoy to exit and a 10s margin before the kubelet's SIGKILL; with less it never drains Envoy itself when no successor takes over, and a pod terminated while it replaces a predecessor (a proxy.concurrency change) is killed with the node's listeners closed" $raw .Values.proxy.hotRestart.drainTime $fixed (add (div $floor 1000000000) 1)) -}}
+{{- end -}}
+{{- $raw -}}
+{{- end -}}
+
+{{/*
 proxy.concurrency, validated (#1093): Envoy's --concurrency takes a positive
 integer. 0 renders nothing (Envoy's one-worker-per-core default); a negative or
 non-integer value fails the render instead of crash-looping every proxy pod.
