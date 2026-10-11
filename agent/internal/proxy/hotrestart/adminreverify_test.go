@@ -129,7 +129,7 @@ func findRepoFile(t *testing.T, rel string) string {
 	// Never skip: this test exists precisely to fail when the pinned file is
 	// not the one we think it is.
 	t.Fatalf("%s not found above the working directory; "+
-		"under Bazel the go_test needs data = [\"//charts/aether:values.yaml\"]", rel)
+		"under Bazel the go_test needs the file in its data (//charts/aether exports it)", rel)
 	return ""
 }
 
