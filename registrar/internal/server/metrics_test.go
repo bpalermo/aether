@@ -204,8 +204,8 @@ func collectGaugePoints(t *testing.T, reader *sdkmetric.ManualReader, name strin
 }
 
 // TestMetrics_ObserveSnapshot: the revision gauges report the store head and
-// the served listing's revision, and the content info gauge exports exactly one
-// series -- the current hash -- however often the contents change (#1193).
+// the revision of the listing the snapshot was last installed from, and follow
+// it as the contents change (#1193).
 func TestMetrics_ObserveSnapshot(t *testing.T) {
 	m, reader := newTestMetrics(t)
 	snap := NewSnapshot()
@@ -225,13 +225,69 @@ func TestMetrics_ObserveSnapshot(t *testing.T) {
 	for i, ip := range []string{"10.0.0.2", "10.0.0.3", "10.0.0.4"} {
 		snap.DiffAndReplaceAt(listing(map[string][]string{"ns/a": {ip}}), Origin{Revision: int64(11 + i)})
 	}
-	points := collectGaugePoints(t, reader, "aether.registrar.snapshot.content")
-	if len(points) != 1 {
-		t.Fatalf("snapshot.content series = %d, want exactly 1", len(points))
+	if got := collectGauge(t, reader, "aether.registrar.snapshot_revision"); got != 13 {
+		t.Errorf("snapshot_revision after three more listings = %d, want 13", got)
 	}
-	hash, _ := points[0].Attributes.Value(attrContentHashLabel)
-	if got, want := hash.AsString(), snap.State().ContentHash; got != want {
-		t.Errorf("content_hash = %q, want the current %q", got, want)
+}
+
+// removedContentGauge is the info gauge (always 1, labelled content_hash) that
+// the value gauge replaced in chart 2.4.12 and chart 2.5.9 removed.
+const removedContentGauge = "aether.registrar.snapshot.content"
+
+// TestMetrics_RemovedContentGaugeIsNotExported: the registrar's exported metric
+// set does not contain the removed labelled gauge, with or without a
+// revisioned backend, and no gauge data point carries a content_hash attribute
+// (a label that changes with the contents leaves a superseded series behind in
+// Prometheus, #1322). The value gauge that replaced it is exported.
+func TestMetrics_RemovedContentGaugeIsNotExported(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		revisions bool
+	}{
+		{name: "revisioned backend", revisions: true},
+		{name: "backend without revisions"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m, reader := newTestMetrics(t)
+			snap := NewSnapshot()
+			var err error
+			if tc.revisions {
+				err = m.ObserveSnapshot(snap, &fakeRevisioned{rev: 12})
+			} else {
+				err = m.ObserveSnapshot(snap, nil)
+			}
+			if err != nil {
+				t.Fatalf("ObserveSnapshot() = %v", err)
+			}
+			snap.DiffAndReplaceAt(listing(map[string][]string{"ns/a": {"10.0.0.1"}}), Origin{Revision: 10})
+			m.syncCompleted(context.Background(), 0.01, snap.State(), map[string]int{"EVENT_TYPE_ENDPOINT_ADDED": 1})
+
+			var rm metricdata.ResourceMetrics
+			if err := reader.Collect(context.Background(), &rm); err != nil {
+				t.Fatalf("Collect() error = %v", err)
+			}
+			names := map[string]bool{}
+			for _, sm := range rm.ScopeMetrics {
+				for _, mt := range sm.Metrics {
+					names[mt.Name] = true
+					gauge, ok := mt.Data.(metricdata.Gauge[int64])
+					if !ok {
+						continue
+					}
+					for _, dp := range gauge.DataPoints {
+						if dp.Attributes.HasValue("content_hash") {
+							t.Errorf("%s carries a content_hash attribute", mt.Name)
+						}
+					}
+				}
+			}
+			if names[removedContentGauge] {
+				t.Errorf("%s is exported; it was removed in chart 2.5.9 (use %s)", removedContentGauge, contentHashGauge)
+			}
+			if !names[contentHashGauge] {
+				t.Errorf("%s is not exported; got %v", contentHashGauge, names)
+			}
+		})
 	}
 }
 
@@ -294,11 +350,6 @@ func TestMetrics_ContentHashGauge(t *testing.T) {
 	}
 	if len(seen) != 3 {
 		t.Errorf("distinct values = %d, want 3 (one per distinct endpoint set)", len(seen))
-	}
-	// The deprecated labelled gauge is still exported next to it (deprecated in
-	// chart 2.4.12; removed in chart 2.6.0 at the earliest).
-	if got := collectGaugePoints(t, reader, "aether.registrar.snapshot.content"); len(got) != 1 {
-		t.Errorf("deprecated snapshot.content series = %d, want 1", len(got))
 	}
 }
 
@@ -395,9 +446,6 @@ func TestMetrics_ObserveSnapshotWithoutRevisions(t *testing.T) {
 	snap.DiffAndReplace(listing(map[string][]string{"ns/a": {"10.0.0.1"}}))
 	if got := collectGaugePoints(t, reader, "aether.registrar.snapshot_revision"); len(got) != 0 {
 		t.Errorf("snapshot_revision reported %d points without a revisioned backend", len(got))
-	}
-	if got := collectGaugePoints(t, reader, "aether.registrar.snapshot.content"); len(got) != 1 {
-		t.Errorf("snapshot.content series = %d, want 1", len(got))
 	}
 	// The value gauge is reported without a revision too (version "hash:<hash>"):
 	// it names the contents. Nothing compares it there, because the divergence

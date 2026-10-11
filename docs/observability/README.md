@@ -133,26 +133,25 @@ and less than the rule's `for: 3m`, so one last sample of a replica that is gone
 never an alert. [`metric-labels.md`](./metric-labels.md), "A label that holds the pod
 name", has the reasoning and what a roll did without the window.
 
-### Deprecated: `aether_registrar_snapshot_content{content_hash}`
+### Removed: `aether_registrar_snapshot_content{content_hash}`
 
 The hash used to be a label on an info gauge. A superseded hash stayed visible for the
 5-minute lookback because OTLP has no staleness marker, and a count over the bare
 selector read that as a divergence (#1322: 108 of 1,920 samples on a soak with none);
-#1328 filtered on `timestamp()` to cope. The labelled metric is still exported for one
-release and is removed in the next. While registrar replicas of both images can run,
-keep the #1328 expression as a second `or` arm (`docs/runbook.md`, "Stored vs in place
-vs applied", has the text and the order of work): a rule on the new metric alone cannot
-see a replica on the older image.
+#1328 filtered on `timestamp()` to cope. The value gauge replaced it in chart 2.4.12
+and the registrar stopped exporting the labelled metric in chart 2.5.9. A rule or a
+dashboard that still reads it returns no data and reports no error
+(`docs/runbook.md`, "Chart 2.5.9", has the checks). The rule in this directory never
+read it.
 
-It has a promtool unit test beside it, `registrar-alerts_test.yml`: same revision and
-same hash (quiet), two live replicas with different hashes (fires after 3m), both
+The rule has a promtool unit test beside it, `registrar-alerts_test.yml`: same revision
+and same hash (quiet), two live replicas with different hashes (fires after 3m), both
 replicas changing hash together (quiet at every step), a replica one revision behind
 (quiet), a pending write-behind intent (quiet), no revision (quiet), and the roll cases:
 a replaced replica's odd last hash (quiet), a replaced replica's last queue depth (a
 real divergence is reported two minutes later, not four), an alert that ends with the
 replica that was replaced and one that stays firing while the divergence lasts, and a
-live replica that misses an export (still read). The GitOps repo's tests add replicas
-that export only the labelled metric (still caught by the transitional arm).
+live replica that misses an export (still read).
 
 etcd backend only: the kubernetes backend reports no revision, so the rule returns
 nothing there. The gauge itself is reported on both backends.

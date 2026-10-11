@@ -31,16 +31,11 @@
 # a pipeline that promoted nothing per replica stored one series for all of
 # them, and one series is never two hashes: the rule could not fire.
 #
-# UPGRADING from a registrar without the value gauge (before #1329): this rule
-# reads a metric an older replica does not export, so it is blind to that
-# replica. Until every replica runs an image with the gauge, keep the previous
-# expression (on aether_registrar_snapshot_content{content_hash}, which this
-# release still exports) as a second arm:  (<expr below, without its unless>)
-# or (<previous expr, without its unless>)  unless on (job) (...). Both arms
-# return {job, revision}, so one divergence is one alert. docs/runbook.md,
-# "Stored vs in place vs applied", has the full text. Drop the second arm once
-# the registrar has rolled; the labelled metric (deprecated in chart 2.4.12) goes
-# away in chart 2.6.0 at the earliest.
+# Every registrar since chart 2.4.12 exports the value gauge, so this one
+# expression sees every replica of a supported skew. The labelled info gauge it
+# replaced (aether_registrar_snapshot_content, the hash in a content_hash label)
+# is no longer exported since chart 2.5.9: a rule that still reads it, alone or
+# as a second `or` arm, returns nothing there. docs/runbook.md, "Chart 2.5.9".
 
 groups:
   - name: aether-registrar

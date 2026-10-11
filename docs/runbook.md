@@ -3529,7 +3529,7 @@ What is deprecated today, and the first chart that may be without it:
 | Deprecated | Since chart | May be removed in | Use instead |
 |---|---|---|---|
 | The optional namespace group of the proxy bootstrap's `aether.pod` stats extractor (the tolerance for an agent older than #1584) | 2.5.0 | 2.6.0 | nothing to do: see "Chart 2.5.0" |
-| `aether_registrar_snapshot_content{content_hash}` | 2.4.12 | 2.6.0 at the earliest | `aether_registrar_snapshot_content_hash` ("Stored vs in place vs applied") |
+| `aether_registrar_snapshot_content{content_hash}` | 2.4.12 | any chart from 2.5.0 on; **removed in chart 2.5.9** (see "Chart 2.5.9") | `aether_registrar_snapshot_content_hash` ("Stored vs in place vs applied") |
 | `cni-install --otlp-endpoint`, `--otlp-pin-endpoint` (ignored) | 2.4.0 | any chart from 2.5.0 on; still accepted in this one | nothing: the chart has not passed them since 2.4.0 |
 
 **What was removed: the pre-envelope mesh-DNS snapshot.** The node agent writes
@@ -3607,6 +3607,79 @@ DaemonSet rolls (it is that pod's init container). No template changed.
 
 Measured: a unit test that the binary refuses each flag by name before the
 installer runs. Not run on a cluster.
+
+#### Chart 2.5.9: the registrar no longer exports `aether_registrar_snapshot_content`
+
+The second row of the table under "Chart 2.5.7" is closed. The registrar's
+labelled info gauge `aether_registrar_snapshot_content{content_hash}` (OTel
+`aether.registrar.snapshot.content`: always 1, the hash in a label), deprecated
+in chart `2.4.12` (#1329) and removable from `2.5.0` on, is gone from the
+binary. That table said "2.6.0 at the earliest" for it: that was one minor too
+cautious (deprecated in 2.4.x means removable in 2.5.0), and this chart is the
+one that removes it.
+
+**A rule, a dashboard or a recording rule that still reads the metric returns
+no data, and says nothing.** A selector on a metric nobody exports is an empty
+result, not an error: an alert on it stops being able to fire and stays green,
+and a panel shows "No data". Prometheus keeps answering from the old pods' last
+samples for its five-minute lookback after the registrar rolls, so the change
+shows a few minutes after the upgrade, not at it.
+
+Use the value gauge every registrar has exported since chart `2.4.12`:
+`aether_registrar_snapshot_content_hash`. Its **value** is the hash (the first
+13 hex digits, as an integer), on one series per replica with no label that
+changes. The divergence expression, as the shipped rule
+`AetherRegistrarSnapshotDiverged` has it (`docs/observability/registrar-alerts.yml`;
+"Stored vs in place vs applied" explains each part):
+
+```promql
+count by (job, revision) (
+  count_values by (job, revision) (
+    "hash",
+    last_over_time(aether_registrar_snapshot_content_hash[150s])
+    * ignoring (revision) group_left (revision)
+    count_values without () ("revision", last_over_time(aether_registrar_snapshot_revision[150s]))
+  )
+) > 1
+unless on (job) (max by (job) (last_over_time(aether_registrar_writebehind_queue_depth[150s])) > 0)
+```
+
+A rule that carried the transitional second arm on the old metric (the `or`
+this runbook recommended while registrars with and without the value gauge
+could run side by side) keeps working: `or` with an arm that returns nothing is
+the first arm. Delete the arm anyway, it can no longer match.
+
+Before the upgrade, find what still reads it. This must print nothing:
+
+```bash
+# Rule files and dashboards, wherever yours are kept. The pattern does not match
+# the replacement, whose name goes on with `_hash`.
+grep -rnE 'aether_registrar_snapshot_content([^_]|$)' <rules-and-dashboards-dir>
+```
+
+After it, with the registrar rolled and five minutes gone:
+
+```promql
+# Empty: no registrar exports the old metric.
+aether_registrar_snapshot_content
+
+# The value equals the number of registrar replicas: every one exports the
+# replacement.
+count(last_over_time(aether_registrar_snapshot_content_hash[150s]))
+```
+
+Skew, both ways. A registrar of any chart from `2.4.12` on exports the value
+gauge, so during the roll (and after a rollback to any 2.5.x or to 2.4.12 and
+later) the shipped rule sees every replica. A rollback brings the old metric
+back with the old image; nothing reads it.
+
+**What the upgrade rolls.** The registrar image changed, so the registrar
+Deployment rolls. No template changed, and no other workload's image did.
+
+Measured: unit tests that the registrar's exported metric set does not contain
+the name and that the value gauge is unchanged; `promtool test rules` on the
+shipped rule (`bazel test //:observability_rules_test`), which never read the
+old metric. Not run on a cluster.
 
 #### The prober chart (#1372, #1373, #1374)
 
@@ -6562,68 +6635,19 @@ its sync fired the alert against the live replicas, and one whose last
 write-behind depth was above zero kept a real divergence quiet for five
 minutes; both are cases of the rule's test file.
 
-**Deprecated: `aether_registrar_snapshot_content{content_hash}`.** Until #1329
-the hash was a label on an info gauge (always 1). A content change ended one
-series and started another, OTLP carries no staleness marker for a series that
-is no longer exported, and Prometheus kept returning the superseded hash for its
-5-minute lookback, so each replica showed two hashes after every change (#1322).
-Counting hashes over the bare selector read that as a divergence: on the 8 h
-soak of 2026-10-06 (66 revisions, none diverged) it was true at 108 of 1,920
-15-second steps. #1328 worked around it by keeping, per replica, the series
-whose `timestamp()` is the newest. The value gauge has no label to go stale and
-needs no such filter.
-
-The labelled metric was deprecated in chart 2.4.12, the chart that introduced
-the value gauge, and is still exported. It is removed in chart 2.6.0 at the
-earliest (one chart minor after its deprecation: `charts/README.md`,
-"Compatibility window"). That window exists for the upgrade. A rule on the new metric cannot see a replica still on the older image
-(it would compare the new replicas among themselves and miss a divergence
-against the old one), so while both images can run, keep the #1328 expression as
-a second arm. Both arms return `{job, revision}`, so `or` yields one alert:
-
-```promql
-(
-  count by (job, revision) (
-    count_values by (job, revision) (
-      "hash",
-      last_over_time(aether_registrar_snapshot_content_hash[150s])
-      * ignoring (revision) group_left (revision)
-      count_values without () ("revision", last_over_time(aether_registrar_snapshot_revision[150s]))
-    )
-  ) > 1
-  or
-  # transitional (#1328): every replica, old image or new, still exports this
-  count by (job, revision) (
-    count_values by (job, content_hash) (
-      "revision",
-      aether_registrar_snapshot_revision
-      * ignoring (content_hash) group_right ()
-      (
-        aether_registrar_snapshot_content
-        and
-        (
-          timestamp(aether_registrar_snapshot_content)
-          == ignoring (content_hash) group_left ()
-          max without (content_hash) (timestamp(aether_registrar_snapshot_content))
-        )
-      )
-    )
-  ) > 1
-)
-unless on (job) (max by (job) (last_over_time(aether_registrar_writebehind_queue_depth[150s])) > 0)
-```
-
-The first arm and the `unless` are the shipped rule's, 150 s window included.
-The transitional arm keeps its bare selectors and its `timestamp()` filter: it
-is not tested in this repository, and with a pod-name label it reads a replaced
-registrar's last labelled series for five minutes after a roll. Drop it before
-the upgrade to chart 2.5.3 if every replica already exports the value gauge.
-
-Order of work: deploy that rule (it is correct against any mix of images),
-upgrade the registrar, then drop the second arm, and only then take the release
-that removes `aether_registrar_snapshot_content`. Check before dropping it:
-`count(aether_registrar_snapshot_content_hash) == count(aether_registrar_snapshot_revision)`
-(every replica that reports a revision reports the value gauge).
+**Before chart 2.5.9: the hash as a label.** Until #1329 the hash was the
+`content_hash` label of an info gauge, `aether_registrar_snapshot_content`
+(always 1). A content change ended one series and started another, OTLP carries
+no staleness marker for a series that is no longer exported, and Prometheus kept
+returning the superseded hash for its 5-minute lookback, so each replica showed
+two hashes after every change (#1322). Counting hashes over the bare selector
+read that as a divergence: on an 8 h soak with 66 revisions, none diverged, it
+was true at 108 of 1,920 15-second steps. #1328 worked around it by keeping, per
+replica, the series whose `timestamp()` is the newest. The value gauge has no
+label to go stale and needs no such filter. It replaced the labelled gauge in
+chart 2.4.12; the labelled gauge was exported beside it through chart 2.5.8 and
+is gone since chart 2.5.9. A rule that still reads it returns nothing: "Chart
+2.5.9" has what to check.
 
 Notes:
 
