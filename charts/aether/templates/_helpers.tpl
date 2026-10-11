@@ -21,6 +21,24 @@ registrar and controller objects get distinct names within one release.
 {{- end -}}
 
 {{/*
+This cluster's name: `--cluster-name` of the agent, the registrar and the edge
+control plane. REQUIRED, and the chart has no default for it (chart 2.6.0).
+
+The agent stamps the name on every endpoint it registers and deregisters only
+endpoints that carry it; with the etcd backend it is a segment of every key the
+registrar writes (/aether/v1/regions/<region>/clusters/<clusterName>/...). A
+default would hand every installation that did not look the same name, and a
+changed default would rename the cluster of every installation that relied on
+the old one, silently, on its next upgrade. So a render without the value
+fails, before helm has touched the cluster. Do not give it a default.
+
+`required` also refuses the empty string. Under `helm lint` it only warns.
+*/}}
+{{- define "aether.clusterName" -}}
+{{- required "clusterName is required and has no default: pass --set clusterName=<name>, or set clusterName in your values. It is this cluster's name in the mesh (--cluster-name of the agent, the registrar and the edge control plane) and a part of the registry's keys, so choose it once and keep it. A release that never set it ran with the default of charts before 2.6.0 and must now pass that same name: how to read it from the running release, and what a different name breaks, is in docs/runbook.md, Chart 2.6.0." .Values.clusterName -}}
+{{- end -}}
+
+{{/*
 "true" when the live Namespace `name` belongs to THIS Helm release, i.e. carries
 the two ownership annotations Helm stamps on every object it creates or adopts.
 That is the case for a release installed while namespace.create still defaulted

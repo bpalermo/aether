@@ -24,10 +24,11 @@ spec:
         - key: aether.io/agent-not-ready
           operator: Exists
           effect: NoSchedule
-      # Spread the two replicas across nodes. Soft (ScheduleAnyway) on purpose:
-      # single-node kind e2e must still schedule. Both replicas stacking onto
-      # one node made main-worker-01 the density hot spot implicated in
-      # #628/#629. Override via registrar.topologySpreadConstraints.
+      {{- /* Spread the two replicas across nodes. Soft (ScheduleAnyway) on
+             purpose: single-node kind e2e must still schedule. Both replicas
+             stacking onto one node made that node the density hot spot
+             implicated in #628/#629. Override via
+             registrar.topologySpreadConstraints. */}}
       {{- /* registrar.nodeSpread picks soft / required / none. From Kubernetes
              1.27 the constraint counts one ReplicaSet (matchLabelKeys), so a
              rollout's old replicas are not counted beside the new ones
@@ -41,7 +42,7 @@ spec:
           imagePullPolicy: {{ .Values.registrar.image.pullPolicy }}
           args:
             - "--debug={{ .Values.debug }}"
-            - "--cluster-name={{ .Values.clusterName }}"
+            - "--cluster-name={{ include "aether.clusterName" . }}"
             # Aether system config, inherited from the umbrella global block.
             # The config-export controller (proposal 026) resolves exported
             # backends as <svc>.<mesh-domain>, so it must be the agent's domain.

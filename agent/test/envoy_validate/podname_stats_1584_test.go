@@ -50,9 +50,11 @@ func TestChartStatsConfigOnNamespacedPodNames(t *testing.T) {
 	require.Equal(t, "health_team-a_web-0", healthCluster)
 	require.Equal(t, "inboundready_team-a_web-0", readyCluster)
 
-	// What an agent from before #1584 writes for a pod "api-7": the proxy
-	// rolls separately from the agent, so for the length of an upgrade a proxy
-	// with this bootstrap can be sent these.
+	// What an agent from before #1584 (chart 2.5.0) writes for a pod "api-7".
+	// Chart 2.5.x read these too, for the length of an upgrade from 2.4.x.
+	// Since chart 2.6.0 the aether.pod extractor requires the namespace, and
+	// an agent that old is outside the compatibility window: the test keeps
+	// them to pin what an operator who skipped 2.5.x sees.
 	oldAgentPrefixes := []string{"inbound_api-7", "out_http_api-7", "inbound_api-7_h3"}
 
 	dir := t.TempDir()
@@ -129,20 +131,32 @@ func TestChartStatsConfigOnNamespacedPodNames(t *testing.T) {
 	assert.NotContains(t, prom, "envoy_listener_out_http_team")
 	assert.NotContains(t, prom, `aether_pod="team-a_web-0`, "the namespace is its own label, not part of aether.pod")
 
-	// The old agent's prefixes during an upgrade: the pod is still a label and
-	// never part of a metric NAME. (Its QUIC prefix has no namespace to tell
-	// from the pod, and reads as namespace "api-7", pod "h3": wrong for that
-	// window, and still one family.)
-	assert.Contains(t, prom, `envoy_listener_inbound_downstream_cx_total{aether_pod="api-7"}`)
-	assert.Contains(t, prom, `envoy_listener_out_http_downstream_cx_total{aether_pod="api-7"}`)
-	assert.Contains(t, prom, `envoy_listener_inbound_downstream_cx_total{aether_namespace="api-7",aether_pod="h3"}`)
+	// No family of a namespaced prefix carries a pod or a namespace in its
+	// name.
 	for _, line := range strings.Split(prom, "\n") {
 		if strings.HasPrefix(line, "# TYPE envoy_listener_") {
 			family := strings.Fields(line)[2]
-			assert.Falsef(t, strings.Contains(family, "api_7") || strings.Contains(family, "web_0") || strings.Contains(family, "team_a"),
+			assert.Falsef(t, strings.Contains(family, "web_0") || strings.Contains(family, "team_a"),
 				"metric family %s carries a pod in its name", family)
 		}
 	}
+
+	// The prefixes of an agent older than chart 2.5.0, which chart 2.6.0 no
+	// longer reads (the 2.5.x tolerance, an optional namespace group in the
+	// aether.pod extractor, is gone). With no namespace part neither extractor
+	// matches: nothing is lifted out, no half of a name becomes a label, and
+	// the pod stays in the stat name, one metric family per pod. That is the
+	// documented cost of an upgrade that skipped 2.5.x (docs/runbook.md,
+	// "Chart 2.6.0").
+	for _, name := range []string{"listener.inbound_api-7.downstream_cx_total", "listener.out_http_api-7.downstream_cx_total"} {
+		assert.Truef(t, stat[name], "%s is not a stat of the proxy: something still extracts a tag from a prefix that has no namespace", name)
+	}
+	assert.Contains(t, prom, "# TYPE envoy_listener_inbound_api_7_downstream_cx_total counter")
+	assert.Contains(t, prom, "# TYPE envoy_listener_out_http_api_7_downstream_cx_total counter")
+	assert.NotContains(t, prom, `aether_pod="api-7"`, "a prefix without a namespace still yields aether.pod: the optional-namespace group of chart 2.5.x is back")
+	// Its QUIC prefix has two parts and reads as namespace "api-7", pod "h3",
+	// exactly as it did under 2.5.x.
+	assert.Contains(t, prom, `envoy_listener_inbound_downstream_cx_total{aether_namespace="api-7",aether_pod="h3"}`)
 
 	for _, cluster := range []string{healthCluster, readyCluster} {
 		// What the health gateway's health_check filter READS. Never excluded.

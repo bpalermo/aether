@@ -347,7 +347,7 @@ Set once at the top of the `aether` chart's values; every component inherits it.
 
 | Value | Default | What it does |
 |---|---|---|
-| `clusterName` | `talos-main` | Cluster name in registry keys (registrars are per-cluster; names need not be unique across clusters). |
+| `clusterName` | none: **required** | This cluster's name in the mesh: `--cluster-name` of the agent, the registrar and the edge control plane, stamped on every endpoint and part of the registry's keys. The chart refuses to render without it (since chart 2.6.0). Choose it once and keep it; it must be unique among the clusters that share a registry. |
 | `meshDomain` | `aether.internal` | The authority suffix services are addressed under (`<svc>.<ns>.<meshDomain>`). Also defaults the SPIRE trust domain. |
 | `spire.enabled` | `true` | Mesh-wide mTLS switch. |
 | `spire.workloadSocketPath` | `/run/secrets/workload-spiffe-uds/socket` | Workload API socket. Every component resolves its own trust domain from its SVID over this socket — there is no `trustDomain` value to configure (retired: it could silently disagree with what SPIRE issues). |
@@ -724,6 +724,7 @@ Enable it:
 ```bash
 helm upgrade --install aether oci://quay.io/aethermesh/chart-aether \
   --version "$VERSION" -n aether-system \
+  --set clusterName=my-cluster \
   --set edge.enabled=true
   # ... plus your other values
 ```

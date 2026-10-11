@@ -37,8 +37,9 @@ inputs:
     description: >-
       One `key=value` per line, each passed to `helm install` as `--set`, ahead
       of the image overrides (which every suite gets: the kind-loaded :latest
-      images, digest cleared, pullPolicy Never). spire.enabled=false and
-      namespace.create=false are always set.
+      images, digest cleared, pullPolicy Never). spire.enabled=false,
+      namespace.create=false and clusterName (the chart requires one; it is
+      the `cluster-name` input) are always set.
     required: false
     default: ""
   ready-description:
@@ -174,6 +175,9 @@ runs:
       shell: bash
       env:
         HELM_SET: ${{ inputs.helm-set }}
+        # The chart has no default cluster name (chart 2.6.0): the mesh's name
+        # for this cluster is the kind cluster's.
+        CLUSTER_NAME: ${{ inputs.cluster-name }}
       run: |
         sed -i -e 's/{GIT_COMMIT}/conformance/' -e 's/{STABLE_GIT_VERSION}/0.0.0-conformance/' charts/aether/Chart.yaml
         # One array element per argument: the suite's values and the images'
@@ -195,6 +199,7 @@ runs:
           --namespace aether-system --create-namespace \
           --set namespace.create=false \
           --set spire.enabled=false \
+          --set "clusterName=${CLUSTER_NAME}" \
           "${values[@]}" \
           "${images[@]}" \
           --set proxy.image.pullPolicy=IfNotPresent

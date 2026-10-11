@@ -36,7 +36,7 @@ Single PR unless conformance triage (M3) grows; then split M3 out.
 **M1 — move everything to 1.6.1 together.**
 Go dep + `test/conformance` runner (self-replace module) + the
 `GATEWAY_API_VERSION` CRD download in `conformance.yaml` (both jobs) →
-v1.6.1. Talos-main CRDs upgraded out-of-band at deploy time (the
+v1.6.1. The reference cluster's CRDs upgraded out-of-band at deploy time (the
 safe-upgrade VAP fixes in 1.6 make the in-place CRD upgrade clean).
 
 **M2 — TCPRoute/UDPRoute to `v1` (no fallback — user directive).**

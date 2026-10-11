@@ -1,7 +1,8 @@
 load("@aether_registry//:registry.bzl", "chart_registry_url", "image_reference")
-load("@rules_helm//helm:defs.bzl", "helm_chart", "helm_lint_test", "helm_template_test")
+load("@rules_helm//helm:defs.bzl", "helm_chart", "helm_lint_test")
 load("@rules_shell//shell:sh_test.bzl", "sh_test")
-load("//bazel/helm:defs.bzl", "chart_push", "helm_pod_template_file_test", "helm_pod_template_version_test", "helm_template_absent_test", "helm_template_fail_test", "helm_template_match_test", "helm_template_reproducible_test", "helm_template_value_changes_test", "helm_template_value_ignored_test")
+load("//bazel/helm:defs.bzl", "chart_push", helm_template_fail_without_cluster_name_test = "helm_template_fail_test")
+load(":test_defs.bzl", "helm_pod_template_file_test", "helm_pod_template_version_test", "helm_template_absent_test", "helm_template_fail_test", "helm_template_match_test", "helm_template_reproducible_test", "helm_template_test", "helm_template_value_changes_test", "helm_template_value_ignored_test")
 
 # The deployed proxy.hotRestart tunables are pinned by a Go test: the supervisor
 # derives its admin re-verify budget from parentShutdownTime, so the values that
@@ -134,6 +135,105 @@ helm_template_match_test(
             "CSIDriver/csi.aether.io",
             "MeshConfig/default",
         ]
+    },
+)
+
+# --- clusterName is required (chart 2.6.0) -------------------------------------
+#
+# The chart has no default cluster name. The name is `--cluster-name` of the
+# agent, the registrar and the edge control plane, it is stamped on every
+# endpoint they register and it is a segment of the registry's keys, so a
+# default would give every installation that did not look the same name, and
+# changing a default would rename the cluster of every installation that
+# relied on it. A render without the value fails instead, before helm touches
+# the cluster, and the message says what the value is and what it is for.
+#
+# These tests render WITHOUT the value, so they use the rule as //bazel/helm
+# defines it. Every other target of this file goes through :test_defs.bzl,
+# which passes `--set clusterName=test-cluster` ahead of the target's own
+# `opts`; none of the fail tests below this section can pass because of a
+# missing cluster name, since their expected message is another one.
+helm_template_fail_without_cluster_name_test(
+    name = "aether_cluster_name_required_test",
+    chart = ":aether",
+    expected_message = "clusterName is required and has no default",
+)
+
+# The message says what the value becomes, not only that it is missing...
+helm_template_fail_without_cluster_name_test(
+    name = "aether_cluster_name_required_says_what_for_test",
+    chart = ":aether",
+    expected_message = "--cluster-name of the agent, the registrar and the edge control plane",
+)
+
+# ...and where the upgrade of a release that relied on the old default is
+# described.
+helm_template_fail_without_cluster_name_test(
+    name = "aether_cluster_name_required_names_the_runbook_test",
+    chart = ":aether",
+    expected_message = "docs/runbook.md, Chart 2.6.0",
+)
+
+# The empty string is not a name either (`--set clusterName=`, or a values file
+# that kept the key and lost the value).
+helm_template_fail_without_cluster_name_test(
+    name = "aether_cluster_name_empty_test",
+    chart = ":aether",
+    expected_message = "clusterName is required and has no default",
+    opts = [
+        "--set",
+        "clusterName=",
+    ],
+)
+
+# The edge control plane takes the same flag: enabling it does not change the
+# answer.
+helm_template_fail_without_cluster_name_test(
+    name = "aether_cluster_name_required_with_edge_test",
+    chart = ":aether",
+    expected_message = "clusterName is required and has no default",
+    opts = [
+        "--set",
+        "edge.enabled=true",
+    ],
+)
+
+# Guard for what must not change: the value reaches the three components that
+# take it, verbatim, as it did when it had a default.
+helm_template_match_test(
+    name = "aether_cluster_name_flag_test",
+    chart = ":aether",
+    document_patterns = {
+        "DaemonSet/release-name-aether-agent": [
+            "\\n            - \"--cluster-name=prod-eu-1\"\\n",
+        ],
+        "Deployment/release-name-aether-registrar": [
+            "\\n            - \"--cluster-name=prod-eu-1\"\\n",
+        ],
+        "Deployment/release-name-aether-edge": [
+            "\\n            - \"--cluster-name=prod-eu-1\"\\n",
+        ],
+    },
+    opts = [
+        "--set",
+        "clusterName=prod-eu-1",
+        "--set",
+        "edge.enabled=true",
+    ],
+)
+
+# ...and the name the wrappers of :test_defs.bzl pass is what every other test
+# of this file renders with.
+helm_template_match_test(
+    name = "aether_cluster_name_test_default_test",
+    chart = ":aether",
+    document_patterns = {
+        "DaemonSet/release-name-aether-agent": [
+            "\\n            - \"--cluster-name=test-cluster\"\\n",
+        ],
+        "Deployment/release-name-aether-registrar": [
+            "\\n            - \"--cluster-name=test-cluster\"\\n",
+        ],
     },
 )
 
@@ -1686,8 +1786,12 @@ helm_template_test(
 # of the stat name: aether.namespace takes the text up to the first underscore
 # after the prefix, aether.pod the rest. Without the first tag the namespace
 # stays in aether.pod; without either, every pod is a metric family of its own.
-# The namespace part is optional in the aether.pod extractor, so the prefixes an
-# agent older than #1584 writes (inbound_<pod>) still collapse during an upgrade.
+# Both extractors REQUIRE the namespace part since chart 2.6.0. In chart 2.5.x
+# it was optional in the aether.pod extractor (`(?:_[^_.]+)?`), so that the
+# prefixes an agent older than #1584 writes (inbound_<pod>) still collapsed
+# during the upgrade from 2.4.x; that tolerance was for one chart minor
+# (docs/runbook.md, "Chart 2.5.0" and "Chart 2.6.0"). The pattern below is the
+# strict form, and fails a chart that brings the optional group back.
 # //agent/test/envoy_validate (TestChartStatsConfigOnNamespacedPodNames) runs
 # the pinned proxy with this block and reads the labels it exports; this pins
 # the two extractors in the packaged chart. The same block's exclusions must
@@ -1703,7 +1807,7 @@ helm_template_test(
     template_patterns = {
         "aether/templates/agent-proxy-configmap.yaml": [
             "- tag_name: aether\\.namespace\\n\\s+regex: \"\\^listener.{1,4}\\(\\?:inbound\\|out_http\\)\\(_\\(\\[\\^_\\.\\]\\+\\)\\)_\\[\\^\\.\\]\\+.{1,4}\"\\n",
-            "- tag_name: aether\\.pod\\n\\s+regex: \"\\^listener.{1,4}\\(\\?:inbound\\|out_http\\)\\(\\?:_\\[\\^_\\.\\]\\+\\)\\?\\(_\\(\\[\\^\\.\\]\\+\\)\\).{1,4}\"\\n",
+            "- tag_name: aether\\.pod\\n\\s+regex: \"\\^listener.{1,4}\\(\\?:inbound\\|out_http\\)_\\[\\^_\\.\\]\\+\\(_\\(\\[\\^\\.\\]\\+\\)\\).{1,4}\"\\n",
         ],
     },
 )
@@ -1723,9 +1827,10 @@ helm_template_test(
 # Do not make the bootstrap accept the dots instead: where a dotted pod name
 # ends and the stat begins can only be told with a list of every stat and
 # subtree name Envoy has ("ssl", "http2", "external" and "default" are all
-# legal labels of a pod name). The template itself is left as it was by #1636,
-# comments included: the supervisor watches the bootstrap, so any change of
-# that ConfigMap hot-restarts the proxy on every node.
+# legal labels of a pod name). #1636 left the template itself as it
+# was, comments included: the supervisor watches the bootstrap, so any change
+# of that ConfigMap, a comment too, hot-restarts the proxy on every node. (Chart
+# 2.6.0 changed it once, on purpose: docs/runbook.md, "Chart 2.6.0".)
 helm_template_test(
     name = "aether_proxy_bootstrap_probe_cluster_exclusions_test",
     chart = ":aether",
