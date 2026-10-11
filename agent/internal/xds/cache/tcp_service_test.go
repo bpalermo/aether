@@ -53,7 +53,7 @@ func TestLoadClustersFromRegistry_TCPCluster(t *testing.T) {
 
 	// The capture reconciler classified echo-tcp as a TCP service (annotation
 	// "tcp" on its mesh Service) and projected its ClusterIP.
-	c.SetCaptureTCPServices([]capture.CaptureTCPService{{ServiceName: "aether-test/echo-tcp", ClusterIP: "10.96.0.50", PrimaryIsTCP: true}})
+	c.SetCaptureTCPServices([]capture.CaptureTCPService{{ServiceName: "aether-test/echo-tcp", ClusterIP: "10.96.0.50"}})
 
 	require.NoError(t, c.LoadClustersFromRegistry(ctx, "cluster-1", "node-1", reg))
 
@@ -123,8 +123,8 @@ func TestCaptureTCPServices_JoinDependencySet(t *testing.T) {
 	c.SetCaptureEnabled(true)
 
 	c.SetCaptureTCPServices([]capture.CaptureTCPService{
-		{ServiceName: "aether-test/tcp-echo", ClusterIP: "10.96.0.50", PrimaryIsTCP: true},
-		{ServiceName: "team-b/redis", ClusterIP: "10.96.0.51", PrimaryIsTCP: true},
+		{ServiceName: "aether-test/tcp-echo", ClusterIP: "10.96.0.50"},
+		{ServiceName: "team-b/redis", ClusterIP: "10.96.0.51"},
 	})
 
 	deps := c.DependencySet()

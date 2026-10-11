@@ -38,7 +38,7 @@ func TestCaptureVhosts_ServiceChainFilter(t *testing.T) {
 		"aether-test/echo": {Name: "envoy.filters.http.header_mutation", Config: cfg},
 	})
 
-	vhosts := c.captureVhosts()
+	vhosts := captureTable(c, 18081)
 	require.NotEmpty(t, vhosts, "echo authority must render a vhost")
 	found := false
 	for _, vh := range vhosts {

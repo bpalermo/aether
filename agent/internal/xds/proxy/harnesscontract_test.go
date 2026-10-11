@@ -108,7 +108,7 @@ func TestExternalHarnessContract_AnyPortStat(t *testing.T) {
 	const cluster = "tcp:echo-tcp.a-namespace.aether.internal"
 	l, err := GenerateCaptureListener(&cniv1.CNIPod{Name: "p1", NetworkNamespace: "/var/run/netns/p1"},
 		"spiffe://aether.internal/ns/default/sa/test", 15001, "aether.internal", false,
-		[]CaptureTCPService{{ClusterName: cluster, ClusterIP: "10.96.1.50", PrimaryIsTCP: true, PrimaryPort: 9000}}, true, nil)
+		[]CaptureTCPService{{ClusterName: cluster, ClusterIP: "10.96.1.50", LegacyTCPPort: 9000, AnyPort: true}}, nil, true, nil)
 	if err != nil {
 		t.Fatalf("GenerateCaptureListener: %v", err)
 	}

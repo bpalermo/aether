@@ -72,8 +72,8 @@ func newBareFixture(t *testing.T) *bareFixture {
 	f.c.metrics = m
 	f.c.SetCaptureEnabled(true)
 	f.c.SetCaptureTCPServices([]capture.CaptureTCPService{
-		{ServiceName: bareSvc, ClusterIP: "10.96.0.60", PrimaryIsTCP: true},
-		{ServiceName: bareUDPSvc, ClusterIP: "10.96.0.61", PrimaryIsTCP: true},
+		{ServiceName: bareSvc, ClusterIP: "10.96.0.60"},
+		{ServiceName: bareUDPSvc, ClusterIP: "10.96.0.61"},
 	})
 	f.c.SetUDPServiceRoutes(map[string][]proxy.L4Backend{
 		bareSvc:    {{Service: bareSvc, Cluster: proxy.UDPClusterName(bareSvc, f.c.meshDomain), Weight: 1}},
@@ -656,10 +656,10 @@ func walk(t *testing.T, seed int64, steps int, withDeps bool) (string, []string)
 			m.inDeps = !m.inDeps
 			// A captured TCP service is a dependency too, so it leaves and
 			// returns with the declaration.
-			captured := []capture.CaptureTCPService{{ServiceName: bareUDPSvc, ClusterIP: "10.96.0.61", PrimaryIsTCP: true}}
+			captured := []capture.CaptureTCPService{{ServiceName: bareUDPSvc, ClusterIP: "10.96.0.61"}}
 			if m.inDeps {
 				declareDeps(f.c, "demo/echo", "demo/other", bareSvc, bareUDPSvc)
-				captured = append(captured, capture.CaptureTCPService{ServiceName: bareSvc, ClusterIP: "10.96.0.60", PrimaryIsTCP: true})
+				captured = append(captured, capture.CaptureTCPService{ServiceName: bareSvc, ClusterIP: "10.96.0.60"})
 			} else {
 				declareDeps(f.c, "demo/echo", "demo/other", bareUDPSvc)
 			}

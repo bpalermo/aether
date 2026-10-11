@@ -56,7 +56,7 @@ func l4CaptureFixture(t *testing.T, withPassthrough bool) *listenerv3.Listener {
 	l, err := GenerateCaptureListener(pod, "spiffe://aether.internal/ns/aether-test/sa/client", 18001, "aether.internal", false,
 		[]CaptureTCPService{
 			{
-				ClusterName: tcpEcho, ClusterIP: "10.96.0.10", PrimaryIsTCP: true, PrimaryPort: 9000,
+				ClusterName: tcpEcho, ClusterIP: "10.96.0.10", LegacyTCPPort: 9000, AnyPort: true,
 				TCPPorts: []uint32{9001},
 				TLSRouteRules: []L4ServiceRoute{{
 					SNIHostnames: []string{"a.example.com"},
@@ -64,13 +64,13 @@ func l4CaptureFixture(t *testing.T, withPassthrough bool) *listenerv3.Listener {
 				}},
 			},
 			{
-				ClusterName: TCPClusterName("aether-test/weighted", "aether.internal"), ClusterIP: "10.96.0.11", PrimaryIsTCP: true,
+				ClusterName: TCPClusterName("aether-test/weighted", "aether.internal"), ClusterIP: "10.96.0.11", LegacyTCPPort: 9000, AnyPort: true,
 				TCPRouteRules: []L4ServiceRoute{{Backends: []L4Backend{
 					{Service: "aether-test/tcp-echo", Cluster: tcpEcho, Weight: 1},
 					{Service: "aether-test/tls-a", Cluster: tlsA, Weight: 1},
 				}}},
 			},
-		}, withPassthrough, nil)
+		}, nil, withPassthrough, nil)
 	require.NoError(t, err)
 	return l
 }

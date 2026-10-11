@@ -43,23 +43,20 @@ import (
 	"go.uber.org/atomic"
 )
 
-// captureTCPEntry describes a non-HTTP mesh service that needs a per-ClusterIP
-// TCP-proxy floor chain on the capture listener.
+// captureTCPEntry describes one mesh service with a routable VIP, as the
+// capture listener's chains are built from it: where it is (from the
+// mesh-Service reconciler) and what its ports are (from the registry
+// endpoints, never from an annotation on the Service).
 type captureTCPEntry struct {
 	serviceName string // bare service name (for cluster name derivation)
 	clusterIP   string // k8s Service ClusterIP (filter-chain prefix_ranges match)
-	// tcpPorts are the service's NON-PRIMARY raw-TCP ports, derived from its
-	// endpoints' port_protocols at registry-load time (proposal 037). Sorted,
-	// so two derivations of the same set compare equal and endpoint churn does
-	// not look like a change -- see equalTCPEntries and Risk 4.
-	tcpPorts []uint32
-	// primaryIsTCP gates the portless /32 floor chain (proposal 037 design (d)).
-	primaryIsTCP bool
-	// primaryPort is the service's primary application port, derived from its
-	// TCP floor entry. It gives the TCP-primary floor a
-	// destination_port-qualified spelling of its own, so that spelling survives
-	// the any-port shim's removal in Phase 4.
-	primaryPort uint32
+	// ports is what the registry endpoints say about the service's ports
+	// (deriveServicePorts): the zero value while this node holds no endpoint
+	// of it, in which case the service gets no chain of its own. Its slices
+	// are sorted, so two derivations of the same declarations compare equal
+	// and endpoint churn does not look like a change -- see equalTCPEntries
+	// and Risk 4.
+	ports servicePorts
 }
 
 // SnapshotCache wraps go-control-plane's SnapshotCache and manages Envoy
@@ -202,6 +199,23 @@ type SnapshotCache struct {
 
 	clusterMu sync.RWMutex
 	clusters  map[string]clusterEntry // keyed by cluster name
+	// servicePorts is what the registry endpoints of the last refresh say
+	// about each service's ports and their classes (deriveAllServicePorts,
+	// proposal 043), keyed by service. A service that left every listing
+	// keeps its last derivation for as long as it keeps a retained cluster
+	// entry (pruneServicePortsLocked). Replaced wholesale by each refresh,
+	// never mutated in place afterwards. Guarded by clusterMu.
+	servicePorts map[string]servicePorts
+	// servicePortsGen counts content changes of servicePorts: an input
+	// generation of the capture route tables' memo. Guarded by clusterMu.
+	servicePortsGen uint64
+	// captureTables keeps the capture route tables between snapshots
+	// (captureRouteTables). Guarded by snapshotMu.
+	captureTables captureTablesMemo
+	// servicePortConflicts is what reportServicePortConflicts last reported,
+	// keyed by service: a disagreement is logged when it appears or changes,
+	// not on every refresh. Guarded by clusterMu.
+	servicePortConflicts map[string]string
 	// registryReuse remembers, per (protocol pass, service), the inputs and
 	// entries of the last registry refresh, so an unchanged service keeps its
 	// proto objects (#1115, registryreuse.go). Guarded by clusterMu (write).
@@ -301,6 +315,15 @@ type SnapshotCache struct {
 	// for a route target whose parentRefs declare no port (then only the portless +
 	// mesh :18081 spellings are emitted, as before). Guarded by depMu.
 	routeTargetPorts map[string][]uint32
+	// servicePortMaps holds, for each Service a route names as its parent or
+	// as a backend and that the registrar did NOT generate, the Service's port
+	// map: Service port -> the pod port its numeric targetPort names, or 0 for
+	// a targetPort that is a name (the registry carries no port names, so it
+	// cannot be resolved). Proposal 043, "A Service is a port map". A Service
+	// with no entry is addressed by its pods' own ports, which is what a
+	// generated Service exposes. Replaced wholesale by SetServicePortMaps,
+	// never mutated in place. Guarded by depMu.
+	servicePortMaps map[string]map[uint32]uint32
 	// serviceChainFilters holds the service-wide ALWAYS-ON extension filter per
 	// route-target service (proposal 025 M4 CHAIN scope), fed by the gamma
 	// reconciler; at most one per service (webhook-enforced). Enabled at the
@@ -459,16 +482,6 @@ type SnapshotCache struct {
 	effRoutes      map[string][]proxy.GammaRoute
 	effRoutesGen   uint64
 	effRoutesValid bool
-	// routeDomains memoizes the per-route-target cap_http host-match domain
-	// lists (issue #540), keyed by the "<ns>/<svc>" route-target key. Valid
-	// while BOTH input generations are unchanged: depGen (routes +
-	// routeTargetPorts + authz flag) and captureAuthGen (captureAuthorities,
-	// the SA-backed fqdn source). Shared with callers; never mutated after
-	// store. Guarded by depMu.
-	routeDomains        map[string][]string
-	routeDomainsDepGen  uint64
-	routeDomainsAuthGen uint64
-	routeDomainsValid   bool
 	// depChanged receives a (coalesced) signal when the dependency set
 	// changes; the registry refresher rebuilds the scoped snapshot on it.
 	depChanged chan struct{}
@@ -526,7 +539,7 @@ type SnapshotCache struct {
 	lastInboundBindings inboundBindingState
 
 	// captureEnabled turns on transparent capture (proposal 018, Phase 3a): per-pod
-	// capture listeners + the cap_http route table. Set once before the manager
+	// capture listeners + the capture route tables (cap_http_<port>). Set once before the manager
 	// starts (SetCaptureEnabled); read without locking. Default off.
 	captureEnabled bool
 	// captureRedirectAll enables the redirect-all + ORIGINAL_DST passthrough mode
@@ -538,7 +551,7 @@ type SnapshotCache struct {
 	captureRedirectAll bool
 	// captureMu guards captureAuthorities and captureTCPServices.
 	// captureAuthorities: mesh service -> its cluster.local FQDN, fed by the
-	// mesh-Service reconciler, for the cap_http route table.
+	// mesh-Service reconciler, for the capture route tables (cap_http_<port>).
 	// captureTCPServices: non-HTTP services that need per-ClusterIP TCP floor
 	// chains on the capture listener (proposal 018, Phase 3a TCP floor).
 	captureMu          sync.RWMutex
@@ -551,17 +564,19 @@ type SnapshotCache struct {
 	// name, that need per-ClusterIP TCP-proxy floor chains on the capture listener.
 	// A nil/empty slice means all captured traffic goes through the HCM chain.
 	captureTCPServices []captureTCPEntry
-	// captureDerivedTCPPorts / captureDerivedPrimaryPorts are the last per-port
-	// derivation from the registry endpoints (refreshCaptureTCPPorts), keyed by
-	// service and guarded by captureMu. They are kept apart from
-	// captureTCPServices because the two halves of an entry come from different
-	// sources in no fixed order -- the mesh-Service reconciler supplies
-	// name/VIP/class, a registry load supplies the ports -- and either may run
-	// first, or again. SetCaptureTCPServices re-applies them to the entries it
-	// builds; without that, every mesh-Service re-projection erased the
-	// declared-port chains until the next registry load (#1094).
-	captureDerivedTCPPorts     map[string][]uint32
-	captureDerivedPrimaryPorts map[string]uint32
+	// captureDerived is the last derivation from the registry endpoints
+	// (refreshCaptureServicePorts), keyed by service and guarded by captureMu.
+	// It is kept apart from captureTCPServices because the two halves of an
+	// entry come from different sources in no fixed order -- the mesh-Service
+	// reconciler supplies name and VIP, a registry load supplies the ports --
+	// and either may run first, or again. SetCaptureTCPServices re-applies it
+	// to the entries it builds; without that, every mesh-Service re-projection
+	// erased the declared-port chains until the next registry load (#1094).
+	captureDerived map[string]servicePorts
+	// captureHTTPPortsSeen is the HTTP port set (captureHTTPPortsKey) the
+	// per-pod capture listeners were last reconciled against
+	// (reconcileCaptureHTTPPorts). Guarded by captureMu.
+	captureHTTPPortsSeen string
 	// captureProjected is closed by the first SetCaptureTCPServices call: the
 	// mesh-Service reconciler has delivered the service set that defines the
 	// capture listener's TCP chains at least once (CaptureProjected).
@@ -636,7 +651,7 @@ type listenerEntry struct {
 	// capture is the per-pod transparent-capture listener (proposal 018, Phase 3a):
 	// nil unless transparent capture is enabled. Bound to the capture port in the
 	// pod netns; routes CNI-redirected ClusterIP:18081 traffic by cluster.local
-	// authority over the cap_http route table.
+	// authority over the capture route tables (cap_http_<port>).
 	capture types.Resource
 	// udpCapture is the per-pod UDP capture listener (proposal 018, Phase 3b):
 	// nil unless capture is enabled AND there are UDPRoute backends for this pod's

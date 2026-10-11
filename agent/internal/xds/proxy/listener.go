@@ -99,20 +99,29 @@ func NewAppDeliveryClusters(cniPod *cniv1.CNIPod, udsSocketPath string) (appClus
 	// liveness) on the primary port; keeping the HC off app_<namespace>_<pod> avoids gating
 	// the delivery path. Liveness stays pod-level (primary port), not per-port.
 	primary := AppPortFromPod(cniPod)
-	// The probe shape follows the pod's declared mesh protocol: HTTP GET for
-	// HTTP/gRPC, a raw TCP connect for the TCP floor (no HTTP readiness
-	// surface), and for UDP a connect to the mesh inbound port, because a UDP
-	// app port answers no TCP connect at all (#931).
+	// The probe shape follows the class of the port it PROBES (proposal 043,
+	// Phase 1): HTTP GET for HTTP/gRPC, a raw TCP connect for a raw-TCP port
+	// (no HTTP readiness surface), and for UDP a connect to the mesh inbound
+	// port, because a UDP app port answers no TCP connect at all (#931).
 	//
-	// Read through endpointmeta.Protocol rather than comparing the annotation
-	// here. That function is the registry's own parser -- the one that decides
-	// which key the pod is registered under -- so the probe and the
-	// registration cannot disagree about what the pod is. An unparseable value
-	// degrades to HTTP, which is what the previous equality check did with any
-	// value other than "tcp"; registration rejects it separately and loudly.
-	protocol, err := endpointmeta.Protocol(cniPod.GetAnnotations())
-	if err != nil {
-		protocol = registryv1.Service_PROTOCOL_HTTP
+	// That is the pod-level endpoint.aether.io/protocol only when the probe
+	// port carries no suffix of its own in endpoint.aether.io/ports; a pod
+	// declaring `ports: "9000=tcp,8080"` with port 9000 has a raw-TCP probe
+	// port whatever the pod-level value is, and an HTTP GET to it is never
+	// answered.
+	//
+	// Read through endpointmeta.PortProtocols rather than comparing an
+	// annotation here. That function is the registry's own parser -- the one
+	// that decides which keys the pod is registered under and what its row
+	// says each port speaks -- so the probe and the registration cannot
+	// disagree about the port. Annotations that do not parse degrade to HTTP,
+	// which is what the previous check did with any value other than "tcp";
+	// registration rejects them separately and loudly.
+	protocol := registryv1.Service_PROTOCOL_HTTP
+	if portProtocols, err := endpointmeta.PortProtocols(cniPod.GetAnnotations()); err == nil {
+		if class, ok := portProtocols[uint32(primary)]; ok {
+			protocol = endpointmeta.ServiceProtocolFromPort(class)
+		}
 	}
 	healthCluster = NewAppHealthProbeCluster(HealthProbeClusterName(cniPod), appAddr, primary, AppHealthPathFromPod(cniPod), protocol)
 

@@ -45,7 +45,7 @@ func perPodResources(t *testing.T, pod *cniv1.CNIPod) (listeners []*listenerv3.L
 	require.NoError(t, err)
 	quic, err := NewInboundQUICListener(pod, sameNameTrustDomain, sameNameMeshDomain, false, false, nil, nil)
 	require.NoError(t, err)
-	capture, err := GenerateCaptureListener(pod, SpiffeIDFromPod(pod, sameNameTrustDomain), 15001, sameNameMeshDomain, false, nil, false, nil)
+	capture, err := GenerateCaptureListener(pod, SpiffeIDFromPod(pod, sameNameTrustDomain), 15001, sameNameMeshDomain, false, nil, nil, false, nil)
 	require.NoError(t, err)
 	udp, err := GenerateUDPCaptureListener(pod, 18082,
 		map[string][]L4Backend{"ns-a/dns": {{Service: "ns-a/dns", Cluster: "udp:dns.ns-a.mesh.internal", Weight: 1}}},

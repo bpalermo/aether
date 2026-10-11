@@ -2,9 +2,9 @@ package cache
 
 import (
 	"context"
-	"regexp"
 	"testing"
 
+	"aethermesh.dev/agent/internal/capture"
 	"aethermesh.dev/agent/internal/xds/proxy"
 	routev3 "github.com/envoyproxy/go-control-plane/envoy/config/route/v3"
 	"github.com/stretchr/testify/assert"
@@ -21,6 +21,12 @@ func findVHost(vhosts []*routev3.VirtualHost, want string) *routev3.VirtualHost 
 		}
 	}
 	return nil
+}
+
+// captureTable returns the virtual hosts of the capture route table of dialled
+// port port (0 for cap_http_other), without the table's catch-all.
+func captureTable(c *SnapshotCache, port uint32) []*routev3.VirtualHost {
+	return c.captureTableVhosts(c.captureTableInputs(), port)
 }
 
 // TestCaptureVhosts_RouteTargetRealPort verifies that a GAMMA route TARGET with no
@@ -46,20 +52,31 @@ func TestCaptureVhosts_RouteTargetRealPort(t *testing.T) {
 	// M2: the route target is addressed on its real Service port 8080.
 	c.SetRouteTargetPorts(map[string][]uint32{"team-a/echo": {8080}})
 
-	vhosts := c.captureVhosts()
+	// Proposal 043: the dialled port selects the table. The real port's
+	// spellings are in the table of port 8080, with the port-less ones (a
+	// port-less Host on a dialled port means that port).
+	vhosts := captureTable(c, 8080)
 
 	// The cluster.local authority at the real port must host-match.
 	vh := findVHost(vhosts, "echo.team-a.svc.cluster.local:8080")
 	require.NotNil(t, vh, "route target must carry a :realPort cluster.local domain (M2); got vhosts=%v", domainsOf(vhosts))
 
 	domains := vh.GetDomains()
-	// Both the portless + mesh :18081 spellings (M1) AND the real-port spellings (M2).
 	assert.Contains(t, domains, "echo.team-a.svc.cluster.local")
-	assert.Contains(t, domains, "echo.team-a.svc.cluster.local:18081")
 	assert.Contains(t, domains, "echo.team-a.aether.internal")
-	assert.Contains(t, domains, "echo.team-a.aether.internal:18081")
 	assert.Contains(t, domains, "echo.team-a.svc.cluster.local:8080")
 	assert.Contains(t, domains, "echo.team-a.aether.internal:8080")
+	assert.NotContains(t, domains, "echo.team-a.svc.cluster.local:18081", "the mesh-port spelling belongs to the table of port 18081")
+	// The mesh :18081 spellings (M1) are served by the legacy table, with the
+	// same rules.
+	legacy := findVHost(captureTable(c, 18081), "echo.team-a.svc.cluster.local:18081")
+	require.NotNil(t, legacy, "the mesh-port spelling keeps its virtual host, in the table of port 18081")
+	assert.Contains(t, legacy.GetDomains(), "echo.team-a.aether.internal:18081")
+	assert.Contains(t, legacy.GetDomains(), "echo.team-a.aether.internal")
+	assert.Equal(t, "echo-v2.team-a.aether.internal", legacy.GetRoutes()[0].GetRoute().GetCluster())
+	// And a table of a port the target is not addressed on has no routing
+	// virtual host for it.
+	assert.Nil(t, findVHost(captureTable(c, 9090), "echo.team-a.svc.cluster.local"))
 
 	// The GAMMA rules must be present and path-ordered by specificity: the most
 	// specific match (/v2, a segment-boundary prefix) is first and routes to echo-v2;
@@ -117,7 +134,7 @@ func TestCaptureVhosts_SABackedRouteTargetShortNames(t *testing.T) {
 	// The route target is addressed on its real Service port 80 (echo Service :80).
 	c.SetRouteTargetPorts(map[string][]uint32{"gateway-conformance-mesh/echo-v2": {80}})
 
-	vhosts := c.captureVhosts()
+	vhosts := captureTable(c, 80)
 
 	// The client dials the bare short name (same-namespace) with no port -> :authority
 	// "echo-v2". With a single owner the bare spelling must be emitted, AND the
@@ -158,23 +175,30 @@ func TestCaptureVhosts_RouteTargetNoPort(t *testing.T) {
 	})
 	// No SetRouteTargetPorts (or empty) — the M1 path.
 
-	vhosts := c.captureVhosts()
-	vh := findVHost(vhosts, "echo.team-a.svc.cluster.local")
-	require.NotNil(t, vh)
-	for _, d := range vh.GetDomains() {
-		assert.NotContains(t, d, ":0", "no spurious :0 domain when the parentRef omits a port")
+	for _, port := range []uint32{80, 18081} {
+		vhosts := captureTable(c, port)
+		vh := findVHost(vhosts, "echo.team-a.svc.cluster.local")
+		require.NotNil(t, vh, "table %d", port)
+		for _, d := range domainsOf(vhosts) {
+			assert.NotContains(t, d, ":0", "no spurious :0 domain when the parentRef omits a port")
+		}
 	}
 }
 
-// matchesAuthority reports whether any known-target route's authority regex matches
-// the given dialed authority and, if so, the cluster it pins to.
-func matchesAuthority(targets []proxy.KnownTargetRoute, authority string) (string, bool) {
-	for _, kt := range targets {
-		if regexp.MustCompile(kt.AuthorityRegex).MatchString(authority) {
-			return kt.Cluster, true
-		}
+// routedCluster returns the cluster the virtual host of table port that
+// host-matches authority routes its last (default) route to, and false when no
+// virtual host of the table claims the authority or the one that does is a
+// refusal.
+func routedCluster(c *SnapshotCache, port uint32, authority string) (string, bool) {
+	vh := findVHost(captureTable(c, port), authority)
+	if vh == nil || len(vh.GetRoutes()) == 0 {
+		return "", false
 	}
-	return "", false
+	last := vh.GetRoutes()[len(vh.GetRoutes())-1]
+	if last.GetRoute() == nil {
+		return "", false
+	}
+	return last.GetRoute().GetCluster(), true
 }
 
 // TestCaptureVhosts_DemandScoped locks the M4 invariant (proposal 022/004): the
@@ -198,7 +222,7 @@ func TestCaptureVhosts_DemandScoped(t *testing.T) {
 	// node's dependency set.
 	require.NoError(t, c.AddPod(ctx, makeDepPod("a-1", "svc-a", "/proc/1/ns/net", "default/in-scope"), "example.org"))
 
-	vhosts := c.captureVhosts()
+	vhosts := captureTable(c, 18081)
 	require.NotNil(t, findVHost(vhosts, "in-scope.default.svc.cluster.local"),
 		"in-scope authority must build a cap_http vhost")
 	assert.Nil(t, findVHost(vhosts, "off-scope.default.svc.cluster.local"),
@@ -207,19 +231,24 @@ func TestCaptureVhosts_DemandScoped(t *testing.T) {
 	// Cold path: once off-scope is observed via ODCDS it joins the dependency set,
 	// so capture scope follows demand and its vhost now builds.
 	require.True(t, c.ObserveDependency(ctx, "default/off-scope"))
-	vhosts = c.captureVhosts()
+	vhosts = captureTable(c, 18081)
 	assert.NotNil(t, findVHost(vhosts, "off-scope.default.svc.cluster.local"),
 		"observed (ODCDS) authority must now build a cap_http vhost — scope follows demand")
 }
 
-// TestCaptureKnownTargets_StableAcrossGAMMAChurn is the regression guard for the
-// MESH-HTTP RDS-reload convergence race. The known-target safety net is derived
-// from captureAuthorities (fed by the generated mesh Services, INDEPENDENT of
-// HTTPRoute lifecycle), so an in-scope mesh authority remains pinned to its cluster
-// even after its GAMMA rules are cleared (the delete half of a suite's apply/delete
-// churn). A captured request to that authority therefore never falls to the
-// ORIGINAL_DST passthrough → kube-proxy while the dedicated vhost is mid-rebuild.
-func TestCaptureKnownTargets_StableAcrossGAMMAChurn(t *testing.T) {
+// TestCaptureTables_StableAcrossGAMMAChurn is the regression guard for the
+// MESH-HTTP RDS-reload convergence race. A mesh service's virtual hosts are
+// derived from captureAuthorities (fed by the generated mesh Services,
+// INDEPENDENT of HTTPRoute lifecycle), so an in-scope mesh authority keeps a
+// virtual host for every one of its names even after its GAMMA rules are
+// cleared (the delete half of a suite's apply/delete churn). A captured
+// request to that authority therefore never falls to the ORIGINAL_DST
+// passthrough → kube-proxy.
+//
+// Until proposal 043 this was the job of a "known-target" regex on the
+// catch-all, which accepted any port and routed it to the default cluster
+// (#1682). The per-port tables do it by construction.
+func TestCaptureTables_StableAcrossGAMMAChurn(t *testing.T) {
 	c := newTestCache("node-1")
 	c.SetCaptureEnabled(true)
 	c.SetCaptureRedirectAll(true)
@@ -228,89 +257,116 @@ func TestCaptureKnownTargets_StableAcrossGAMMAChurn(t *testing.T) {
 		svc     = "gateway-conformance-mesh/echo-v2"
 		cluster = "echo-v2.gateway-conformance-mesh.aether.internal"
 	)
-	// The mesh-Service reconciler projects the SA-backed authority. This is stable
-	// across HTTPRoute churn.
+	// The mesh-Service reconciler projects the SA-backed authority and its
+	// address, which puts the service in the node's dependency set whatever
+	// routes exist. This is stable across HTTPRoute churn.
 	c.SetCaptureAuthorities(map[string]string{
 		svc: "echo-v2.gateway-conformance-mesh.svc.cluster.local",
 	})
+	c.SetCaptureTCPServices([]capture.CaptureTCPService{{ServiceName: svc, ClusterIP: "10.96.0.20"}})
 	// A GAMMA rule is applied (the route exists).
 	c.SetServiceRoutes(map[string][]proxy.GammaRoute{
 		svc: {{Backends: []proxy.GammaBackend{{Service: svc, Cluster: cluster, Weight: 1}}}},
 	})
 
+	// What a client that dials port 80 can present as its authority.
 	dialSpellings := []string{
 		"echo-v2",
 		"echo-v2:80",
 		"echo-v2.gateway-conformance-mesh",
 		"echo-v2.gateway-conformance-mesh.svc",
 		"echo-v2.gateway-conformance-mesh.svc.cluster.local",
-		"echo-v2.gateway-conformance-mesh.svc.cluster.local:8080",
+		"echo-v2.gateway-conformance-mesh.svc.cluster.local:80",
+		"echo-v2.gateway-conformance-mesh.aether.internal",
 	}
 
-	// With the route applied, every spelling pins to the cluster.
-	withRules := c.captureKnownTargets()
+	// With the route applied, every spelling reaches the cluster.
 	for _, a := range dialSpellings {
-		got, ok := matchesAuthority(withRules, a)
-		require.Truef(t, ok, "with rules: %q must be a known target", a)
+		got, ok := routedCluster(c, 80, a)
+		require.Truef(t, ok, "with rules: %q must have a routing virtual host in the table of port 80", a)
 		assert.Equalf(t, cluster, got, "with rules: %q -> %s", a, cluster)
 	}
 
 	// Now SIMULATE THE CHURN: the suite deletes the HTTPRoute, the gamma reconciler
 	// reconciles with the route gone -> serviceRoutes for echo-v2 is cleared. The
-	// dedicated cap_http vhost vanishes (this is the race window). The mesh Service
-	// is untouched, so captureAuthorities still carries echo-v2.
+	// mesh Service is untouched, so captureAuthorities still carries echo-v2.
 	c.SetServiceRoutes(map[string][]proxy.GammaRoute{})
 
-	// The dedicated vhost is indeed gone (proving the window is real)...
-	assert.Nil(t, findVHost(c.captureVhosts(), "echo-v2"),
-		"the dedicated cap_http vhost is absent while rules are cleared (the race window)")
-
-	// ...but the known-target safety net STILL pins every spelling to the cluster,
-	// so a captured request reaches the backend in-mesh, never the passthrough.
-	afterChurn := c.captureKnownTargets()
+	// Every spelling STILL has its virtual host and still reaches the cluster,
+	// so a captured request stays in the mesh, never the passthrough.
 	for _, a := range dialSpellings {
-		got, ok := matchesAuthority(afterChurn, a)
-		require.Truef(t, ok, "after churn: %q must remain a known target (no passthrough leak)", a)
+		got, ok := routedCluster(c, 80, a)
+		require.Truef(t, ok, "after churn: %q must keep its virtual host (no passthrough leak)", a)
 		assert.Equalf(t, cluster, got, "after churn: %q -> %s", a, cluster)
 	}
+
+	// Negative control: a name that is not the service's is claimed by no
+	// virtual host, so the test above cannot pass on a wildcard.
+	_, ok := routedCluster(c, 80, "echo-v3.gateway-conformance-mesh.svc.cluster.local")
+	assert.False(t, ok, "an authority that names no mesh service has no virtual host")
 }
 
-// TestCaptureKnownTargets_RouteOnlyTarget covers the versioned-fanout shape: a GAMMA
+// TestCaptureTables_RouteOnlyTarget covers the versioned-fanout shape: a GAMMA
 // route TARGET with no SA-backed mesh Service of its own (only in serviceRoutes).
-// Its cluster.local authority is derived from the namespace-qualified key and it is
-// pinned to its mesh cluster so the passthrough never shadows it.
-func TestCaptureKnownTargets_RouteOnlyTarget(t *testing.T) {
+// Its cluster.local authority is derived from the namespace-qualified key and it
+// has a virtual host for every name, so the passthrough never shadows it.
+func TestCaptureTables_RouteOnlyTarget(t *testing.T) {
 	c := newTestCache("node-1")
 	c.SetCaptureEnabled(true)
 	c.SetCaptureRedirectAll(true)
 
 	c.SetServiceRoutes(map[string][]proxy.GammaRoute{
-		"team-a/echo": {{Backends: []proxy.GammaBackend{{Service: "team-a/echo-v1", Cluster: "echo-v1.team-a.aether.internal", Weight: 1}}}},
+		"team-a/echo": {{Matches: []proxy.GammaMatch{{Prefix: "/v1"}}, Backends: []proxy.GammaBackend{{Service: "team-a/echo-v1", Cluster: "echo-v1.team-a.aether.internal", Weight: 1}}}},
 	})
 
-	targets := c.captureKnownTargets()
-	cluster, ok := matchesAuthority(targets, "echo.team-a.svc.cluster.local:8080")
-	require.True(t, ok, "route-only target must be pinned")
+	cluster, ok := routedCluster(c, 80, "echo.team-a.svc.cluster.local")
+	require.True(t, ok, "route-only target must have a virtual host")
 	assert.Equal(t, "echo.team-a.aether.internal", cluster)
-	cluster, ok = matchesAuthority(targets, "echo")
-	require.True(t, ok, "bare same-namespace dial must be pinned")
+	cluster, ok = routedCluster(c, 80, "echo")
+	require.True(t, ok, "bare same-namespace dial must have a virtual host")
 	assert.Equal(t, "echo.team-a.aether.internal", cluster)
+	// A Host that names a port other than the one dialled is refused, where
+	// the known-target regex routed any port to the default cluster (#1682).
+	_, ok = routedCluster(c, 80, "echo.team-a.svc.cluster.local:8080")
+	assert.False(t, ok, "no virtual host of table 80 routes an authority that names port 8080")
+	mismatch := findVHost(captureTable(c, 80), "echo.team-a.svc.cluster.local:*")
+	require.NotNil(t, mismatch, "the other-port spellings are claimed by the port-mismatch refusal")
+	assert.Equal(t, uint32(421), mismatch.GetRoutes()[0].GetDirectResponse().GetStatus())
+	assert.Equal(t, proxy.RefusalPortMismatch, mismatch.GetRoutes()[0].GetResponseHeadersToAdd()[0].GetHeader().GetValue())
 }
 
-// TestCaptureKnownTargets_DisabledWithoutRedirectAll: with scoped capture (no
-// redirect-all) there is no passthrough cluster to shadow a target, so the
-// known-target set is empty and the catch-all keeps its hard 404.
-func TestCaptureKnownTargets_DisabledWithoutRedirectAll(t *testing.T) {
-	c := newTestCache("node-1")
-	c.SetCaptureEnabled(true)
-	// redirect-all NOT enabled.
-	c.SetCaptureAuthorities(map[string]string{
-		"team-a/echo": "echo.team-a.svc.cluster.local",
-	})
-	c.SetServiceRoutes(map[string][]proxy.GammaRoute{
-		"team-a/echo": {{Backends: []proxy.GammaBackend{{Service: "team-a/echo", Cluster: "echo.team-a.aether.internal", Weight: 1}}}},
-	})
-	assert.Nil(t, c.captureKnownTargets(), "no passthrough -> no known-target safety net")
+// TestCaptureTables_FallthroughFollowsRedirectAll: with scoped capture (no
+// redirect-all) there is no passthrough cluster, so a table's catch-all ends in
+// a hard 404; with redirect-all it ends in the ORIGINAL_DST passthrough. The
+// service's own virtual hosts are the same in both.
+func TestCaptureTables_FallthroughFollowsRedirectAll(t *testing.T) {
+	for _, redirectAll := range []bool{false, true} {
+		c := newTestCache("node-1")
+		c.SetCaptureEnabled(true)
+		c.SetCaptureRedirectAll(redirectAll)
+		c.SetCaptureAuthorities(map[string]string{
+			"team-a/echo": "echo.team-a.svc.cluster.local",
+		})
+		c.SetServiceRoutes(map[string][]proxy.GammaRoute{
+			"team-a/echo": {{Backends: []proxy.GammaBackend{{Service: "team-a/echo", Cluster: "echo.team-a.aether.internal", Weight: 1}}}},
+		})
+		var table *routev3.RouteConfiguration
+		for _, r := range c.captureRouteTables([]uint32{80}) {
+			if rc := r.(*routev3.RouteConfiguration); rc.GetName() == "cap_http_80" {
+				table = rc
+			}
+		}
+		require.NotNil(t, table)
+		require.NotNil(t, findVHost(table.GetVirtualHosts(), "echo.team-a.svc.cluster.local"))
+		catchAll := table.GetVirtualHosts()[len(table.GetVirtualHosts())-1]
+		require.Equal(t, []string{"*"}, catchAll.GetDomains())
+		last := catchAll.GetRoutes()[len(catchAll.GetRoutes())-1]
+		if redirectAll {
+			assert.Equal(t, proxy.PassthroughClusterName, last.GetRoute().GetCluster())
+		} else {
+			assert.Equal(t, uint32(404), last.GetDirectResponse().GetStatus(), "no passthrough -> hard 404")
+		}
+	}
 }
 
 func domainsOf(vhosts []*routev3.VirtualHost) []string {
@@ -379,7 +435,7 @@ func TestCaptureVhosts_RouteTargetGAMMAFeatures(t *testing.T) {
 	})
 	c.SetRouteTargetPorts(map[string][]uint32{"gateway-conformance-mesh/echo": {80}})
 
-	vhosts := c.captureVhosts()
+	vhosts := captureTable(c, 80)
 
 	// The route target must host-match the bare same-namespace dial "echo" (the
 	// authority the conformance client presents) — else the request falls to the

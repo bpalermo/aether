@@ -1,7 +1,7 @@
 // Package capture contains the node agent's transparent-capture controller: it
 // watches the generated selectorless mesh Services (proposal 018, Phase 3a) and
 // projects their cluster.local authorities into the snapshot cache, which builds the
-// cap_http route table the per-pod capture listeners serve. Endpoints stay in the
+// cap_http_<port> route tables the per-pod capture listeners serve. Endpoints stay in the
 // registry; this only maps a captured authority to its existing service cluster.
 package capture
 
@@ -9,11 +9,9 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
-	"strings"
 
 	"aethermesh.dev/common/serviceref"
 
-	aetherannotations "aethermesh.dev/common/constants/annotations"
 	aetherlabels "aethermesh.dev/common/constants/labels"
 	"aethermesh.dev/common/ctrlqueue"
 	commonlog "aethermesh.dev/common/log"
@@ -29,10 +27,11 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/source"
 )
 
-// CaptureTCPService describes a non-HTTP mesh Service that needs a per-ClusterIP
-// TCP-proxy floor chain on the capture listener (proposal 018, Phase 3a TCP floor).
-// The ClusterIP drives the filter-chain prefix_ranges match; the cache derives the
-// cluster name from ServiceName and its configured mesh domain.
+// CaptureTCPService describes a mesh Service with a routable address: the
+// capture listener's raw-TCP chains match on that address (proposal 018,
+// Phase 3a TCP floor; proposal 037). The ClusterIP drives the filter-chain
+// prefix_ranges match; the cache derives the cluster name from ServiceName and
+// its configured mesh domain, and the service's ports from the registry.
 type CaptureTCPService struct {
 	// ServiceName is the bare mesh service name (registry key). The cache uses this
 	// to derive the TCP cluster name (TCPClusterName) and to look up SAN namespaces.
@@ -41,19 +40,10 @@ type CaptureTCPService struct {
 	// matches on (original-dst recovered via SO_ORIGINAL_DST). Must be a valid
 	// non-None IP address (headless/unallocated Services are skipped).
 	ClusterIP string
-	// PrimaryIsTCP reports whether the service's PRIMARY port is raw TCP, from
-	// the registrar-stamped aether.io/app-protocol annotation.
-	//
-	// It gates the PORTLESS /32 floor chain and nothing else (proposal 037
-	// design (d)). An HTTP-primary service must not have one — a per-IP chain
-	// outranks the HCM's application-protocol match and would swallow the VIP's
-	// HTTP traffic — but it may still serve raw-TCP ports, which get
-	// destination_port-qualified chains that do not.
-	PrimaryIsTCP bool
 }
 
 // AuthoritySink receives the projections from the generated mesh Services:
-//   - SetCaptureAuthorities: service -> cluster.local FQDN (cap_http, transparent capture).
+//   - SetCaptureAuthorities: service -> cluster.local FQDN (the cap_http_<port> route tables, transparent capture).
 //   - SetMeshDNSRecords:     service -> mesh-Service ClusterIP (the per-pod dns_filter's
 //     A record for <svc>.<meshDomain>, the mesh-global FQDN).
 //   - SetCaptureTCPServices: the non-HTTP services that need per-ClusterIP TCP floor chains.
@@ -108,36 +98,6 @@ func initialProjection() <-chan event.GenericEvent {
 	return ch
 }
 
-// isHTTPAppProtocol reports whether the annotation value represents an HTTP-family
-// protocol (http, h2, grpc) that the HCM filter chain handles. Non-HTTP protocols
-// (tcp, or any unrecognised value) get a per-ClusterIP TCP-proxy floor chain.
-func isHTTPAppProtocol(proto string) bool {
-	switch strings.ToLower(proto) {
-	case "http", "h2", "grpc", "http2", "":
-		return true
-	default:
-		return false
-	}
-}
-
-// isUDPAppProtocol reports whether the service's primary port speaks datagrams.
-//
-// This is NOT the complement of isHTTPAppProtocol, and the difference matters: a
-// UDP service must get neither an HCM chain nor a portless /32 TCP floor chain.
-// Its data path is the udp_proxy capture listener, which is a separate,
-// connection-less listener on the same port and shares no filter chain with the
-// TCP side.
-//
-// Without this carve-out "udp" fell to isHTTPAppProtocol's default branch and
-// was classified TCP-primary, so a UDP service's VIP acquired a portless TCP
-// floor chain naming a tcp: cluster that may not exist. An unrecognised value
-// still classifies as TCP -- that conservative default is deliberate and
-// unchanged; only a protocol the mesh actually knows is datagram-only is carved
-// out of it.
-func isUDPAppProtocol(proto string) bool {
-	return strings.EqualFold(proto, aetherannotations.ProtocolUDP)
-}
-
 // Reconcile re-lists the mesh Services and projects their cluster.local authorities,
 // DNS records, and TCP-floor service set.
 func (r *Reconciler) Reconcile(ctx context.Context, _ reconcile.Request) (reconcile.Result, error) {
@@ -166,32 +126,18 @@ func (r *Reconciler) Reconcile(ctx context.Context, _ reconcile.Request) (reconc
 			records[svc] = ip
 		}
 		// EVERY mesh Service with a routable VIP is delivered (proposal 037
-		// design (d)), not only the non-HTTP ones, because an HTTP-primary
-		// service can still serve raw-TCP ports and those need chains too.
+		// design (d)): any of them can serve raw-TCP ports, which need chains
+		// on its address.
 		//
-		// PrimaryIsTCP is what the consumer keys the PORTLESS /32 floor chain
-		// on. An HTTP-primary service must NOT get one: filter-chain match
-		// precedence puts destination-IP above application-protocol, so a per-IP
-		// chain would intercept HTTP to that VIP before the HCM chain could.
-		// Its raw-TCP ports get destination_port-qualified chains instead, which
-		// Envoy evaluates ahead of prefix_ranges and which therefore do not
-		// disturb the VIP's HTTP traffic.
-		//
-		// The annotation is still the primary's protocol -- the registrar stamps
-		// it from the primary port -- but it is no longer the gate on delivery.
-		// Which PORTS are raw TCP is derived by the cache from the endpoints it
-		// already holds, one hop closer to the source than this annotation, and
-		// #878 is what happened when the two copies disagreed.
+		// Nothing but the name and the address is read from the Service
+		// (proposal 043, Phase 1). What its ports are and what speaks on each
+		// is derived by the cache from the registry endpoints it holds, per
+		// port. The aether.io/app-protocol and aether.io/port annotations are
+		// NOT read: they said one thing about the whole service, #878 and
+		// #1672 are what happened when that one thing was wrong, and the
+		// registrar only keeps stamping them for agents of chart 2.6.
 		if ip != "" && ip != corev1.ClusterIPNone {
-			appProto := s.Annotations[aetherlabels.AnnotationMeshAppProtocol]
-			tcpServices = append(tcpServices, CaptureTCPService{
-				ServiceName: svc,
-				ClusterIP:   ip,
-				// Three-valued, not two: HTTP gets the HCM chain, UDP gets
-				// neither chain (its path is the udp_proxy listener), and
-				// everything else gets the portless TCP floor.
-				PrimaryIsTCP: !isHTTPAppProtocol(appProto) && !isUDPAppProtocol(appProto),
-			})
+			tcpServices = append(tcpServices, CaptureTCPService{ServiceName: svc, ClusterIP: ip})
 		}
 	}
 

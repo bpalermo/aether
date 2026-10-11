@@ -12,6 +12,7 @@ package gamma
 import (
 	"context"
 	"log/slog"
+	"maps"
 	"slices"
 	"strings"
 
@@ -20,15 +21,24 @@ import (
 	configprotov1 "aethermesh.dev/api/aether/config/v1"
 	registryv1 "aethermesh.dev/api/aether/registry/v1"
 	configapisv1 "aethermesh.dev/common/apis/config/v1"
+	aetherlabels "aethermesh.dev/common/constants/labels"
 	"aethermesh.dev/common/crdcheck"
 	"aethermesh.dev/common/ctrlqueue"
 	"aethermesh.dev/common/gammaproject"
 	commonlog "aethermesh.dev/common/log"
 	"aethermesh.dev/common/referencegrant"
+	"aethermesh.dev/common/serviceref"
+	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/equality"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/util/intstr"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
+	"sigs.k8s.io/controller-runtime/pkg/predicate"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
 	gatewayv1beta1 "sigs.k8s.io/gateway-api/apis/v1beta1"
@@ -51,6 +61,13 @@ type RouteSink interface {
 	// SetServiceRoutes. Sourced from the HTTPRoute/GRPCRoute parentRef port; lets the
 	// cap_http vhost host-match a client dialing the target's REAL port.
 	SetRouteTargetPorts(ports map[string][]uint32)
+	// SetServicePortMaps receives the port map of every Service a route names
+	// as its parent or as a backend and that the registrar did not generate
+	// (proposal 043, "A Service is a port map"), keyed "<ns>/<svc>": Service
+	// port -> the pod port its targetPort names, 0 when the targetPort is a
+	// name. A route's ports are ports of the SERVICE; the mesh resolves them
+	// to pod ports through this.
+	SetServicePortMaps(portMaps map[string]map[uint32]uint32)
 }
 
 // Reconciler watches HTTPRoutes (parentRef=Service) cluster-wide and projects, on
@@ -136,6 +153,11 @@ func (r *Reconciler) SetupWithManager(mgr ctrl.Manager) error {
 		// that reference it.
 		b = b.Watches(&configapisv1.HTTPFilter{}, enqueueAll)
 	}
+	// A route's ports are ports of a Service, resolved through the Service's
+	// port map (proposal 043): a Service whose ports change must re-project
+	// the routes that name it. Only a change of ports or of ownership counts;
+	// Services change status and annotations far more often than that.
+	b = b.Watches(&corev1.Service{}, enqueueAll, builder.WithPredicates(servicePortsChanged()))
 	return b.Named("gamma").WithOptions(ctrlqueue.Options()).Complete(r)
 }
 
@@ -157,7 +179,14 @@ func (r *Reconciler) Reconcile(ctx context.Context, _ reconcile.Request) (reconc
 
 	routes, portSets := r.projectAllRoutes(httpList, grpcList, grants, httpFilters, specs)
 	routeTargetPorts := buildRouteTargetPorts(portSets)
+	portMaps, err := r.servicePortMaps(ctx, routes)
+	if err != nil {
+		return reconcile.Result{}, err
+	}
 
+	// The port maps first: the rules are placed and their backends resolved
+	// through them.
+	r.Sink.SetServicePortMaps(portMaps)
 	r.Sink.SetServiceRoutes(routes)
 	r.Sink.SetServiceChainFilters(chainFilters)
 	r.Sink.SetServiceInboundFilters(inboundFilters)
@@ -293,7 +322,12 @@ func (r *Reconciler) projectHTTPRouteItems(
 			addToPortSets(portSets, p.Key, p.Port)
 			svcFilters := gammaproject.ServiceFilters(p.Key, specs)
 			for _, rule := range hr.Spec.Rules {
-				routes[p.Key] = append(routes[p.Key], r.buildGammaRoute(rule, hr.Namespace, "HTTPRoute", grants, httpFilters, svcFilters))
+				gr := r.buildGammaRoute(rule, hr.Namespace, "HTTPRoute", grants, httpFilters, svcFilters)
+				refs := make([]gatewayv1.BackendObjectReference, 0, len(rule.BackendRefs))
+				for _, b := range rule.BackendRefs {
+					refs = append(refs, b.BackendObjectReference)
+				}
+				routes[p.Key] = append(routes[p.Key], withPorts(gr, p.Port, gammaproject.BackendRefPorts(refs, hr.Namespace, "HTTPRoute", grants)))
 			}
 		}
 	}
@@ -314,10 +348,127 @@ func (r *Reconciler) projectGRPCRouteItems(
 			addToPortSets(portSets, p.Key, p.Port)
 			svcFilters := gammaproject.ServiceFilters(p.Key, specs)
 			for _, rule := range gr.Spec.Rules {
-				routes[p.Key] = append(routes[p.Key], r.buildGammaRouteFromGRPC(rule, gr.Namespace, "GRPCRoute", grants, httpFilters, svcFilters))
+				projected := r.buildGammaRouteFromGRPC(rule, gr.Namespace, "GRPCRoute", grants, httpFilters, svcFilters)
+				refs := make([]gatewayv1.BackendObjectReference, 0, len(rule.BackendRefs))
+				for _, b := range rule.BackendRefs {
+					refs = append(refs, b.BackendObjectReference)
+				}
+				routes[p.Key] = append(routes[p.Key], withPorts(projected, p.Port, gammaproject.BackendRefPorts(refs, gr.Namespace, "GRPCRoute", grants)))
 			}
 		}
 	}
+}
+
+// withPorts returns a projected rule carrying the two ports the shared
+// projection does not: the parentRef's port (0 = none: the rule applies to
+// every port of the parent Service) and each backendRef's port, both ports of
+// a SERVICE (proposal 043). backendPorts is gammaproject.BackendRefPorts over
+// the rule's backendRefs, so element i belongs to backend i; a length that
+// does not match leaves the backends without a port rather than guess.
+func withPorts(rule proxy.GammaRoute, parentPort uint32, backendPorts []uint32) proxy.GammaRoute {
+	rule.ParentPort = parentPort
+	if len(backendPorts) != len(rule.Backends) {
+		return rule
+	}
+	for i := range rule.Backends {
+		rule.Backends[i].Port = backendPorts[i]
+	}
+	return rule
+}
+
+// servicePortsChanged passes the Service events that can change a port map:
+// a Service appearing or going, and an update that changes its ports or
+// whether the registrar owns it.
+func servicePortsChanged() predicate.Predicate {
+	return predicate.Funcs{
+		UpdateFunc: func(e event.UpdateEvent) bool {
+			o, okOld := e.ObjectOld.(*corev1.Service)
+			n, okNew := e.ObjectNew.(*corev1.Service)
+			if !okOld || !okNew {
+				return true
+			}
+			return !equality.Semantic.DeepEqual(o.Spec.Ports, n.Spec.Ports) ||
+				o.Labels[aetherlabels.LabelMeshService] != n.Labels[aetherlabels.LabelMeshService]
+		},
+	}
+}
+
+// servicePortMaps reads the port map of every Service the projected routes
+// name, as a parent or as a backend (proposal 043, "A Service is a port map").
+//
+// A Service the registrar generated is left out: it exposes its pods' ports
+// unchanged, and the cache derives those from the registry (it does so
+// whatever the Service carries, so an agent behind an older registrar needs
+// nothing from it). So is a Service that does not exist: the name is then
+// addressed by its pods' own ports, as before.
+//
+// A numeric targetPort resolves to that pod port, and an unset one to the
+// Service port (the API server's own default). A NAMED targetPort cannot be
+// resolved, because the registry carries no port names: it maps to 0, the
+// routes through it route nothing, and it is said here.
+func (r *Reconciler) servicePortMaps(ctx context.Context, routes map[string][]proxy.GammaRoute) (map[string]map[uint32]uint32, error) {
+	out := map[string]map[uint32]uint32{}
+	for _, key := range routeServiceKeys(routes) {
+		ref, ok := serviceref.ParseKey(key)
+		if !ok {
+			continue
+		}
+		svc := &corev1.Service{}
+		if err := r.Get(ctx, client.ObjectKey{Namespace: ref.Namespace, Name: ref.Name}, svc); err != nil {
+			if apierrors.IsNotFound(err) {
+				continue
+			}
+			return nil, err
+		}
+		if svc.Labels[aetherlabels.LabelMeshService] == "true" {
+			continue
+		}
+		m, named := servicePortMap(svc)
+		for _, sp := range named {
+			r.Log.WarnContext(ctx, "a Service port a route can address has a named targetPort, which the mesh cannot resolve (the registry carries no port names); routes through it route nothing. Use a numeric targetPort",
+				"service", key, "port", sp.Port, "targetPort", sp.TargetPort.StrVal)
+		}
+		out[key] = m
+	}
+	return out, nil
+}
+
+// routeServiceKeys returns, sorted, the key of every Service the routes name:
+// each parent and each backend.
+func routeServiceKeys(routes map[string][]proxy.GammaRoute) []string {
+	keys := map[string]struct{}{}
+	for parent, rules := range routes {
+		keys[parent] = struct{}{}
+		for _, rule := range rules {
+			for _, b := range rule.Backends {
+				keys[b.Service] = struct{}{}
+			}
+		}
+	}
+	return slices.Sorted(maps.Keys(keys))
+}
+
+// servicePortMap returns a Service's TCP port map (Service port -> pod port,
+// 0 for a named targetPort) and the ports whose targetPort is a name.
+func servicePortMap(svc *corev1.Service) (map[uint32]uint32, []corev1.ServicePort) {
+	m := make(map[uint32]uint32, len(svc.Spec.Ports))
+	var named []corev1.ServicePort
+	for _, sp := range svc.Spec.Ports {
+		if sp.Protocol != "" && sp.Protocol != corev1.ProtocolTCP {
+			continue
+		}
+		port := uint32(sp.Port)
+		switch {
+		case sp.TargetPort.Type == intstr.String:
+			m[port] = 0
+			named = append(named, sp)
+		case sp.TargetPort.IntVal > 0:
+			m[port] = uint32(sp.TargetPort.IntVal)
+		default:
+			m[port] = port
+		}
+	}
+	return m, named
 }
 
 // addToPortSets records port in portSets[key], skipping zero ports.

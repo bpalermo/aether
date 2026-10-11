@@ -188,7 +188,7 @@ func TestLateTCPFloorSubscribesToItsOwnEDSResource(t *testing.T) {
 	require.False(t, hasFloor, "fixture: the floor must NOT exist yet, or nothing is 'later'")
 
 	// The later CDS update: the service joins the capture TCP set.
-	c.SetCaptureTCPServices([]capture.CaptureTCPService{{ServiceName: "aether-test/mixed", ClusterIP: "10.96.0.60", PrimaryIsTCP: true}})
+	c.SetCaptureTCPServices([]capture.CaptureTCPService{{ServiceName: "aether-test/mixed", ClusterIP: "10.96.0.60"}})
 	require.NoError(t, c.generateSnapshot(ctx))
 	later, err := c.GetSnapshot("node-1")
 	require.NoError(t, err)
@@ -219,7 +219,7 @@ func TestNoNonDefaultClusterSharesTheBareServiceEDSName(t *testing.T) {
 	require.NoError(t, c.SetNodeIdentity(ctx, nodeIdentity))
 	declareDeps(c, "demo/echo", "demo/mixed")
 	c.SetCaptureAuthorities(map[string]string{"demo/echo": "echo.demo.svc.cluster.local"})
-	c.SetCaptureTCPServices([]capture.CaptureTCPService{{ServiceName: "demo/mixed", ClusterIP: "10.96.0.61", PrimaryIsTCP: true}})
+	c.SetCaptureTCPServices([]capture.CaptureTCPService{{ServiceName: "demo/mixed", ClusterIP: "10.96.0.61"}})
 
 	multi := makeEndpoint("10.0.3.1", "cluster-1", "node-2", 8080)
 	multi.Ports = []uint32{8080, 9090}
@@ -233,12 +233,20 @@ func TestNoNonDefaultClusterSharesTheBareServiceEDSName(t *testing.T) {
 		9000: registryv1.PortProtocol_PORT_PROTOCOL_TCP,
 		8080: registryv1.PortProtocol_PORT_PROTOCOL_TCP,
 	}
+	// Two TCP pods to the one HTTP pod. The service's pods disagree about the
+	// port they declare (9000 raw TCP here, 8080 HTTP there), and the capture
+	// chains follow the legacy target of the most endpoints (legacyTarget),
+	// where they used to follow the mesh Service's annotation when this
+	// fixture had one pod of each (#1672).
+	tcpMulti2 := makeEndpoint("10.0.0.21", "cluster-1", "node-2", 9000)
+	tcpMulti2.Ports = tcpMulti.Ports
+	tcpMulti2.PortProtocols = tcpMulti.PortProtocols
 	reg := &mockRegistry{
 		tcpAware: true,
 		listAllEndpointsFunc: func(_ context.Context, protocol registryv1.Service_Protocol) (map[string][]*registryv1.ServiceEndpoint, error) {
 			if protocol == registryv1.Service_PROTOCOL_TCP {
 				return map[string][]*registryv1.ServiceEndpoint{
-					"demo/mixed": {tcpMulti},
+					"demo/mixed": {tcpMulti, tcpMulti2},
 				}, nil
 			}
 			return map[string][]*registryv1.ServiceEndpoint{

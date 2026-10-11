@@ -107,6 +107,7 @@ go_test(
     srcs = [
         "accesslog_test.go",
         "authz_test.go",
+        "capture_perport_043_test.go",
         "capture_test.go",
         "captureport_test.go",
         "cluster_test.go",
@@ -143,6 +144,7 @@ go_test(
         "podstatkey_test.go",
         "projection_test.go",
         "quic_outbound_test.go",
+        "route_perport_043_test.go",
         "route_test.go",
         "sourceidentity_test.go",
         "spiffe_test.go",
@@ -240,6 +242,8 @@ go_test(
         "podstatkey_test.go",
         "outcome.go",
         "outcome_test.go",
+        "capture_perport_043_test.go",
+        "route_perport_043_test.go",
     ],
     deps = [
         "//agent/internal/xds/config",

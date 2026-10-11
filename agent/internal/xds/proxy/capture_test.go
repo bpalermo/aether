@@ -20,7 +20,7 @@ import (
 
 func TestGenerateCaptureListener(t *testing.T) {
 	pod := &cniv1.CNIPod{Name: "p1", Namespace: "default", NetworkNamespace: "/var/run/netns/p1"}
-	l, err := GenerateCaptureListener(pod, "spiffe://aether.internal/ns/default/sa/test", 15001, "aether.internal", false, nil, false, nil)
+	l, err := GenerateCaptureListener(pod, "spiffe://aether.internal/ns/default/sa/test", 15001, "aether.internal", false, nil, nil, false, nil)
 	require.NoError(t, err)
 
 	assert.Equal(t, "capture_default_p1", l.GetName())
@@ -56,7 +56,8 @@ func TestGenerateCaptureListener(t *testing.T) {
 	assert.Equal(t, listenerFilterHTTPInspectorName, l.GetListenerFilters()[1].GetName())
 	assert.Equal(t, listenerFilterTLSInspectorName, l.GetListenerFilters()[2].GetName())
 
-	// no TCP services → HCM filter chain; no DefaultFilterChain (withPassthrough=false).
+	// no TCP services and no HTTP port number → the one HTTP chain every
+	// listener has, cap_http_other; no DefaultFilterChain (withPassthrough=false).
 	// +1 for cap_tcp_blackhole: scoped mode catches raw TCP to the TCP mesh
 	// port that no service chain claimed, before the HCM fabricates a 400 for
 	// it (proposal 037).
@@ -75,11 +76,14 @@ func TestGenerateCaptureListener(t *testing.T) {
 	hcmFilter := filters[len(filters)-1]
 	var hcm http_connection_managerv3.HttpConnectionManager
 	require.NoError(t, hcmFilter.GetTypedConfig().UnmarshalTo(&hcm))
-	assert.Equal(t, CaptureHTTPRouteName, hcm.GetRds().GetRouteConfigName())
+	// Proposal 043: with no HTTP port number in the mesh the listener's only
+	// HTTP chain is cap_http_other, and its route table carries the chain's
+	// name (it was the single "cap_http" table before).
+	assert.Equal(t, CaptureHTTPOtherRouteName, hcm.GetRds().GetRouteConfigName())
 }
 
 func TestGenerateCaptureListener_RequiresNetns(t *testing.T) {
-	_, err := GenerateCaptureListener(&cniv1.CNIPod{Name: "p1"}, "spiffe://aether.internal/ns/default/sa/test", 15001, "aether.internal", false, nil, false, nil)
+	_, err := GenerateCaptureListener(&cniv1.CNIPod{Name: "p1"}, "spiffe://aether.internal/ns/default/sa/test", 15001, "aether.internal", false, nil, nil, false, nil)
 	assert.Error(t, err)
 }
 
@@ -88,25 +92,30 @@ func TestGenerateCaptureListener_RequiresNetns(t *testing.T) {
 func TestGenerateCaptureListener_WithTCPServices(t *testing.T) {
 	pod := &cniv1.CNIPod{Name: "p1", Namespace: "default", NetworkNamespace: "/var/run/netns/p1"}
 	tcpSvcs := []CaptureTCPService{
-		{ClusterName: "tcp:svc-a.aether.internal", ClusterIP: "10.96.1.10", PrimaryIsTCP: true},
-		{ClusterName: "tcp:svc-b.aether.internal", ClusterIP: "10.96.1.20", PrimaryIsTCP: true},
+		{ClusterName: "tcp:svc-a.aether.internal", ClusterIP: "10.96.1.10", LegacyTCPPort: 9000, AnyPort: true},
+		{ClusterName: "tcp:svc-b.aether.internal", ClusterIP: "10.96.1.20", LegacyTCPPort: 9000, AnyPort: true},
 	}
-	l, err := GenerateCaptureListener(pod, "spiffe://aether.internal/ns/default/sa/test", 15001, "aether.internal", false, tcpSvcs, false, nil)
+	l, err := GenerateCaptureListener(pod, "spiffe://aether.internal/ns/default/sa/test", 15001, "aether.internal", false, tcpSvcs, nil, false, nil)
 	require.NoError(t, err)
 
-	// Each TCP-primary service now yields TWO chains (proposal 037): the
-	// well-known :18082 spelling, and the portless any-port deprecation shim
-	// whose own stat prefix is what Phase 4's removal is gated on. Plus the HCM
-	// catch-all and the scoped-mode blackhole.
+	// Each service whose legacy target is raw TCP, and which declares no
+	// HTTP port, yields THREE chains (proposals 037 and 043): the well-known
+	// :18082 spelling, its own port, and the portless any-port chain whose
+	// own stat prefix is what its removal is gated on. Plus cap_http_other
+	// and the scoped-mode blackhole.
 	names := map[string]bool{}
 	for _, fc := range l.GetFilterChains() {
 		names[fc.GetName()] = true
 	}
 	assert.True(t, names["cap_tcp_tcp:svc-a.aether.internal_18082"], "the :18082 spelling")
+	assert.True(t, names["cap_tcp_tcp:svc-a.aether.internal_9000"], "the legacy target's own port")
 	assert.True(t, names["cap_tcp_anyport_tcp:svc-a.aether.internal"], "the any-port shim, counted separately")
 	assert.True(t, names["cap_tcp_blackhole"])
-	assert.True(t, names["capture_default_p1"])
-	require.Len(t, l.GetFilterChains(), 6, "2 per TCP service + HCM catch-all + blackhole")
+	// The HTTP chain is named after its route table since proposal 043; it
+	// was capture_<pod> while there was one of it.
+	assert.True(t, names[CaptureHTTPOtherRouteName])
+	assert.False(t, names["capture_default_p1"])
+	require.Len(t, l.GetFilterChains(), 8, "3 per TCP service + cap_http_other + blackhole")
 
 	// Collect chains by match type.
 	var tcpChains []*listenerv3.FilterChain
@@ -114,12 +123,12 @@ func TestGenerateCaptureListener_WithTCPServices(t *testing.T) {
 	for _, fc := range l.GetFilterChains() {
 		if len(fc.GetFilterChainMatch().GetPrefixRanges()) > 0 {
 			tcpChains = append(tcpChains, fc)
-		} else {
+		} else if fc.GetName() == CaptureHTTPOtherRouteName {
 			hcmChain = fc
 		}
 	}
-	// Four: the :18082 spelling and the any-port shim, per service.
-	require.Len(t, tcpChains, 4)
+	// Six: the :18082 spelling, the port and the any-port shim, per service.
+	require.Len(t, tcpChains, 6)
 	require.NotNil(t, hcmChain)
 
 	// TCP chains: keyed by /32 prefix_range, single tcp_proxy filter.
@@ -144,17 +153,23 @@ func TestGenerateCaptureListener_WithTCPServices(t *testing.T) {
 func TestGenerateCaptureListener_InvalidTCPService(t *testing.T) {
 	pod := &cniv1.CNIPod{Name: "p1", NetworkNamespace: "/var/run/netns/p1"}
 	tcpSvcs := []CaptureTCPService{
-		{ClusterName: "tcp:svc-a.aether.internal", ClusterIP: "", PrimaryIsTCP: true},           // missing IP
-		{ClusterName: "", ClusterIP: "10.96.1.10", PrimaryIsTCP: true},                          // missing name
-		{ClusterName: "tcp:svc-b.aether.internal", ClusterIP: "not-an-ip", PrimaryIsTCP: true},  // bad IP
-		{ClusterName: "tcp:svc-c.aether.internal", ClusterIP: "10.96.1.30", PrimaryIsTCP: true}, // valid
+		{ClusterName: "tcp:svc-a.aether.internal", ClusterIP: "", LegacyTCPPort: 9000, AnyPort: true, TCPPorts: []uint32{9100}},           // missing IP
+		{ClusterName: "", ClusterIP: "10.96.1.10", LegacyTCPPort: 9000, AnyPort: true, TCPPorts: []uint32{9100}},                          // missing name
+		{ClusterName: "tcp:svc-b.aether.internal", ClusterIP: "not-an-ip", LegacyTCPPort: 9000, AnyPort: true, TCPPorts: []uint32{9100}},  // bad IP
+		{ClusterName: "tcp:svc-c.aether.internal", ClusterIP: "10.96.1.30", LegacyTCPPort: 9000, AnyPort: true, TCPPorts: []uint32{9100}}, // valid
 	}
-	l, err := GenerateCaptureListener(pod, "spiffe://aether.internal/ns/default/sa/test", 15001, "aether.internal", false, tcpSvcs, false, nil)
+	l, err := GenerateCaptureListener(pod, "spiffe://aether.internal/ns/default/sa/test", 15001, "aether.internal", false, tcpSvcs, nil, false, nil)
 	require.NoError(t, err)
 
-	// Only the valid service produces chains: its :18082 spelling and the
-	// any-port shim, plus the HCM catch-all and the scoped-mode blackhole.
-	require.Len(t, l.GetFilterChains(), 4)
+	// Only the valid service produces chains: its per-port chain, its :18082
+	// spelling, its own port and the any-port shim, plus cap_http_other and
+	// the scoped-mode blackhole.
+	require.Len(t, l.GetFilterChains(), 6)
+	for _, fc := range l.GetFilterChains() {
+		for _, pr := range fc.GetFilterChainMatch().GetPrefixRanges() {
+			assert.Equal(t, "10.96.1.30", pr.GetAddressPrefix(), "chain %s", fc.GetName())
+		}
+	}
 }
 
 // TestGenerateCaptureListener_WithPassthrough verifies that withPassthrough=true adds
@@ -162,7 +177,7 @@ func TestGenerateCaptureListener_InvalidTCPService(t *testing.T) {
 // an extra named chain (DefaultFilterChain is separate from filter_chains).
 func TestGenerateCaptureListener_WithPassthrough(t *testing.T) {
 	pod := &cniv1.CNIPod{Name: "p1", NetworkNamespace: "/var/run/netns/p1"}
-	l, err := GenerateCaptureListener(pod, "spiffe://aether.internal/ns/default/sa/test", 15001, "aether.internal", false, nil, true, nil)
+	l, err := GenerateCaptureListener(pod, "spiffe://aether.internal/ns/default/sa/test", 15001, "aether.internal", false, nil, nil, true, nil)
 	require.NoError(t, err)
 
 	// Named filter_chains: only the HCM chain (no TCP services).
@@ -200,15 +215,16 @@ func TestGenerateCaptureListener_WithPassthrough(t *testing.T) {
 func TestGenerateCaptureListener_WithPassthroughAndTCPServices(t *testing.T) {
 	pod := &cniv1.CNIPod{Name: "p1", NetworkNamespace: "/var/run/netns/p1"}
 	tcpSvcs := []CaptureTCPService{
-		{ClusterName: "tcp:svc-a.aether.internal", ClusterIP: "10.96.1.10", PrimaryIsTCP: true},
+		{ClusterName: "tcp:svc-a.aether.internal", ClusterIP: "10.96.1.10", LegacyTCPPort: 9000, AnyPort: true},
 	}
-	l, err := GenerateCaptureListener(pod, "spiffe://aether.internal/ns/default/sa/test", 15001, "aether.internal", false, tcpSvcs, true, nil)
+	l, err := GenerateCaptureListener(pod, "spiffe://aether.internal/ns/default/sa/test", 15001, "aether.internal", false, tcpSvcs, nil, true, nil)
 	require.NoError(t, err)
 
-	// Named chains: the service's :18082 spelling, its any-port shim, and the
-	// HCM. No blackhole here — redirect-all uses passthrough -> kube-proxy
-	// REJECT, which is already attributable (proposal 037).
-	require.Len(t, l.GetFilterChains(), 3)
+	// Named chains: the service's :18082 spelling, its own port, its any-port
+	// shim, and cap_http_other. No blackhole here — redirect-all uses
+	// passthrough -> kube-proxy REJECT, which is already attributable
+	// (proposal 037).
+	require.Len(t, l.GetFilterChains(), 4)
 	// DefaultFilterChain carries the passthrough.
 	require.NotNil(t, l.GetDefaultFilterChain())
 	assert.Equal(t, "cap_passthrough", l.GetDefaultFilterChain().GetName())
@@ -282,8 +298,13 @@ func TestBuildCaptureRouteConfiguration(t *testing.T) {
 		ServiceClusterName("aether-test/svc-1", "aether.internal"),
 		[]string{"svc-1.aether-test.svc.cluster.local", "svc-1.aether-test.svc.cluster.local:18081"},
 	)
-	rc := BuildCaptureRouteConfiguration([]*routev3.VirtualHost{vh}, "aether.internal", false)
-	assert.Equal(t, CaptureHTTPRouteName, rc.GetName())
+	// The table of the mesh HTTP port (a legacy table, so a port-less mesh
+	// authority may name its cluster too), scoped capture. One table per
+	// dialled port since proposal 043; it was the single "cap_http".
+	name := CaptureHTTPRouteName(meshconst.ProxyOutboundPort)
+	rc := BuildCaptureRouteConfiguration(name, []*routev3.VirtualHost{vh},
+		BuildCaptureCatchAllVirtualHost("aether.internal", meshconst.ProxyOutboundPort, true, false))
+	assert.Equal(t, "cap_http_18081", rc.GetName())
 	require.Len(t, rc.GetVirtualHosts(), 2, "the service vhost + the on-demand catch-all")
 
 	got := rc.GetVirtualHosts()[0]
@@ -305,6 +326,10 @@ func TestBuildCaptureRouteConfiguration(t *testing.T) {
 	}
 	assert.True(t, hasOnDemand, "catch-all routes mesh authorities to ODCDS via :authority")
 	assert.True(t, has404, "scoped-capture catch-all 404s non-mesh authorities")
+
+	// The table owns its virtual_hosts slice, and a nil catch-all adds none.
+	bare := BuildCaptureRouteConfiguration(name, []*routev3.VirtualHost{vh}, nil)
+	require.Len(t, bare.GetVirtualHosts(), 1)
 }
 
 // TestBuildCaptureRouteConfigurationRedirectAll verifies that with redirect-all
@@ -312,7 +337,8 @@ func TestBuildCaptureRouteConfiguration(t *testing.T) {
 // (so a captured request to a real Kubernetes Service with no mesh authority and no
 // dependency-set vhost still reaches its backend via kube-proxy) instead of 404'ing.
 func TestBuildCaptureRouteConfigurationRedirectAll(t *testing.T) {
-	rc := BuildCaptureRouteConfiguration(nil, "aether.internal", true)
+	rc := BuildCaptureRouteConfiguration(CaptureHTTPRouteName(8080), nil,
+		BuildCaptureCatchAllVirtualHost("aether.internal", 8080, false, true))
 	require.Len(t, rc.GetVirtualHosts(), 1, "just the on-demand catch-all")
 	catchAll := rc.GetVirtualHosts()[0]
 

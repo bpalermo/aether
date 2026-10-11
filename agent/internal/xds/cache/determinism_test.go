@@ -238,8 +238,10 @@ func fingerprintCache(t *testing.T, c *SnapshotCache) map[string]string {
 		vhostResources = append(vhostResources, vh)
 	}
 	captureVhostResources := make([]types.Resource, 0)
-	for _, vh := range c.captureVhosts() {
-		captureVhostResources = append(captureVhostResources, vh)
+	for _, port := range append(c.captureHTTPPorts(), 0) {
+		for _, vh := range captureTable(c, port) {
+			captureVhostResources = append(captureVhostResources, vh)
+		}
 	}
 	c.secretMu.RLock()
 	secrets := make([]types.Resource, 0, len(c.secrets))

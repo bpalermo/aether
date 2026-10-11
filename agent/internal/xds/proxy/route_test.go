@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"regexp"
+	"strings"
 	"testing"
 
 	routev3 "github.com/envoyproxy/go-control-plane/envoy/config/route/v3"
@@ -54,63 +55,122 @@ func resolveCatchAll(vh *routev3.VirtualHost, authority, path string) (cluster s
 	return "", 0
 }
 
+// resolveTable resolves (authority, path) against a whole route table the way
+// Envoy selects a virtual host: an exact domain first, then the longest prefix
+// wildcard ("name:*"), then "*". It returns the selected virtual host's name
+// with what resolveCatchAll finds in it.
+func resolveTable(rc *routev3.RouteConfiguration, authority, path string) (vhost, cluster string, status uint32) {
+	var exact, wildcard, star *routev3.VirtualHost
+	wildcardLen := -1
+	for _, vh := range rc.GetVirtualHosts() {
+		for _, d := range vh.GetDomains() {
+			switch {
+			case d == "*":
+				star = vh
+			case strings.HasSuffix(d, "*"):
+				if p := strings.TrimSuffix(d, "*"); strings.HasPrefix(authority, p) && len(p) > wildcardLen {
+					wildcard, wildcardLen = vh, len(p)
+				}
+			case d == authority:
+				exact = vh
+			}
+		}
+	}
+	for _, vh := range []*routev3.VirtualHost{exact, wildcard, star} {
+		if vh != nil {
+			cluster, status = resolveCatchAll(vh, authority, path)
+			return vh.GetName(), cluster, status
+		}
+	}
+	return "", "", 0
+}
+
 // TestCatchAll_KnownTargetNeverShadowedByPassthrough is the regression guard for the
 // MESH-HTTP RDS-reload convergence race: a captured request whose :authority is a
 // known in-scope mesh service must resolve to that service's cluster — under EVERY
-// dial spelling and on ANY port — never to the ORIGINAL_DST passthrough (which
-// leaks to kube-proxy and silently drops the GAMMA features). The known-target
-// routes are derived from the STABLE mesh-authority set, so this holds even while
-// the service's dedicated cap_http vhost is absent mid-rebuild.
+// dial spelling — never to the ORIGINAL_DST passthrough (which leaks to
+// kube-proxy and silently drops the GAMMA features).
+//
+// Until proposal 043 the guarantee was a "known target" regex route on the
+// catch-all that accepted the service's names ON ANY PORT and sent them to its
+// default cluster. That route was #1682: "<svc>.<ns>:9090" reached the port the
+// default cluster addresses and answered 200. It is gone. The guarantee is now
+// held by the table itself: the table of the dialled port carries a virtual
+// host with every spelling of the service (port-less and with that port), and
+// a refusal for the service's names with any OTHER port. So the catch-all only
+// ever sees names that are no mesh service, and what it must NOT do is asserted
+// here too: route a Kubernetes name, with any port, to a mesh cluster.
 func TestCatchAll_KnownTargetNeverShadowedByPassthrough(t *testing.T) {
-	// echo-v2 in gateway-conformance-mesh, all spellings, optional port.
-	known := KnownTargetRoute{
-		AuthorityRegex: "^(echo-v2|echo-v2\\.gateway-conformance-mesh|echo-v2\\.gateway-conformance-mesh\\.svc|echo-v2\\.gateway-conformance-mesh\\.svc\\.cluster\\.local)(:[0-9]+)?$",
-		Cluster:        "echo-v2.gateway-conformance-mesh.aether.internal",
-	}
-	vh := buildOnDemandCatchAllVirtualHost("aether.internal", true, known)
-
-	// Every spelling a client might dial, with and without a real Service port.
-	for _, authority := range []string{
+	const cluster = "echo-v2.gateway-conformance-mesh.aether.internal"
+	names := []string{
 		"echo-v2",
-		"echo-v2:80",
 		"echo-v2.gateway-conformance-mesh",
-		"echo-v2.gateway-conformance-mesh:80",
 		"echo-v2.gateway-conformance-mesh.svc",
 		"echo-v2.gateway-conformance-mesh.svc.cluster.local",
-		"echo-v2.gateway-conformance-mesh.svc.cluster.local:8080",
-	} {
-		cluster, _ := resolveCatchAll(vh, authority, "/set")
-		assert.Equalf(t, known.Cluster, cluster,
-			"known target %q must route to its cluster, not the passthrough", authority)
-		assert.NotEqualf(t, PassthroughClusterName, cluster,
-			"known target %q must never resolve to the passthrough", authority)
+		cluster,
+	}
+	var routed, mismatch []string
+	for _, n := range names {
+		routed = append(routed, n, n+":80")
+		mismatch = append(mismatch, n+":*")
+	}
+	// The table of dialled port 80, redirect-all.
+	table := BuildCaptureRouteConfiguration(CaptureHTTPRouteName(80), []*routev3.VirtualHost{
+		BuildServiceVirtualHost(cluster+"|80", cluster, routed, nil),
+		BuildRefusalVirtualHost(cluster+"|mismatch", mismatch, RefusalPortMismatch, "refused\n"),
+	}, BuildCaptureCatchAllVirtualHost("aether.internal", 80, true, true))
+
+	// Every spelling a client might dial on port 80, port-less or spelled out.
+	for _, authority := range routed {
+		vh, got, _ := resolveTable(table, authority, "/set")
+		assert.Equalf(t, cluster, got, "known target %q must route to its cluster, not the passthrough (vhost %s)", authority, vh)
+		assert.NotEqualf(t, PassthroughClusterName, got, "known target %q must never resolve to the passthrough", authority)
+	}
+
+	// The same names with a port that was NOT dialled: refused, and in
+	// particular not delivered to the cluster of the port that was (#1682).
+	for _, n := range names {
+		vh, got, status := resolveTable(table, n+":8080", "/set")
+		assert.Equalf(t, uint32(421), status, "%s:8080 in the table of port 80 (vhost %s)", n, vh)
+		assert.Emptyf(t, got, "%s:8080 must reach no cluster", n)
 	}
 
 	// A genuinely foreign authority still falls to the passthrough (redirect-all).
-	cluster, _ := resolveCatchAll(vh, "example.com", "/")
-	assert.Equal(t, PassthroughClusterName, cluster,
+	_, got, _ := resolveTable(table, "example.com", "/")
+	assert.Equal(t, PassthroughClusterName, got,
 		"a non-mesh, unknown authority still passes through (plain egress)")
 
-	// A mesh-shaped authority still resolves via ODCDS cluster_header(:authority).
-	cluster, _ = resolveCatchAll(vh, "other.team-a.aether.internal", "/")
-	assert.Equal(t, "other.team-a.aether.internal", cluster,
+	// A mesh-shaped authority this node has no virtual host for still resolves
+	// via ODCDS cluster_header(:authority), in a legacy table port-less too.
+	_, got, _ = resolveTable(table, "other.team-a.aether.internal", "/")
+	assert.Equal(t, "other.team-a.aether.internal", got,
 		"a mesh-shaped authority still resolves via ODCDS, not the passthrough")
+
+	// The catch-all on its own, with the service's virtual hosts gone (the
+	// mid-rebuild window the known-target routes were for): a Kubernetes name
+	// is passed through, with or without a port. It is NEVER sent to a mesh
+	// cluster by the catch-all, on any port; that was the defect.
+	catchAll := BuildCaptureCatchAllVirtualHost("aether.internal", 80, true, true)
+	for _, authority := range []string{"echo-v2", "echo-v2:80", "echo-v2.gateway-conformance-mesh:9090", "echo-v2.gateway-conformance-mesh.svc.cluster.local:8080"} {
+		got, _ := resolveCatchAll(catchAll, authority, "/set")
+		assert.Equalf(t, PassthroughClusterName, got, "the catch-all names no mesh cluster for %q", authority)
+	}
 }
 
-// TestCatchAll_KnownTargetsOnlyInRedirectAll: without redirect-all there is no
-// passthrough to shadow, so known-target routes must NOT be emitted (the catch-all
-// keeps its hard-404 fallthrough and the minimal mesh-authority/liveness routes).
+// TestCatchAll_KnownTargetsOnlyInRedirectAll: the catch-all's shape in the two
+// capture modes. It carries no per-service route in either (the known-target
+// routes it had in redirect-all are gone with proposal 043): liveness, the
+// on-demand route, and the fallthrough, which is the passthrough with
+// redirect-all and a hard 404 without.
 func TestCatchAll_KnownTargetsOnlyInRedirectAll(t *testing.T) {
-	known := KnownTargetRoute{AuthorityRegex: "^echo$", Cluster: "echo.ns.aether.internal"}
-
-	withPT := buildOnDemandCatchAllVirtualHost("aether.internal", true, known)
-	require.Len(t, withPT.GetRoutes(), 4, "liveness + mesh-regex + 1 known-target + passthrough")
+	withPT := BuildCaptureCatchAllVirtualHost("aether.internal", 8080, false, true)
+	require.Len(t, withPT.GetRoutes(), 3, "liveness + mesh-regex + passthrough")
 	assert.Equal(t, PassthroughClusterName,
 		withPT.GetRoutes()[len(withPT.GetRoutes())-1].GetRoute().GetCluster())
 
-	// redirectAll=false: knownTargets are ignored and the fallthrough is a 404.
-	noPT := buildOnDemandCatchAllVirtualHost("aether.internal", false, known)
-	require.Len(t, noPT.GetRoutes(), 3, "liveness + mesh-regex + 404 (no known-target, no passthrough)")
+	// redirectAll=false: the fallthrough is a 404.
+	noPT := BuildCaptureCatchAllVirtualHost("aether.internal", 8080, false, false)
+	require.Len(t, noPT.GetRoutes(), 3, "liveness + mesh-regex + 404 (no passthrough)")
 	assert.Equal(t, uint32(404),
 		noPT.GetRoutes()[len(noPT.GetRoutes())-1].GetDirectResponse().GetStatus())
 }
@@ -198,7 +258,7 @@ func TestBuildOutboundClusterVirtualHost(t *testing.T) {
 func TestOutboundRetryPolicy(t *testing.T) {
 	for name, vh := range map[string]*routev3.VirtualHost{
 		"cluster vhost":   BuildOutboundClusterVirtualHost("svc-1.aether.internal", []string{"svc-1.aether.internal"}),
-		"catch-all vhost": buildOnDemandCatchAllVirtualHost("aether.internal", false),
+		"catch-all vhost": buildOnDemandCatchAllVirtualHost(MeshAuthorityRegex("aether.internal", "(:[0-9]+)?"), false),
 	} {
 		// Find the routed (non-direct-response) route; the catch-all leads with a
 		// liveness direct_response route (see TestEgressLivenessRoute).
@@ -226,7 +286,7 @@ func TestOutboundRetryPolicy(t *testing.T) {
 // MeshLivePath (proposal 013 prober), matched by exact path before the
 // authority-regex/404 routes, so it wins regardless of authority.
 func TestEgressLivenessRoute(t *testing.T) {
-	vh := buildOnDemandCatchAllVirtualHost("aether.internal", false)
+	vh := buildOnDemandCatchAllVirtualHost(MeshAuthorityRegex("aether.internal", "(:[0-9]+)?"), false)
 	require.NotEmpty(t, vh.GetRoutes())
 	live := vh.GetRoutes()[0]
 	assert.Equal(t, MeshLivePath, live.GetMatch().GetPath(), "liveness must be an exact-path match")

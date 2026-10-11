@@ -54,7 +54,7 @@ func TestNoHTTPPortVhostAnswers421(t *testing.T) {
 	declareDeps(c, "aether-test/echo-tcp")
 	c.SetCaptureAuthorities(map[string]string{"aether-test/echo-tcp": "echo-tcp.aether-test.svc.cluster.local"})
 	c.SetCaptureTCPServices([]capture.CaptureTCPService{
-		{ServiceName: "aether-test/echo-tcp", ClusterIP: "10.96.0.50", PrimaryIsTCP: true},
+		{ServiceName: "aether-test/echo-tcp", ClusterIP: "10.96.0.50"},
 	})
 
 	reg := &mockRegistry{
@@ -70,7 +70,9 @@ func TestNoHTTPPortVhostAnswers421(t *testing.T) {
 	}
 	require.NoError(t, c.LoadClustersFromRegistry(ctx, "cluster-1", "node-1", reg))
 
-	vh := captureVhost(t, c, "node-1", "echo-tcp.aether-test.aether.internal")
+	// The legacy virtual host of the service: what a dial to the mesh HTTP port
+	// or to port 80 reaches (the same refusal is in out_http, by the same name).
+	vh := captureVhost(t, c, "node-1", "echo-tcp.aether-test.aether.internal|legacy")
 	require.NotNil(t, vh, "a TCP-only service in scope must still have a cap_http vhost — silence would be a 404 with no cause")
 	require.Len(t, vh.GetRoutes(), 1)
 

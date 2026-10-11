@@ -68,7 +68,7 @@ func newReprojectCache(t *testing.T) (*SnapshotCache, *mockRegistry) {
 func projectEchoTCP(t *testing.T, c *SnapshotCache) {
 	t.Helper()
 	project(t, c, []capture.CaptureTCPService{
-		{ServiceName: "aether-test/echo-tcp", ClusterIP: "10.96.11.228", PrimaryIsTCP: true},
+		{ServiceName: "aether-test/echo-tcp", ClusterIP: "10.96.11.228"},
 	})
 }
 
@@ -146,8 +146,8 @@ func TestCaptureReprojectionKeepsDeclaredPortChains(t *testing.T) {
 		projectEchoTCP(t, c)
 		require.NoError(t, c.LoadClustersFromRegistry(ctx, "cluster-1", "node-1", reg))
 		project(t, c, []capture.CaptureTCPService{
-			{ServiceName: "aether-test/echo-tcp", ClusterIP: "10.96.11.228", PrimaryIsTCP: true},
-			{ServiceName: "aether-test/other", ClusterIP: "10.96.11.229", PrimaryIsTCP: true},
+			{ServiceName: "aether-test/echo-tcp", ClusterIP: "10.96.11.228"},
+			{ServiceName: "aether-test/other", ClusterIP: "10.96.11.229"},
 		})
 		assertDeclaredPortChains(t, c, "a real change to the service list must carry the derived ports over")
 	})

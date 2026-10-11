@@ -90,7 +90,7 @@ func TestSourceIdentityStampedOnEveryMeshOriginatingChain(t *testing.T) {
 	id := SourceIdentityForPod(pod, testTrustDomain)
 	require.Equal(t, testSourceIdentity, id)
 
-	svc := CaptureTCPService{ClusterName: "tcp:svc-a." + testTrustDomain, ClusterIP: "10.96.1.10", PrimaryIsTCP: true}
+	svc := CaptureTCPService{ClusterName: "tcp:svc-a." + testTrustDomain, ClusterIP: "10.96.1.10", LegacyTCPPort: 9000, AnyPort: true}
 	rules := []L4ServiceRoute{{Backends: []L4Backend{{Service: "svc-a", Cluster: "tcp:svc-a." + testTrustDomain, Weight: 1}}}}
 	tlsRules := []L4ServiceRoute{{SNIHostnames: []string{"a.example.com"}, Backends: rules[0].Backends}}
 
@@ -99,7 +99,10 @@ func TestSourceIdentityStampedOnEveryMeshOriginatingChain(t *testing.T) {
 	})
 
 	t.Run("capture HCM chain", func(t *testing.T) {
-		requireBothSourceKeys(t, buildCaptureHTTPFilterChain(pod, id, testTrustDomain, false, false, nil), "capture HCM chain")
+		requireBothSourceKeys(t, buildCaptureHTTPFilterChain(pod, id, testTrustDomain, false, false, nil, CaptureHTTPRouteName(8080), 8080), "capture HCM chain")
+		for _, fc := range buildCaptureHTTPFilterChains(pod, id, testTrustDomain, false, true, nil, []uint32{80, 8080, 18081}) {
+			requireBothSourceKeys(t, fc, "capture HCM chain "+fc.GetName())
+		}
 	})
 
 	t.Run("capture TCP floor chain", func(t *testing.T) {
@@ -120,7 +123,7 @@ func TestSourceIdentityStampedOnEveryMeshOriginatingChain(t *testing.T) {
 		svcWithRoutes := svc
 		svcWithRoutes.TCPRouteRules = rules
 		svcWithRoutes.TLSRouteRules = tlsRules
-		l, err := GenerateCaptureListener(pod, id, 18081, testTrustDomain, false, []CaptureTCPService{svcWithRoutes}, true, nil)
+		l, err := GenerateCaptureListener(pod, id, 18081, testTrustDomain, false, []CaptureTCPService{svcWithRoutes}, nil, true, nil)
 		require.NoError(t, err)
 		named := 0
 		for _, fc := range l.GetFilterChains() {

@@ -4,13 +4,9 @@ import (
 	"context"
 	"fmt"
 	"maps"
-	"regexp"
 	"slices"
 	"strconv"
-	"strings"
 	"time"
-
-	"aethermesh.dev/common/serviceref"
 
 	"aethermesh.dev/agent/internal/capture"
 	"aethermesh.dev/agent/internal/meshdns"
@@ -144,24 +140,15 @@ func (c *SnapshotCache) generateCaptureListener(cniPod *cniv1.CNIPod, trustDomai
 		if !identityReady {
 			break
 		}
-		tcpServices = append(tcpServices, proxy.CaptureTCPService{
-			// TCP clusters are separate from HTTP clusters: they share the same EDS
-			// resource (same endpoint set) but use no ALPN on the transport socket so
-			// the destination inbound demuxes to the TCP floor DEFAULT chain.
-			ClusterName:  proxy.TCPClusterName(e.serviceName, c.meshDomain),
-			TCPPorts:     e.tcpPorts,
-			PrimaryIsTCP: e.primaryIsTCP,
-			PrimaryPort:  e.primaryPort,
-			ClusterIP:    e.clusterIP,
-			// L4 route rules (Phase 3b): override the passthrough floor chain when
-			// a TCPRoute or TLSRoute is attached to this service.
-			TCPRouteRules: tcpRoutes[e.serviceName],
-			TLSRouteRules: tlsRoutes[e.serviceName],
-		})
+		if svc, ok := captureTCPService(e, c.meshDomain, tcpRoutes[e.serviceName], tlsRoutes[e.serviceName]); ok {
+			tcpServices = append(tcpServices, svc)
+		}
 	}
 	c.captureMu.RUnlock()
 
-	l, err := proxy.GenerateCaptureListener(cniPod, proxy.SourceIdentityForPod(cniPod, trustDomain), meshconst.ProxyCapturePort, c.meshDomain, c.emitStatsPod, tcpServices, c.captureRedirectAll, extensionFilters)
+	// The HTTP chains are NOT gated on identity: an HTTP cluster fetches its
+	// client certificate per connection and is published either way.
+	l, err := proxy.GenerateCaptureListener(cniPod, proxy.SourceIdentityForPod(cniPod, trustDomain), meshconst.ProxyCapturePort, c.meshDomain, c.emitStatsPod, tcpServices, c.captureHTTPPorts(), c.captureRedirectAll, extensionFilters)
 	if err != nil {
 		return nil, err
 	}
@@ -173,6 +160,44 @@ func (c *SnapshotCache) generateCaptureListener(cniPod *cniv1.CNIPod, trustDomai
 		return nil, nil
 	}
 	return l, nil
+}
+
+// captureTCPService renders one capture entry as the listener generator's
+// input, and reports false for a service that gets no chain of its own: one
+// this node holds no endpoint of, or one with neither a raw-TCP port nor a
+// TLSRoute.
+//
+// Every fact comes from the entry's derived ports. The mesh Service's
+// aether.io/app-protocol annotation is not read anywhere (proposal 043,
+// Phase 1): it said one thing about the whole service, and for a service with
+// a raw-TCP port and an HTTP port it said the wrong one (#1672).
+func captureTCPService(e captureTCPEntry, meshDomain string, tcpRoutes, tlsRoutes []proxy.L4ServiceRoute) (proxy.CaptureTCPService, bool) {
+	legacyTCP := e.ports.legacyTCPPort()
+	tcpPorts := make([]uint32, 0, len(e.ports.tcp))
+	for _, p := range e.ports.tcp {
+		if p != legacyTCP {
+			tcpPorts = append(tcpPorts, p)
+		}
+	}
+	if legacyTCP == 0 && len(tcpPorts) == 0 && len(tlsRoutes) == 0 {
+		return proxy.CaptureTCPService{}, false
+	}
+	return proxy.CaptureTCPService{
+		// TCP clusters are separate from HTTP clusters: they use no ALPN on
+		// the transport socket, so the destination inbound demuxes them to a
+		// tcp_proxy chain.
+		ClusterName:   proxy.TCPClusterName(e.serviceName, meshDomain),
+		ClusterIP:     e.clusterIP,
+		HTTPPorts:     e.ports.http,
+		TCPPorts:      tcpPorts,
+		LegacyTCPPort: legacyTCP,
+		// No any-port chain for a service that declares any HTTP port.
+		AnyPort: legacyTCP != 0 && !e.ports.servesHTTP(),
+		// L4 route rules (Phase 3b): override the passthrough floor chain when
+		// a TCPRoute or TLSRoute is attached to this service.
+		TCPRouteRules: tcpRoutes,
+		TLSRouteRules: tlsRoutes,
+	}, true
 }
 
 // SetCaptureEnabled turns transparent capture (proposal 018, Phase 3a) on. Call once
@@ -262,7 +287,7 @@ func (c *SnapshotCache) writeMeshDNSSnapshot(records map[string]string, generati
 
 // SetCaptureAuthorities replaces the mesh service -> cluster.local FQDN map (fed by
 // the agent's capture reconciler from the generated mesh Services) and signals a
-// snapshot rebuild on change so cap_http re-derives.
+// snapshot rebuild on change so the capture route tables re-derive.
 func (c *SnapshotCache) SetCaptureAuthorities(authorities map[string]string) {
 	c.captureMu.Lock()
 	changed := !equalStringMaps(c.captureAuthorities, authorities)
@@ -285,10 +310,10 @@ func (c *SnapshotCache) SetCaptureAuthorities(authorities map[string]string) {
 // and regenerates the xDS snapshot so Envoy picks up the new filter chains.
 func (c *SnapshotCache) SetCaptureTCPServices(services []capture.CaptureTCPService) {
 	c.captureMu.Lock()
-	// The reconciler knows a service's name, VIP and primary class; its PORTS
-	// are derived by the cache from the registry endpoints
-	// (refreshCaptureTCPPorts), on the registry's schedule. Carry the last
-	// derivation into every entry built here. Dropping it -- as this did until
+	// The reconciler knows a service's name and VIP; its PORTS are derived by
+	// the cache from the registry endpoints (refreshCaptureServicePorts), on
+	// the registry's schedule. Carry the last derivation into every entry
+	// built here. Dropping it -- as this did until
 	// #1094 -- made an unchanged re-projection compare as a change (the derived
 	// fields went to zero), so every mesh-Service event rebuilt every capture
 	// listener WITHOUT its destination_port chains: a connection to a declared
@@ -301,11 +326,9 @@ func (c *SnapshotCache) SetCaptureTCPServices(services []capture.CaptureTCPServi
 	for _, s := range services {
 		if s.ServiceName != "" && s.ClusterIP != "" {
 			entries = append(entries, captureTCPEntry{
-				serviceName:  s.ServiceName,
-				clusterIP:    s.ClusterIP,
-				primaryIsTCP: s.PrimaryIsTCP,
-				tcpPorts:     c.captureDerivedTCPPorts[s.ServiceName],
-				primaryPort:  c.captureDerivedPrimaryPorts[s.ServiceName],
+				serviceName: s.ServiceName,
+				clusterIP:   s.ClusterIP,
+				ports:       c.captureDerived[s.ServiceName],
 			})
 		}
 	}
@@ -523,13 +546,49 @@ func (c *SnapshotCache) edgeTCPClusters() ([]types.Resource, []types.Resource) {
 		// Edge variant: fetch SVID/bundle from spire_agent (not ADS), no ALPN, no SNI (TCP floor).
 		cl.TransportSocket = proxy.EdgeUpstreamTCPTransportSocket(nodeSpiffeID, validationContextName, sanURIs)
 		resources = append(resources, cl)
-		if cla := proxy.LoadAssignmentAlias(c.bareServiceCLALocked(svc), tcpName); cla != nil {
+		bare := c.bareServiceCLALocked(svc)
+		if cla := proxy.LoadAssignmentAlias(bare, tcpName); cla != nil {
 			clas = append(clas, cla)
 		}
+		portClusters, portCLAs := c.edgeTCPPortClustersLocked(svc, tcpName, bare, sanURIs, nodeSpiffeID, validationContextName)
+		resources = append(resources, portClusters...)
+		clas = append(clas, portCLAs...)
 	}
 	c.clusterMu.RUnlock()
 
 	return resources, clas
+}
+
+// edgeTCPPortClustersLocked returns a service's per-port raw-TCP clusters for
+// the edge, tcp:<fqdn>:<port> (proposal 043, Phase 1: "Edge: per-port TCP
+// clusters are published"), and the load assignments of the ones that are
+// aliases. Caller must hold clusterMu.
+//
+// The same two shapes the node proxy publishes (tcpPortClustersLocked), with
+// the edge's own transport socket: the legacy target's port is an alias of
+// the floor (no SNI), every other raw-TCP port has its own membership and
+// carries its port as SNI.
+func (c *SnapshotCache) edgeTCPPortClustersLocked(svc, tcpName string, bare *endpointv3.ClusterLoadAssignment, sanURIs []string, nodeSpiffeID, validationContextName string) ([]types.Resource, []types.Resource) {
+	var out, clas []types.Resource
+	for _, port := range c.servicePorts[svc].tcp {
+		name := proxy.TCPPortClusterName(tcpName, port)
+		portEntry, ok := c.clusters[name]
+		if !ok {
+			continue
+		}
+		pc := proxy.NewTCPServiceCluster(name, name, proxy.TCPPortStatKey(svc, port))
+		if portEntry.loadAssignment == nil {
+			pc.TransportSocket = proxy.EdgeUpstreamTCPTransportSocket(nodeSpiffeID, validationContextName, sanURIs)
+			out = append(out, pc)
+			if cla := proxy.LoadAssignmentAlias(bare, name); cla != nil {
+				clas = append(clas, cla)
+			}
+			continue
+		}
+		pc.TransportSocket = proxy.EdgeUpstreamTCPPortTransportSocket(nodeSpiffeID, validationContextName, portEntry.sanURIs, strconv.Itoa(int(port)))
+		out = append(out, pc)
+	}
+	return out, clas
 }
 
 // collectEdgeTCPServices returns the distinct service names (with a Cluster name
@@ -796,381 +855,6 @@ func unroutableUDPEndpoints(la *endpointv3.ClusterLoadAssignment) int {
 	return total
 }
 
-// captureVhosts builds the cap_http virtual hosts: each in-scope service that has a
-// cluster.local authority routes (both the portless and :meshPort spellings) to its
-// <svc>.<meshDomain> cluster. Scoped to the dependency set so cap_http only references
-// clusters the scoped snapshot carries; unknown authorities hit the 404 default.
-func (c *SnapshotCache) captureVhosts() []*routev3.VirtualHost {
-	// Read-only membership tests only, so take the shared memo rather than a copy.
-	deps := c.dependencySetShared()
-	// GAMMA (HTTPRoute/GRPCRoute) rules enrich the captured path too — capture is the
-	// default client path (mesh-DNS), so the same L7 vocabulary the outbound listener
-	// applies must apply here; no rules = passthrough to the service cluster. The
-	// per-route-target domain lists are read from the same-generation memo (issue
-	// #540); they fold in the real Service port(s) (proposal 023 M2) and the
-	// bare-name uniqueness guard.
-	gammaRoutes, routeDomains := c.serviceRoutesAndDomainsSnapshot()
-	// Service-wide always-on extension filters (025 M4 CHAIN scope), vhost-enabled.
-	chainFilters := c.serviceChainFiltersSnapshot()
-
-	// East-west QUIC selection arms per eligible service (proposal 038
-	// Phase 4b), computed under clusterMu BEFORE captureMu so the two never
-	// nest; the same predicate that publishes the quic: twins, so a cap_http
-	// route can never name a twin the snapshot does not carry.
-	quicArms := c.quicArmsByService()
-
-	c.captureMu.RLock()
-	defer c.captureMu.RUnlock()
-	vhosts := make([]*routev3.VirtualHost, 0, len(c.captureAuthorities)+len(gammaRoutes))
-	vhosts = c.appendSABackedCaptureVhosts(vhosts, deps, gammaRoutes, routeDomains, chainFilters, quicArms)
-	vhosts = c.appendRouteOnlyCaptureVhosts(vhosts, deps, gammaRoutes, routeDomains, chainFilters)
-	// Both appenders range maps (captureAuthorities, gammaRoutes), so without
-	// this the cap_http RouteConfiguration's repeated virtual_hosts field is in
-	// a fresh random order on every snapshot — the #135 mechanism on the primary
-	// client route table of a capture-enabled node. See ordering.go.
-	sortVirtualHostsByName(vhosts)
-	return vhosts
-}
-
-// appendSABackedCaptureVhosts appends cap_http virtual hosts for services that have
-// SA-backed mesh authorities (captureAuthorities). Caller must hold captureMu.
-func (c *SnapshotCache) appendSABackedCaptureVhosts(vhosts []*routev3.VirtualHost, deps map[string]struct{}, gammaRoutes map[string][]proxy.GammaRoute, routeDomains map[string][]string, chainFilters map[string]proxy.ExtensionFilter, quicArms map[string]map[string]string) []*routev3.VirtualHost {
-	for svc, fqdn := range c.captureAuthorities {
-		if _, ok := deps[svc]; !ok {
-			continue
-		}
-		mesh := proxy.ServiceClusterName(svc, c.meshDomain)
-		rules := gammaRoutes[svc]
-		domains := c.captureVhostDomains(svc, fqdn, mesh, rules, routeDomains)
-
-		// A service in scope that serves NO HTTP port gets a 421 vhost instead
-		// of the ordinary one (proposal 037). Emitting the ordinary vhost would
-		// point at an h2 cluster the cache never builds for such a service, and
-		// the caller would get a 503 with cluster_not_found —
-		// indistinguishable from a cluster that vanished mid-reload, and never
-		// reaching ODCDS so even the coordinator's 404 does not occur.
-		if spellings := c.tcpSpellingsIfNoHTTPPortLocked(svc); spellings != "" {
-			vhosts = append(vhosts, proxy.BuildNoHTTPPortVirtualHost(mesh, domains, spellings))
-			continue
-		}
-
-		vh := proxy.BuildOutboundServiceVirtualHost(mesh, domains, rules)
-		applyChainFilter(vh, chainFilters, svc)
-		// The captured path is the default client path (mesh-DNS), so the
-		// per-source HTTP/3 selection applies here exactly as on out_http.
-		if arms := quicArms[svc]; len(arms) > 0 {
-			proxy.ApplyQUICClusterSelection(vh, mesh, arms)
-		}
-		vhosts = append(vhosts, vh)
-	}
-	return vhosts
-}
-
-// captureVhostDomains returns the host-match domain list for an SA-backed service's
-// cap_http virtual host. When the service carries GAMMA rules the full short-name +
-// real-port domain set is used; otherwise only the cluster.local + mesh spellings.
-func (c *SnapshotCache) captureVhostDomains(svc, fqdn, mesh string, rules []proxy.GammaRoute, routeDomains map[string][]string) []string {
-	if len(rules) > 0 {
-		domains := routeDomains[svc]
-		if len(domains) == 0 {
-			// Defensive: a route target with rules always has a memo entry
-			// unless its "<ns>/<svc>" key is unparseable AND it raced past a
-			// captureAuthorities swap. ParseKey failing means the short-name
-			// spellings (and bareNameCount/ports) are unused, so this inline
-			// render matches what the memo would have built.
-			return routeTargetDomains(svc, fqdn, mesh, nil, nil)
-		}
-		return domains
-	}
-	// Route both the cluster.local authority and the mesh-global
-	// <svc>.<meshDomain> authority (portless + :meshPort) to the service
-	// cluster, so a captured request reaches it under either name (the
-	// mesh-DNS path uses the latter).
-	return []string{
-		fqdn, fmt.Sprintf("%s:%d", fqdn, meshconst.ProxyOutboundPort),
-		mesh, fmt.Sprintf("%s:%d", mesh, meshconst.ProxyOutboundPort),
-	}
-}
-
-// appendRouteOnlyCaptureVhosts appends cap_http virtual hosts for GAMMA route
-// targets that have no SA-backed mesh Service of their own (the versioned-fanout
-// shape). Caller must hold captureMu.
-func (c *SnapshotCache) appendRouteOnlyCaptureVhosts(vhosts []*routev3.VirtualHost, deps map[string]struct{}, gammaRoutes map[string][]proxy.GammaRoute, routeDomains map[string][]string, chainFilters map[string]proxy.ExtensionFilter) []*routev3.VirtualHost {
-	// Service-based routing (proposal 023): a GAMMA route TARGET with no SA-backed
-	// mesh Service of its own (the versioned-fanout shape — an "echo" target routed
-	// to echo-v1/echo-v2) still needs a cap_http vhost. Its cluster.local authority
-	// is derived from the namespace-qualified key, and the GAMMA rules route to the
-	// backendRef (SA-backed) clusters. Skip targets already handled as SA-backed
-	// authorities above (a Service that is both a target and its own backend).
-	for svc := range gammaRoutes {
-		if _, ok := c.captureAuthorities[svc]; ok {
-			continue
-		}
-		if _, ok := deps[svc]; !ok {
-			continue
-		}
-		domains := routeDomains[svc]
-		if len(domains) == 0 {
-			// No memo entry: the "<ns>/<svc>" key is unparseable (no cluster.local
-			// authority can be derived) — skipped before the memo existed too.
-			continue
-		}
-		mesh := proxy.ServiceClusterName(svc, c.meshDomain)
-		vh := proxy.BuildOutboundServiceVirtualHost(mesh, domains, gammaRoutes[svc])
-		applyChainFilter(vh, chainFilters, svc)
-		vhosts = append(vhosts, vh)
-	}
-	return vhosts
-}
-
-// captureKnownTargets builds the redirect-all catch-all's known-target safety net
-// (proposal 022 hardening): one route-target per in-scope mesh authority, pinning
-// all of that authority's non-mesh cluster.local dial spellings (on any port) to
-// its mesh cluster. The catch-all consults these BEFORE the ORIGINAL_DST
-// passthrough, so a captured request to a service the mesh knows about can never
-// leak to kube-proxy — including the window where the service's dedicated cap_http
-// vhost is mid-rebuild across a GAMMA HTTPRoute add/delete (serviceRoutes churns,
-// but captureAuthorities — fed by the generated mesh Services, independent of
-// HTTPRoute lifecycle — does not).
-//
-// Returns nil unless redirect-all capture is on (without a passthrough cluster
-// there is nothing to shadow, and the catch-all keeps its hard 404).
-//
-// Gating: the safety net is keyed on the STABLE known-mesh-service signals —
-// every captureAuthorities entry (a generated mesh Service exists ⇒ the service
-// is real and meshed; this map is fed by the mesh-Service reconciler and is
-// untouched by HTTPRoute churn) plus every current GAMMA route target. It is
-// deliberately NOT gated on the demand-scoped dependency set: a route target's
-// dependency-set membership comes from its (churning) GAMMA rule, so gating on
-// deps would re-introduce the very race this fixes — the entry would vanish the
-// instant the route is deleted. Routing a known service's captured traffic to its
-// mesh cluster fails CLOSED into the mesh (a brief 503 if the demand-scoped cluster
-// is momentarily absent — which the conformance harness cleanly retries) rather
-// than OPEN to kube-proxy (a silent 200 that drops the GAMMA feature and resets the
-// consecutive-success counter). The regex is built once per service over its
-// short-name spellings with an optional ":port" suffix, so it matches a dial on the
-// real Service port without the control plane tracking it.
-func (c *SnapshotCache) captureKnownTargets() []proxy.KnownTargetRoute {
-	if !c.captureEnabled || !c.captureRedirectAll {
-		return nil
-	}
-	gammaRoutes := c.serviceRoutesSnapshot()
-
-	c.captureMu.RLock()
-	defer c.captureMu.RUnlock()
-
-	seen := make(map[string]struct{}, len(c.captureAuthorities)+len(gammaRoutes))
-	targets := make([]proxy.KnownTargetRoute, 0, len(c.captureAuthorities)+len(gammaRoutes))
-	add := func(svc, fqdn string) {
-		if _, ok := seen[svc]; ok {
-			return
-		}
-		ref, ok := serviceref.ParseKey(svc)
-		if !ok {
-			return
-		}
-		seen[svc] = struct{}{}
-		targets = append(targets, proxy.KnownTargetRoute{
-			AuthorityRegex: knownTargetAuthorityRegex(ref.Name, ref.Namespace, fqdn),
-			Cluster:        proxy.ServiceClusterName(svc, c.meshDomain),
-		})
-	}
-	// Every SA-backed mesh authority (covers plain services AND the MeshFrontend
-	// shape where a Service is its own GAMMA backend). Stable across HTTPRoute churn.
-	for svc, fqdn := range c.captureAuthorities {
-		add(svc, fqdn)
-	}
-	// Route-only GAMMA targets (no SA-backed mesh Service of their own — the
-	// versioned-fanout shape): derive the cluster.local authority from the
-	// namespace-qualified key. Present only while the route is, but the dedicated
-	// vhost is too, so there is no extra window to cover here.
-	for svc := range gammaRoutes {
-		if _, ok := c.captureAuthorities[svc]; ok {
-			continue
-		}
-		ref, ok := serviceref.ParseKey(svc)
-		if !ok {
-			continue
-		}
-		add(svc, ref.ClusterLocalFQDN())
-	}
-	// Both loops above range maps. These become routes on the redirect-all
-	// catch-all virtual host, and Envoy evaluates a virtual host's routes in
-	// order, first match wins — so map order is not just a re-hash here, it
-	// decides which authority regex wins when two services' short-name
-	// spellings overlap (the bare-name collision the doc above calls out).
-	// Cluster is unique per target (seen dedupes by service key), so this is a
-	// total order.
-	slices.SortStableFunc(targets, func(a, b proxy.KnownTargetRoute) int {
-		return strings.Compare(a.Cluster, b.Cluster)
-	})
-	return targets
-}
-
-// knownTargetAuthorityRegex builds the RE2 :authority pattern covering all of a
-// service's non-mesh dial spellings with an optional ":port" suffix: the bare
-// same-namespace name, <name>.<ns>, <name>.<ns>.svc, and the cluster.local FQDN.
-// The mesh spelling (<svc>.<meshDomain>) is intentionally omitted — the catch-all
-// already routes mesh-shaped authorities via the ODCDS regex. The bare name is
-// always included here (unlike routeTargetDomains' bareNameCount guard) because a
-// safe_regex header match cannot collide the way duplicate vhost domains NACK; a
-// bare name shared across namespaces simply means both services' regexes match it,
-// and either resolves to a real in-scope cluster (never the passthrough), which is
-// strictly better than the kube-proxy leak. Port-agnostic so any real Service port
-// matches.
-func knownTargetAuthorityRegex(name, namespace, fqdn string) string {
-	spellings := []string{
-		name,
-		name + "." + namespace,
-		name + "." + namespace + ".svc",
-		fqdn,
-	}
-	quoted := make([]string, 0, len(spellings))
-	seen := make(map[string]struct{}, len(spellings))
-	for _, s := range spellings {
-		if s == "" {
-			continue
-		}
-		if _, ok := seen[s]; ok {
-			continue
-		}
-		seen[s] = struct{}{}
-		quoted = append(quoted, regexp.QuoteMeta(s))
-	}
-	return "^(" + strings.Join(quoted, "|") + ")(:[0-9]+)?$"
-}
-
-// serviceRoutesAndDomainsSnapshot returns the effective stripped GAMMA rules
-// together with the per-route-target cap_http domain lists built from that SAME
-// route generation, memoized on the two input generations (issue #540): depGen
-// (routes + routeTargetPorts + the authz flag) and captureAuthGen
-// (captureAuthorities, the SA-backed fqdn source). Previously
-// routeTargetDomains rebuilt every list via fmt.Sprintf in nested loops (base
-// names × ports) on EVERY snapshot; now the snapshot path only reads the memo.
-// Both returned maps are shared across calls until the next rebuild and must be
-// treated as read-only (the depSet convention).
-func (c *SnapshotCache) serviceRoutesAndDomainsSnapshot() (map[string][]proxy.GammaRoute, map[string][]string) {
-	// Lock order: captureMu and depMu are taken strictly sequentially, never
-	// nested (matching SetCaptureTCPServices).
-	c.captureMu.RLock()
-	authGen := c.captureAuthGen
-	c.captureMu.RUnlock()
-
-	c.depMu.Lock()
-	routes := c.effectiveStrippedRoutesLocked()
-	if c.routeDomainsValid && c.routeDomainsDepGen == c.depGen && c.routeDomainsAuthGen == authGen {
-		domains := c.routeDomains
-		c.depMu.Unlock()
-		return routes, domains
-	}
-	depGen := c.depGen
-	// routeTargetPorts is replaced wholesale by SetRouteTargetPorts, never
-	// mutated in place, so the reference stays safe to read outside depMu.
-	ports := c.routeTargetPorts
-	c.depMu.Unlock()
-
-	// Same replace-not-mutate convention for captureAuthorities. Re-read the
-	// generation WITH the map so the memo tag matches the inputs actually used;
-	// if either input advances mid-build, the tag mismatch makes the next
-	// reader rebuild.
-	c.captureMu.RLock()
-	authGen = c.captureAuthGen
-	authorities := c.captureAuthorities
-	c.captureMu.RUnlock()
-
-	built := c.buildRouteTargetDomains(routes, authorities, ports)
-
-	c.depMu.Lock()
-	c.routeDomains = built
-	c.routeDomainsDepGen = depGen
-	c.routeDomainsAuthGen = authGen
-	c.routeDomainsValid = true
-	c.depMu.Unlock()
-	return routes, built
-}
-
-// buildRouteTargetDomains renders the cap_http domain list for every route
-// target in routes (the memo rebuild). The fqdn is the target's mesh authority
-// when SA-backed (captureAuthorities), else derived from its "<ns>/<svc>" key;
-// a target with an unparseable key and no authority entry gets no entry
-// (captureVhosts skips those, matching the previous inline behavior).
-//
-// bareNameCount equivalence: the previous inline computation counted bare names
-// only over route targets present in the dependency set — but every effective
-// route target is unconditionally unioned into the dependency set
-// (dependencySetLocked), so counting over all route keys is identical.
-func (c *SnapshotCache) buildRouteTargetDomains(routes map[string][]proxy.GammaRoute, authorities map[string]string, ports map[string][]uint32) map[string][]string {
-	if len(routes) == 0 {
-		return nil
-	}
-	bareNameCount := make(map[string]int, len(routes))
-	for svc := range routes {
-		if ref, ok := serviceref.ParseKey(svc); ok {
-			bareNameCount[ref.Name]++
-		}
-	}
-	out := make(map[string][]string, len(routes))
-	for svc := range routes {
-		fqdn, ok := authorities[svc]
-		if !ok {
-			ref, parsed := serviceref.ParseKey(svc)
-			if !parsed {
-				continue
-			}
-			fqdn = ref.ClusterLocalFQDN()
-		}
-		mesh := proxy.ServiceClusterName(svc, c.meshDomain)
-		out[svc] = routeTargetDomains(svc, fqdn, mesh, bareNameCount, ports[svc])
-	}
-	return out
-}
-
-// routeTargetDomains builds the cap_http host-match domains for a GAMMA route
-// target keyed "<ns>/<name>". A captured request carries whatever authority the
-// client used to dial the target. Kubernetes search-domain resolution lets a
-// client reach a Service by any of its short names — the bare name (same
-// namespace), the <name>.<namespace> form, and the <name>.<namespace>.svc form —
-// in addition to the full cluster.local FQDN and aether's mesh name. The captured
-// request's :authority is exactly the (un-resolved) name the client typed, so
-// cap_http must host-match every spelling or a same-namespace dial misses the
-// route-target vhost and falls through to the kube-proxy passthrough (round
-// robin), bypassing the GAMMA rules. Both portless and the mesh :18081 spellings
-// are emitted, plus each real Service port (proposal 023 M2) so a client dialing
-// the captured ClusterIP:port (echo:80 / echo:8080) host-matches too. The bare
-// same-namespace name is emitted only when a single namespace owns it
-// (bareNameCount==1), since a duplicate bare domain makes Envoy NACK the route
-// config. Called from the routeDomains memo rebuild (issue #540), not per
-// snapshot.
-func routeTargetDomains(svc, fqdn, mesh string, bareNameCount map[string]int, ports []uint32) []string {
-	baseNames := []string{fqdn, mesh}
-	if ref, ok := serviceref.ParseKey(svc); ok {
-		baseNames = append(
-			baseNames,
-			ref.Name+"."+ref.Namespace,        // <name>.<namespace>
-			ref.Name+"."+ref.Namespace+".svc", // <name>.<namespace>.svc
-		)
-		// The bare same-namespace name is only collision-free when one namespace owns it.
-		if bareNameCount[ref.Name] == 1 {
-			baseNames = append(baseNames, ref.Name)
-		}
-	}
-	domains := make([]string, 0, len(baseNames)*2)
-	for _, n := range baseNames {
-		// Portless + the mesh :18081 spelling (the mesh-DNS path uses the latter).
-		domains = append(domains, n, fmt.Sprintf("%s:%d", n, meshconst.ProxyOutboundPort))
-	}
-	// proposal 023 M2: also match the route target's REAL Service port(s).
-	for _, p := range ports {
-		if p == 0 || p == meshconst.ProxyOutboundPort {
-			continue // 0 = unset; :18081 already emitted above.
-		}
-		for _, n := range baseNames {
-			domains = append(domains, fmt.Sprintf("%s:%d", n, p))
-		}
-	}
-	return domains
-}
-
 func equalStringMaps(a, b map[string]string) bool {
 	if len(a) != len(b) {
 		return false
@@ -1198,18 +882,15 @@ func equalTCPEntries(a, b []captureTCPEntry) bool {
 		if !ok || prev.clusterIP != e.clusterIP {
 			return false
 		}
-		// The derived TCP port set is part of the identity: a change to it
-		// changes the chains, so it must trigger a regeneration. Both sides are
-		// sorted at derivation, so ordinary endpoint churn -- pods coming and
-		// going with the SAME declared ports -- produces an identical slice and
-		// compares equal.
+		// The derived ports are part of the identity: a change to them
+		// changes the chains, so it must trigger a regeneration. Every slice
+		// is sorted at derivation, so ordinary endpoint churn -- pods coming
+		// and going with the SAME declared ports -- compares equal.
 		//
 		// That is the whole of Risk 4's mitigation: regenerating a per-pod
 		// capture listener drains its connections, so this comparison has to be
 		// over the DERIVED set and not over the reload event.
-		if !slices.Equal(prev.tcpPorts, e.tcpPorts) ||
-			prev.primaryIsTCP != e.primaryIsTCP ||
-			prev.primaryPort != e.primaryPort {
+		if !prev.ports.equal(e.ports) {
 			return false
 		}
 	}
@@ -1300,53 +981,15 @@ func (c *SnapshotCache) podExtensionHTTPFilters(cniPod *cniv1.CNIPod, shared []*
 	return shared
 }
 
-// deriveTCPPorts returns each service's NON-PRIMARY raw-TCP ports, from the
-// port_protocols its endpoints declare (proposal 037).
-//
-// The primary port is excluded on purpose: it is what the portless floor chain
-// already reaches, so a chain for it would add nothing and would need the same
-// cluster the floor already uses. Everything returned here is a port that has
-// no data path today.
-//
-// Classification comes from the ENDPOINTS rather than from the mesh Service's
-// aether.io/app-protocol annotation. That annotation is the registrar's
-// projection of a per-pod fact, one hop removed from its source, and #878 is
-// what happens when the two copies disagree. Deriving here means the chain and
-// the cluster that serves it are built from one map in one snapshot
-// generation, which is also the structural half of #877 — a chain whose
-// cluster was never built kills connections silently, and tcp_proxy has no
-// ODCDS cold path to recover.
-//
-// The result is sorted so that two derivations over the same declared ports
-// compare equal regardless of map iteration order. equalTCPEntries depends on
-// that: endpoint churn must not read as a change, or every pod ADD/DEL would
-// regenerate per-pod capture listeners and drain their connections (Risk 4).
-func deriveTCPPorts(endpointsByService map[string][]*registryv1.ServiceEndpoint) map[string][]uint32 {
-	out := make(map[string][]uint32, len(endpointsByService))
-	for service, endpoints := range endpointsByService {
-		if ports := nonPrimaryTCPPorts(endpoints); len(ports) > 0 {
-			out[service] = ports
-		}
-	}
-	return out
-}
-
-// nonPrimaryTCPPorts returns one service's raw-TCP ports excluding its primary,
-// sorted and de-duplicated across its endpoints. Empty when the service has
-// none — which is every service that existed before proposal 037, since a pod
-// with one declared protocol has exactly one class and its primary carries it.
-func nonPrimaryTCPPorts(endpoints []*registryv1.ServiceEndpoint) []uint32 {
-	if len(endpoints) == 0 {
-		return nil
-	}
-	// Endpoints of one service share a primary port (proposal 005), so the
-	// first is representative.
-	primary := endpoints[0].GetPort()
+// declaredTCPPorts returns the ports a service's endpoints declare as raw TCP
+// in their port_protocols, sorted and de-duplicated. Empty for a service whose
+// rows carry no port_protocols (written before proposal 037: one class per
+// pod, carried by its one declared port).
+func declaredTCPPorts(endpoints []*registryv1.ServiceEndpoint) []uint32 {
 	seen := map[uint32]struct{}{}
 	for _, ep := range endpoints {
 		for port, proto := range ep.GetPortProtocols() {
-			if proto == registryv1.PortProtocol_PORT_PROTOCOL_TCP &&
-				port != primary && port > 0 && port <= 65535 {
+			if proto == registryv1.PortProtocol_PORT_PROTOCOL_TCP && port > 0 && port <= 65535 {
 				seen[port] = struct{}{}
 			}
 		}
@@ -1354,17 +997,12 @@ func nonPrimaryTCPPorts(endpoints []*registryv1.ServiceEndpoint) []uint32 {
 	if len(seen) == 0 {
 		return nil
 	}
-	ports := make([]uint32, 0, len(seen))
-	for p := range seen {
-		ports = append(ports, p)
-	}
-	slices.Sort(ports)
-	return ports
+	return slices.Sorted(maps.Keys(seen))
 }
 
-// refreshCaptureTCPPorts updates each capture-TCP service's derived per-port
-// set and, ONLY if any of them changed, rebuilds the per-pod capture listeners
-// so the new destination_port chains reach Envoy (proposal 037).
+// refreshCaptureServicePorts updates each capture service's derived ports
+// and, ONLY if any of them changed, rebuilds the per-pod capture listeners so
+// the new chains reach Envoy (proposals 037 and 043).
 //
 // It reuses SetCaptureTCPServices' entry list and its change detection rather
 // than adding a second regeneration trigger: one comparison, over the derived
@@ -1373,19 +1011,17 @@ func nonPrimaryTCPPorts(endpoints []*registryv1.ServiceEndpoint) []uint32 {
 // every pod ADD/DEL anywhere on the node — so a trigger keyed on "a reload
 // occurred" rather than "the derived set changed" would turn ordinary churn
 // into dropped connections.
-func (c *SnapshotCache) refreshCaptureTCPPorts(derived map[string][]uint32, primary map[string]uint32) {
+func (c *SnapshotCache) refreshCaptureServicePorts(derived map[string]servicePorts) {
 	c.captureMu.Lock()
 	// Keep the derivation itself, not only its application to today's entries:
 	// a service the reconciler projects AFTER this load (the order at agent
 	// start) or projects again later gets these ports from
-	// SetCaptureTCPServices (#1094). Both maps are freshly built by the caller
-	// and never mutated afterwards, so holding them is safe.
-	c.captureDerivedTCPPorts = derived
-	c.captureDerivedPrimaryPorts = primary
+	// SetCaptureTCPServices (#1094). The map is freshly built by the caller
+	// and never mutated afterwards, so holding it is safe.
+	c.captureDerived = derived
 	next := make([]captureTCPEntry, 0, len(c.captureTCPServices))
 	for _, e := range c.captureTCPServices {
-		e.tcpPorts = derived[e.serviceName]
-		e.primaryPort = primary[e.serviceName]
+		e.ports = derived[e.serviceName]
 		next = append(next, e)
 	}
 	changed := !equalTCPEntries(c.captureTCPServices, next)
@@ -1399,7 +1035,7 @@ func (c *SnapshotCache) refreshCaptureTCPPorts(derived map[string][]uint32, prim
 	// embed the TCP chains, so they all have to be regenerated.
 	shared := c.extensionHTTPFilters()
 	c.listenerMu.Lock()
-	c.rebuildPodListenersLocked("derived TCP port set change", shared)
+	c.rebuildPodListenersLocked("derived port set change", shared)
 	c.listenerMu.Unlock()
 }
 
@@ -1538,7 +1174,10 @@ func (c *SnapshotCache) tcpPortClustersLocked(
 		}
 	}
 
-	for _, port := range e.tcpPorts {
+	for _, port := range e.ports.tcp {
+		if port == e.ports.legacyTCPPort() {
+			continue // the alias above
+		}
 		portEntry, ok := c.clusters[proxy.TCPPortClusterName(tcpName, port)]
 		if !ok || portEntry.loadAssignment == nil {
 			continue
@@ -1552,35 +1191,4 @@ func (c *SnapshotCache) tcpPortClustersLocked(
 		out = append(out, pc)
 	}
 	return out, clas
-}
-
-// tcpSpellingsIfNoHTTPPortLocked returns the TCP spellings a caller should use
-// for a service that serves NO HTTP port, or "" when the service has one (and
-// therefore gets an ordinary vhost). Caller must hold clusterMu or be on a path
-// that does.
-//
-// "No HTTP port" is read from the CACHE, not from the app-protocol annotation:
-// a service has an HTTP port exactly when the HTTP pass built it a default
-// entry under the bare service key. That is the same fact the vhost would point
-// at, so the two cannot disagree — which is the failure #878 was.
-//
-// Returns "" for a service the cache knows nothing about yet, so a service
-// mid-warm gets the ordinary cold path rather than a 421 it would have to
-// retry past.
-func (c *SnapshotCache) tcpSpellingsIfNoHTTPPortLocked(svc string) string {
-	c.clusterMu.RLock()
-	_, hasHTTP := c.clusters[svc]
-	tcpEntry, hasTCP := c.clusters[proxy.TCPClusterName(svc, c.meshDomain)]
-	c.clusterMu.RUnlock()
-
-	if hasHTTP || !hasTCP {
-		return ""
-	}
-
-	fqdn := proxy.ServiceClusterName(svc, c.meshDomain)
-	spellings := fmt.Sprintf("%s:%d", fqdn, meshconst.ProxyL4OutboundPort)
-	if p := primaryPortOf(tcpEntry); p != 0 {
-		spellings += fmt.Sprintf(" or %s:%d", fqdn, p)
-	}
-	return spellings
 }

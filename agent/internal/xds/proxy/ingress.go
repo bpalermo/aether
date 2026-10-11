@@ -582,12 +582,17 @@ func applyInboundFilter(rc *routev3.RouteConfiguration, inboundFilter *Extension
 	}
 }
 
-// appTCPPorts returns the pod's ports declared raw-TCP via the `=tcp` suffix on
-// endpoint.aether.io/ports, EXCLUDING the primary (proposal 037).
+// appTCPPorts returns the pod's raw-TCP ports: every port its annotations
+// declare as raw TCP, the one in endpoint.aether.io/port included (proposals
+// 037 and 043).
 //
-// The primary is excluded because the inbound default floor chain already
-// serves it: a no-SNI mesh connection lands there and is forwarded to it. Only
-// a non-primary port needs an SNI-matched chain of its own.
+// Each gets an SNI-matched tcp_proxy chain of its own, in place of the HCM
+// chain a port otherwise gets. The declared port has one too since proposal
+// 043 Phase 1 (it used to be left out, and its SNI chain was an HCM in front
+// of a port that does not speak HTTP): a source that names it by SNI is then
+// served as raw TCP. No source does yet; sources still reach it with no SNI,
+// on the default floor chain, which stays. The explicit chain is what lets
+// them switch in a later chart without the destination changing again.
 //
 // A malformed annotation yields no TCP ports rather than a guess, so the pod
 // keeps its pre-037 HCM chains. That is the conservative direction: the
@@ -600,9 +605,8 @@ func appTCPPorts(cniPod *cniv1.CNIPod) map[uint16]struct{} {
 	if err != nil {
 		return out
 	}
-	primary := uint32(AppPortFromPod(cniPod))
 	for port, proto := range pp {
-		if proto == registryv1.PortProtocol_PORT_PROTOCOL_TCP && port != primary && port > 0 && port <= 65535 {
+		if proto == registryv1.PortProtocol_PORT_PROTOCOL_TCP && port > 0 && port <= 65535 {
 			out[uint16(port)] = struct{}{}
 		}
 	}

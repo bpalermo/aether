@@ -24,26 +24,72 @@ func (f *fakeSink) SetCaptureAuthorities(a map[string]string)   { f.got = a }
 func (f *fakeSink) SetMeshDNSRecords(r map[string]string)       { f.records = r }
 func (f *fakeSink) SetCaptureTCPServices(s []CaptureTCPService) { f.tcpServices = s }
 
-func TestIsHTTPAppProtocol(t *testing.T) {
-	cases := []struct {
-		proto string
-		want  bool
-	}{
-		{"http", true},
-		{"HTTP", true},
-		{"h2", true},
-		{"grpc", true},
-		{"http2", true},
-		{"", true}, // empty = default HTTP
-		{"tcp", false},
-		{"TCP", false},
-		{"ws", false}, // unrecognised = TCP
-		{"grpc-web", false},
+// projectWithAnnotations reconciles ONE mesh Service carrying annotations and
+// returns what the sink was given for it.
+func projectWithAnnotations(t *testing.T, annotations map[string]string) (CaptureTCPService, *fakeSink) {
+	t.Helper()
+	svc := &corev1.Service{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "svc", Namespace: "aether-test",
+			Labels:      map[string]string{aetherlabels.LabelMeshService: "true"},
+			Annotations: annotations,
+		},
+		Spec: corev1.ServiceSpec{ClusterIP: "10.96.0.9"},
 	}
-	for _, c := range cases {
-		t.Run(c.proto, func(t *testing.T) {
-			assert.Equal(t, c.want, isHTTPAppProtocol(c.proto))
+	sink := &fakeSink{}
+	r := &Reconciler{Client: fake.NewClientBuilder().WithObjects(svc).Build(), Sink: sink, Log: slog.New(slog.DiscardHandler)}
+	_, err := r.Reconcile(context.Background(), reconcile.Request{})
+	require.NoError(t, err)
+	require.Len(t, sink.tcpServices, 1)
+	return sink.tcpServices[0], sink
+}
+
+// TestIsHTTPAppProtocol used to pin how the reconciler read the Service's
+// aether.io/app-protocol annotation as "HTTP or not". That reading is gone
+// (proposal 043, Phase 1): the annotation said one thing about the whole
+// service, and it was the wrong thing for a service with a raw-TCP port and an
+// HTTP port (#1672). What replaced it is asserted over the same values: the
+// annotation changes NOTHING in what is delivered. Name and address only; the
+// ports and their classes come from the registry endpoints, in the cache.
+func TestIsHTTPAppProtocol(t *testing.T) {
+	want := CaptureTCPService{ServiceName: "aether-test/svc", ClusterIP: "10.96.0.9"}
+	cases := []string{
+		"http", "HTTP", "h2", "grpc", "http2",
+		"", // empty = the 2.6 default
+		"tcp", "TCP",
+		"ws", // unrecognised
+		"grpc-web",
+	}
+	for _, proto := range cases {
+		t.Run(proto, func(t *testing.T) {
+			got, sink := projectWithAnnotations(t, map[string]string{
+				aetherlabels.AnnotationMeshService:     "svc",
+				aetherlabels.AnnotationMeshAppProtocol: proto,
+			})
+			assert.Equal(t, want, got, "aether.io/app-protocol=%q must not change what is delivered", proto)
+			assert.Equal(t, map[string]string{"aether-test/svc": "svc.aether-test.svc.cluster.local"}, sink.got)
+			assert.Equal(t, map[string]string{"aether-test/svc": "10.96.0.9"}, sink.records)
 		})
+	}
+	// Negative control: the comparison above can fail. A different address
+	// IS a different delivery.
+	got, _ := projectWithAnnotations(t, nil)
+	other := got
+	other.ClusterIP = "10.96.0.10"
+	assert.NotEqual(t, want, other)
+}
+
+// TestReconcile_PortAnnotationIsNotRead: neither is aether.io/port. Both
+// annotations are frozen at their chart-2.6 values for 2.6 agents and have no
+// reader in this one.
+func TestReconcile_PortAnnotationIsNotRead(t *testing.T) {
+	base, _ := projectWithAnnotations(t, map[string]string{aetherlabels.AnnotationMeshService: "svc"})
+	for _, port := range []string{"", "8080", "9000", "0", "not-a-port"} {
+		got, _ := projectWithAnnotations(t, map[string]string{
+			aetherlabels.AnnotationMeshService: "svc",
+			aetherlabels.AnnotationMeshPort:    port,
+		})
+		assert.Equal(t, base, got, "aether.io/port=%q", port)
 	}
 }
 
@@ -106,13 +152,12 @@ func TestReconcile_ProjectsTCPServices(t *testing.T) {
 
 	assert.Equal(t, "10.96.0.99", byName["aether-test/svc-tcp"].ClusterIP)
 
-	// PrimaryIsTCP is what gates the PORTLESS /32 floor chain. Getting this
-	// wrong for the HTTP service is not a cosmetic error: a per-IP chain
-	// outranks the HCM catch-all's application_protocols match, so it would
-	// swallow every HTTP request to that VIP.
-	assert.True(t, byName["aether-test/svc-tcp"].PrimaryIsTCP)
-	assert.False(t, byName["aether-test/svc-http"].PrimaryIsTCP,
-		"an HTTP-primary service must never get the portless floor chain")
+	// Nothing but the name and the address is delivered (proposal 043, Phase
+	// 1). Which of the two gets raw-TCP chains is decided by the cache from
+	// the registry endpoints, per port; the "tcp" and "http" annotations above
+	// are not read, so the two entries differ in name and address only.
+	assert.Equal(t, CaptureTCPService{ServiceName: "aether-test/svc-tcp", ClusterIP: "10.96.0.99"}, byName["aether-test/svc-tcp"])
+	assert.Equal(t, CaptureTCPService{ServiceName: "aether-test/svc-http", ClusterIP: "10.96.0.50"}, byName["aether-test/svc-http"])
 }
 
 func TestReconcile_ProjectsAuthoritiesAndDNSRecords(t *testing.T) {
@@ -137,28 +182,27 @@ func TestReconcile_ProjectsAuthoritiesAndDNSRecords(t *testing.T) {
 	assert.Equal(t, map[string]string{"aether-test/svc-1": "10.96.0.42"}, sink.records, "ClusterIP -> the <svc>.<meshDomain> A record")
 }
 
-// TestIsUDPAppProtocol pins the carve-out that keeps a datagram service off the
-// TCP floor. Note the asymmetry with isHTTPAppProtocol: an unrecognised value is
-// still TCP (the conservative default), so this predicate is deliberately narrow
-// -- it is not "everything that is not HTTP".
+// TestIsUDPAppProtocol used to pin the carve-out that kept a datagram service
+// off the TCP floor by reading "udp" out of the Service's annotation. The
+// carve-out now lives where the floor is decided, in the cache, from the
+// endpoints' own port classes. Here the same values assert what replaced the
+// predicate: no spelling of the annotation, "udp" included, changes the
+// delivery.
 func TestIsUDPAppProtocol(t *testing.T) {
-	cases := []struct {
-		proto string
-		want  bool
-	}{
-		{"udp", true},
-		{"UDP", true},
-		{"Udp", true},
-		{"tcp", false},
-		{"http", false},
-		{"", false},
-		{"ws", false},      // unrecognised stays TCP, not UDP
-		{"quic", false},    // not a protocol the mesh knows
-		{"udplite", false}, // prefix match would be wrong
+	want := CaptureTCPService{ServiceName: "aether-test/svc", ClusterIP: "10.96.0.9"}
+	cases := []string{
+		"udp", "UDP", "Udp", "tcp", "http", "",
+		"ws",      // unrecognised
+		"quic",    // not a protocol the mesh knows
+		"udplite", // a prefix of nothing
 	}
-	for _, c := range cases {
-		t.Run(c.proto, func(t *testing.T) {
-			assert.Equal(t, c.want, isUDPAppProtocol(c.proto))
+	for _, proto := range cases {
+		t.Run(proto, func(t *testing.T) {
+			got, _ := projectWithAnnotations(t, map[string]string{
+				aetherlabels.AnnotationMeshService:     "svc",
+				aetherlabels.AnnotationMeshAppProtocol: proto,
+			})
+			assert.Equal(t, want, got)
 		})
 	}
 }
@@ -166,11 +210,12 @@ func TestIsUDPAppProtocol(t *testing.T) {
 // TestReconcile_UDPServiceGetsNoTCPFloor is the projection-level consequence.
 //
 // A UDP service is still DELIVERED (it has a routable VIP, so it needs a
-// mesh-DNS record and a capture authority), but it must not be marked
-// PrimaryIsTCP: the portless /32 floor chain that flag gates would put a
-// tcp_proxy in front of the VIP naming a tcp: cluster that need not exist.
-// Before the carve-out, "udp" fell through isHTTPAppProtocol's default branch
-// and got exactly that.
+// mesh-DNS record and a capture authority), and the delivery carries nothing
+// that could ask for a TCP floor: a portless /32 chain would put a tcp_proxy
+// in front of the VIP naming a tcp: cluster that need not exist. Before
+// proposal 043 that was a PrimaryIsTCP flag read from the annotation, which
+// "udp" had to be carved out of; the field no longer exists, and the cache
+// builds raw-TCP chains only from ports the endpoints declare raw TCP.
 func TestReconcile_UDPServiceGetsNoTCPFloor(t *testing.T) {
 	udpSvc := &corev1.Service{
 		ObjectMeta: metav1.ObjectMeta{
@@ -200,8 +245,8 @@ func TestReconcile_UDPServiceGetsNoTCPFloor(t *testing.T) {
 	got, ok := byName["aether-test/svc-udp"]
 	require.True(t, ok, "a UDP service with a routable VIP is still delivered")
 	assert.Equal(t, "10.96.0.77", got.ClusterIP)
-	assert.False(t, got.PrimaryIsTCP,
-		"a UDP service must not get the portless TCP floor chain")
+	assert.Equal(t, CaptureTCPService{ServiceName: "aether-test/svc-udp", ClusterIP: "10.96.0.77"}, got,
+		"a UDP service's delivery is its name and address, with nothing that asks for a TCP floor")
 
 	// And it keeps the things every VIP-bearing mesh Service gets.
 	assert.Equal(t, "10.96.0.77", sink.records["aether-test/svc-udp"],

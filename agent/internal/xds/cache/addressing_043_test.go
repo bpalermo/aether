@@ -1,0 +1,1220 @@
+package cache
+
+import (
+	"context"
+	"fmt"
+	"maps"
+	"regexp"
+	"slices"
+	"strconv"
+	"strings"
+	"testing"
+
+	"aethermesh.dev/agent/internal/capture"
+	"aethermesh.dev/agent/internal/xds/proxy"
+	cniv1 "aethermesh.dev/api/aether/cni/v1"
+	registryv1 "aethermesh.dev/api/aether/registry/v1"
+	listenerv3 "github.com/envoyproxy/go-control-plane/envoy/config/listener/v3"
+	routev3 "github.com/envoyproxy/go-control-plane/envoy/config/route/v3"
+	"github.com/envoyproxy/go-control-plane/pkg/cache/types"
+	resourcev3 "github.com/envoyproxy/go-control-plane/pkg/resource/v3"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+	"google.golang.org/protobuf/proto"
+)
+
+// The addressing rule of proposal 043, held end to end through the cache: the
+// registry listings go in, a snapshot comes out, and every assertion is made on
+// the route tables and listeners of that snapshot, resolved the way the proxy
+// resolves them. What these tests exist to catch is the SILENT wrong answer: a
+// request delivered to another port, or to another service, with a 200.
+
+const (
+	a043Mesh = "aether.internal"
+	a043NS   = "demo"
+)
+
+// a043Service is one workload of the fixture: the port its pods declare in
+// endpoint.aether.io/port and the class of each port.
+type a043Service struct {
+	name   string
+	ns     string
+	legacy uint32
+	ports  map[uint32]registryv1.PortProtocol
+	ip     string
+	vip    string
+}
+
+func (s a043Service) key() string { return s.ns + "/" + s.name }
+
+// a043Fixture is the leg table's workload set (proposal 043, "Addressing legs
+// (Phase 1)"), plus a raw-TCP-only service and a second namespace that shares
+// a bare name.
+func a043Fixture() []a043Service {
+	h, tcp := registryv1.PortProtocol_PORT_PROTOCOL_HTTP, registryv1.PortProtocol_PORT_PROTOCOL_TCP
+	return []a043Service{
+		{name: "httponly", ns: a043NS, legacy: 8080, ports: map[uint32]registryv1.PortProtocol{8080: h}, ip: "10.0.1.1", vip: "10.96.1.1"},
+		{name: "multi", ns: a043NS, legacy: 8080, ports: map[uint32]registryv1.PortProtocol{8080: h, 9090: h}, ip: "10.0.1.2", vip: "10.96.1.2"},
+		{name: "eighty", ns: a043NS, legacy: 8080, ports: map[uint32]registryv1.PortProtocol{80: h, 8080: h, 9090: h}, ip: "10.0.1.3", vip: "10.96.1.3"},
+		{name: "mixed", ns: a043NS, legacy: 8080, ports: map[uint32]registryv1.PortProtocol{8080: h, 9000: tcp}, ip: "10.0.1.4", vip: "10.96.1.4"},
+		{name: "tcpfirst", ns: a043NS, legacy: 9000, ports: map[uint32]registryv1.PortProtocol{9000: tcp, 8080: h}, ip: "10.0.1.5", vip: "10.96.1.5"},
+		{name: "nine", ns: a043NS, legacy: 9000, ports: map[uint32]registryv1.PortProtocol{9000: h}, ip: "10.0.1.6", vip: "10.96.1.6"},
+		{name: "tcponly", ns: a043NS, legacy: 9000, ports: map[uint32]registryv1.PortProtocol{9000: tcp}, ip: "10.0.1.7", vip: "10.96.1.7"},
+		// The same bare name in another namespace: "multi" alone names neither.
+		{name: "multi", ns: "other", legacy: 7070, ports: map[uint32]registryv1.PortProtocol{7070: h}, ip: "10.0.2.2", vip: "10.96.2.2"},
+	}
+}
+
+// a043Registry lists each service under every protocol it serves a port of,
+// with the same row, as both registry backends do.
+func a043Registry(services []a043Service) *mockRegistry {
+	return &mockRegistry{
+		tcpAware: true,
+		listAllEndpointsFunc: func(_ context.Context, protocol registryv1.Service_Protocol) (map[string][]*registryv1.ServiceEndpoint, error) {
+			out := map[string][]*registryv1.ServiceEndpoint{}
+			for _, s := range services {
+				serves := false
+				ep := makeEndpoint(s.ip, "cluster-1", "node-2", s.legacy)
+				ep.KubernetesMetadata.Namespace = s.ns
+				ep.PortProtocols = s.ports
+				for port, class := range s.ports {
+					ep.Ports = append(ep.Ports, port)
+					if registryv1.Service_Protocol(class) == protocol {
+						serves = true
+					}
+				}
+				slices.Sort(ep.Ports)
+				if serves {
+					out[s.key()] = append(out[s.key()], ep)
+				}
+			}
+			return out, nil
+		},
+	}
+}
+
+// a043Cache builds a capture-enabled, redirect-all cache holding the fixture
+// and one local pod, with a snapshot set.
+func a043Cache(t *testing.T, services []a043Service) *SnapshotCache {
+	t.Helper()
+	ctx := context.Background()
+	c := newTestCache("node-1")
+	c.SetCaptureEnabled(true)
+	c.SetCaptureRedirectAll(true)
+	require.NoError(t, c.AddPod(ctx, &cniv1.CNIPod{
+		Name: "client-0", Namespace: a043NS, ServiceAccount: "client", NetworkNamespace: "/var/run/netns/cni-client",
+	}, a043Mesh))
+	require.NoError(t, c.SetNodeIdentity(ctx, nodeIdentity))
+	a043Project(c, services)
+	require.NoError(t, c.LoadClustersFromRegistry(ctx, "cluster-1", "node-1", a043Registry(services)))
+	return c
+}
+
+// a043Project feeds what the mesh-Service reconciler projects: the name and
+// the address of every generated Service, and nothing else.
+func a043Project(c *SnapshotCache, services []a043Service) {
+	authorities := map[string]string{}
+	var vips []capture.CaptureTCPService
+	for _, s := range services {
+		authorities[s.key()] = fmt.Sprintf("%s.%s.svc.cluster.local", s.name, s.ns)
+		vips = append(vips, capture.CaptureTCPService{ServiceName: s.key(), ClusterIP: s.vip})
+	}
+	c.SetCaptureAuthorities(authorities)
+	c.SetCaptureTCPServices(vips)
+}
+
+// a043Tables returns the snapshot's route tables by name.
+func a043Tables(t *testing.T, c *SnapshotCache) map[string]*routev3.RouteConfiguration {
+	t.Helper()
+	snap, err := c.GetSnapshot("node-1")
+	require.NoError(t, err)
+	out := map[string]*routev3.RouteConfiguration{}
+	for name, res := range snap.GetResources(resourcev3.RouteType) {
+		rc, ok := res.(*routev3.RouteConfiguration)
+		require.True(t, ok)
+		out[name] = rc
+	}
+	return out
+}
+
+// a043Answer is what a route table does with one request.
+type a043Answer struct {
+	// cluster is the cluster the request is routed to, "" when it is not.
+	cluster string
+	// refusal is the x-aether-error of a 421, "" when the request is not
+	// refused.
+	refusal string
+	// status is the direct-response status, 0 when the request is routed.
+	status uint32
+	// onDemand: the cluster is named by the request's own authority.
+	onDemand bool
+	vhost    string
+	body     string
+}
+
+// a043Resolve picks the virtual host the way the proxy does (an exact domain,
+// then the longest prefix wildcard "x*", then "*"), then the first route whose
+// path and :authority matchers accept the request "GET / " with authority
+// host.
+func a043Resolve(t *testing.T, table *routev3.RouteConfiguration, host string) a043Answer {
+	t.Helper()
+	require.NotNil(t, table, "no such route table")
+	var exact, wildcard, catchAll *routev3.VirtualHost
+	wildcardLen := -1
+	seen := map[string]string{}
+	for _, vh := range table.GetVirtualHosts() {
+		for _, d := range vh.GetDomains() {
+			if prev, dup := seen[d]; dup {
+				t.Fatalf("table %s: domain %q is claimed by both %q and %q; the proxy rejects the whole table", table.GetName(), d, prev, vh.GetName())
+			}
+			seen[d] = vh.GetName()
+			switch {
+			case d == "*":
+				catchAll = vh
+			case strings.HasSuffix(d, "*"):
+				if p := strings.TrimSuffix(d, "*"); strings.HasPrefix(host, p) && len(p) > wildcardLen {
+					wildcard, wildcardLen = vh, len(p)
+				}
+			case d == host:
+				exact = vh
+			}
+		}
+	}
+	vh := catchAll
+	if wildcard != nil {
+		vh = wildcard
+	}
+	if exact != nil {
+		vh = exact
+	}
+	require.NotNil(t, vh, "table %s has no catch-all", table.GetName())
+	for _, r := range vh.GetRoutes() {
+		if p := r.GetMatch().GetPath(); p != "" && p != "/" {
+			continue
+		}
+		matched := true
+		for _, h := range r.GetMatch().GetHeaders() {
+			if h.GetName() != ":authority" {
+				matched = false
+				break
+			}
+			matched = matched && mustRegexp(t, h.GetStringMatch().GetSafeRegex().GetRegex()).MatchString(host)
+		}
+		if !matched {
+			continue
+		}
+		ans := a043Answer{vhost: vh.GetName()}
+		if dr := r.GetDirectResponse(); dr != nil {
+			ans.status = dr.GetStatus()
+			ans.body = dr.GetBody().GetInlineString()
+			for _, h := range r.GetResponseHeadersToAdd() {
+				if h.GetHeader().GetKey() == proxy.NoHTTPPortErrorHeader {
+					ans.refusal = h.GetHeader().GetValue()
+				}
+			}
+			return ans
+		}
+		ra := r.GetRoute()
+		require.NotNil(t, ra, "a route of %s/%s is neither a direct response nor a route", table.GetName(), vh.GetName())
+		switch {
+		case ra.GetClusterHeader() != "":
+			ans.cluster, ans.onDemand = host, true
+		case ra.GetCluster() != "":
+			ans.cluster = ra.GetCluster()
+		default:
+			// The per-source HTTP/3 selection wraps the h2 cluster; its
+			// on_no_match is the h2 cluster the route had.
+			ans.cluster = quicSelectionDefault(t, ra)
+		}
+		return ans
+	}
+	t.Fatalf("table %s, virtual host %s: no route matches %q", table.GetName(), vh.GetName(), host)
+	return a043Answer{}
+}
+
+// a043Names returns the name families of a fixture service.
+func a043Names(s a043Service, bare bool) (mesh string, kube []string) {
+	mesh = fmt.Sprintf("%s.%s.%s", s.name, s.ns, a043Mesh)
+	kube = []string{
+		fmt.Sprintf("%s.%s.svc.cluster.local", s.name, s.ns),
+		fmt.Sprintf("%s.%s.svc", s.name, s.ns),
+		fmt.Sprintf("%s.%s", s.name, s.ns),
+	}
+	if bare {
+		kube = append(kube, s.name)
+	}
+	return mesh, kube
+}
+
+// a043Cluster is the cluster that serves HTTP port port of s.
+func a043Cluster(s a043Service, port uint32) string {
+	mesh, _ := a043Names(s, false)
+	if port == s.legacy {
+		return mesh
+	}
+	return fmt.Sprintf("%s:%d", mesh, port)
+}
+
+func a043BareIsUnique(services []a043Service, s a043Service) bool {
+	n := 0
+	for _, o := range services {
+		if o.name == s.name {
+			n++
+		}
+	}
+	return n == 1
+}
+
+// TestAddressing_CapturedDialledPortDecides is legs A1, A2, A5, A7 and A9 of
+// proposal 043 on the captured path, for every workload, every HTTP port and
+// every name family: the table of the dialled port routes a request to that
+// port's cluster or refuses it, and never anything else.
+func TestAddressing_CapturedDialledPortDecides(t *testing.T) {
+	services := a043Fixture()
+	c := a043Cache(t, services)
+	tables := a043Tables(t, c)
+
+	// Every HTTP port number of the fixture has a table, and so do the two
+	// legacy numbers and cap_http_other.
+	for _, name := range []string{"cap_http_80", "cap_http_7070", "cap_http_8080", "cap_http_9000", "cap_http_9090", "cap_http_18081", "cap_http_other"} {
+		require.Contains(t, tables, name)
+	}
+	require.NotContains(t, tables, "cap_http_18082", "the TCP mesh port is never an HTTP chain's port")
+	require.NotContains(t, tables, "cap_http", "the single table is gone")
+
+	dialled := []uint32{80, 7070, 7777, 8080, 9000, 9090, 18081}
+	for _, s := range services {
+		mesh, kube := a043Names(s, a043BareIsUnique(services, s))
+		for _, d := range dialled {
+			table := tables[proxy.CaptureHTTPRouteName(d)]
+			if table == nil {
+				table = tables[proxy.CaptureHTTPOtherRouteName]
+			}
+			for _, name := range append([]string{mesh}, kube...) {
+				t.Run(fmt.Sprintf("%s/dial_%d/%s", s.key(), d, name), func(t *testing.T) {
+					class, declared := s.ports[d]
+					isHTTP := declared && class == registryv1.PortProtocol_PORT_PROTOCOL_HTTP
+					legacyHTTP := s.ports[s.legacy] == registryv1.PortProtocol_PORT_PROTOCOL_HTTP
+
+					// A1/A2: the Host names the dialled port. A9: a port-less
+					// Host means the dialled port.
+					for _, host := range []string{name, fmt.Sprintf("%s:%d", name, d)} {
+						got := a043Resolve(t, table, host)
+						portless := host == name
+						switch {
+						case isHTTP && d == 80 && s.legacy != 80 && portless:
+							// Decision 11: a port-less request to a declared
+							// port 80 keeps its legacy meaning.
+							assert.Equal(t, a043Cluster(s, s.legacy), got.cluster, "decision 11")
+						case isHTTP:
+							assert.Equalf(t, a043Cluster(s, d), got.cluster, "Host %q on dialled port %d must reach port %d and no other (%+v)", host, d, d, got)
+							assert.False(t, got.onDemand, "a known service is routed by its own virtual host")
+						case d == 18081 || d == 80:
+							// A12: the legacy spellings.
+							switch {
+							case legacyHTTP:
+								assert.Equalf(t, a043Cluster(s, s.legacy), got.cluster, "the legacy target (%+v)", got)
+							case len(httpPortsOf(s)) > 0:
+								assert.Equal(t, proxy.RefusalPortRequired, got.refusal)
+							default:
+								assert.Equal(t, proxy.RefusalNoHTTPPort, got.refusal)
+							}
+						case declared:
+							assert.Equalf(t, proxy.RefusalPortNotHTTP, got.refusal, "%+v", got)
+						default:
+							// A7.
+							assert.Equalf(t, proxy.RefusalPortNotDeclared, got.refusal, "%+v", got)
+						}
+						if got.refusal != "" {
+							assert.Equal(t, uint32(421), got.status)
+							assert.Empty(t, got.cluster, "a refusal reaches no cluster")
+							if got.refusal != proxy.RefusalNoHTTPPort {
+								for p := range s.ports {
+									assert.Contains(t, got.body, strconv.Itoa(int(p)), "the body lists the service's ports")
+								}
+							}
+						}
+					}
+
+					// A5: a Host that names ANOTHER port is refused, whatever
+					// that port is, and never obeyed.
+					for _, other := range []uint32{80, 8080, 9000, 9090, 18081, 7777} {
+						if other == d {
+							continue
+						}
+						got := a043Resolve(t, table, fmt.Sprintf("%s:%d", name, other))
+						if d == 7777 {
+							assert.Equalf(t, proxy.RefusalPortNotDeclared, got.refusal, "%+v", got)
+						} else {
+							assert.Equalf(t, proxy.RefusalPortMismatch, got.refusal, "dialled %d, Host port %d: %+v", d, other, got)
+						}
+						assert.Empty(t, got.cluster)
+					}
+				})
+			}
+		}
+	}
+}
+
+func httpPortsOf(s a043Service) []uint32 {
+	var out []uint32
+	for p, class := range s.ports {
+		if class == registryv1.PortProtocol_PORT_PROTOCOL_HTTP {
+			out = append(out, p)
+		}
+	}
+	slices.Sort(out)
+	return out
+}
+
+// TestAddressing_NoRouteLeavesItsPort is the structural form of #1682: in the
+// table of dialled port P, every route that reaches a mesh cluster reaches
+// the cluster of port P of the service the virtual host belongs to. It walks
+// every route of every table instead of resolving chosen requests, so a route
+// nobody thought to probe is covered too.
+func TestAddressing_NoRouteLeavesItsPort(t *testing.T) {
+	services := a043Fixture()
+	c := a043Cache(t, services)
+	byMesh := map[string]a043Service{}
+	for _, s := range services {
+		mesh, _ := a043Names(s, false)
+		byMesh[mesh] = s
+	}
+	routes := 0
+	for name, table := range a043Tables(t, c) {
+		port, isPortTable := proxy.CaptureHTTPRoutePort(name)
+		if !isPortTable && name != proxy.CaptureHTTPOtherRouteName {
+			continue // out_http: the loopback table, held below
+		}
+		for _, vh := range table.GetVirtualHosts() {
+			for _, r := range vh.GetRoutes() {
+				ra := r.GetRoute()
+				if ra == nil {
+					continue
+				}
+				if vh.GetName() == "on_demand_catch_all" {
+					if ra.GetClusterHeader() != "" {
+						require.True(t, isPortTable, "cap_http_other names no cluster on demand")
+						re := mustRegexp(t, r.GetMatch().GetHeaders()[0].GetStringMatch().GetSafeRegex().GetRegex())
+						assert.True(t, re.MatchString(fmt.Sprintf("x.y.%s:%d", a043Mesh, port)))
+						assert.Falsef(t, re.MatchString(fmt.Sprintf("x.y.%s:%d", a043Mesh, port+1)), "table %s: an authority of another port may not name a cluster", name)
+						assert.Equal(t, port == 80 || port == 18081, re.MatchString("x.y."+a043Mesh), "table %s: the port-less name", name)
+						assert.False(t, re.MatchString("x.y.svc.cluster.local"), "only a mesh authority is a cluster name")
+						continue
+					}
+					assert.Equal(t, proxy.PassthroughClusterName, ra.GetCluster())
+					continue
+				}
+				require.True(t, isPortTable, "cap_http_other routes nothing: %s", vh.GetName())
+				mesh, _, _ := strings.Cut(vh.GetName(), "|")
+				s, known := byMesh[mesh]
+				require.Truef(t, known, "virtual host %q belongs to no fixture service", vh.GetName())
+				cluster := ra.GetCluster()
+				if cluster == "" {
+					cluster = quicSelectionDefault(t, ra)
+				}
+				routes++
+				want := a043Cluster(s, port)
+				if s.ports[port] != registryv1.PortProtocol_PORT_PROTOCOL_HTTP || strings.HasSuffix(vh.GetName(), "|legacy") {
+					want = a043Cluster(s, s.legacy)
+					require.Truef(t, port == 80 || port == 18081, "table %s routes %s although the service has no HTTP port %d", name, vh.GetName(), port)
+				}
+				assert.Equalf(t, want, cluster, "table %s, virtual host %s", name, vh.GetName())
+			}
+		}
+	}
+	assert.Greater(t, routes, 15, "the walk must have seen the fixture's routes, or it proves nothing")
+}
+
+// TestAddressing_Loopback is legs A3, A6, A7 and A12 on the loopback listener
+// (out_http): nothing is dialled, so the port in Host is the port.
+func TestAddressing_Loopback(t *testing.T) {
+	services := a043Fixture()
+	c := a043Cache(t, services)
+	out := a043Tables(t, c)[proxy.OutboundHTTPRouteName]
+	for _, s := range services {
+		mesh, kube := a043Names(s, false)
+		legacyHTTP := s.ports[s.legacy] == registryv1.PortProtocol_PORT_PROTOCOL_HTTP
+		t.Run(s.key(), func(t *testing.T) {
+			for port, class := range s.ports {
+				got := a043Resolve(t, out, fmt.Sprintf("%s:%d", mesh, port))
+				if class == registryv1.PortProtocol_PORT_PROTOCOL_HTTP {
+					// A3.
+					assert.Equalf(t, a043Cluster(s, port), got.cluster, "port %d: %+v", port, got)
+					assert.False(t, got.onDemand)
+				} else {
+					// A6.
+					assert.Equalf(t, proxy.RefusalPortNotHTTP, got.refusal, "port %d: %+v", port, got)
+					assert.Equal(t, uint32(421), got.status)
+				}
+			}
+			// A7.
+			got := a043Resolve(t, out, mesh+":7777")
+			assert.Equalf(t, proxy.RefusalPortNotDeclared, got.refusal, "%+v", got)
+			// A12: the port-less name and the mesh HTTP port are the legacy
+			// target, or refused.
+			for _, host := range []string{mesh, mesh + ":18081"} {
+				got := a043Resolve(t, out, host)
+				switch {
+				case legacyHTTP && host == mesh:
+					assert.Equal(t, mesh, got.cluster)
+				case legacyHTTP:
+					assert.Equal(t, mesh+":18081", got.cluster, "the alias cluster of the default one")
+				case len(httpPortsOf(s)) > 0:
+					assert.Equal(t, proxy.RefusalPortRequired, got.refusal)
+				default:
+					assert.Equal(t, proxy.RefusalNoHTTPPort, got.refusal)
+				}
+			}
+			// The loopback listener answers mesh names only.
+			for _, name := range kube {
+				got := a043Resolve(t, out, name+":8080")
+				assert.Equalf(t, uint32(404), got.status, "%s: %+v", name, got)
+			}
+		})
+	}
+	// A name that is no mesh service this node knows still takes the cold
+	// path, by its own authority.
+	got := a043Resolve(t, out, "nobody.demo."+a043Mesh+":8080")
+	assert.True(t, got.onDemand)
+}
+
+// TestAddressing_ClustersArePerPortAndClass: an HTTP cluster exists for every
+// (service, HTTP port) and for no raw-TCP port; a raw-TCP cluster for every
+// (service, raw-TCP port) and for no HTTP port. A cluster of the wrong class
+// for a port is how a request reaches a port that cannot answer it.
+func TestAddressing_ClustersArePerPortAndClass(t *testing.T) {
+	services := a043Fixture()
+	c := a043Cache(t, services)
+	snap, err := c.GetSnapshot("node-1")
+	require.NoError(t, err)
+	clusters := snap.GetResources(resourcev3.ClusterType)
+	for _, s := range services {
+		mesh, _ := a043Names(s, false)
+		for port, class := range s.ports {
+			h2 := a043Cluster(s, port)
+			tcp := fmt.Sprintf("tcp:%s:%d", mesh, port)
+			if class == registryv1.PortProtocol_PORT_PROTOCOL_HTTP {
+				assert.Containsf(t, clusters, h2, "%s: HTTP port %d has no cluster", s.key(), port)
+				assert.NotContainsf(t, clusters, tcp, "%s: HTTP port %d has a raw-TCP cluster", s.key(), port)
+			} else {
+				assert.Containsf(t, clusters, tcp, "%s: raw-TCP port %d has no cluster", s.key(), port)
+				assert.NotContainsf(t, clusters, fmt.Sprintf("%s:%d", mesh, port), "%s: raw-TCP port %d has an h2 cluster", s.key(), port)
+			}
+		}
+		if s.ports[s.legacy] != registryv1.PortProtocol_PORT_PROTOCOL_HTTP {
+			assert.NotContainsf(t, clusters, mesh, "%s: no default h2 cluster for a raw-TCP legacy target (#1672)", s.key())
+			assert.NotContainsf(t, clusters, mesh+":18081", "%s: nor its mesh-port alias", s.key())
+		}
+	}
+}
+
+// a043CaptureListener returns the local pod's capture listener.
+func a043CaptureListener(t *testing.T, c *SnapshotCache) *listenerv3.Listener {
+	t.Helper()
+	snap, err := c.GetSnapshot("node-1")
+	require.NoError(t, err)
+	for name, res := range snap.GetResources(resourcev3.ListenerType) {
+		if strings.HasPrefix(name, "capture_") && !strings.Contains(name, "udp") {
+			return res.(*listenerv3.Listener)
+		}
+	}
+	t.Fatal("no capture listener in the snapshot")
+	return nil
+}
+
+func chainNames(l *listenerv3.Listener) []string {
+	out := make([]string, 0, len(l.GetFilterChains()))
+	for _, fc := range l.GetFilterChains() {
+		out = append(out, fc.GetName())
+	}
+	slices.Sort(out)
+	return out
+}
+
+// TestAddressing_ListenerChains holds the capture listener's chain set against
+// the fixture: an HTTP chain per HTTP port number, a raw-TCP chain per
+// (service, raw-TCP port), the legacy chains of a raw-TCP legacy target, and
+// the any-port chain only for a service with no HTTP port.
+func TestAddressing_ListenerChains(t *testing.T) {
+	services := a043Fixture()
+	c := a043Cache(t, services)
+	l := a043CaptureListener(t, c)
+	names := chainNames(l)
+
+	for _, want := range []string{
+		"cap_http_80", "cap_http_7070", "cap_http_8080", "cap_http_9000", "cap_http_9090", "cap_http_18081", "cap_http_other",
+		// mixed: 9000 is raw TCP, and its legacy target is HTTP.
+		"cap_tcp_tcp:mixed.demo.aether.internal_9000",
+		// tcpfirst: a raw-TCP legacy target on its own port and on :18082.
+		"cap_tcp_tcp:tcpfirst.demo.aether.internal_9000",
+		"cap_tcp_tcp:tcpfirst.demo.aether.internal_18082",
+		// tcponly: the same, and the any-port chain.
+		"cap_tcp_tcp:tcponly.demo.aether.internal_9000",
+		"cap_tcp_tcp:tcponly.demo.aether.internal_18082",
+		"cap_tcp_anyport_tcp:tcponly.demo.aether.internal",
+	} {
+		assert.Contains(t, names, want)
+	}
+	for _, name := range names {
+		assert.NotContains(t, name, "cap_tcp_anyport_tcp:tcpfirst", "no any-port chain for a service that declares an HTTP port")
+		assert.NotContains(t, name, "cap_tcp_anyport_tcp:mixed")
+		assert.NotContains(t, name, "cap_tcp_tcp:mixed.demo.aether.internal_18082", "the TCP mesh port names nothing on a service whose legacy target is HTTP")
+		assert.NotContains(t, name, "cap_tcp_tcp:nine", "a port declared HTTP gets no raw-TCP chain, whatever another service declares for the number")
+	}
+
+	// A10: nine's HTTP on 9000 and mixed's raw TCP on 9000 are told apart by
+	// the address. The raw-TCP chains of port 9000 match an address; the HTTP
+	// chain of port 9000 matches none.
+	addresses := map[string][]string{}
+	for _, fc := range l.GetFilterChains() {
+		m := fc.GetFilterChainMatch()
+		if m.GetDestinationPort().GetValue() != 9000 {
+			continue
+		}
+		for _, r := range m.GetPrefixRanges() {
+			addresses[fc.GetName()] = append(addresses[fc.GetName()], r.GetAddressPrefix())
+		}
+		if len(m.GetPrefixRanges()) == 0 {
+			addresses[fc.GetName()] = nil
+		}
+	}
+	assert.Equal(t, map[string][]string{
+		"cap_http_9000": nil,
+		"cap_tcp_tcp:mixed.demo.aether.internal_9000":    {"10.96.1.4"},
+		"cap_tcp_tcp:tcpfirst.demo.aether.internal_9000": {"10.96.1.5"},
+		"cap_tcp_tcp:tcponly.demo.aether.internal_9000":  {"10.96.1.7"},
+	}, addresses)
+
+	// No two chains match the same thing: the proxy rejects such a listener
+	// whole.
+	seen := map[string]string{}
+	for _, fc := range l.GetFilterChains() {
+		key := fc.GetFilterChainMatch().String()
+		if prev, dup := seen[key]; dup {
+			t.Errorf("chains %q and %q have the same match %s", prev, fc.GetName(), key)
+		}
+		seen[key] = fc.GetName()
+	}
+}
+
+// TestAddressing_ChainAndTableTravelTogether: every cap_http_<P> chain of a
+// listener in a snapshot names a route table of that snapshot, when a port
+// number enters the mesh and when it leaves. A chain naming a table the
+// snapshot does not carry leaves the listener warming (#817).
+func TestAddressing_ChainAndTableTravelTogether(t *testing.T) {
+	ctx := context.Background()
+	services := a043Fixture()
+	c := a043Cache(t, services)
+	check := func(wantPort uint32, present bool) {
+		t.Helper()
+		tables := a043Tables(t, c)
+		l := a043CaptureListener(t, c)
+		named := 0
+		for _, fc := range l.GetFilterChains() {
+			if !strings.HasPrefix(fc.GetName(), proxy.CaptureHTTPRoutePrefix) {
+				continue
+			}
+			named++
+			assert.Containsf(t, tables, fc.GetName(), "chain %s names a route table the snapshot does not carry", fc.GetName())
+		}
+		require.Greater(t, named, 2)
+		assert.Equal(t, present, slices.Contains(chainNames(l), proxy.CaptureHTTPRouteName(wantPort)))
+		_, hasTable := tables[proxy.CaptureHTTPRouteName(wantPort)]
+		assert.Equal(t, present, hasTable)
+	}
+	check(7070, true)
+
+	// The only service with port 7070 leaves the mesh for good: its Service
+	// goes, its endpoints go, and its retained clusters age out.
+	c.serviceRetentionGrace = 1
+	remaining := services[:len(services)-1]
+	a043Project(c, remaining)
+	require.NoError(t, c.LoadClustersFromRegistry(ctx, "cluster-1", "node-1", a043Registry(remaining)))
+	require.NoError(t, c.LoadClustersFromRegistry(ctx, "cluster-1", "node-1", a043Registry(remaining)))
+	check(7070, false)
+
+	// And a new port number enters.
+	h := registryv1.PortProtocol_PORT_PROTOCOL_HTTP
+	grown := append(slices.Clone(remaining), a043Service{name: "late", ns: a043NS, legacy: 6060, ports: map[uint32]registryv1.PortProtocol{6060: h}, ip: "10.0.1.9", vip: "10.96.1.9"})
+	a043Project(c, grown)
+	require.NoError(t, c.LoadClustersFromRegistry(ctx, "cluster-1", "node-1", a043Registry(grown)))
+	check(6060, true)
+}
+
+// TestAddressing_EndpointChurnDoesNotRebuildListeners: pods coming and going
+// with the same declarations leave the capture listener the very same object,
+// so the proxy is not sent it again (a listener update drains connections).
+func TestAddressing_EndpointChurnDoesNotRebuildListeners(t *testing.T) {
+	ctx := context.Background()
+	services := a043Fixture()
+	c := a043Cache(t, services)
+	before := a043CaptureListener(t, c)
+
+	churned := slices.Clone(services)
+	for i := range churned {
+		churned[i].ip = strings.Replace(churned[i].ip, "10.0.", "10.9.", 1)
+	}
+	require.NoError(t, c.LoadClustersFromRegistry(ctx, "cluster-1", "node-1", a043Registry(churned)))
+	assert.Same(t, before, a043CaptureListener(t, c), "endpoint churn rebuilt the capture listener")
+
+	// Negative control: a declaration that changes does rebuild it.
+	churned[0].ports = map[uint32]registryv1.PortProtocol{8080: registryv1.PortProtocol_PORT_PROTOCOL_HTTP, 5555: registryv1.PortProtocol_PORT_PROTOCOL_TCP}
+	require.NoError(t, c.LoadClustersFromRegistry(ctx, "cluster-1", "node-1", a043Registry(churned)))
+	after := a043CaptureListener(t, c)
+	assert.NotSame(t, before, after)
+	assert.Contains(t, chainNames(after), "cap_tcp_tcp:httponly.demo.aether.internal_5555")
+}
+
+// TestAddressing_RulesFollowTheParentPort is leg A4: a rule whose parentRef
+// names no port applies on every HTTP port of the service, on both paths; a
+// rule that names a port applies on that port only.
+func TestAddressing_RulesFollowTheParentPort(t *testing.T) {
+	ctx := context.Background()
+	services := a043Fixture()
+	c := a043Cache(t, services)
+	mark := func(v string) *proxy.GammaHeaderMutation {
+		return &proxy.GammaHeaderMutation{AddResponse: []proxy.GammaHeaderKV{{Name: "x-mp-route", Value: v}}}
+	}
+	c.SetServiceRoutes(map[string][]proxy.GammaRoute{
+		"demo/multi": {
+			{Matches: []proxy.GammaMatch{{Prefix: "/all"}}, HeaderMutation: mark("all")},
+			{ParentPort: 9090, Matches: []proxy.GammaMatch{{Prefix: "/only9090"}}, HeaderMutation: mark("9090")},
+		},
+	})
+	require.NoError(t, c.LoadClustersFromRegistry(ctx, "cluster-1", "node-1", a043Registry(services)))
+	tables := a043Tables(t, c)
+
+	marks := func(table *routev3.RouteConfiguration, host string) map[string]string {
+		out := map[string]string{}
+		for _, vh := range table.GetVirtualHosts() {
+			if !slices.Contains(vh.GetDomains(), host) {
+				continue
+			}
+			for _, r := range vh.GetRoutes() {
+				for _, h := range r.GetResponseHeadersToAdd() {
+					if h.GetHeader().GetKey() == "x-mp-route" {
+						cluster := r.GetRoute().GetCluster()
+						if cluster == "" {
+							cluster = quicSelectionDefault(t, r.GetRoute())
+						}
+						out[h.GetHeader().GetValue()] = cluster
+					}
+				}
+			}
+		}
+		return out
+	}
+	const mesh = "multi.demo.aether.internal"
+	// Captured: each port's table, each rule routed to THAT port's cluster.
+	assert.Equal(t, map[string]string{"all": mesh}, marks(tables["cap_http_8080"], mesh+":8080"))
+	assert.Equal(t, map[string]string{"all": mesh + ":9090", "9090": mesh + ":9090"}, marks(tables["cap_http_9090"], mesh+":9090"))
+	assert.Equal(t, map[string]string{"all": mesh + ":9090", "9090": mesh + ":9090"}, marks(tables["cap_http_9090"], "multi.demo.svc.cluster.local"))
+	// The legacy spellings are the legacy target, port 8080.
+	assert.Equal(t, map[string]string{"all": mesh}, marks(tables["cap_http_18081"], mesh+":18081"))
+	// Loopback.
+	out := tables[proxy.OutboundHTTPRouteName]
+	assert.Equal(t, map[string]string{"all": mesh}, marks(out, mesh+":8080"))
+	assert.Equal(t, map[string]string{"all": mesh + ":9090", "9090": mesh + ":9090"}, marks(out, mesh+":9090"))
+	// Negative control: another service's virtual hosts carry none of it.
+	assert.Empty(t, marks(tables["cap_http_9090"], "eighty.demo.aether.internal:9090"))
+}
+
+// TestAddressing_BackendRefPort: a backendRef's port is a port of the backend
+// Service and selects that port's cluster. It was not read at all, so a route
+// to port 9090 of a two-port service delivered to its other port (proposal
+// 043, fact 1, row 11).
+func TestAddressing_BackendRefPort(t *testing.T) {
+	services := a043Fixture()
+	all := deriveAllServicePorts(a043Listing(t, services, registryv1.Service_PROTOCOL_HTTP), a043Listing(t, services, registryv1.Service_PROTOCOL_TCP), nil)
+	const multi, tcpfirst = "multi.demo.aether.internal", "tcpfirst.demo.aether.internal"
+	userMap := map[string]map[uint32]uint32{"demo/multi": {80: 9090, 81: 0, 443: 8443}}
+	cases := []struct {
+		name     string
+		backend  proxy.GammaBackend
+		portMaps map[string]map[uint32]uint32
+		want     string
+	}{
+		{"a declared HTTP port", proxy.GammaBackend{Service: "demo/multi", Cluster: multi, Port: 9090}, nil, multi + ":9090"},
+		{"the legacy target's port is the default cluster", proxy.GammaBackend{Service: "demo/multi", Cluster: multi, Port: 8080}, nil, multi},
+		{"no port: the projected cluster", proxy.GammaBackend{Service: "demo/multi", Cluster: multi}, nil, multi},
+		{"the mesh HTTP port: the legacy spelling", proxy.GammaBackend{Service: "demo/multi", Cluster: multi, Port: 18081}, nil, multi},
+		{"port 80 of a service that does not declare it: the legacy spelling", proxy.GammaBackend{Service: "demo/multi", Cluster: multi, Port: 80}, nil, multi},
+		{"port 80 of a service that declares it", proxy.GammaBackend{Service: "demo/eighty", Cluster: "eighty.demo.aether.internal", Port: 80}, nil, "eighty.demo.aether.internal:80"},
+		{"an undeclared port names a cluster that does not exist", proxy.GammaBackend{Service: "demo/multi", Cluster: multi, Port: 7777}, nil, multi + ":7777"},
+		{"a raw-TCP port is not an HTTP backend", proxy.GammaBackend{Service: "demo/mixed", Cluster: "mixed.demo.aether.internal", Port: 9000}, nil, "mixed.demo.aether.internal:9000"},
+		{"the legacy spelling of a service whose legacy target is raw TCP names nothing", proxy.GammaBackend{Service: "demo/tcpfirst", Cluster: tcpfirst, Port: 18081}, nil, tcpfirst + ":18081"},
+		{"a service this node knows no port of keeps the projected cluster", proxy.GammaBackend{Service: "demo/cold", Cluster: "cold.demo.aether.internal", Port: 9090}, nil, "cold.demo.aether.internal"},
+		{"a user Service: its port resolves through targetPort", proxy.GammaBackend{Service: "demo/multi", Cluster: multi, Port: 80}, userMap, multi + ":9090"},
+		{"a user Service: a named targetPort resolves to nothing", proxy.GammaBackend{Service: "demo/multi", Cluster: multi, Port: 81}, userMap, multi + ":81"},
+		{"a user Service: a port it does not have resolves to nothing", proxy.GammaBackend{Service: "demo/multi", Cluster: multi, Port: 8080}, userMap, multi + ":8080"},
+		{"a user Service: a targetPort the pods do not declare", proxy.GammaBackend{Service: "demo/multi", Cluster: multi, Port: 443}, userMap, multi + ":8443"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.want, backendCluster(tc.backend, tc.portMaps, all, a043Mesh))
+		})
+	}
+
+	// resolveRules never writes into the shared rules.
+	shared := map[string][]proxy.GammaRoute{"demo/httponly": {{Backends: []proxy.GammaBackend{{Service: "demo/multi", Cluster: multi, Port: 9090, Weight: 1}}}}}
+	got := resolveRules(ruleInputs{routes: shared}, all, a043Mesh, "demo/httponly", 8080)
+	require.Len(t, got, 1)
+	assert.Equal(t, multi+":9090", got[0].Backends[0].Cluster)
+	assert.Equal(t, multi, shared["demo/httponly"][0].Backends[0].Cluster, "the shared rule was mutated")
+}
+
+func a043Listing(t *testing.T, services []a043Service, protocol registryv1.Service_Protocol) map[string][]*registryv1.ServiceEndpoint {
+	t.Helper()
+	out, err := a043Registry(services).listAllEndpointsFunc(context.Background(), protocol)
+	require.NoError(t, err)
+	return out
+}
+
+// TestAddressing_UserServicePortMap is the conformance shape: a user Service
+// "echo" owns the name, maps port 80 to pod port 8080, and a route sends it to
+// "echo-v1" port 80, itself a user Service mapping 80 to 8080. The client
+// dials port 80.
+func TestAddressing_UserServicePortMap(t *testing.T) {
+	ctx := context.Background()
+	h := registryv1.PortProtocol_PORT_PROTOCOL_HTTP
+	services := []a043Service{
+		{name: "echo-v1", ns: a043NS, legacy: 8080, ports: map[uint32]registryv1.PortProtocol{8080: h, 3000: h}, ip: "10.0.3.1", vip: "10.96.3.1"},
+	}
+	c := newTestCache("node-1")
+	c.SetCaptureEnabled(true)
+	c.SetCaptureRedirectAll(true)
+	// No generated Service: the user's Services own both names.
+	declareDeps(c, "demo/echo-v1")
+	c.SetServicePortMaps(map[string]map[uint32]uint32{
+		"demo/echo":    {80: 8080, 8080: 8080},
+		"demo/echo-v1": {80: 8080, 3000: 3000, 9: 0},
+	})
+	c.SetServiceRoutes(map[string][]proxy.GammaRoute{
+		"demo/echo": {{Backends: []proxy.GammaBackend{{Service: "demo/echo-v1", Cluster: "echo-v1.demo.aether.internal", Port: 80, Weight: 1}}}},
+		"demo/echo-v1": {{
+			ParentPort: 3000, Matches: []proxy.GammaMatch{{Prefix: "/x"}},
+			Backends: []proxy.GammaBackend{{Service: "demo/echo-v1", Cluster: "echo-v1.demo.aether.internal", Port: 3000, Weight: 1}},
+		}},
+	})
+	require.NoError(t, c.LoadClustersFromRegistry(ctx, "cluster-1", "node-1", a043Registry(services)))
+	tables := a043Tables(t, c)
+
+	// The Service ports are the mesh's port numbers, not the pods'.
+	for _, p := range []uint32{80, 3000, 8080} {
+		require.Contains(t, tables, proxy.CaptureHTTPRouteName(p))
+	}
+	assert.NotContains(t, tables, "cap_http_9", "a named targetPort routes nothing")
+
+	// http://echo/ dials 80: the route's backend is echo-v1's SERVICE port 80,
+	// which is pod port 8080, its default cluster.
+	got := a043Resolve(t, tables["cap_http_80"], "echo")
+	assert.Equal(t, "echo-v1.demo.aether.internal", got.cluster)
+	got = a043Resolve(t, tables["cap_http_80"], "echo.demo.svc.cluster.local:80")
+	assert.Equal(t, "echo-v1.demo.aether.internal", got.cluster)
+	// echo-v1 dialled on its Service port 80 is its pod port 8080.
+	got = a043Resolve(t, tables["cap_http_80"], "echo-v1.demo")
+	assert.Equal(t, "echo-v1.demo.aether.internal", got.cluster)
+	// Its Service port 3000 is pod port 3000, with the rule scoped to it.
+	vh := findVHost(tables["cap_http_3000"].GetVirtualHosts(), "echo-v1.demo:3000")
+	require.NotNil(t, vh)
+	require.Len(t, vh.GetRoutes(), 2, "the rule of parent port 3000, and the default route")
+	assert.Equal(t, "echo-v1.demo.aether.internal:3000", vh.GetRoutes()[0].GetRoute().GetCluster())
+	assert.Equal(t, "echo-v1.demo.aether.internal:3000", vh.GetRoutes()[1].GetRoute().GetCluster())
+	// And that rule is on no other port's virtual host.
+	vh = findVHost(tables["cap_http_80"].GetVirtualHosts(), "echo-v1.demo")
+	require.NotNil(t, vh)
+	assert.Len(t, vh.GetRoutes(), 1)
+	// Pod port 8080 is not a port of the Service echo-v1: dialling it is
+	// refused, not routed by the pod's own numbering.
+	got = a043Resolve(t, tables["cap_http_8080"], "echo-v1.demo:8080")
+	assert.Equal(t, proxy.RefusalPortNotDeclared, got.refusal)
+}
+
+// TestServicePorts_Derivation holds the per-port model: the class of a port is
+// the endpoints' own declaration, decided by vote when they disagree, in any
+// order of rows and listings.
+func TestServicePorts_Derivation(t *testing.T) {
+	h, tcp, udp := registryv1.PortProtocol_PORT_PROTOCOL_HTTP, registryv1.PortProtocol_PORT_PROTOCOL_TCP, registryv1.PortProtocol_PORT_PROTOCOL_UDP
+	ep := func(ip string, port uint32, pp map[uint32]registryv1.PortProtocol, ports ...uint32) *registryv1.ServiceEndpoint {
+		return &registryv1.ServiceEndpoint{Ip: ip, ClusterName: "c1", Port: port, Ports: ports, PortProtocols: pp}
+	}
+	lst := func(p registryv1.Service_Protocol, eps ...*registryv1.ServiceEndpoint) listedEndpoints {
+		return listedEndpoints{protocol: p, endpoints: eps}
+	}
+	const sHTTP, sTCP, sUDP = registryv1.Service_PROTOCOL_HTTP, registryv1.Service_PROTOCOL_TCP, registryv1.Service_PROTOCOL_UDP
+
+	t.Run("nothing known", func(t *testing.T) {
+		got := deriveServicePorts()
+		assert.False(t, got.known())
+		assert.Zero(t, got.legacyHTTPPort())
+		assert.Zero(t, got.legacyTCPPort())
+		assert.Equal(t, "none", got.describe())
+	})
+
+	t.Run("a mixed pod is one endpoint, whichever listing is read first (#1672)", func(t *testing.T) {
+		a := ep("10.0.0.1", 9000, map[uint32]registryv1.PortProtocol{9000: tcp, 8080: h}, 8080, 9000)
+		for _, listings := range [][]listedEndpoints{
+			{lst(sHTTP, a), lst(sTCP, a)},
+			{lst(sTCP, a), lst(sHTTP, a)},
+			{lst(sHTTP, a)},
+		} {
+			got := deriveServicePorts(listings...)
+			assert.Equal(t, []uint32{8080}, got.http)
+			assert.Equal(t, []uint32{9000}, got.tcp)
+			assert.Equal(t, uint32(9000), got.legacyTCPPort(), "the declared port is raw TCP: listed under HTTP says the pod serves an HTTP port, not that this one is HTTP")
+			assert.Zero(t, got.legacyHTTPPort())
+			assert.Empty(t, got.conflicts, "one pod in two listings is not a disagreement")
+			assert.Equal(t, "8080 (http), 9000 (tcp)", got.describe())
+		}
+	})
+
+	t.Run("a row written before proposal 037 takes its listing's class", func(t *testing.T) {
+		got := deriveServicePorts(lst(sTCP, ep("10.0.0.1", 9000, nil)))
+		assert.Equal(t, []uint32{9000}, got.tcp)
+		assert.Equal(t, uint32(9000), got.legacyTCPPort())
+		got = deriveServicePorts(lst(sUDP, ep("10.0.0.1", 5353, nil)))
+		assert.Equal(t, []uint32{5353}, got.udp)
+		got = deriveServicePorts(lst(registryv1.Service_PROTOCOL_UNSPECIFIED, ep("10.0.0.1", 8080, nil, 8080, 9090)))
+		assert.Equal(t, []uint32{8080, 9090}, got.http)
+		assert.Equal(t, uint32(8080), got.legacyHTTPPort())
+	})
+
+	t.Run("a port the map does not name takes the listing's class; an unusable port is dropped", func(t *testing.T) {
+		got := deriveServicePorts(lst(sTCP, ep("10.0.0.1", 9000, map[uint32]registryv1.PortProtocol{8080: h, 70000: h, 0: h}, 9000, 8080)))
+		assert.Equal(t, []uint32{8080}, got.http)
+		assert.Equal(t, []uint32{9000}, got.tcp)
+	})
+
+	t.Run("a class conflict: most endpoints win, in any order", func(t *testing.T) {
+		a := ep("10.0.0.1", 8080, map[uint32]registryv1.PortProtocol{8080: h, 9000: tcp})
+		b := ep("10.0.0.2", 8080, map[uint32]registryv1.PortProtocol{8080: h, 9000: tcp})
+		x := ep("10.0.0.3", 8080, map[uint32]registryv1.PortProtocol{8080: h, 9000: h})
+		for _, order := range [][]*registryv1.ServiceEndpoint{{a, b, x}, {x, a, b}, {b, x, a}} {
+			got := deriveServicePorts(lst(sHTTP, order...), lst(sTCP, a, b))
+			assert.Equal(t, []uint32{8080}, got.http)
+			assert.Equal(t, []uint32{9000}, got.tcp)
+			assert.Equal(t, []string{"9000: 1 http, 2 tcp"}, got.conflicts)
+		}
+	})
+
+	t.Run("a tied class conflict: http, then tcp, then udp", func(t *testing.T) {
+		a := ep("10.0.0.1", 8080, map[uint32]registryv1.PortProtocol{8080: h, 9000: tcp})
+		x := ep("10.0.0.3", 8080, map[uint32]registryv1.PortProtocol{8080: h, 9000: h})
+		u := ep("10.0.0.4", 8080, map[uint32]registryv1.PortProtocol{8080: h, 9000: udp})
+		for _, order := range [][]*registryv1.ServiceEndpoint{{a, x}, {x, a}} {
+			assert.Equal(t, []uint32{8080, 9000}, deriveServicePorts(lst(sHTTP, order...)).http)
+		}
+		for _, order := range [][]*registryv1.ServiceEndpoint{{a, u}, {u, a}} {
+			got := deriveServicePorts(lst(sHTTP, order...))
+			assert.Equal(t, []uint32{9000}, got.tcp)
+			assert.Empty(t, got.udp)
+		}
+	})
+
+	t.Run("the legacy target when pods disagree: most endpoints, then http, then the lower port (decision 4)", func(t *testing.T) {
+		t1 := ep("10.0.0.1", 9000, map[uint32]registryv1.PortProtocol{9000: tcp, 8080: h})
+		t2 := ep("10.0.0.2", 9000, map[uint32]registryv1.PortProtocol{9000: tcp, 8080: h})
+		h1 := ep("10.0.0.3", 8080, map[uint32]registryv1.PortProtocol{9000: tcp, 8080: h})
+		for _, order := range [][]*registryv1.ServiceEndpoint{{t1, t2, h1}, {h1, t1, t2}, {t2, h1, t1}} {
+			port, class := legacyTarget(lst(sHTTP, order...), lst(sTCP, order...))
+			assert.Equal(t, uint32(9000), port)
+			assert.Equal(t, tcp, class)
+		}
+		for _, order := range [][]*registryv1.ServiceEndpoint{{t1, h1}, {h1, t1}} {
+			port, class := legacyTarget(lst(sHTTP, order...))
+			assert.Equal(t, uint32(8080), port, "tied: http first")
+			assert.Equal(t, h, class)
+		}
+		lo, hi := ep("10.0.0.5", 8080, nil), ep("10.0.0.6", 9090, nil)
+		for _, order := range [][]*registryv1.ServiceEndpoint{{lo, hi}, {hi, lo}} {
+			port, _ := legacyTarget(lst(sHTTP, order...))
+			assert.Equal(t, uint32(8080), port, "tied on class: the lower port")
+		}
+	})
+
+	t.Run("the same address in two clusters is two endpoints", func(t *testing.T) {
+		a := ep("10.0.0.1", 9000, map[uint32]registryv1.PortProtocol{9000: tcp})
+		b := ep("10.0.0.1", 9000, map[uint32]registryv1.PortProtocol{9000: tcp})
+		b.ClusterName = "c2"
+		x := ep("10.0.0.9", 8080, map[uint32]registryv1.PortProtocol{8080: h})
+		port, class := legacyTarget(lst(sHTTP, x), lst(sTCP, a, b))
+		assert.Equal(t, uint32(9000), port)
+		assert.Equal(t, tcp, class)
+	})
+
+	t.Run("equal ignores what does not change a chain", func(t *testing.T) {
+		a := deriveServicePorts(lst(sHTTP, ep("10.0.0.1", 8080, map[uint32]registryv1.PortProtocol{8080: h, 9000: tcp})))
+		b := deriveServicePorts(lst(sHTTP, ep("10.9.9.9", 8080, map[uint32]registryv1.PortProtocol{9000: tcp, 8080: h})))
+		assert.True(t, a.equal(b))
+		c := deriveServicePorts(lst(sHTTP, ep("10.0.0.1", 8080, map[uint32]registryv1.PortProtocol{8080: h, 9000: h})))
+		assert.False(t, a.equal(c), "a class change is a change")
+		d := deriveServicePorts(lst(sHTTP, ep("10.0.0.1", 9000, map[uint32]registryv1.PortProtocol{8080: h, 9000: tcp})))
+		assert.False(t, a.equal(d), "a legacy target change is a change")
+	})
+}
+
+// TestServicePorts_RetainedWithTheClusters: a service that vanishes from the
+// listing keeps its derived ports for as long as it keeps its retained
+// clusters, so a single-replica restart does not take a port number out of
+// the mesh and back; and loses them when the clusters are pruned.
+func TestServicePorts_RetainedWithTheClusters(t *testing.T) {
+	ctx := context.Background()
+	services := a043Fixture()
+	c := a043Cache(t, services)
+	before := a043CaptureListener(t, c)
+
+	// "nine", the only HTTP service on port 9000, loses its only pod. Its
+	// Service is still there (the registrar prunes on its own schedule).
+	var without []a043Service
+	for _, s := range services {
+		if s.name != "nine" {
+			without = append(without, s)
+		}
+	}
+	require.NoError(t, c.LoadClustersFromRegistry(ctx, "cluster-1", "node-1", a043Registry(without)))
+	assert.Same(t, before, a043CaptureListener(t, c), "a transiently empty service rebuilt the capture listener")
+	got := a043Resolve(t, a043Tables(t, c)["cap_http_9000"], "nine.demo.aether.internal:9000")
+	assert.Equal(t, "nine.demo.aether.internal", got.cluster, "it keeps routing to its retained (empty) cluster: a retriable 503, not a refusal")
+
+	// Past the grace the clusters are pruned and the ports with them.
+	c.serviceRetentionGrace = 1
+	require.NoError(t, c.LoadClustersFromRegistry(ctx, "cluster-1", "node-1", a043Registry(without)))
+	c.clusterMu.RLock()
+	_, kept := c.servicePorts["demo/nine"]
+	c.clusterMu.RUnlock()
+	assert.False(t, kept)
+}
+
+func mustRegexp(t *testing.T, pattern string) *regexp.Regexp {
+	t.Helper()
+	re, err := regexp.Compile(pattern)
+	require.NoError(t, err, "pattern %q", pattern)
+	return re
+}
+
+// quicSelectionDefault returns the h2 cluster of a route action rewritten by
+// the per-source HTTP/3 selection: the cluster a request with no arm takes.
+func quicSelectionDefault(t *testing.T, ra *routev3.RouteAction) string {
+	t.Helper()
+	_, noMatch, ok := proxy.QUICSelectionArms(&routev3.Route{Action: &routev3.Route_Route{Route: ra}})
+	require.True(t, ok, "a route action with neither a cluster nor a selection plugin: %v", ra)
+	return noMatch
+}
+
+// TestAddressing_RoutePortsReachTheListener: a port number that enters the
+// mesh through a route alone (a parentRef port, a user Service's port map)
+// gets its chain on the next snapshot. Nothing else rebuilds the listeners
+// for it: the routes did not change, and neither did the Services or the
+// registry.
+func TestAddressing_RoutePortsReachTheListener(t *testing.T) {
+	ctx := context.Background()
+	services := a043Fixture()
+	c := a043Cache(t, services)
+	c.SetServiceRoutes(map[string][]proxy.GammaRoute{
+		"demo/route-only": {{Backends: []proxy.GammaBackend{{Service: "demo/multi", Cluster: "multi.demo.aether.internal", Weight: 1}}}},
+	})
+	require.NoError(t, c.generateSnapshot(ctx))
+	require.NotContains(t, chainNames(a043CaptureListener(t, c)), "cap_http_6543")
+
+	c.SetRouteTargetPorts(map[string][]uint32{"demo/route-only": {6543}})
+	require.NoError(t, c.generateSnapshot(ctx))
+	assert.Contains(t, chainNames(a043CaptureListener(t, c)), "cap_http_6543")
+	assert.Contains(t, a043Tables(t, c), "cap_http_6543")
+
+	c.SetRouteTargetPorts(nil)
+	c.SetServicePortMaps(map[string]map[uint32]uint32{"demo/route-only": {6544: 8080}})
+	require.NoError(t, c.generateSnapshot(ctx))
+	names := chainNames(a043CaptureListener(t, c))
+	assert.Contains(t, names, "cap_http_6544")
+	assert.NotContains(t, names, "cap_http_6543", "a port number that left the mesh loses its chain")
+}
+
+// TestAddressing_ScaleWorkedExample builds the worked example of proposal
+// 043's "Scale" section and holds the counts it states: 200 services with an
+// address, three HTTP port numbers (80, 8080, 9090), 20 (service, raw-TCP
+// port) pairs, 50 pods on the node.
+//
+// Two shapes of the 20 pairs are measured, because they do not cost the same:
+// a raw-TCP port beside an HTTP legacy target is one chain; a raw-TCP LEGACY
+// target with no HTTP port is the chain on its own port, the one on the TCP
+// mesh port, and the any-port chain with a twin on every HTTP port number.
+func TestAddressing_ScaleWorkedExample(t *testing.T) {
+	h, tcp := registryv1.PortProtocol_PORT_PROTOCOL_HTTP, registryv1.PortProtocol_PORT_PROTOCOL_TCP
+	build := func(tcpOnly bool) (*SnapshotCache, []a043Service) {
+		var services []a043Service
+		for i := 0; i < 200; i++ {
+			s := a043Service{
+				name: fmt.Sprintf("svc-%03d", i), ns: a043NS, legacy: 8080,
+				ports: map[uint32]registryv1.PortProtocol{8080: h},
+				ip:    fmt.Sprintf("10.0.%d.%d", 10+i/200, 1+i%200), vip: fmt.Sprintf("10.96.%d.%d", 10+i/200, 1+i%200),
+			}
+			switch {
+			case i < 20 && tcpOnly:
+				s.legacy, s.ports = 5432, map[uint32]registryv1.PortProtocol{5432: tcp}
+			case i < 20:
+				s.ports[5432] = tcp
+			case i%3 == 0:
+				s.ports[9090] = h
+			case i%7 == 0:
+				s.ports[80] = h
+			}
+			services = append(services, s)
+		}
+		ctx := context.Background()
+		c := newTestCache("node-1")
+		c.SetCaptureEnabled(true)
+		c.SetCaptureRedirectAll(true)
+		for p := 0; p < 50; p++ {
+			require.NoError(t, c.AddPod(ctx, &cniv1.CNIPod{
+				Name: fmt.Sprintf("client-%d", p), Namespace: a043NS, ServiceAccount: "client", NetworkNamespace: fmt.Sprintf("/var/run/netns/cni-%d", p),
+			}, a043Mesh))
+		}
+		require.NoError(t, c.SetNodeIdentity(ctx, nodeIdentity))
+		a043Project(c, services)
+		require.NoError(t, c.LoadClustersFromRegistry(ctx, "cluster-1", "node-1", a043Registry(services)))
+		return c, services
+	}
+
+	for _, shape := range []struct {
+		name       string
+		tcpOnly    bool
+		wantChains int
+	}{
+		// 4 HTTP port numbers (80, 8080, 9090 and the legacy 18081) + other + 20.
+		{"20 raw-TCP ports beside an HTTP legacy target", false, 4 + 1 + 20},
+		// Per raw-TCP-only service: its port, :18082, any-port, 4 twins.
+		{"20 raw-TCP legacy targets with no HTTP port", true, 4 + 1 + 20*(2+1+4)},
+	} {
+		t.Run(shape.name, func(t *testing.T) {
+			c, _ := build(shape.tcpOnly)
+			snap, err := c.GetSnapshot("node-1")
+			require.NoError(t, err)
+
+			captureListeners, chains, hcms, listenerBytes := 0, 0, 0, 0
+			for name, res := range snap.GetResources(resourcev3.ListenerType) {
+				if !strings.HasPrefix(name, "capture_") {
+					continue
+				}
+				l := res.(*listenerv3.Listener)
+				captureListeners++
+				listenerBytes += proto.Size(l)
+				assert.Len(t, l.GetFilterChains(), shape.wantChains)
+				chains += len(l.GetFilterChains())
+				for _, fc := range l.GetFilterChains() {
+					if strings.HasPrefix(fc.GetName(), "cap_http_") {
+						hcms++
+					}
+				}
+				assert.NotNil(t, l.GetDefaultFilterChain(), "plus the passthrough default chain")
+			}
+			require.Equal(t, 50, captureListeners)
+			assert.Equal(t, 50*5, hcms, "H+1 HCM configs per pod, H counting the legacy mesh HTTP port")
+
+			tables, vhosts, tableBytes := 0, 0, 0
+			for name, res := range snap.GetResources(resourcev3.RouteType) {
+				rc := res.(*routev3.RouteConfiguration)
+				tables++
+				if name != proxy.OutboundHTTPRouteName {
+					vhosts += len(rc.GetVirtualHosts())
+					tableBytes += proto.Size(rc)
+				}
+			}
+			assert.Equal(t, 6, tables, "cap_http_80, _8080, _9090, _18081, cap_http_other and out_http")
+			t.Logf("%s: chains per pod listener=%d (+1 default), per node=%d; HCM configs per pod=5, per node=%d; route tables per node=%d; capture virtual hosts=%d; capture listeners=%d KiB total (%d KiB each); capture route tables=%d KiB total; clusters=%d",
+				shape.name, shape.wantChains, chains, hcms, tables, vhosts, listenerBytes/1024, listenerBytes/1024/50, tableBytes/1024, len(snap.GetResources(resourcev3.ClusterType)))
+		})
+	}
+}
+
+// TestAddressing_TablesAreKeptWhileTheirInputsAre: the capture route tables
+// are the same objects from one snapshot to the next while nothing they are
+// built from changed (so the proxy is not sent them and the agent does not
+// hash them again), and new ones as soon as any input does. A table kept
+// across a change would route by yesterday's ports.
+func TestAddressing_TablesAreKeptWhileTheirInputsAre(t *testing.T) {
+	ctx := context.Background()
+	services := a043Fixture()
+	c := a043Cache(t, services)
+	table := func() *routev3.RouteConfiguration { return a043Tables(t, c)["cap_http_8080"] }
+	last := table()
+	kept := func(what string) {
+		t.Helper()
+		now := table()
+		assert.Samef(t, last, now, "%s rebuilt the tables", what)
+		last = now
+	}
+	rebuilt := func(what string) {
+		t.Helper()
+		now := table()
+		assert.NotSamef(t, last, now, "%s left a stale table", what)
+		last = now
+	}
+
+	require.NoError(t, c.generateSnapshot(ctx))
+	kept("a snapshot build with no change")
+
+	churned := slices.Clone(services)
+	for i := range churned {
+		churned[i].ip = strings.Replace(churned[i].ip, "10.0.", "10.9.", 1)
+	}
+	require.NoError(t, c.LoadClustersFromRegistry(ctx, "cluster-1", "node-1", a043Registry(churned)))
+	kept("endpoint churn")
+
+	c.SetServiceRoutes(map[string][]proxy.GammaRoute{"demo/multi": {{Matches: []proxy.GammaMatch{{Prefix: "/x"}}}}})
+	require.NoError(t, c.generateSnapshot(ctx))
+	rebuilt("a route")
+	require.Len(t, findVHost(last.GetVirtualHosts(), "multi.demo.aether.internal:8080").GetRoutes(), 2)
+
+	c.SetServicePortMaps(map[string]map[uint32]uint32{"demo/elsewhere": {80: 8080}})
+	require.NoError(t, c.generateSnapshot(ctx))
+	rebuilt("a port map")
+
+	c.SetRouteTargetPorts(map[string][]uint32{"demo/multi": {8080}})
+	require.NoError(t, c.generateSnapshot(ctx))
+	rebuilt("a route target port")
+
+	renamed := slices.Clone(churned)
+	renamed[0].name = "httponly2"
+	a043Project(c, renamed)
+	require.NoError(t, c.generateSnapshot(ctx))
+	rebuilt("a mesh Service")
+
+	// A port's class changes: 8080 of "mixed" becomes raw TCP.
+	retyped := slices.Clone(renamed)
+	retyped[3].ports = map[uint32]registryv1.PortProtocol{8080: registryv1.PortProtocol_PORT_PROTOCOL_TCP, 9000: registryv1.PortProtocol_PORT_PROTOCOL_TCP}
+	retyped[3].legacy = 9000
+	require.NoError(t, c.LoadClustersFromRegistry(ctx, "cluster-1", "node-1", a043Registry(retyped)))
+	rebuilt("a port's class")
+	got := a043Resolve(t, last, "mixed.demo.aether.internal:8080")
+	assert.Equal(t, proxy.RefusalPortNotHTTP, got.refusal)
+
+	// The Services' names alone: a second namespace takes a bare name, which
+	// then names neither service. Nothing else changes (no address, no
+	// dependency), so only the authorities' generation says so.
+	require.NotNil(t, findVHost(last.GetVirtualHosts(), "eighty"))
+	c.captureMu.RLock()
+	authorities := maps.Clone(c.captureAuthorities)
+	c.captureMu.RUnlock()
+	authorities["elsewhere/eighty"] = "eighty.elsewhere.svc.cluster.local"
+	c.SetCaptureAuthorities(authorities)
+	require.NoError(t, c.generateSnapshot(ctx))
+	rebuilt("a mesh Service name")
+	assert.Nil(t, findVHost(last.GetVirtualHosts(), "eighty"), "a bare name two namespaces share is nobody's")
+
+	// The set of tables asked for is part of what was built.
+	names := func(rs []types.Resource) []string {
+		var out []string
+		for _, r := range rs {
+			out = append(out, r.(*routev3.RouteConfiguration).GetName())
+		}
+		return out
+	}
+	assert.Equal(t, []string{"cap_http_80", "cap_http_other"}, names(c.captureRouteTables([]uint32{80})))
+	assert.Equal(t, []string{"cap_http_80", "cap_http_1234", "cap_http_other"}, names(c.captureRouteTables([]uint32{80, 1234})))
+
+	// The QUIC arms have no generation: they are compared.
+	c.captureTables.arms = map[string]map[string]string{"demo/multi": {"spiffe://x": "quic:stale"}}
+	require.NoError(t, c.generateSnapshot(ctx))
+	rebuilt("a change of the QUIC arms")
+}
