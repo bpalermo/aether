@@ -7,40 +7,6 @@ import (
 	httpv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/upstreams/http/v3"
 )
 
-func TestHttp1ProtocolOptions(t *testing.T) {
-	tests := []struct {
-		name string
-	}{
-		{
-			name: "returns valid HTTP/1 protocol options",
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got := Http1ProtocolOptions()
-
-			if got == nil {
-				t.Fatal("expected non-nil HttpProtocolOptions")
-			}
-
-			explicit, ok := got.UpstreamProtocolOptions.(*httpv3.HttpProtocolOptions_ExplicitHttpConfig_)
-			if !ok {
-				t.Fatal("expected ExplicitHttpConfig")
-			}
-
-			http1, ok := explicit.ExplicitHttpConfig.ProtocolConfig.(*httpv3.HttpProtocolOptions_ExplicitHttpConfig_HttpProtocolOptions)
-			if !ok {
-				t.Fatal("expected Http1ProtocolOptions")
-			}
-
-			if http1.HttpProtocolOptions == nil {
-				t.Fatal("expected non-nil Http1ProtocolOptions")
-			}
-		})
-	}
-}
-
 func TestHttp2ProtocolOptions(t *testing.T) {
 	tests := []struct {
 		name string
@@ -116,7 +82,6 @@ func TestUseDownstreamProtocolOptions(t *testing.T) {
 // under non-keepalive downstream traffic on the reference cluster, 2026-06-11).
 func TestUpstreamIdleTimeoutSet(t *testing.T) {
 	for name, opts := range map[string]*httpv3.HttpProtocolOptions{
-		"http1":          Http1ProtocolOptions(),
 		"http2":          Http2ProtocolOptions(),
 		"use_downstream": UseDownstreamProtocolOptions(),
 	} {
@@ -203,7 +168,7 @@ func TestHttp3ProtocolOptionsDetectADeadPeer(t *testing.T) {
 	}
 	for name, po := range map[string]interface {
 		GetExplicitHttpConfig() *httpv3.HttpProtocolOptions_ExplicitHttpConfig
-	}{"h1": Http1ProtocolOptions(), "h2": Http2ProtocolOptions()} {
+	}{"h2": Http2ProtocolOptions()} {
 		if po.GetExplicitHttpConfig().GetHttp3ProtocolOptions() != nil {
 			t.Errorf("%s options carry HTTP/3 settings", name)
 		}

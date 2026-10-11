@@ -323,10 +323,10 @@ func buildCaptureTCPPortFilterChain(svc CaptureTCPService, port uint32, sourceSp
 // upstream transport socket to the service's EDS cluster. Returns nil for invalid
 // ClusterIPs (headless or unset) so callers can skip them.
 //
-// ALPN: the outbound tcp_proxy dials with ALPN "aether-tcp" (via
-// UpstreamTCPTransportSocket). The destination inbound listener matches
-// application_protocols:["aether-tcp"] on its TCP floor chain, so mTLS-demux is
-// clean: h2 → HCM chains; aether-tcp → TCP floor chains.
+// ALPN: the outbound tcp_proxy dials with NO ALPN (via
+// MeshUpstreamTCPTransportSocket). The destination inbound listener's HTTP
+// chains match application_protocols:["h2"], so mTLS-demux is clean: h2 → HCM
+// chains; no ALPN → the TCP floor's default chain.
 //
 // Filter-chain precedence: destination-IP is more specific than application-protocol
 // in Envoy's match order, BUT this chain only exists for NON-HTTP ClusterIPs, so the

@@ -96,12 +96,12 @@ var ErrSnapshotParse = errors.New("parse mesh-DNS snapshot")
 // exports now-WrittenAt as aether.mesh_dns.snapshot_age_seconds. A wedged/crashed
 // agent then shows up as a growing age instead of silently serving a frozen table.
 //
-// The legacy bare-map form (just Records, no envelope) is still accepted on read —
-// see ReadSnapshot — so an in-place upgrade never starts cold.
+// It is the only form read: a file without a records object is a parse error (see
+// ReadSnapshot).
 type Snapshot struct {
 	// WrittenAt is the writer's wall clock (unix seconds) at persist time. It is
 	// re-stamped by the heartbeat even when Records do not change. Zero means
-	// unknown (a legacy snapshot whose mtime could not be stat'd).
+	// unknown.
 	WrittenAt int64 `json:"writtenAt"`
 	// Generation is the writer's record-table version: it advances only when the
 	// record CONTENT changes, so a heartbeat rewrite keeps it stable. It is
@@ -387,45 +387,31 @@ func (s *Server) SetRecords(records map[string]string) {
 // can distinguish a missing file via errors.Is(err, fs.ErrNotExist) and treat it as a
 // cold start, and a corrupt one via errors.Is(err, ErrSnapshotParse).
 //
-// It also accepts the LEGACY bare-map form (`{"<ns>/<svc>":"<ip>"}`, everything
-// written before issue #586) so an in-place upgrade — a new daemon reading the old
-// agent's file, or a new agent's file read by an old daemon — never starts cold. A
-// legacy snapshot carries no writtenAt, so the file's mtime is used instead: the
-// freshness signal degrades to mtime exactly for the upgrade window and is exact
-// again on the first envelope write.
+// The envelope is the only form there is. The bare record map
+// (`{"<ns>/<svc>":"<ip>"}`) that agents wrote before the envelope (#586, chart
+// 0.87.0, July 2026) decodes as an envelope without a records object and is
+// reported as ErrSnapshotParse, like any other file that is not a snapshot: the
+// resolver starts cold (SERVFAIL for mesh names) or keeps the table it serves,
+// warns, and counts a parse_error. Serving such a file as an EMPTY table would
+// answer NXDOMAIN for the whole mesh instead.
 func ReadSnapshot(path string) (*Snapshot, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, err
 	}
-	snap, legacy, err := parseSnapshot(data)
-	if err != nil {
+	var snap Snapshot
+	if err := json.Unmarshal(data, &snap); err != nil {
 		return nil, fmt.Errorf("%w %s: %w", ErrSnapshotParse, path, err)
 	}
-	if legacy {
-		if fi, statErr := os.Stat(path); statErr == nil {
-			snap.WrittenAt = fi.ModTime().Unix()
-		}
+	if snap.Records == nil {
+		return nil, fmt.Errorf("%w %s: %w", ErrSnapshotParse, path, errNoRecordsObject)
 	}
-	return snap, nil
+	return &snap, nil
 }
 
-// parseSnapshot decodes either the versioned envelope or the legacy bare record map,
-// reporting which form it found. The envelope is tried first and only accepted when it
-// actually carries a "records" object; anything else falls back to the bare map, so a
-// legacy file whose service keys happen to collide with envelope field names still
-// decodes.
-func parseSnapshot(data []byte) (snap *Snapshot, legacy bool, err error) {
-	var envelope Snapshot
-	if err := json.Unmarshal(data, &envelope); err == nil && envelope.Records != nil {
-		return &envelope, false, nil
-	}
-	var records map[string]string
-	if err := json.Unmarshal(data, &records); err != nil {
-		return nil, false, err
-	}
-	return &Snapshot{Records: records}, true, nil
-}
+// errNoRecordsObject is the reason a file that is valid JSON is still not a
+// snapshot: WriteSnapshot always writes a records object, even for an empty table.
+var errNoRecordsObject = errors.New(`no records object (the bare-map form written before chart 0.87.0 is not read; the node agent replaces the file on its next write)`)
 
 // WriteSnapshot atomically writes the record table to path as a versioned envelope
 // (creating the parent dir), stamping writtenAt with the current wall clock and
@@ -435,8 +421,8 @@ func parseSnapshot(data []byte) (snap *Snapshot, legacy bool, err error) {
 // from exactly what the agent wrote.
 func WriteSnapshot(path string, records map[string]string, generation uint64) error {
 	if records == nil {
-		// Never emit "records": null — the reader would see an envelope without a
-		// records object and fall back to the legacy bare-map decode, which fails.
+		// Never emit "records": null: the reader takes an envelope without a records
+		// object for a file that is not a snapshot (ErrSnapshotParse).
 		records = map[string]string{}
 	}
 	data, err := json.Marshal(&Snapshot{

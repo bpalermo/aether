@@ -27,6 +27,7 @@ go_test(
     size = "small",
     srcs = [
         "file_test.go",
+        "options_test.go",
         "sync_test.go",
     ],
     embed = [":file"],

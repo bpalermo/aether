@@ -16,7 +16,6 @@ go_library(
         "//cni/internal/constants",
         "//cni/internal/util",
         "//common/file",
-        "@com_github_google_renameio_v2//:renameio",
     ],
 )
 

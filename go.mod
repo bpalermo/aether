@@ -13,7 +13,6 @@ require (
 	github.com/fsnotify/fsnotify v1.10.1
 	github.com/go-logr/logr v1.4.4
 	github.com/google/nftables v0.3.0
-	github.com/google/renameio/v2 v2.0.2
 	github.com/grpc-ecosystem/go-grpc-middleware/v2 v2.3.4
 	github.com/miekg/dns v1.1.73
 	github.com/pseudomuto/protoc-gen-doc v1.5.1 // build tooling: imported by //bazel/protodoc only

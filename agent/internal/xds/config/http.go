@@ -193,23 +193,6 @@ func QUICTwinTransportOptions() *corev3.QuicProtocolOptions {
 	}
 }
 
-// Http1ProtocolOptions creates HTTP/1.1 protocol options for upstream clusters.
-// This is used to configure Envoy to communicate with services that only support HTTP/1.1.
-func Http1ProtocolOptions() *httpv3.HttpProtocolOptions {
-	return &httpv3.HttpProtocolOptions{
-		CommonHttpProtocolOptions: &corev3.HttpProtocolOptions{
-			IdleTimeout: durationpb.New(UpstreamIdleTimeout),
-		},
-		UpstreamProtocolOptions: &httpv3.HttpProtocolOptions_ExplicitHttpConfig_{
-			ExplicitHttpConfig: &httpv3.HttpProtocolOptions_ExplicitHttpConfig{
-				ProtocolConfig: &httpv3.HttpProtocolOptions_ExplicitHttpConfig_HttpProtocolOptions{
-					HttpProtocolOptions: &corev3.Http1ProtocolOptions{},
-				},
-			},
-		},
-	}
-}
-
 // Http2ProtocolOptions creates HTTP/2 protocol options for upstream clusters.
 // This is used to configure Envoy to communicate with services that support HTTP/2.
 func Http2ProtocolOptions() *httpv3.HttpProtocolOptions {

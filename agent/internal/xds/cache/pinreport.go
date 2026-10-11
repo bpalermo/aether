@@ -149,7 +149,7 @@ type pinReport struct {
 
 // add classifies one cluster entry (pinState) into the report. A snapshot
 // build calls it from the pass it already makes over the cluster map
-// (clustersEndpointsVhostsAndPins), so the report describes exactly the
+// (clustersEndpointsVhostsAndPinsInto), so the report describes exactly the
 // entries that build read and costs no pass of its own.
 func (r *pinReport) add(name string, entry *clusterEntry) {
 	kind, cause := entry.pinState()

@@ -52,6 +52,43 @@ func TestReaderThreads(t *testing.T) {
 	}, got)
 }
 
+// TestParseSchedstat pins the one parser of the kernel's
+// "<cpu_ns> <runq_ns> <timeslices>" line. The agent's scheduler metrics and the
+// proxy supervisor's stall sampler both read through it.
+func TestParseSchedstat(t *testing.T) {
+	cpu, runq, slices, err := ParseSchedstat([]byte("807472818 798485462 3329\n"))
+	require.NoError(t, err)
+	assert.EqualValues(t, 807472818, cpu)
+	assert.EqualValues(t, 798485462, runq)
+	assert.EqualValues(t, 3329, slices)
+
+	// What the kernel writes with scheduler accounting off.
+	cpu, runq, slices, err = ParseSchedstat([]byte("0 0 0\n"))
+	require.NoError(t, err)
+	assert.Zero(t, cpu+runq+slices)
+
+	for _, bad := range []string{"", "1", "1 2", "x 1 1", "1 y 1", "1 1 z", "-1 1 1"} {
+		_, _, _, err := ParseSchedstat([]byte(bad))
+		assert.Error(t, err, "%q", bad)
+	}
+}
+
+// TestReaderThreadIDs: the numeric entries of the task directory, whatever
+// their files hold, and os.ErrNotExist for a process that is gone.
+func TestReaderThreadIDs(t *testing.T) {
+	root := t.TempDir()
+	writeThread(t, root, "42", "1000 200 30\n", statusOf(1, 1), "")
+	writeThread(t, root, "44", "garbage\n", statusOf(1, 1), "")
+	require.NoError(t, os.MkdirAll(filepath.Join(root, "42", "task", "x"), 0o755))
+
+	tids, err := Reader{Root: root, PID: "42"}.ThreadIDs()
+	require.NoError(t, err)
+	assert.ElementsMatch(t, []int{42, 44}, tids)
+
+	_, err = Reader{Root: root, PID: "43"}.ThreadIDs()
+	assert.ErrorIs(t, err, os.ErrNotExist)
+}
+
 func TestReaderSkipsUnreadableThread(t *testing.T) {
 	root := t.TempDir()
 	writeThread(t, root, "42", "1000 200 30\n", statusOf(1, 1), "")

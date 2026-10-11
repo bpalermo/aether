@@ -17,8 +17,10 @@
 // the caller's own process.
 //
 // The supervisor's stall sampler (agent/internal/proxy/hotrestart/procstat.go,
-// #1093/#1100) reads the same files for Envoy's threads; it stays separate
-// because it samples thread STATE and per-CPU node load, which this does not.
+// #1093/#1100) reads the same files for Envoy's threads. It lists them with
+// Reader.ThreadIDs and parses their schedstat with ParseSchedstat, so the two
+// cannot disagree about the kernel's format; what it samples besides (thread
+// STATE, wait channels, per-CPU node load) is its own and stays there.
 package procsched
 
 import (
@@ -74,24 +76,38 @@ func (r Reader) taskDir() string {
 	return filepath.Join(root, pid, "task")
 }
 
+// ThreadIDs lists the process's thread IDs: the numeric entries of its task
+// directory. A process that is gone yields an error wrapping os.ErrNotExist.
+func (r Reader) ThreadIDs() ([]int, error) {
+	entries, err := os.ReadDir(r.taskDir())
+	if err != nil {
+		return nil, err
+	}
+	tids := make([]int, 0, len(entries))
+	for _, e := range entries {
+		tid, convErr := strconv.Atoi(e.Name())
+		if convErr != nil {
+			continue
+		}
+		tids = append(tids, tid)
+	}
+	return tids, nil
+}
+
 // Threads returns the counters of every live thread, keyed by thread ID. A
 // thread that exits between the directory listing and its reads is left out.
 // It fails only when the task directory cannot be listed, or no thread at all
 // could be read.
 func (r Reader) Threads() (map[int]ThreadCounters, error) {
 	dir := r.taskDir()
-	entries, err := os.ReadDir(dir)
+	tids, err := r.ThreadIDs()
 	if err != nil {
 		return nil, err
 	}
-	out := make(map[int]ThreadCounters, len(entries))
+	out := make(map[int]ThreadCounters, len(tids))
 	var lastErr error
-	for _, e := range entries {
-		tid, convErr := strconv.Atoi(e.Name())
-		if convErr != nil {
-			continue
-		}
-		c, readErr := readThread(filepath.Join(dir, e.Name()))
+	for _, tid := range tids {
+		c, readErr := readThread(filepath.Join(dir, strconv.Itoa(tid)))
 		if readErr != nil {
 			lastErr = readErr
 			continue
@@ -110,7 +126,7 @@ func readThread(dir string) (ThreadCounters, error) {
 	if err != nil {
 		return c, err
 	}
-	if c.CPUNs, c.RunDelayNs, c.Timeslices, err = parseSchedstat(schedstat); err != nil {
+	if c.CPUNs, c.RunDelayNs, c.Timeslices, err = ParseSchedstat(schedstat); err != nil {
 		return c, err
 	}
 	status, err := os.ReadFile(filepath.Join(dir, "status"))
@@ -124,8 +140,12 @@ func readThread(dir string) (ThreadCounters, error) {
 	return c, nil
 }
 
-// parseSchedstat parses "<cpu_ns> <runq_ns> <timeslices>".
-func parseSchedstat(b []byte) (cpu, runq, slices uint64, err error) {
+// ParseSchedstat parses the content of a /proc/<pid>/task/<tid>/schedstat file,
+// "<cpu_ns> <runq_ns> <timeslices>": nanoseconds on a CPU, nanoseconds runnable
+// but waiting for one, and the number of timeslices run. The kernel always
+// writes all three (three zeros when scheduler accounting is off), so fewer is
+// an error.
+func ParseSchedstat(b []byte) (cpu, runq, slices uint64, err error) {
 	f := strings.Fields(string(b))
 	if len(f) < 3 {
 		return 0, 0, 0, fmt.Errorf("schedstat: want 3 fields, got %q", strings.TrimSpace(string(b)))

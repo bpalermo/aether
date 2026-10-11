@@ -69,6 +69,27 @@ type L4ServiceRoute struct {
 // the weighted-cluster set here rather than normalised to 1 (#492).
 type L4Backend = l4project.Backend
 
+// TCPBackendClusterNamer is the cluster namer of a TCPRoute or TLSRoute
+// backend, for common/l4project.Backends: the one copy for the node agent's L4
+// reconciler and the edge gateway reconciler, so the two cannot name the same
+// backendRef differently.
+//
+// Port-qualified since proposal 037 Phase 3: a backendRef naming a specific
+// raw-TCP port resolves to that port's own cluster. A ref with no port yields
+// 0 and the service's default floor cluster -- what every route written before
+// Phase 3 gets.
+//
+// The cache publishes tcp:<fqdn>:<port> for EVERY TCP port including the
+// primary (an alias sharing the floor's EDS), so a port-qualified name always
+// resolves; naming a port the service does not serve as TCP is what does not,
+// and that is caught by the chain-to-CDS gate rather than silently routed
+// somewhere else.
+func TCPBackendClusterNamer(meshDomain string) l4project.ClusterNameFunc {
+	return func(serviceKey string, port uint32) string {
+		return TCPPortClusterName(TCPClusterName(serviceKey, meshDomain), port)
+	}
+}
+
 // BuildCaptureTCPRouteFilterChain builds a per-ClusterIP TCP floor filter chain
 // for a service that has a TCPRoute. It matches the service's ClusterIP as the
 // original destination (/32 prefix_ranges) and routes via tcp_proxy

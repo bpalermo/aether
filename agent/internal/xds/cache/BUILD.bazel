@@ -134,6 +134,7 @@ go_test(
         "quicpublish_test.go",
         "races_test.go",
         "registryreuse_test.go",
+        "route_filter_equality_test.go",
         "route_memo_test.go",
         "snapshot_build_bench_test.go",
         "snapshot_test.go",

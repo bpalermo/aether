@@ -1603,7 +1603,7 @@ func TestPinReportIsOfTheClustersTheBuildRead(t *testing.T) {
 	require.NoError(t, c.SetTrustDomain(ctx, raceTrustDomain))
 	addPinnedCluster(c, bindingClusterName)
 
-	clusters, _, _, pins := c.clustersEndpointsVhostsAndPins()
+	clusters, _, _, pins := c.clustersEndpointsVhostsAndPinsInto(nil, nil)
 	addOutboundCluster(c, "late.aether-test.aether.internal") // unpinned, after the read
 
 	require.Len(t, clusters, 1, "the build read one cluster")

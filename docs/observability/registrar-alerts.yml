@@ -39,8 +39,8 @@
 # or (<previous expr, without its unless>)  unless on (job) (...). Both arms
 # return {job, revision}, so one divergence is one alert. docs/runbook.md,
 # "Stored vs in place vs applied", has the full text. Drop the second arm once
-# the registrar has rolled; the labelled metric goes away in the release after
-# this one.
+# the registrar has rolled; the labelled metric (deprecated in chart 2.4.12) goes
+# away in chart 2.6.0 at the earliest.
 
 groups:
   - name: aether-registrar

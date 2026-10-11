@@ -288,12 +288,6 @@ func dportAcceptExprs(proto byte, port uint16) []expr.Any {
 	}
 }
 
-// excludePortAcceptExprs is dportAcceptExprs for TCP, kept under its historical
-// name for the tests and call sites that predate UDP capture.
-func excludePortAcceptExprs(port uint16) []expr.Any {
-	return dportAcceptExprs(unix.IPPROTO_TCP, port)
-}
-
 // excludeIPRangeAcceptExprs builds:
 //
 //	ip daddr & <netmask> == <network> · accept

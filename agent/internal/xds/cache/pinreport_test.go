@@ -33,7 +33,7 @@ const (
 
 // clusterPinReport is the pin report of the cache as it is now, under one read
 // of the cluster map. A snapshot build takes its report in the pass that
-// collects the cluster resources (clustersEndpointsVhostsAndPins).
+// collects the cluster resources (clustersEndpointsVhostsAndPinsInto).
 func (c *SnapshotCache) clusterPinReport() pinReport {
 	c.clusterMu.RLock()
 	defer c.clusterMu.RUnlock()
@@ -49,7 +49,7 @@ func (c *SnapshotCache) clusterPinReport() pinReport {
 // clustersEndpointsAndVhosts is the build's read of the cluster map without
 // the pin report, for the tests that only look at the resources.
 func (c *SnapshotCache) clustersEndpointsAndVhosts() ([]types.Resource, []types.Resource, []*routev3.VirtualHost) {
-	clusters, clas, vhosts, _ := c.clustersEndpointsVhostsAndPins()
+	clusters, clas, vhosts, _ := c.clustersEndpointsVhostsAndPinsInto(nil, nil)
 	return clusters, clas, vhosts
 }
 

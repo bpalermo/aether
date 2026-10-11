@@ -11,7 +11,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// chanWatchStream feeds processStream from a channel, so a test can act between
+// chanWatchStream feeds consumeStream from a channel, so a test can act between
 // events; closing the channel ends the stream with EOF.
 type chanWatchStream struct {
 	registrarv1.RegistrarService_WatchEndpointsClient

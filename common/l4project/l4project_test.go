@@ -308,3 +308,31 @@ func TestBackends_UDPIgnoresPort(t *testing.T) {
 	assert.Equal(t, "udp:dns.default.aether.internal:5353", got[0].Cluster,
 		"the shared test namer qualifies; the AGENT's UDP namer ignores the port — see buildUDPL4Backends")
 }
+
+// TestRouteBackendRefs holds the three flatteners to the same result: every
+// backendRef of every rule, in rule order, with the object reference intact
+// (group, kind, namespace and port are what a ResolvedRefs check reads), and nil
+// for a route without one.
+func TestRouteBackendRefs(t *testing.T) {
+	other := gatewayv1.Namespace("other")
+	a := gatewayv1.BackendRef{BackendObjectReference: gatewayv1.BackendObjectReference{
+		Group: ptr(gatewayv1.Group("")), Kind: ptr(gatewayv1.Kind("Service")), Name: "a",
+		Namespace: &other, Port: ptr(gatewayv1.PortNumber(5432)),
+	}, Weight: ptr(int32(3))}
+	b, c := backendRef("b"), backendRef("c")
+	want := []gatewayv1.BackendObjectReference{a.BackendObjectReference, b.BackendObjectReference, c.BackendObjectReference}
+
+	assert.Equal(t, want, TCPRouteBackendRefs([]gatewayv1.TCPRouteRule{
+		{BackendRefs: []gatewayv1.BackendRef{a, b}}, {}, {BackendRefs: []gatewayv1.BackendRef{c}},
+	}), "TCPRoute")
+	assert.Equal(t, want, TLSRouteBackendRefs([]gatewayv1.TLSRouteRule{
+		{BackendRefs: []gatewayv1.BackendRef{a, b}}, {}, {BackendRefs: []gatewayv1.BackendRef{c}},
+	}), "TLSRoute")
+	assert.Equal(t, want, UDPRouteBackendRefs([]gatewayv1.UDPRouteRule{
+		{BackendRefs: []gatewayv1.BackendRef{a, b}}, {}, {BackendRefs: []gatewayv1.BackendRef{c}},
+	}), "UDPRoute")
+
+	assert.Nil(t, TCPRouteBackendRefs(nil))
+	assert.Nil(t, TLSRouteBackendRefs([]gatewayv1.TLSRouteRule{{}}))
+	assert.Nil(t, UDPRouteBackendRefs(nil))
+}

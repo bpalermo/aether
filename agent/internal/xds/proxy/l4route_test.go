@@ -278,3 +278,19 @@ func TestL4RulesToWeightedClusters_ZeroWeightDrained(t *testing.T) {
 	assert.Equal(t, "tcp:svc-h.aether.internal", clusters[0].Name)
 	assert.Equal(t, uint32(5), clusters[0].Weight)
 }
+
+// TestTCPBackendClusterNamer pins the name a TCPRoute/TLSRoute backend resolves
+// to, for both reconcilers that project them: the service's floor cluster for a
+// backendRef without a port, that port's own cluster for one with.
+func TestTCPBackendClusterNamer(t *testing.T) {
+	name := TCPBackendClusterNamer("aether.internal")
+	if got, want := name("ns/pg", 0), "tcp:pg.ns.aether.internal"; got != want {
+		t.Errorf("no port: got %q, want the floor cluster %q", got, want)
+	}
+	if got, want := name("ns/pg", 5432), TCPPortClusterName(TCPClusterName("ns/pg", "aether.internal"), 5432); got != want {
+		t.Errorf("port 5432: got %q, want %q", got, want)
+	}
+	if name("ns/pg", 5432) == name("ns/pg", 0) {
+		t.Error("a backendRef port must select that port's cluster, not the floor")
+	}
+}

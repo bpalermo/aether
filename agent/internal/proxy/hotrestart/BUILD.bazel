@@ -28,6 +28,7 @@ go_library(
     deps = [
         "//common/file",
         "//common/log",
+        "//common/procsched",
         "//common/telemetry/serviceresource",
         "@com_github_fsnotify_fsnotify//:fsnotify",
         "@io_opentelemetry_go_otel//attribute",

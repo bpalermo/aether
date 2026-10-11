@@ -100,7 +100,7 @@ func (f *truncatingStream) received() []*registrarv1.WatchEndpointsResponse {
 }
 
 // agentResumeToken applies the agent's rule (registry/internal/registrar
-// processStream): the first FULL_SNAPSHOT clears the token along with the
+// consumeStream): the first FULL_SNAPSHOT clears the token along with the
 // cache, and the resume token is the last non-empty version received.
 func agentResumeToken(start string, events []*registrarv1.WatchEndpointsResponse) string {
 	token := start

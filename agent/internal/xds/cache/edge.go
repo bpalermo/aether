@@ -994,10 +994,10 @@ func equalRoute(ra, rb Route) bool {
 	if !equalHeaderMutation(ra.HeaderMutation, rb.HeaderMutation) {
 		return false
 	}
-	if !equalRouteRedirect(ra.Redirect, rb.Redirect) {
+	if !equalGammaRedirect(ra.Redirect, rb.Redirect) {
 		return false
 	}
-	if !equalRouteURLRewrite(ra.URLRewrite, rb.URLRewrite) {
+	if !equalGammaURLRewrite(ra.URLRewrite, rb.URLRewrite) {
 		return false
 	}
 	return equalHeaderMatches(ra.Headers, rb.Headers) && equalQueryParamMatches(ra.QueryParams, rb.QueryParams)
@@ -1051,28 +1051,6 @@ func equalRouteDuration(a, b *durationpb.Duration) bool {
 		return false
 	}
 	return a.Seconds == b.Seconds && a.Nanos == b.Nanos
-}
-
-// equalRouteRedirect reports content equality for two *proxy.GammaRedirect values.
-func equalRouteRedirect(a, b *proxy.GammaRedirect) bool {
-	if a == nil && b == nil {
-		return true
-	}
-	if a == nil || b == nil {
-		return false
-	}
-	return *a == *b
-}
-
-// equalRouteURLRewrite reports content equality for two *proxy.GammaURLRewrite values.
-func equalRouteURLRewrite(a, b *proxy.GammaURLRewrite) bool {
-	if a == nil && b == nil {
-		return true
-	}
-	if a == nil || b == nil {
-		return false
-	}
-	return *a == *b
 }
 
 // equalHeaderMutation reports content equality for two *GammaHeaderMutation
