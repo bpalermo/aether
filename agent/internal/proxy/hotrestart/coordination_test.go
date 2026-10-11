@@ -84,6 +84,10 @@ type fakeAdminServer struct {
 	// statsHits counts the requests for it (issue #1679).
 	listenersStopped atomic.Int64
 	statsHits        atomic.Int64
+	// refuseDrain, when set (a func() int), is called while POST
+	// /drain_listeners is being served, and the status it returns is the
+	// answer: a predecessor that does not accept the drain.
+	refuseDrain atomic.Value
 }
 
 // recordRequest appends r to the log of the connection it arrived on.
@@ -174,6 +178,10 @@ func newFakeAdmin(t *testing.T, state string, epoch int) *fakeAdminServer {
 		f.recordRequest(r)
 		f.drainQuery.Store(r.URL.RawQuery)
 		if f.wedged(r) {
+			return
+		}
+		if refuse, ok := f.refuseDrain.Load().(func() int); ok {
+			w.WriteHeader(refuse())
 			return
 		}
 		fmt.Fprint(w, "OK\n")
