@@ -91,6 +91,12 @@
 #        and the MeshConfig out of the manifest; back on this chart the
 #        MeshConfig is rendered again (it carries the marker too) and the
 #        rollback to the revision that created the namespace still works.
+#        That chart pins another proxy image, so the two upgrades are also a
+#        roll of ds/aether-proxy reverted while its surge pod starts: the
+#        DaemonSet deletes the surge pod, whose Envoy has taken the node by
+#        then, and keeps the first pod. The leg's last check, every workload
+#        Ready, is what holds the supervisor to taking the node back (the
+#        nightly of 2026-10-11 failed there: the kept pod stayed NotReady).
 #
 # Helm: the suite runs under Helm 3 and under Helm 4 (#1543). Whatever `helm`
 # is first on PATH is the one under test; `verify` prints its version. The

@@ -5712,6 +5712,64 @@ running, and the DaemonSet deletes an idle pod. So during a rolling upgrade:
   pod's `pod not ready` is rule 2 failing. One at about fork + 19 s, after the successor's
   `pod ready`, is rule 1 failing.
 
+### A proxy roll reverted while the surge pod starts
+
+A roll can be taken back before it has finished on a node: `helm rollback` during an
+upgrade, or an upgrade followed at once by its revert. The DaemonSet's template is then
+the **old** pod's revision again, so the controller deletes the surge pod and keeps the old
+one. By then the surge pod's Envoy has usually taken the node over (fork to workers is a
+fraction of a second on a quiet node), and it terminates the old pod's Envoy when its
+parent-shutdown time is up. The node's only Envoy is now in a pod that is terminating, and
+the pod the DaemonSet kept has none.
+
+Until the supervisor handled this, that was the end of it. The kept pod logged `newest
+epoch terminated cleanly by successor; awaiting pod deletion` and waited for a deletion
+that never came, NotReady with `stat /var/run/aether-proxy/ready: no such file or
+directory`. The deleted pod waited `successor_wait` (155 s at the defaults) for a
+replacement the DaemonSet had no reason to create, drained and exited, and the node had
+**no proxy** until the next roll or a `kubectl delete pod` (nightly e2e, 2026-10-11:
+`ds/aether-proxy never became Ready`).
+
+Now the kept pod's supervisor takes the node back, in one of two ways:
+
+| `restart_triggers` value | when | what happens | data-plane cost |
+| --- | --- | --- | --- |
+| `successor_terminating` | the terminating supervisor asks for a successor: while it waits with its Envoy LIVE it refreshes the node epoch heartbeat and writes `successor-wanted` beside it (in `--state-dir`, `/run/aether/hotrestart` by default), every second | the kept pod hot-restarts from that Envoy as a new pod would (epoch N+1, the usual readiness gate); the terminating pod then ends on the `successor_wait` branch | none |
+| `successor_gone` | nothing asks: the node's admin has not answered for the admin watchdog's bound (30 s) and the epoch heartbeat is stale. The successor was killed outright, or its supervisor is older than this | a fresh Envoy at epoch 0 | the node has no proxy from the successor's exit until that Envoy is up |
+
+```
+# kept pod
+newest epoch terminated cleanly by successor; awaiting pod deletion   epoch=N-1
+the successor that terminated our envoy is going away and this pod was not deleted; starting envoy again
+    trigger=successor_terminating lastEpoch=N-1 startEpoch=N+1 hotRestartFromEpoch=N      (WARN)
+live predecessor confirmed; starting cross-pod hot restart            predecessorEpoch=N startEpoch=N+1
+pod ready: envoy live at newest epoch                                 epoch=N+1
+
+# deleted (surge) pod
+waiting for a successor before draining                               epoch=N
+successor took over during shutdown wait                              epoch=N
+```
+
+`aether_supervisor_restart_triggers_total{aether_supervisor_trigger="successor_terminating"|"successor_gone"}`
+counts them. Either is expected only when a roll was reverted or superseded, or a surge
+pod was deleted by hand; `successor_gone` outside those is a successor pod that died after
+taking the node, and is worth reading that pod's last lines for.
+
+A healthy successor is never taken from. The kept pod does nothing while the admin answers
+or the heartbeat is fresh and nobody asks, which is every roll that completes; if the
+Envoy it starts cannot bind (another one holds the node after all) it goes back to waiting
+instead of attaching to whatever is live (`… lost the base-id socket to another envoy;
+awaiting pod deletion again`).
+
+Both pods need a supervisor that knows this. In a roll **from** an older supervisor image
+that is then reverted, the kept pod is the old one and waits as before: delete it
+(`kubectl -n aether-system delete pod aether-proxy-<x>`), and its replacement starts
+fresh.
+
+A surge pod that gets its SIGTERM before its first fork (deleted while its image was still
+being pulled, started and stopped in the same moment) now starts no Envoy at all:
+`termination requested before the first envoy was started; starting none`.
+
 ### The ext_authz sidecar across a proxy roll (#1275)
 
 **Symptom (chart <= 2.4.8).** `ext_authz` errors on a node right after its proxy pod was

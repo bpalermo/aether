@@ -108,6 +108,7 @@ node, after:    [new Pod: supervisor → envoy epoch 6]   no dropped connection,
   - **Epoch edge case** — if the predecessor is gone (reboot/crash), the file says `5` but no epoch-5 process exists; starting at `6` hangs waiting for a parent. The supervisor must probe for a live predecessor and **reset to epoch 0** when absent.
   - **Readiness gating** — new Pod stays NotReady until handoff succeeds, so `maxUnavailable: 0` keeps the old Pod alive if the new one fails.
   - **maxSurge + hostNetwork co-scheduling** — confirm two proxy Pods co-schedule (admin is `127.0.0.1`, listeners are netns-bound, so no hostPort collision).
+  - **A roll reverted mid-surge** (found 2026-10-11, nightly e2e): the design above assumes the pod whose Envoy was terminated is the pod the DaemonSet deletes. When the template goes back to the old pod's revision while the surge pod is starting, the DaemonSet deletes the *surge* pod instead, and that pod's Envoy has usually taken the node over already. The old pod's supervisor therefore does not only wait for its deletion: it hot-restarts from a terminating successor that asks for one (`successor-wanted` beside the epoch file), and starts a fresh Envoy once nothing has answered on the node for the admin watchdog's bound. See `agent/internal/proxy/hotrestart/superseded.go` and the runbook, "A proxy roll reverted while the surge pod starts".
 
 ---
 
