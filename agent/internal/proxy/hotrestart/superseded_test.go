@@ -350,8 +350,13 @@ func TestSupersededSupervisorLeavesAHealthySuccessorAlone(t *testing.T) {
 			setup: func(t *testing.T, f *fakeAdminServer, _ string, old *Supervisor) {
 				f.hang.Store(true)
 				stop := make(chan struct{})
-				t.Cleanup(func() { close(stop) })
+				stopped := make(chan struct{})
+				t.Cleanup(func() {
+					close(stop)
+					<-stopped
+				})
 				go func() {
+					defer close(stopped)
 					for {
 						old.writeState(1)
 						select {
@@ -903,11 +908,29 @@ func TestSuccessorGoneRelaunchIsNotKilledByItsOwnAdminWatchdog(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
-	go func() { done <- s.Run(ctx) }()
+	returned := make(chan struct{})
+	go func() {
+		defer close(returned)
+		done <- s.Run(ctx)
+	}()
+	// Wait for Run before the temporary directories go: cancelled with a LIVE
+	// Envoy it asks for a successor, writing into the state directory, until
+	// that Envoy is gone.
 	t.Cleanup(func() {
 		cancel()
-		for e := 0; e < 4; e++ {
-			s.signalEpoch(e, syscall.SIGKILL)
+		deadline := time.After(20 * time.Second)
+		for {
+			for e := 0; e < 4; e++ {
+				s.signalEpoch(e, syscall.SIGKILL)
+			}
+			select {
+			case <-returned:
+				return
+			case <-deadline:
+				t.Error("Run did not return after the test")
+				return
+			case <-time.After(50 * time.Millisecond):
+			}
 		}
 	})
 
@@ -964,7 +987,21 @@ func TestLostTakeBackLeavesTheSupervisorAtItsOwnEpoch(t *testing.T) {
 	successor, _ := newTerminatingSuccessor(t, f, stateDir)
 	f.identity.Store(successor.adminIdentity)
 	successor.cfg.TerminationGrace = 60 * time.Second
-	go func() { _ = successor.handleShutdown(cancelledCtx()) }()
+	shutdown := make(chan struct{})
+	go func() {
+		defer close(shutdown)
+		_ = successor.handleShutdown(cancelledCtx())
+	}()
+	// It writes into the state directory until its Envoy is gone: wait for it
+	// before the directory is removed.
+	t.Cleanup(func() {
+		successor.signalEpoch(1, syscall.SIGKILL)
+		select {
+		case <-shutdown:
+		case <-time.After(20 * time.Second):
+			t.Error("the terminating supervisor did not return after the test")
+		}
+	})
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -1001,5 +1038,4 @@ func TestLostTakeBackLeavesTheSupervisorAtItsOwnEpoch(t *testing.T) {
 		t.Fatalf("handleChildExit returned: %+v", got)
 	case <-time.After(1 * time.Second):
 	}
-	successor.signalEpoch(1, syscall.SIGTERM)
 }
