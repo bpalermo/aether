@@ -256,6 +256,38 @@ func (c *SnapshotCache) outboundRefusalVhostsLocked() []*routev3.VirtualHost {
 			out = c.appendOutboundRefusalsLocked(out, svc, ports)
 		}
 	}
+	return c.dropClaimedDomainsLocked(out)
+}
+
+// dropClaimedDomainsLocked removes from the refusing virtual hosts every
+// domain a cluster entry's own virtual host already claims, and every virtual
+// host left with none. Caller must hold clusterMu.
+//
+// The two are built from one answer (reuseInputs.ports) and do not overlap.
+// This is the guard for the day they do: a domain claimed twice makes the
+// proxy reject the WHOLE route table, which is every pod's loopback path on
+// the node, where a missing refusal is one slow error. The entry wins.
+func (c *SnapshotCache) dropClaimedDomainsLocked(refusals []*routev3.VirtualHost) []*routev3.VirtualHost {
+	claimed := make(map[string]struct{}, 2*len(c.clusters))
+	for _, entry := range c.clusters {
+		for _, d := range entry.vhost.GetDomains() {
+			claimed[d] = struct{}{}
+		}
+	}
+	out := refusals[:0]
+	for _, vh := range refusals {
+		kept := vh.Domains[:0]
+		for _, d := range vh.GetDomains() {
+			if _, taken := claimed[d]; taken {
+				c.log.Warn("a refusing virtual host and a cluster's virtual host claim the same authority; keeping the cluster's", "authority", d, "refusal", vh.GetName())
+				continue
+			}
+			kept = append(kept, d)
+		}
+		if vh.Domains = kept; len(kept) > 0 {
+			out = append(out, vh)
+		}
+	}
 	return out
 }
 

@@ -176,7 +176,11 @@ func TestLateTCPFloorSubscribesToItsOwnEDSResource(t *testing.T) {
 
 	const fqdn = "mixed.aether-test.aether.internal"
 	floor := "tcp:" + fqdn
-	floorAlias := floor + ":9000"
+	// One pod declares 8080 (HTTP) and one 9000 (raw TCP): the service's
+	// legacy target is the HTTP port (a tie goes to HTTP, legacyTarget), so
+	// it keeps its default cluster, and 9000 is a raw-TCP port with a cluster
+	// and a membership of its own.
+	portCluster := floor + ":9000"
 
 	first, err := c.GetSnapshot("node-1")
 	require.NoError(t, err)
@@ -195,7 +199,10 @@ func TestLateTCPFloorSubscribesToItsOwnEDSResource(t *testing.T) {
 	assert.NotEqual(t, first.GetVersion(resourcev3.EndpointType), later.GetVersion(resourcev3.EndpointType),
 		"the snapshot introducing the floor's load assignment must carry a new EDS version")
 	assertOwnEDSWithBaseMembership(t, later, floor, bareEDS)
-	assertOwnEDSWithBaseMembership(t, later, floorAlias, bareEDS)
+	pc, ok := later.GetResources(resourcev3.ClusterType)[portCluster].(*clusterv3.Cluster)
+	require.True(t, ok, "cluster %s missing: %v", portCluster, keysOf(later.GetResources(resourcev3.ClusterType)))
+	assert.Equal(t, portCluster, pc.GetEdsClusterConfig().GetServiceName(), "a per-port cluster subscribes to its own EDS name too")
+	assert.Contains(t, later.GetResources(resourcev3.EndpointType), portCluster)
 
 	assertRegenerationByteIdentical(t, c, later)
 }

@@ -12,7 +12,6 @@ import (
 	"aethermesh.dev/agent/internal/meshdns"
 	"aethermesh.dev/agent/internal/xds/proxy"
 	cniv1 "aethermesh.dev/api/aether/cni/v1"
-	registryv1 "aethermesh.dev/api/aether/registry/v1"
 	meshconst "aethermesh.dev/common/constants/mesh"
 	corev3 "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
 	endpointv3 "github.com/envoyproxy/go-control-plane/envoy/config/endpoint/v3"
@@ -981,25 +980,6 @@ func (c *SnapshotCache) podExtensionHTTPFilters(cniPod *cniv1.CNIPod, shared []*
 	return shared
 }
 
-// declaredTCPPorts returns the ports a service's endpoints declare as raw TCP
-// in their port_protocols, sorted and de-duplicated. Empty for a service whose
-// rows carry no port_protocols (written before proposal 037: one class per
-// pod, carried by its one declared port).
-func declaredTCPPorts(endpoints []*registryv1.ServiceEndpoint) []uint32 {
-	seen := map[uint32]struct{}{}
-	for _, ep := range endpoints {
-		for port, proto := range ep.GetPortProtocols() {
-			if proto == registryv1.PortProtocol_PORT_PROTOCOL_TCP && port > 0 && port <= 65535 {
-				seen[port] = struct{}{}
-			}
-		}
-	}
-	if len(seen) == 0 {
-		return nil
-	}
-	return slices.Sorted(maps.Keys(seen))
-}
-
 // refreshCaptureServicePorts updates each capture service's derived ports
 // and, ONLY if any of them changed, rebuilds the per-pod capture listeners so
 // the new chains reach Envoy (proposals 037 and 043).
@@ -1164,7 +1144,9 @@ func (c *SnapshotCache) tcpPortClustersLocked(
 	var out, clas []types.Resource
 
 	if aliasName := proxy.TCPPortClusterName(tcpName, primaryPortOf(tcpEntry)); aliasName != "" {
-		if _, ok := c.clusters[aliasName]; ok {
+		// An ALIAS entry holds no load assignment of its own; an entry of that
+		// name that does is a per-port cluster, published by the loop below.
+		if alias, ok := c.clusters[aliasName]; ok && alias.loadAssignment == nil {
 			ac := proxy.NewTCPServiceCluster(aliasName, aliasName, proxy.TCPPortStatKey(e.serviceName, primaryPortOf(tcpEntry)))
 			proxy.InjectUpstreamTCPMTLS(ac, nodeSpiffeID, validationContextName, sanURIs, "")
 			out = append(out, ac)
@@ -1175,9 +1157,6 @@ func (c *SnapshotCache) tcpPortClustersLocked(
 	}
 
 	for _, port := range e.ports.tcp {
-		if port == e.ports.legacyTCPPort() {
-			continue // the alias above
-		}
 		portEntry, ok := c.clusters[proxy.TCPPortClusterName(tcpName, port)]
 		if !ok || portEntry.loadAssignment == nil {
 			continue

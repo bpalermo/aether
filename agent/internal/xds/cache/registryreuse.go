@@ -119,6 +119,16 @@ const (
 type reuseInputs struct {
 	localRegion, localZone string
 	waypoint               proxy.WaypointRewrite
+	// ports is what the registry says about the ports of the service being
+	// built, over EVERY listing it is in (deriveServicePorts): which port is
+	// its legacy target, and the class of each port. A pass sees the rows of
+	// one listing only, and two passes that each decided from their own rows
+	// could disagree about the service (pods of one ServiceAccount that
+	// declare different things, for the length of a rollout): an h2 cluster
+	// for a port the route tables refuse as raw TCP, or a route to a default
+	// cluster that was never built. Every pass and every route table reads
+	// this one answer instead. Set per service by the pass's loop.
+	ports servicePorts
 }
 
 // registryReuseAudit makes every reuse rebuild the entries fresh and panic on
@@ -152,6 +162,11 @@ func (r *registryReuse) reuseKey(pass reusePass, meshDomain string, edge, ownsBa
 	b = protowire.AppendString(b, meshDomain)
 	b = protowire.AppendVarint(b, protowire.EncodeBool(edge))
 	b = protowire.AppendVarint(b, protowire.EncodeBool(ownsBareCLA))
+	// The service's ports, as decided over all its listings: the rows of this
+	// listing do not determine them.
+	b = protowire.AppendString(b, in.ports.describe())
+	b = protowire.AppendVarint(b, uint64(in.ports.legacyPort))
+	b = protowire.AppendVarint(b, uint64(in.ports.legacyClass))
 	b = protowire.AppendVarint(b, uint64(len(endpoints)))
 	for _, ep := range endpoints {
 		// Length-prefix each row so two different row lists can never

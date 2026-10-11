@@ -76,7 +76,10 @@ func TestL4ClustersReportUnderTheirOwnStatKey(t *testing.T) {
 	clusters := snap.GetResources(resourcev3.ClusterType)
 
 	want := map[string]string{
-		"mixed.demo.aether.internal":          "demo/mixed", // HTTP: unchanged
+		// HTTP: unchanged. The one pod that serves 8080 as HTTP is outvoted
+		// on the service's declared port, so the HTTP cluster is the per-port
+		// one and there is no default cluster.
+		"mixed.demo.aether.internal:8080":     "demo/mixed",
 		"tcp:mixed.demo.aether.internal":      "tcp_demo/mixed",
 		"tcp:mixed.demo.aether.internal:9000": "tcp_demo/mixed_9000", // primary-port alias
 		"tcp:mixed.demo.aether.internal:8080": "tcp_demo/mixed_8080", // non-primary per-port

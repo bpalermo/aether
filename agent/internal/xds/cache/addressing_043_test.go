@@ -14,8 +14,10 @@ import (
 	"aethermesh.dev/agent/internal/xds/proxy"
 	cniv1 "aethermesh.dev/api/aether/cni/v1"
 	registryv1 "aethermesh.dev/api/aether/registry/v1"
+	clusterv3 "github.com/envoyproxy/go-control-plane/envoy/config/cluster/v3"
 	listenerv3 "github.com/envoyproxy/go-control-plane/envoy/config/listener/v3"
 	routev3 "github.com/envoyproxy/go-control-plane/envoy/config/route/v3"
+	tcp_proxyv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/network/tcp_proxy/v3"
 	"github.com/envoyproxy/go-control-plane/pkg/cache/types"
 	resourcev3 "github.com/envoyproxy/go-control-plane/pkg/resource/v3"
 	"github.com/stretchr/testify/assert"
@@ -1217,4 +1219,232 @@ func TestAddressing_TablesAreKeptWhileTheirInputsAre(t *testing.T) {
 	c.captureTables.arms = map[string]map[string]string{"demo/multi": {"spiffe://x": "quic:stale"}}
 	require.NoError(t, c.generateSnapshot(ctx))
 	rebuilt("a change of the QUIC arms")
+}
+
+// a043DisagreeingRegistry wraps the fixture's registry with one more service,
+// "split", whose pods disagree about everything: pod A declares 8080 as its
+// HTTP port; pods B and C declare 9000 raw TCP as theirs and 8080 raw TCP too.
+// It is the state of a rollout that retypes a port, and the state in which
+// two builders that each decided from their own listing would disagree.
+func a043DisagreeingRegistry(services []a043Service) *mockRegistry {
+	base := a043Registry(services)
+	h, tcp := registryv1.PortProtocol_PORT_PROTOCOL_HTTP, registryv1.PortProtocol_PORT_PROTOCOL_TCP
+	row := func(ip string, port uint32, pp map[uint32]registryv1.PortProtocol) *registryv1.ServiceEndpoint {
+		ep := makeEndpoint(ip, "cluster-1", "node-2", port)
+		ep.KubernetesMetadata.Namespace = a043NS
+		ep.PortProtocols = pp
+		for p := range pp {
+			ep.Ports = append(ep.Ports, p)
+		}
+		slices.Sort(ep.Ports)
+		return ep
+	}
+	a := row("10.0.8.1", 8080, map[uint32]registryv1.PortProtocol{8080: h})
+	b := row("10.0.8.2", 9000, map[uint32]registryv1.PortProtocol{9000: tcp, 8080: tcp})
+	c := row("10.0.8.3", 9000, map[uint32]registryv1.PortProtocol{9000: tcp, 8080: tcp})
+	return &mockRegistry{
+		tcpAware: true,
+		listAllEndpointsFunc: func(ctx context.Context, protocol registryv1.Service_Protocol) (map[string][]*registryv1.ServiceEndpoint, error) {
+			out, err := base.listAllEndpointsFunc(ctx, protocol)
+			switch protocol {
+			case registryv1.Service_PROTOCOL_HTTP:
+				out["demo/split"] = []*registryv1.ServiceEndpoint{a}
+			case registryv1.Service_PROTOCOL_TCP:
+				out["demo/split"] = []*registryv1.ServiceEndpoint{b, c}
+			}
+			return out, err
+		},
+	}
+}
+
+// TestAddressing_EveryChainAndRouteHasItsCluster: every raw-TCP chain of the
+// capture listener forwards to a cluster the same snapshot publishes, and so
+// does every route of every table that names a cluster. A tcp_proxy chain
+// without its cluster accepts the connection and kills it, with no NACK and
+// nothing in a log (tcp_proxy has no on-demand path); a route to a cluster
+// that does not exist is a 503 after the on-demand timeout.
+//
+// Held over the fixture AND over a service whose pods disagree about their
+// ports, which is where a chain decided from one listing and a cluster built
+// from another would part.
+func TestAddressing_EveryChainAndRouteHasItsCluster(t *testing.T) {
+	ctx := context.Background()
+	services := a043Fixture()
+	c := a043Cache(t, services)
+	withSplit := append(slices.Clone(services), a043Service{name: "split", ns: a043NS, vip: "10.96.8.1"})
+	a043Project(c, withSplit)
+	require.NoError(t, c.LoadClustersFromRegistry(ctx, "cluster-1", "node-1", a043DisagreeingRegistry(services)))
+
+	snap, err := c.GetSnapshot("node-1")
+	require.NoError(t, err)
+	clusters := snap.GetResources(resourcev3.ClusterType)
+	endpoints := snap.GetResources(resourcev3.EndpointType)
+
+	// The disagreement is decided one way everywhere: most pods declare 9000
+	// raw TCP as their port and 8080 as raw TCP.
+	c.clusterMu.RLock()
+	split := c.servicePorts["demo/split"]
+	c.clusterMu.RUnlock()
+	require.Equal(t, uint32(9000), split.legacyTCPPort())
+	require.Equal(t, []uint32{8080, 9000}, split.tcp)
+	require.Empty(t, split.http)
+	require.NotEmpty(t, split.conflicts)
+	// So it has no default h2 cluster, although one of its pods, read alone,
+	// declares an HTTP port as its own: every builder reads the one answer.
+	assert.NotContains(t, clusters, "split.demo.aether.internal")
+	assert.Contains(t, clusters, "split.demo.aether.internal:8080", "the pod that serves 8080 as HTTP keeps its endpoint set")
+	assert.Contains(t, clusters, "tcp:split.demo.aether.internal:8080")
+
+	tcpChains := 0
+	l := a043CaptureListener(t, c)
+	for _, fc := range l.GetFilterChains() {
+		for _, f := range fc.GetFilters() {
+			tp := &tcp_proxyv3.TcpProxy{}
+			if f.GetTypedConfig().UnmarshalTo(tp) != nil {
+				continue
+			}
+			tcpChains++
+			name := tp.GetCluster()
+			cl, ok := clusters[name].(*clusterv3.Cluster)
+			if !assert.Truef(t, ok, "chain %s forwards to cluster %q, which the snapshot does not publish", fc.GetName(), name) {
+				continue
+			}
+			eds := cl.GetEdsClusterConfig().GetServiceName()
+			assert.Containsf(t, endpoints, eds, "chain %s: cluster %s subscribes to %q, which nothing publishes", fc.GetName(), name, eds)
+		}
+	}
+	require.Greater(t, tcpChains, 8)
+	assert.Contains(t, chainNames(l), "cap_tcp_tcp:split.demo.aether.internal_8080")
+	assert.Contains(t, chainNames(l), "cap_tcp_tcp:split.demo.aether.internal_9000")
+
+	routed := 0
+	for name, table := range a043Tables(t, c) {
+		for _, vh := range table.GetVirtualHosts() {
+			if vh.GetName() == "on_demand_catch_all" {
+				continue
+			}
+			for _, r := range vh.GetRoutes() {
+				ra := r.GetRoute()
+				if ra == nil {
+					continue
+				}
+				cluster := ra.GetCluster()
+				if cluster == "" {
+					cluster = quicSelectionDefault(t, ra)
+				}
+				routed++
+				assert.Containsf(t, clusters, cluster, "table %s, virtual host %s routes to a cluster the snapshot does not publish", name, vh.GetName())
+			}
+		}
+	}
+	require.Greater(t, routed, 30)
+
+	// No resource name is published twice: the proxy keeps one, and which
+	// one changes from build to build.
+	for _, typ := range []resourcev3.Type{resourcev3.ClusterType, resourcev3.EndpointType, resourcev3.RouteType, resourcev3.ListenerType} {
+		assert.Empty(t, duplicateDomains(snap.GetResources(typ)), "%s", typ)
+	}
+}
+
+// duplicateDomains returns the domains claimed by more than one virtual host
+// of a route table, for every route table among resources.
+func duplicateDomains(resources map[string]types.Resource) []string {
+	var dups []string
+	for name, res := range resources {
+		rc, ok := res.(*routev3.RouteConfiguration)
+		if !ok {
+			continue
+		}
+		seen := map[string]bool{}
+		for _, vh := range rc.GetVirtualHosts() {
+			for _, d := range vh.GetDomains() {
+				if seen[d] {
+					dups = append(dups, name+": "+d)
+				}
+				seen[d] = true
+			}
+		}
+	}
+	return dups
+}
+
+// TestAddressing_ReuseFollowsTheServicesPorts: a service's HTTP entries are
+// rebuilt when its legacy target changes although the rows of its HTTP listing
+// did not. The legacy target is decided over every listing, so a pod that is
+// only in the raw-TCP listing can move it; entries reused on the HTTP rows
+// alone (#1115) would keep a default cluster the route tables no longer lead
+// to, and lack the per-port one they do.
+func TestAddressing_ReuseFollowsTheServicesPorts(t *testing.T) {
+	ctx := context.Background()
+	h, tcp := registryv1.PortProtocol_PORT_PROTOCOL_HTTP, registryv1.PortProtocol_PORT_PROTOCOL_TCP
+	row := func(ip string, port uint32, pp map[uint32]registryv1.PortProtocol) *registryv1.ServiceEndpoint {
+		ep := makeEndpoint(ip, "cluster-1", "node-2", port)
+		ep.KubernetesMetadata.Namespace = a043NS
+		ep.PortProtocols = pp
+		return ep
+	}
+	a := row("10.0.9.1", 8080, map[uint32]registryv1.PortProtocol{8080: h})
+	b := row("10.0.9.2", 9000, map[uint32]registryv1.PortProtocol{9000: tcp, 8080: h})
+	c3 := row("10.0.9.3", 9000, map[uint32]registryv1.PortProtocol{9000: tcp})
+	tcpRows := []*registryv1.ServiceEndpoint{b}
+	reg := &mockRegistry{
+		tcpAware: true,
+		listAllEndpointsFunc: func(_ context.Context, protocol registryv1.Service_Protocol) (map[string][]*registryv1.ServiceEndpoint, error) {
+			switch protocol {
+			case registryv1.Service_PROTOCOL_HTTP:
+				return map[string][]*registryv1.ServiceEndpoint{"demo/moving": {a, b}}, nil
+			case registryv1.Service_PROTOCOL_TCP:
+				return map[string][]*registryv1.ServiceEndpoint{"demo/moving": tcpRows}, nil
+			}
+			return nil, nil
+		},
+	}
+	c := newTestCache("node-1")
+	c.SetCaptureEnabled(true)
+	c.SetCaptureRedirectAll(true)
+	require.NoError(t, c.SetNodeIdentity(ctx, nodeIdentity))
+	a043Project(c, []a043Service{{name: "moving", ns: a043NS, vip: "10.96.9.1"}})
+	clusters := func() map[string]types.Resource {
+		require.NoError(t, c.LoadClustersFromRegistry(ctx, "cluster-1", "node-1", reg))
+		snap, err := c.GetSnapshot("node-1")
+		require.NoError(t, err)
+		return snap.GetResources(resourcev3.ClusterType)
+	}
+	const mesh = "moving.demo.aether.internal"
+
+	// One pod declares 8080 (HTTP), one 9000 (raw TCP): a tie, which goes to
+	// HTTP. The service has a default cluster.
+	first := clusters()
+	require.Contains(t, first, mesh)
+
+	// A second raw-TCP pod, which serves no HTTP port and is therefore not in
+	// the HTTP listing: the rows the HTTP entries were built from are the
+	// same, and the service's declared port is now 9000, raw TCP.
+	tcpRows = []*registryv1.ServiceEndpoint{b, c3}
+	second := clusters()
+	pc, ok := second[mesh+":8080"].(*clusterv3.Cluster)
+	require.True(t, ok, "port 8080 is now reached by its per-port cluster")
+	assert.Equal(t, mesh+":8080", pc.GetEdsClusterConfig().GetServiceName(), "a real per-port cluster with a membership of its own, not the alias of a default cluster that is gone")
+	for _, table := range []string{"cap_http_8080", proxy.OutboundHTTPRouteName} {
+		got := a043Resolve(t, a043Tables(t, c)[table], mesh+":8080")
+		assert.Equal(t, mesh+":8080", got.cluster, table)
+	}
+	// The old default entry is retained, empty, for the grace period, like
+	// any entry that left the listing. It must not keep claiming
+	// "<fqdn>:8080" beside the new entry: one domain in two virtual hosts and
+	// the proxy rejects the whole loopback table (a043Resolve fails on a
+	// duplicate domain).
+	snap, err := c.GetSnapshot("node-1")
+	require.NoError(t, err)
+	assert.Empty(t, duplicateDomains(snap.GetResources(resourcev3.RouteType)))
+	// The legacy spellings now name a raw-TCP port: refused on the captured
+	// path, whatever is retained.
+	got := a043Resolve(t, a043Tables(t, c)["cap_http_18081"], mesh+":18081")
+	assert.Equal(t, proxy.RefusalPortRequired, got.refusal)
+
+	// Past the grace the default cluster is gone.
+	c.serviceRetentionGrace = 1
+	third := clusters()
+	assert.NotContains(t, third, mesh, "the default cluster outlived the legacy target it was the cluster of")
+	assert.Contains(t, third, mesh+":8080")
 }
