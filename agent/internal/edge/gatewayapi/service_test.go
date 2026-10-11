@@ -330,7 +330,7 @@ func TestGatewayServiceShape(t *testing.T) {
 	svc := &corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: svcName, Namespace: "aether-ingress"}}
 
 	t.Run("create new service without pinned IP", func(t *testing.T) {
-		err := r.createOrUpdateGatewayService(context.Background(), svc.DeepCopy(), "aether-ingress", "edge", ports, "")
+		err := r.createOrUpdateGatewayService(context.Background(), svc.DeepCopy(), "aether-ingress", "edge", ports, "", infrastructureMetadata{})
 		require.NoError(t, err)
 
 		got := &corev1.Service{}
@@ -348,7 +348,7 @@ func TestGatewayServiceShape(t *testing.T) {
 	})
 
 	t.Run("update existing service to add pinned IP", func(t *testing.T) {
-		err := r.createOrUpdateGatewayService(context.Background(), svc.DeepCopy(), "aether-ingress", "edge", ports, "203.0.113.101")
+		err := r.createOrUpdateGatewayService(context.Background(), svc.DeepCopy(), "aether-ingress", "edge", ports, "203.0.113.101", infrastructureMetadata{})
 		require.NoError(t, err)
 
 		got := &corev1.Service{}
@@ -361,7 +361,7 @@ func TestGatewayServiceShape(t *testing.T) {
 	})
 
 	t.Run("update service to remove pinned IP", func(t *testing.T) {
-		err := r.createOrUpdateGatewayService(context.Background(), svc.DeepCopy(), "aether-ingress", "edge", ports, "")
+		err := r.createOrUpdateGatewayService(context.Background(), svc.DeepCopy(), "aether-ingress", "edge", ports, "", infrastructureMetadata{})
 		require.NoError(t, err)
 
 		got := &corev1.Service{}

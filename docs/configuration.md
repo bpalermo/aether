@@ -475,6 +475,74 @@ over mTLS and routes external traffic via the Gateway API. Disabled by default.
 | `edge.goMaxProcs` | `2` | Rendered as the edge `agent` container's `GOMAXPROCS` env var (#1335), the same shape as `agent.goMaxProcs` (#1116). The container has no CPU limit, so the Go runtime would otherwise size itself to the node's core count; it averages under 2m of CPU (4.4m over its busiest 5 minutes on the reference cluster), so 2 is not a constraint. The `envoy` container is not a Go process. `0` (or empty) omits the env var and lets the Go runtime choose, e.g. when you set an explicit CPU limit. |
 | `edge.concurrency` | `2` | Envoy worker thread count for the edge pod's `envoy` container (#1344, chart 2.4.13), the same shape as `proxy.concurrency`: `N > 0` passes `--concurrency N` on the container's command line (the edge runs Envoy directly, with no supervisor), `0` passes no flag and Envoy picks its own default, which is what earlier charts did: the smallest of the node's online CPUs, the CPUs the container's affinity mask allows, and the container's cgroup CPU limit (`edge.resources.limits.cpu`) rounded down to a whole CPU, never less than 1 — one worker per node core only when the container has no CPU limit and no restricted mask. The default is the count the node proxies run with on the reference cluster; the edge Envoy averages about 12m of CPU there. Raise it for an edge that carries real traffic volume. Changing it is an ordinary rolling update: the edge has no hot restart, so none of `proxy.concurrency`'s caveats apply. A negative or non-integer value fails the render. |
 
+#### Labelling and annotating a Gateway's LoadBalancer Service
+
+Every Gateway of the edge's class gets one generated resource: its own
+LoadBalancer Service in the edge namespace (`edge.namespace`), named
+`<edge>-gw-<gateway namespace>-<gateway name>` (hashed when longer than 63
+characters) and labelled `aether.io/edge-gateway`. The edge pods and their
+ServiceAccount belong to the one shared Deployment and serve every Gateway, so
+nothing of a single Gateway is put on them.
+
+The Gateway API fields `spec.infrastructure.labels` and
+`spec.infrastructure.annotations` are copied to that Service. This is how a
+Gateway's owner reaches the load-balancer controller without write access to the
+edge namespace:
+
+```yaml
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: web
+  namespace: apps
+spec:
+  gatewayClassName: aether
+  infrastructure:
+    labels:
+      team: payments
+    annotations:
+      # whatever your load-balancer controller reads on a Service, for example
+      service.beta.kubernetes.io/aws-load-balancer-scheme: internal
+      metallb.universe.tf/address-pool: internal
+  listeners:
+    - name: http
+      port: 80
+      protocol: HTTP
+```
+
+- **Updates and removals follow the Gateway.** Changing a value changes it on
+  the Service; removing a key from the Gateway removes it from the Service. No
+  pod is restarted: only the Service's metadata is written.
+- **Nothing else on the Service is touched.** Labels and annotations set by
+  another controller or by hand stay, whether or not the Gateway sets any. The
+  edge records the keys it copied in the Service annotation
+  `aether.io/infrastructure-keys` and removes only those. If the Gateway sets a
+  key that is already on the Service, the Gateway's value wins and the key is
+  the Gateway's from then on.
+- **Refused keys.** A key is not copied when its prefix is `aether.io` or a
+  subdomain of it (the edge's own label decides which Services it
+  garbage-collects, and the record above decides what it removes), when its
+  prefix is `gateway.networking.k8s.io` or a subdomain of it (those labels state
+  facts about generated resources that would not be true here), or when it is
+  `metallb.universe.tf/loadBalancerIPs` (the address pin is set from the
+  Gateway's `spec.addresses`, and the edge removes that annotation when
+  `spec.addresses` is empty). A label whose key or value the API server would
+  reject is not copied either. The rest of the Gateway's keys are still applied,
+  and the Gateway stays `Accepted=True`: the refused keys are named in that
+  condition's message and in the edge log.
+- **What an annotation does is up to the controller that reads it.** Some
+  load-balancer annotations are only read when the Service is created, and some
+  change the address; the Gateway's `status.addresses` follows whatever the
+  Service is assigned.
+- **A Gateway without `spec.infrastructure` labels or annotations** gets the same
+  Service as before, with no extra annotation.
+- **No per-Gateway Service, nothing copied.** When the edge runs without
+  `--edge-service-name`, or cannot allocate a per-Gateway port, Gateways share
+  the edge's own Service and these fields have no effect.
+
+`spec.infrastructure.parametersRef` is the third field of that struct; it
+attaches an `EdgeConfig` (next section).
+
 #### `edge.config` — the fleet-default `EdgeConfig` (proposal 029)
 
 This block renders one `EdgeConfig` CR (`edge-defaultconfig.yaml`) that the

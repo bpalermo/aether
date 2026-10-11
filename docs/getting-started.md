@@ -761,6 +761,13 @@ spec:
 - **Addressing:** per-Gateway addressing is unconditional (proposal 021 Phase 2;
   the flag and chart value were retired in 031 round 2) — each `Gateway` gets its
   own LoadBalancer Service and external IP; pin one with `edge.gateway.address`.
+  To label or annotate that Service (for example with what your load-balancer
+  controller reads), set `spec.infrastructure.labels` / `.annotations` on the
+  `Gateway`; the edge copies them to the Service and removes them again when
+  they leave the Gateway. Keys under `aether.io` and
+  `gateway.networking.k8s.io`, and the address-pin annotation, are refused: see
+  `docs/configuration.md`, "Labelling and annotating a Gateway's LoadBalancer
+  Service".
 - **HTTP/3:** set `edge.config.http3.enabled=true` (default off) to add a QUIC
   listener on the HTTPS port and advertise it with `alt-svc` (proposal 029); it
   can also be set per `Gateway` through an `EdgeConfig` attached with

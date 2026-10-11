@@ -580,8 +580,6 @@ jobs:
           # (2) + (3) the chart must actually deploy repository@digest. This is
           # the assertion that catches a stale or missing digest, because
           # aether.image falls back to the tag and nothing else would notice.
-          # clusterName is required and has no default (chart 2.6.0); which name
-          # is of no interest to this check.
           helm template aether charts/aether --set clusterName=ci > "$RUNNER_TEMP/rendered.yaml"
           if grep -qF "\"${repository}@${digest}\"" "$RUNNER_TEMP/rendered.yaml"; then
             echo "helm: proxy container renders ${repository}@${digest}"

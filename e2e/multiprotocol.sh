@@ -1,267 +1,723 @@
 #!/usr/bin/env bash
-# Multi-protocol per service (proposal 037) end-to-end check.
+# Single-cluster kind e2e for proposal 037 (multi-protocol ports on one mesh
+# service): ONE pod that serves HTTP on :8080 and a raw-TCP protocol on :9000,
+# under one ServiceAccount, with both ports on the mesh.
 #
-# Deploys ONE workload that serves an HTTP primary on :8080 and a raw-TCP
-# secondary on :9000 — the shape the whole proposal exists to enable, and the
-# one no existing suite covers — then drives it from a mesh client and asserts
-# both protocols reach the right port.
+# It is the only end-to-end test of that shape. e2e/l4routes.sh covers services
+# whose primary port is TCP; every HTTP suite covers services with no TCP port.
+# Neither builds what a mixed service needs and nothing else does: a capture
+# chain per TCP port on a VIP that also serves HTTP, a per-port "tcp:" cluster
+# that carries the port as SNI (it is not the pod's primary), a per-port floor
+# chain on the destination's inbound, and one pod registered under both
+# protocols.
 #
-# Why a Job rather than `kubectl exec`: exec into the reference cluster is not available to
-# this harness, so the checks have to run INSIDE the mesh as a managed workload
-# and report through their own logs. That is also closer to what a real caller
-# experiences: the client pod is captured, so its dials traverse the capture
-# listener exactly as an application's would.
+# The declaration under test is one pod annotation:
 #
-# Usage:
-#   e2e/multiprotocol.sh [--keep]
+#   endpoint.aether.io/port:  "8080"
+#   endpoint.aether.io/ports: "8080,9000=tcp"
 #
-# --keep leaves the workloads in place for inspection.
+# Two workloads with the SAME two containers and the same two listeners:
+#
+#   mp-mixed     ports "8080,9000=tcp"   http answers "mixhttp",  tcp answers "mixtcp"
+#   mp-httponly  ports "8080"            http answers "ctlhttp",  tcp answers "ctltcp"
+#
+# mp-httponly is the control: its :9000 listener is as alive as mp-mixed's, and
+# is not declared. What a probe reads back is the marker of the container that
+# served it, so every assertion names WHICH listener answered, not just that
+# something did.
+#
+#   M0  control       mp-httponly: HTTP on :18081 answers "ctlhttp"; raw TCP to
+#                     :9000 and to :18082 is NEVER answered by "ctltcp" — a port
+#                     that is not declared is not on the mesh
+#   M1  http, mesh    mp-mixed http://<name>:18081/ -> "mixhttp": the HTTP mesh
+#                     port still routes on the authority, on a VIP that now
+#                     also has TCP chains
+#   M2  http, bare    mp-mixed http://<name>/ (dials 80) -> "mixhttp": a
+#                     portless URL resolves by its scheme
+#   M3  http, port    mp-mixed http://<name>:8080/ -> "mixhttp": the HTTP app
+#                     port by number
+#   M4  tcp, port     mp-mixed raw TCP to :9000 -> "mixtcp": the per-port chain
+#                     (cap_tcp_<svc>_9000 -> tcp:<name>:9000 -> the inbound's
+#                     per-port floor chain)
+#   M5  tcp, mesh     mp-mixed raw TCP to :18082 is NOT answered: the TCP mesh
+#                     port is "the primary port, as raw TCP"
+#                     (docs/workload-requirements.md), this primary is HTTP, and
+#                     raw bytes are never forwarded to it
+#   M6  both keys     the registry holds mp-mixed's pod under the HTTP key AND
+#                     the TCP key, and mp-httponly's under the HTTP key only
+#   M7  the Service   the generated mesh Service of mp-mixed is classified
+#                     http and exposes both mesh ports, 18081 and 18082
+#
+# M0 is an assertion and not setup — it is the state in which the TCP probe
+# gives the other answer, re-observed on every run, so a green M4 cannot be a
+# probe that only ever says one thing (#853). M5 is the same probe on the same
+# VIP as M4, one port over: M4 green with M5 answered would mean the per-port
+# chain had become a per-VIP one.
+#
+# THE RED HALF. To see the gate fail, bring the suite up with the mixed
+# workload's declaration cut down to its HTTP port, and verify:
+#
+#   MP_MIXED_PORTS=8080 e2e/multiprotocol.sh up && e2e/multiprotocol.sh verify
+#
+# M0 to M3 pass (HTTP never depended on the suffix) and M4 fails: no probe to
+# :9000 is answered, exactly as on mp-httponly.
+#
+# THE MIRROR SHAPE IS NOT IN THE GATE. A pod with a TCP primary and an HTTP
+# secondary (endpoint.aether.io/protocol: tcp, port 9000, ports "9000,8080=h1")
+# is the other way to be mixed. On the build this suite was written against its
+# HTTP port is served and its TCP primary is not reachable through the mesh at
+# all, on :18082 or on :9000. To reproduce, or to see it fixed:
+#
+#   MP_TCP_PRIMARY=1 e2e/multiprotocol.sh up && e2e/multiprotocol.sh verify
+#
+# which runs X1..X3 on mp-tcpfirst after the gate. Once they pass, deploy the
+# workload unconditionally and move them into the gate.
+#
+# SPIRE IS ON AND THE REGISTRY BACKEND IS etcd, for the reasons the header of
+# e2e/l4routes.sh gives in full: with SPIRE off the mesh has no TCP path at
+# either end (no node SVID => no "tcp:" clusters; the cleartext inbound has no
+# floor chain), and etcd is the backend that keys an endpoint by protocol,
+# which is what M6 reads.
+#
+# Usage: e2e/multiprotocol.sh {up|test|verify|down}   (bare = up + verify)
+#
+# Prereqs: kind, docker, kubectl, helm, bazel (for the image build; CI sets
+# MP_SKIP_BUILD=1 and pre-loads the images from the nightly build artifact).
+# The cluster is this script's own; it reads no kube context but the one it
+# creates.
 set -euo pipefail
 
-NS="${NS:-aether-test}"
-CTX="${CTX:-talos-main}"
-DOMAIN="${DOMAIN:-aether.internal}"
-KEEP=0
-[ "${1:-}" = "--keep" ] && KEEP=1
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# The pinned kind binary / node image / kubectl (#1251): one Kubernetes for every
+# e2e surface, local and CI alike.
+# shellcheck source=e2e/kind-version.sh
+. "$REPO_ROOT/e2e/kind-version.sh"
+# <registry>/<namespace> every aether image is tagged under, from the single
+# setting in bazel/registry/registry.bzl (proposal 040) -- never a literal.
+IMAGE_REGISTRY="$("$REPO_ROOT/scripts/image-registry.sh" prefix)"
+CLUSTER="${MP_CLUSTER:-multiprotocol}"
+CTX="kind-$CLUSTER"
+NS="aether-system"
+TEST_NS="aether-test"
+MESH_DOMAIN="aether.internal"
+TRUST_DOMAIN="aether.internal"
+# The two application ports of both workloads, and the two mesh ports
+# (meshconst.ProxyOutboundPort, meshconst.ProxyL4OutboundPort).
+HTTP_PORT="8080"
+TCP_PORT="9000"
+MESH_HTTP_PORT="18081"
+MESH_TCP_PORT="18082"
+# The mixed workload's endpoint.aether.io/ports. The default is the declaration
+# under test; the red half (see the header) overrides it. CI never sets it.
+MP_MIXED_PORTS="${MP_MIXED_PORTS:-$HTTP_PORT,$TCP_PORT=tcp}"
+# "1" also deploys the mirror shape and verifies it after the gate (see "THE
+# MIRROR SHAPE" in the header). CI never sets it.
+MP_TCP_PRIMARY="${MP_TCP_PRIMARY:-0}"
+# How many probes each measured batch sends.
+PROBES=20
+# SPIRE >= 1.15.2 is required since proposal 036 (the SPIFFE Broker API); these
+# are the same chart pins e2e/l4routes.sh uses.
+SPIRE_CHART_VERSION="${SPIRE_CHART_VERSION:-0.30.2}"
+SPIRE_CRDS_VERSION="${SPIRE_CRDS_VERSION:-0.6.1}"
+SPIRE_CLASS="spire-mgmt-spire" # spire-controller-manager class (namespace-release)
+IMAGES=(agent mesh-dns proxy-supervisor cni-install registrar controller uds-csi l4echo)
+HTTP_ECHO_IMAGE="hashicorp/http-echo:1.0@sha256:fcb75f691c8b0414d670ae570240cbf95502cc18a9ba57e982ecac589760a186"
+CURL_IMAGE="curlimages/curl:8.22.0@sha256:58adaa4e8dca9c988bae2aba4ab3434a0bb2da16bbe3f92dec39ec7785166777"
+KIND_NET="kind"
+REGION="local"
+ETCD_NAME="${ETCD_NAME:-aether-multiprotocol-etcd}"
+# shellcheck source=e2e/etcd-image.sh
+. "$REPO_ROOT/e2e/etcd-image.sh"
 
-k() { kubectl --context "$CTX" -n "$NS" "$@"; }
-
-log() { printf '\n==> %s\n' "$*"; }
-ok() { printf '  \033[32mPASS\033[0m %s\n' "$*"; }
-bad() {
-	printf '  \033[31mFAIL\033[0m %s\n' "$*"
-	FAILED=1
+log() { printf '\n\033[1;34m==> %s\033[0m\n' "$*"; }
+ok() { printf '\033[1;32m  ✓ %s\033[0m\n' "$*"; }
+die() {
+	printf '\033[1;31m  ✗ %s\033[0m\n' "$*" >&2
+	dump_state
+	exit 1
 }
-FAILED=0
 
-# Everything this script creates carries OWNER_LABEL, and cleanup deletes BY
-# THAT LABEL rather than by name.
-#
-# Deleting by name is how this script destroyed the soak harness's long-lived
-# workload (#918). Both harnesses had called theirs `mixed-svc` in this same
-# namespace, so a correct, successful e2e run tore down the workload driving
-# proposal 037's Phase 4 evidence -- and printed PASS while doing it, because
-# the run itself had genuinely passed. Renaming to mp-e2e-svc makes that one
-# collision impossible; deleting by label makes the CLASS impossible, because a
-# selector cannot match an object this script did not create.
-OWNER_LABEL="app.kubernetes.io/created-by=multiprotocol-e2e"
+kc() { kubectl --context "$CTX" "$@"; }
 
-cleanup() {
-	[ "$KEEP" = "1" ] && {
-		log "--keep: leaving mp-e2e-svc and mp-client in place"
+# A red run is one of: the pod never registered under the TCP key, the source
+# has no chain for the port, the chain names a cluster that was never
+# published, or the destination has no floor chain for it. Print what tells
+# them apart (the #590 principle).
+dump_state() {
+	kubectl config get-contexts "$CTX" >/dev/null 2>&1 || return 0
+	printf '\033[1;33m  -- pods --\033[0m\n' >&2
+	kc get pods -A -o wide 2>&1 | sed 's/^/    /' >&2 || true
+	printf '\033[1;33m  -- the workloads'"'"' declarations (endpoint.aether.io/ports) --\033[0m\n' >&2
+	kc -n "$TEST_NS" get pods -o custom-columns=NAME:.metadata.name,PORT:.metadata.annotations.endpoint\\.aether\\.io/port,PORTS:.metadata.annotations.endpoint\\.aether\\.io/ports 2>&1 |
+		sed 's/^/    /' >&2 || true
+	printf '\033[1;33m  -- mesh services (classification + ports) --\033[0m\n' >&2
+	kc -n "$TEST_NS" get svc -o custom-columns=NAME:.metadata.name,CLUSTERIP:.spec.clusterIP,PROTO:.metadata.annotations.aether\\.io/app-protocol,PORTS:.spec.ports[*].port 2>&1 |
+		sed 's/^/    /' >&2 || true
+	printf '\033[1;33m  -- registry keys of the test services (one line per protocol the pod is registered under) --\033[0m\n' >&2
+	docker exec "$ETCD_NAME" etcdctl get --prefix / --keys-only 2>/dev/null |
+		grep -E '/services/mp-(mixed|tcpfirst|httponly)/' | sed 's/^/    /' >&2 || true
+	# The agent and the proxy are hostNetwork, so the kind node shares their
+	# netns and reaches Envoy's loopback-only admin. Names only: which chains and
+	# which "tcp:" clusters exist is the whole question.
+	local node
+	node="$(kc -n "$TEST_NS" get pod -l app=client -o jsonpath='{.items[0].spec.nodeName}' 2>/dev/null || true)"
+	if [ -n "$node" ]; then
+		printf '\033[1;33m  -- envoy: TCP filter chains (cap_tcp_* on the source, in_tcp_* on the destination) --\033[0m\n' >&2
+		docker exec "$node" curl -s --max-time 5 "http://127.0.0.1:9901/config_dump?resource=dynamic_listeners" 2>/dev/null |
+			grep -oE '"(cap_tcp_|in_tcp_)[^"]*"' | sort | uniq -c | sed 's/^/    /' >&2 || true
+		printf '\033[1;33m  -- envoy: tcp: clusters and their hosts --\033[0m\n' >&2
+		docker exec "$node" curl -s --max-time 5 http://127.0.0.1:9901/clusters 2>/dev/null |
+			grep -E '^tcp:.*(::health_flags|::cx_connect_fail|::rq_total)' | sed -n '1,40s/^/    /p' >&2 || true
+	fi
+	printf '\033[1;33m  -- agent log --\033[0m\n' >&2
+	kc -n "$NS" logs -l app.kubernetes.io/component=agent --all-containers --tail=120 --prefix 2>&1 |
+		sed 's/^/    /' >&2 || true
+	printf '\033[1;33m  -- proxy log --\033[0m\n' >&2
+	kc -n "$NS" logs -l app.kubernetes.io/component=proxy -c proxy --tail=60 --prefix 2>&1 |
+		sed 's/^/    /' >&2 || true
+	printf '\033[1;33m  -- registrar --\033[0m\n' >&2
+	kc -n "$NS" logs -l app.kubernetes.io/component=registrar --tail=40 --prefix 2>&1 |
+		sed 's/^/    /' >&2 || true
+}
+
+raise_inotify() {
+	if sudo -n true 2>/dev/null; then
+		sudo sysctl -w fs.inotify.max_user_instances=8192 fs.inotify.max_user_watches=524288 >/dev/null 2>&1 &&
+			ok "inotify limits raised" || echo "  (could not raise inotify limits)"
+	else
+		echo "  (no passwordless sudo; run: sudo sysctl -w fs.inotify.max_user_instances=8192 fs.inotify.max_user_watches=524288)"
+	fi
+}
+
+build_images() {
+	# CI builds the images itself (bazel image_load via RBE) and sets
+	# MP_SKIP_BUILD=1 so this is a no-op — they are already in the local docker
+	# daemon under <IMAGE_REGISTRY>/<img>:latest.
+	if [ "${MP_SKIP_BUILD:-0}" = "1" ]; then
+		ok "skipping image build (MP_SKIP_BUILD=1; images pre-built)"
 		return
-	}
-	log "cleanup"
-	k delete job,deployment,serviceaccount -l "$OWNER_LABEL" --ignore-not-found --wait=false >/dev/null 2>&1 || true
+	fi
+	log "building + loading aether images (incl. the l4echo test backend)"
+	local t
+	for t in //agent/cmd/agent //agent/cmd/mesh-dns //agent/cmd/proxy-supervisor \
+		//cni/cmd/cni-install //registrar/cmd/registrar //controller/cmd/controller //agent/cmd/uds-csi \
+		//e2e/l4echo; do
+		(cd "$REPO_ROOT" && bazel run "$t:image_load" >/dev/null 2>&1) || die "image build failed for $t"
+	done
+	ok "images built"
 }
-trap cleanup EXIT
 
-log "deploying the mixed-protocol workload (HTTP :8080 primary + raw TCP :9000)"
-cat <<YAML | kubectl --context "$CTX" apply -f - >/dev/null
+create_cluster() {
+	# SIGPIPE rule (#1121, e2e/README.md): this script runs under pipefail, so
+	# no pipeline may end in a reader that exits before its writer is done
+	# (`head`, `grep -q`/`-m`, `awk '...; exit'`): the writer dies of SIGPIPE
+	# and the pipeline fails with 141 at a random point. Read to EOF instead
+	# (`grep -c ... >/dev/null`). The pods' own `sh` scripts run without
+	# pipefail.
+	if kind get clusters 2>/dev/null | grep -cx "$CLUSTER" >/dev/null; then
+		ok "kind cluster '$CLUSTER' already exists"
+		return
+	fi
+	log "creating kind cluster '$CLUSTER'"
+	local cfg
+	cfg="$(mktemp)"
+	sed -e "s/CLUSTER_NAME/$CLUSTER/g" \
+		-e "s#POD_SUBNET#10.20.0.0/16#g" \
+		-e "s#SVC_SUBNET#10.120.0.0/16#g" \
+		"$REPO_ROOT/e2e/kind-cluster.yaml" >"$cfg"
+	kind_require_binary || die "kind binary does not match e2e/kind-version.sh (see above)"
+	kind create cluster --image "$KIND_NODE_IMAGE" --config "$cfg" --wait 60s >/dev/null
+	rm -f "$cfg"
+	ok "cluster '$CLUSTER' ready"
+}
+
+# etcd on kind's docker network, reachable from the cluster's node.
+etcd_ip() { docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' "$ETCD_NAME"; }
+
+start_etcd() {
+	log "starting etcd (the registry backend; see the header) on the '$KIND_NET' docker network"
+	docker rm -f "$ETCD_NAME" >/dev/null 2>&1 || true
+	docker run -d --name "$ETCD_NAME" --network "$KIND_NET" "$ETCD_IMAGE" \
+		etcd --name s1 --data-dir /tmp/etcd \
+		--listen-client-urls http://0.0.0.0:2379 --advertise-client-urls http://0.0.0.0:2379 >/dev/null ||
+		die "could not start etcd"
+	local deadline=$((SECONDS + 60))
+	until docker exec "$ETCD_NAME" etcdctl endpoint health >/dev/null 2>&1; do
+		[ "$SECONDS" -lt "$deadline" ] || die "etcd never became healthy"
+		sleep 2
+	done
+	local ip
+	ip="$(etcd_ip)"
+	[ -n "$ip" ] || die "could not determine the etcd container IP"
+	ok "etcd healthy at http://$ip:2379"
+}
+
+load_images() {
+	log "loading images into '$CLUSTER'"
+	local img
+	for img in "${IMAGES[@]}"; do
+		kind load docker-image "${IMAGE_REGISTRY}/${img}:latest" --name "$CLUSTER" >/dev/null 2>&1 ||
+			die "could not load ${IMAGE_REGISTRY}/${img}:latest into kind (was it built?)"
+	done
+	ok "images loaded"
+}
+
+# SPIRE, single cluster, self-signed. Mandatory here (see the header); the
+# values are e2e/l4routes.sh's, whose comments say why each one is set.
+install_spire() {
+	log "installing SPIRE (trust domain $TRUST_DOMAIN)"
+	helm --kube-context "$CTX" repo add spiffe https://spiffe.github.io/helm-charts-hardened/ >/dev/null 2>&1 || true
+	helm --kube-context "$CTX" repo update >/dev/null 2>&1 || true
+	kc create ns spire-mgmt >/dev/null 2>&1 || true
+	helm --kube-context "$CTX" upgrade --install spire-crds spiffe/spire-crds \
+		-n spire-mgmt --version "$SPIRE_CRDS_VERSION" --wait --timeout 3m >/dev/null ||
+		die "spire-crds install failed"
+	helm --kube-context "$CTX" upgrade --install spire spiffe/spire \
+		-n spire-mgmt --version "$SPIRE_CHART_VERSION" \
+		--set global.spire.trustDomain="$TRUST_DOMAIN" \
+		--set global.spire.clusterName="$CLUSTER" \
+		--set "spiffe-oidc-discovery-provider.enabled=false" \
+		--set "spire-agent.sockets.broker.enabled=true" \
+		--set "spire-agent.sockets.broker.mountOnHost=true" \
+		--set "spire-agent.brokerAPI.brokers.aether-agent.enabled=true" \
+		--set "spire-agent.brokerAPI.brokers.aether-agent.idTemplate=spiffe://$TRUST_DOMAIN/ns/$NS/sa/aether-agent" \
+		--set "spire-agent.brokerAPI.brokers.aether-agent.allowedReferenceTypes[0].typeURL=type.googleapis.com/spiffe.broker.KubernetesObjectReference" \
+		--set "spire-agent.brokerAPI.brokers.aether-agent.allowedReferenceTypes[0].allowOverTCP=false" \
+		--set "spire-agent.workloadAttestors.k8s.brokerAPI.accessPolicy=permissive" \
+		--set "spire-agent.workloadAttestors.k8s.brokerAPI.brokers.aether-agent.enabled=true" \
+		--wait --timeout 8m >/dev/null || die "SPIRE install failed"
+	kc apply -f - >/dev/null <<YAML || die "ClusterSPIFFEID apply failed"
+apiVersion: spire.spiffe.io/v1alpha1
+kind: ClusterSPIFFEID
+metadata:
+  name: aether-workloads
+spec:
+  className: $SPIRE_CLASS
+  spiffeIDTemplate: "spiffe://{{ .TrustDomain }}/ns/{{ .PodMeta.Namespace }}/sa/{{ .PodSpec.ServiceAccountName }}"
+  dnsNameTemplates:
+    - "{{ .PodSpec.ServiceAccountName }}.{{ .PodMeta.Namespace }}.$MESH_DOMAIN"
+    - "*.{{ .PodSpec.ServiceAccountName }}.{{ .PodMeta.Namespace }}.$MESH_DOMAIN"
+  podSelector:
+    matchLabels:
+      aether.io/managed: "true"
+YAML
+	ok "SPIRE up"
+}
+
+# Render the chart placeholders into a temp copy so the source tree stays clean.
+chart_dir() {
+	local out
+	out="$(mktemp -d)"
+	cp -r "$REPO_ROOT/charts" "$out/"
+	sed -i -e 's/{GIT_COMMIT}/e2e/' -e 's/{STABLE_GIT_VERSION}/0.0.0-e2e/' \
+		"$out/charts/crds/Chart.yaml" "$out/charts/aether/Chart.yaml"
+	echo "$out/charts"
+}
+
+install_aether() {
+	# Declared and assigned separately (SC2155), so `set -e` sees etcd_ip fail.
+	local charts etcd
+	charts="$(chart_dir)"
+	etcd="http://$(etcd_ip):2379"
+	img() { echo "--set $1.image.repository=${IMAGE_REGISTRY}/$2 --set $1.image.tag=latest --set $1.image.digest= --set $1.image.pullPolicy=Never"; }
+	log "installing the aether CRDs"
+	helm --kube-context "$CTX" upgrade --install aether-crds "$charts/crds" \
+		-n "$NS" --create-namespace --wait --timeout 2m >/dev/null || die "crds chart install failed"
+
+	# Everything except SPIRE and the registry backend is chart default:
+	# transparent capture with redirect-all (which is what captures a dial to
+	# :9000 and to :80), mesh DNS. Per-port protocols have no values gate.
+	log "installing aether (SPIRE ON, etcd registry — see the header)"
+	# shellcheck disable=SC2046
+	helm --kube-context "$CTX" upgrade --install aether "$charts/aether" \
+		-n "$NS" --create-namespace \
+		--set namespace.create=false \
+		--set "clusterName=$CLUSTER" \
+		--set "meshDomain=$MESH_DOMAIN" \
+		--set spire.enabled=true \
+		--set edge.enabled=false \
+		--set registrar.registryBackend=etcd \
+		--set "registrar.region=$REGION" \
+		--set "registrar.etcd.region=$REGION" \
+		--set "registrar.etcd.endpoints[0]=$etcd" \
+		$(img agent agent) $(img agent.meshDnsDaemon mesh-dns) \
+		$(img proxy.supervisor proxy-supervisor) $(img cniInstall cni-install) \
+		$(img registrar registrar) $(img controller controller) $(img udsCsi uds-csi) \
+		--set proxy.image.pullPolicy=IfNotPresent \
+		--timeout 6m >/dev/null || die "aether install failed"
+	rm -rf "$(dirname "$charts")"
+
+	kc -n "$NS" rollout status ds/aether-agent --timeout=300s >/dev/null || die "the agent DaemonSet never became Ready"
+	kc -n "$NS" rollout status ds/aether-mesh-dns --timeout=180s >/dev/null || die "the mesh-DNS DaemonSet never became Ready"
+	kc -n "$NS" rollout status deploy/aether-registrar --timeout=180s >/dev/null || die "the registrar never became Ready"
+	kc -n "$NS" rollout status deploy/aether-controller --timeout=180s >/dev/null || die "the controller never became Ready"
+	ok "aether up"
+}
+
+# deploy_two_port_workload NAME PORTS HTTP_TEXT TCP_TEXT [PRIMARY PROTOCOL] —
+# one pod, two listeners: an HTTP server on :$HTTP_PORT and e2e/l4echo (reads
+# one line, writes "<text> <line>", closes) on :$TCP_PORT. PORTS is the pod's
+# endpoint.aether.io/ports; PRIMARY and PROTOCOL are its endpoint.aether.io/port
+# and /protocol (the class of an unsuffixed port), HTTP on :$HTTP_PORT unless
+# given. The declaration is the ONLY thing that differs between the workloads
+# besides their markers.
+#
+# No Kubernetes Service is written: the registrar generates the selectorless
+# mesh Service (the name mesh DNS answers) for every registered service, and
+# skips a name some other Service already owns. The registry service name is
+# the pod's ServiceAccount.
+deploy_two_port_workload() {
+	local name="$1" ports="$2" http_text="$3" tcp_text="$4" primary="${5:-$HTTP_PORT}" protocol="${6:-http}"
+	kc apply -f - >/dev/null <<YAML || die "workload $name apply failed"
 apiVersion: v1
 kind: ServiceAccount
-metadata: {name: mp-e2e-svc, namespace: $NS, labels: {app.kubernetes.io/created-by: multiprotocol-e2e}}
----
-apiVersion: v1
-kind: ServiceAccount
-metadata: {name: mp-client, namespace: $NS, labels: {app.kubernetes.io/created-by: multiprotocol-e2e}}
+metadata: {name: $name, namespace: $TEST_NS}
 ---
 apiVersion: apps/v1
 kind: Deployment
-metadata: {name: mp-e2e-svc, namespace: $NS, labels: {app.kubernetes.io/created-by: multiprotocol-e2e}}
+metadata: {name: $name, namespace: $TEST_NS}
 spec:
   replicas: 1
-  selector: {matchLabels: {app: mp-e2e-svc}}
+  selector: {matchLabels: {app: $name}}
   template:
     metadata:
-      labels: {app: mp-e2e-svc, aether.io/managed: "true", app.kubernetes.io/created-by: multiprotocol-e2e}
+      labels: {app: $name, aether.io/managed: "true"}
       annotations:
-        # The declaration this whole proposal turns on: an HTTP primary and a
-        # raw-TCP secondary on ONE pod, under ONE ServiceAccount.
-        endpoint.aether.io/port: "8080"
-        endpoint.aether.io/ports: "8080,9000=tcp"
+        endpoint.aether.io/port: "$primary"
+        endpoint.aether.io/protocol: "$protocol"
+        endpoint.aether.io/ports: "$ports"
     spec:
-      serviceAccountName: mp-e2e-svc
+      serviceAccountName: $name
       securityContext:
         runAsNonRoot: true
-        runAsUser: 1000
+        runAsUser: 65532
         seccompProfile: {type: RuntimeDefault}
       containers:
         - name: http
-          image: hashicorp/http-echo:1.0@sha256:fcb75f691c8b0414d670ae570240cbf95502cc18a9ba57e982ecac589760a186
-          args: ["-text=served-by-http-8080", "-listen=:8080"]
-          ports: [{containerPort: 8080}]
+          image: $HTTP_ECHO_IMAGE
+          args: ["-text=$http_text", "-listen=:$HTTP_PORT"]
+          ports: [{containerPort: $HTTP_PORT}]
           securityContext:
             allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
             capabilities: {drop: ["ALL"]}
         - name: tcp
-          image: istio/tcp-echo-server:1.3@sha256:782259608d5ce934e1a07ce4a3f2664934b6806d50430fd20b7bf429ea500272
-          args: ["9000", "served-by-tcp-9000"]
-          ports: [{containerPort: 9000}]
+          image: ${IMAGE_REGISTRY}/l4echo:latest
+          imagePullPolicy: Never
+          args: ["--mode=tcp", "--listen=:$TCP_PORT", "--text=$tcp_text"]
+          ports: [{containerPort: $TCP_PORT}]
           securityContext:
             allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
             capabilities: {drop: ["ALL"]}
 YAML
-
-log "waiting for the workload to register"
-k rollout status deployment/mp-e2e-svc --timeout=120s >/dev/null
-
-# Wait on the OBSERVABLE, not on a clock (#919).
-#
-# This step waits for a chain of independent async events -- registrar observes
-# the pods, generates the mesh Service, the agent observes it, builds the
-# clusters, EDS propagates -- and none of them has a bounded duration. A fixed
-# `sleep 15` failed 2 of 3 consecutive runs here, and only became visible once
-# #918 stopped the script from reusing the soak harness's permanently-warm
-# `mixed-svc`. Two bugs had been cancelling out: the e2e passed BECAUSE it was
-# destroying somebody else's workload.
-#
-# Raising the sleep would trade a flake for a slower flake. Poll instead, and
-# say which stage failed to converge so a real regression stays distinguishable
-# from slowness.
-await_mesh_service() {
-	local deadline=$((SECONDS + 120))
-	while [ "$SECONDS" -lt "$deadline" ]; do
-		if k get svc mp-e2e-svc >/dev/null 2>&1; then
-			return 0
-		fi
-		sleep 3
-	done
-	bad "registrar never generated the mesh Service for mp-e2e-svc within 120s"
-	bad "  -> the failure is registration, NOT the 037 data path; do not read it as a routing regression"
-	return 1
 }
 
-await_mesh_service || exit 1
+deploy_workloads() {
+	log "deploying mp-mixed (ports: $MP_MIXED_PORTS), mp-httponly (ports: $HTTP_PORT) and the client"
+	kc create ns "$TEST_NS" >/dev/null 2>&1 || true
+	deploy_two_port_workload mp-mixed "$MP_MIXED_PORTS" mixhttp mixtcp
+	deploy_two_port_workload mp-httponly "$HTTP_PORT" ctlhttp ctltcp
+	local workloads="mp-mixed mp-httponly" upstreams="mp-mixed.$TEST_NS,mp-httponly.$TEST_NS"
+	if [ "$MP_TCP_PRIMARY" = "1" ]; then
+		log "MP_TCP_PRIMARY=1: also deploying mp-tcpfirst (TCP primary :$TCP_PORT, ports: $TCP_PORT,$HTTP_PORT=h1)"
+		deploy_two_port_workload mp-tcpfirst "$TCP_PORT,$HTTP_PORT=h1" revhttp revtcp "$TCP_PORT" tcp
+		workloads="$workloads mp-tcpfirst"
+		upstreams="$upstreams,mp-tcpfirst.$TEST_NS"
+	fi
 
-# NO wait on endpoints here, deliberately. The generated mesh Service is
-# SELECTORLESS and its endpoints live in the aether registry, not in Kubernetes
-# -- `kubectl get endpointslice -l kubernetes.io/service-name=<svc>` returns
-# nothing for it, ever. A first version of this polled exactly that and so
-# timed out on every run, which is the same defect this file keeps finding
-# elsewhere: waiting on an observable nobody checked exists.
-#
-# What we actually need to know is whether the path is REACHABLE, and the only
-# way to observe that is to try it. So the retry lives inside the probe below,
-# where a slow convergence costs a few extra attempts and a genuinely broken
-# path still fails on the deadline.
-
-FQDN="mp-e2e-svc.${NS}.${DOMAIN}"
-
-log "running the in-mesh client"
-k delete job mp-client --ignore-not-found >/dev/null 2>&1 || true
-cat <<YAML | kubectl --context "$CTX" apply -f - >/dev/null
-apiVersion: batch/v1
-kind: Job
-metadata: {name: mp-client, namespace: $NS, labels: {app.kubernetes.io/created-by: multiprotocol-e2e}}
+	# The upstreams annotation is NOT an optimisation: there is no on-demand
+	# discovery for tcp_proxy. An undeclared TCP upstream yields a chain that
+	# matches and a cluster that is missing, which looks exactly like a routing
+	# bug.
+	kc apply -f - >/dev/null <<YAML || die "client apply failed"
+apiVersion: v1
+kind: ServiceAccount
+metadata: {name: client, namespace: $TEST_NS}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: client, namespace: $TEST_NS}
 spec:
-  backoffLimit: 0
+  replicas: 1
+  selector: {matchLabels: {app: client}}
   template:
     metadata:
-      labels: {app: mp-client, aether.io/managed: "true", app.kubernetes.io/created-by: multiprotocol-e2e}
+      labels: {app: client, aether.io/managed: "true"}
       annotations:
-        # Declare the dependency so the agent delivers the service's clusters
-        # and chains to this pod's listeners (demand-scoped distribution, 004).
-        config.aether.io/upstreams: "mp-e2e-svc.$NS"
+        config.aether.io/upstreams: "$upstreams"
     spec:
-      serviceAccountName: mp-client
-      restartPolicy: Never
-      securityContext:
-        runAsNonRoot: true
-        runAsUser: 1000
-        seccompProfile: {type: RuntimeDefault}
+      serviceAccountName: client
       containers:
-        - name: probe
-          image: curlimages/curl:8.22.0@sha256:58adaa4e8dca9c988bae2aba4ab3434a0bb2da16bbe3f92dec39ec7785166777
+        - name: curl
+          image: $CURL_IMAGE
+          command: ["sleep", "infinity"]
           securityContext:
             allowPrivilegeEscalation: false
             capabilities: {drop: ["ALL"]}
-          command: ["sh", "-c"]
-          args:
-            - |
-              set -u
-              F="$FQDN"
-              rc=0
-
-              # Retry each check until it succeeds or the deadline passes
-              # (#919). The mesh Service, its clusters and the capture chains
-              # converge asynchronously after the workload registers, and a
-              # fixed sleep outside this pod failed 2 runs in 3. A slow
-              # convergence costs extra attempts here; a genuinely broken path
-              # still fails, because the deadline is bounded and the last
-              # response is what gets reported.
-              try_until() { # seconds marker command...
-                deadline=\$(( \$(date +%s) + \$1 )); shift
-                marker="\$1"; shift
-                while :; do
-                  out=\$("\$@" 2>/dev/null || true)
-                  case "\$out" in (*"\$marker"*) printf '%s' "\$out"; return 0 ;; esac
-                  [ "\$(date +%s)" -ge "\$deadline" ] && { printf '%s' "\$out"; return 1; }
-                  sleep 2
-                done
-              }
-
-              # 1. HTTP on the mesh port. The authority carries the port; the
-              #    capture HCM routes on it.
-              body=\$(try_until 90 served-by-http-8080 curl -s --max-time 5 "http://\$F:18081/")
-              case "\$body" in
-                *served-by-http-8080*) echo "RESULT http_18081 PASS" ;;
-                *) echo "RESULT http_18081 FAIL got=[\$body]"; rc=1 ;;
-              esac
-
-              # 2. HTTP portless — the scheme's default port (80).
-              body=\$(try_until 60 served-by-http-8080 curl -s --max-time 5 "http://\$F/")
-              case "\$body" in
-                *served-by-http-8080*) echo "RESULT http_portless PASS" ;;
-                *) echo "RESULT http_portless FAIL got=[\$body]"; rc=1 ;;
-              esac
-
-              # 3. Raw TCP on the service's OWN port. This is proposal 037's
-              #    reason to exist: before it, this port had no chain at all on
-              #    an HTTP-primary service.
-              tcp_dial() { (echo hello; sleep 2) | timeout 6 nc "\$F" 9000 2>/dev/null; }
-              out=\$(try_until 90 served-by-tcp-9000 tcp_dial)
-              case "\$out" in
-                *served-by-tcp-9000*) echo "RESULT tcp_9000 PASS" ;;
-                *) echo "RESULT tcp_9000 FAIL got=[\$out]" ; rc=1 ;;
-              esac
-
-              echo "RESULT exit \$rc"
-              exit 0
 YAML
-
-k wait --for=condition=complete job/mp-client --timeout=180s >/dev/null 2>&1 || true
-
-log "results"
-OUT="$(k logs job/mp-client 2>/dev/null || true)"
-echo "$OUT" | grep '^RESULT' || {
-	bad "client produced no results"
-	echo "$OUT" | tail -20
+	local d
+	for d in $workloads client; do
+		kc -n "$TEST_NS" rollout status "deploy/$d" --timeout=180s >/dev/null ||
+			die "workload '$d' never became Ready"
+	done
+	ok "workloads deployed"
 }
 
-# SIGPIPE rule (#1121, e2e/README.md): this script runs under pipefail, so no
-# pipeline may end in a reader that exits before its writer is done (`head`,
-# `grep -q`/`-m`, `awk '...; exit'`): the writer dies of SIGPIPE and the
-# pipeline fails with 141 at a random point. Read to EOF instead, or grep a
-# captured variable (as here).
-for check in http_18081 http_portless tcp_9000; do
-	if grep -q "^RESULT $check PASS" <<<"$OUT"; then
-		ok "$check"
-	else
-		bad "$check — $(echo "$OUT" | grep "^RESULT $check" || echo 'no result line')"
+# --- probes -------------------------------------------------------------------
+
+fqdn() { printf '%s.%s.%s' "$1" "$TEST_NS" "$MESH_DOMAIN"; }
+
+# http_probe_batch AUTHORITY N — N GETs of http://AUTHORITY/ from the client, in
+# ONE exec. Prints N lines: the body's first token (a workload's marker), or
+# HTTP<status> when there is a response without one, or NOREPLY.
+http_probe_batch() {
+	local authority="$1" n="$2"
+	# SC2016: the single quotes are the point — the body is evaluated by the
+	# POD's shell; $url/$n/$i/$out are its variables.
+	# shellcheck disable=SC2016
+	kc -n "$TEST_NS" exec deploy/client -c curl -- sh -c '
+		url="$1"; n="$2"; i=1
+		while [ "$i" -le "$n" ]; do
+			out=$(curl -s --max-time 5 -w "\nHTTP%{http_code}\n" "$url" 2>/dev/null | tr -d "\r")
+			first=$(printf "%s\n" "$out" | sed -n "1p")
+			case "$first" in
+			mixhttp | revhttp | ctlhttp | mixtcp* | revtcp* | ctltcp*) printf "%s\n" "${first%% *}" ;;
+			*) printf "%s\n" "$(printf "%s\n" "$out" | grep "^HTTP[1-9]" | sed -n "1p" | grep . || echo NOREPLY)" ;;
+			esac
+			i=$((i + 1))
+		done
+	' sh "http://$authority/" "$n" 2>/dev/null || true
+}
+
+# tcp_probe_batch HOST:PORT N — N raw-TCP probes from the client in ONE exec.
+# Prints N lines: the first token of the reply (l4echo answers
+# "<marker> <line>" and closes), or NOREPLY.
+#
+# The payload is >= 6 bytes on purpose: the capture listener's http_inspector
+# waits on an inconclusive short first write (#466).
+tcp_probe_batch() {
+	local target="$1" n="$2"
+	# shellcheck disable=SC2016  # evaluated by the POD's shell; see http_probe_batch
+	kc -n "$TEST_NS" exec deploy/client -c curl -- sh -c '
+		target="$1"; n="$2"; i=1
+		while [ "$i" -le "$n" ]; do
+			reply=$(printf "probe-%s\n" "$i" | curl -s --max-time 5 "telnet://$target" 2>/dev/null | sed -n "1p" | tr -d "\r")
+			reply="${reply%% *}"
+			printf "%s\n" "${reply:-NOREPLY}"
+			i=$((i + 1))
+		done
+	' sh "$target" "$n" 2>/dev/null || true
+}
+
+count_token() { printf '%s\n' "$1" | awk -v want="$2" '$1 == want { n++ } END { print n + 0 }'; }
+histogram() { printf '%s\n' "$1" | awk 'NF { c[$1]++ } END { for (k in c) printf "%s=%d ", k, c[k] }'; }
+
+# await_probe FN TARGET WANT TIMEOUT — poll small batches until every probe of
+# one batch answers WANT. The convergence gate before a measured batch:
+# registration, the generated Service, the clusters and the chains arrive one
+# after another, and none of them has a bounded duration (#919). On a timeout it
+# prints what it last saw.
+await_probe() {
+	local fn="$1" target="$2" want="$3" timeout="$4" replies deadline probes=5
+	deadline=$((SECONDS + timeout))
+	while true; do
+		replies="$("$fn" "$target" "$probes")"
+		if [ "$(count_token "$replies" "$want")" -eq "$probes" ]; then
+			return 0
+		fi
+		if [ "$SECONDS" -ge "$deadline" ]; then
+			printf '%s' "$(histogram "$replies")"
+			return 1
+		fi
+		sleep 5
+	done
+}
+
+# expect_all ID FN TARGET WANT TIMEOUT MEANING — converge, then one measured
+# batch that must be WANT on every probe.
+expect_all() {
+	local id="$1" fn="$2" target="$3" want="$4" timeout="$5" meaning="$6" replies got
+	await_probe "$fn" "$target" "$want" "$timeout" >/dev/null ||
+		die "$id: $target never answered '$want': $(await_probe "$fn" "$target" "$want" 1) — $meaning"
+	replies="$("$fn" "$target" "$PROBES")"
+	got="$(count_token "$replies" "$want")"
+	[ "$got" -eq "$PROBES" ] ||
+		die "$id: expected $PROBES/$PROBES '$want' from $target, got $(histogram "$replies") — $meaning"
+}
+
+# --- assertions ---------------------------------------------------------------
+
+# M0 — the control, and it runs first: the state in which the TCP probe is not
+# answered. Its HTTP half is what makes the TCP half mean something: the
+# workload is up, registered, resolvable and reachable, and its :9000 listener
+# is still not on the mesh.
+verify_control() {
+	log "M0 control: mp-httponly declares only its HTTP port — its :$TCP_PORT listener must not be reachable through the mesh"
+	local name replies target got
+	name="$(fqdn mp-httponly)"
+	expect_all M0 http_probe_batch "$name:$MESH_HTTP_PORT" ctlhttp 240 \
+		"the control workload does not serve HTTP through the mesh, so nothing below could mean anything"
+	ok "$PROBES/$PROBES HTTP requests to :$MESH_HTTP_PORT answered by its HTTP container"
+	# Few probes: an unanswered one costs the client its whole timeout.
+	for target in "$name:$TCP_PORT" "$name:$MESH_TCP_PORT"; do
+		replies="$(tcp_probe_batch "$target" 3)"
+		got="$(count_token "$replies" NOREPLY)"
+		[ "$got" -eq 3 ] ||
+			die "M0: raw TCP to $target was answered ($(histogram "$replies")) although the pod does not declare a TCP port — the probe cannot tell a declared port from an undeclared one, or the mesh forwards a port nobody registered"
+	done
+	ok "raw TCP to :$TCP_PORT and to :$MESH_TCP_PORT unanswered (3/3 each): a port that is not declared is not on the mesh"
+}
+
+# M1..M3 — HTTP on a service that also has a TCP port. The TCP chains are
+# matched on destination port ahead of everything else; these are the three
+# HTTP spellings they must not shadow.
+verify_http() {
+	local name
+	name="$(fqdn mp-mixed)"
+	log "M1 http on the mesh port: http://$name:$MESH_HTTP_PORT/"
+	expect_all M1 http_probe_batch "$name:$MESH_HTTP_PORT" mixhttp 240 \
+		"HTTP to the mesh port of a mixed service is not served by its HTTP port"
+	ok "$PROBES/$PROBES answered by the HTTP container"
+
+	log "M2 http, portless: http://$name/ (the client dials 80)"
+	expect_all M2 http_probe_batch "$name" mixhttp 90 \
+		"a portless http:// URL does not resolve to the service's HTTP port"
+	ok "$PROBES/$PROBES answered by the HTTP container"
+
+	log "M3 http on the app port: http://$name:$HTTP_PORT/"
+	expect_all M3 http_probe_batch "$name:$HTTP_PORT" mixhttp 90 \
+		"HTTP to the service's own HTTP port is not served by it"
+	ok "$PROBES/$PROBES answered by the HTTP container"
+}
+
+# M4, M5 — raw TCP to the HTTP-primary service.
+verify_tcp() {
+	local name replies got
+	name="$(fqdn mp-mixed)"
+	log "M4 raw TCP on the service's own TCP port: $name:$TCP_PORT"
+	expect_all M4 tcp_probe_batch "$name:$TCP_PORT" mixtcp 180 \
+		"NOREPLY means no chain claims the port on the source (the pod is not registered with $TCP_PORT=tcp, or the per-port chain is missing); an HTTP marker or status means the connection was delivered to the HTTP port"
+	ok "$PROBES/$PROBES answered by the TCP container: the per-port chain carries :$TCP_PORT"
+
+	# :18082 is "the primary port, as raw TCP" (docs/workload-requirements.md,
+	# "How a spelling resolves"), and this service's primary is HTTP: there is
+	# nothing for it to name. Asserted so that the answer is a decision: proposal
+	# 037's text has :18082 resolve to the lowest TCP port of such a service
+	# ("default TCP port"), which is not what shipped. If that is built, this
+	# becomes $PROBES/$PROBES 'mixtcp' on purpose, with the document.
+	log "M5 the TCP mesh port of an HTTP-primary service: $name:$MESH_TCP_PORT names no port"
+	replies="$(tcp_probe_batch "$name:$MESH_TCP_PORT" 3)"
+	got="$(count_token "$replies" NOREPLY)"
+	[ "$got" -eq 3 ] ||
+		die "M5: raw TCP to $name:$MESH_TCP_PORT was answered ($(histogram "$replies")) — 'mixhttp' would be raw bytes forwarded to the HTTP primary; 'mixtcp' means :$MESH_TCP_PORT now resolves to a non-primary TCP port: update this leg and docs/workload-requirements.md together"
+	ok "unanswered (3/3): the primary is HTTP, and raw TCP is never forwarded to it"
+}
+
+# X1..X3 — the mirror shape, a TCP primary with an HTTP secondary. NOT part of
+# the gate: see "THE MIRROR SHAPE" in the header. Runs only when `up` deployed
+# mp-tcpfirst (MP_TCP_PRIMARY=1).
+verify_tcpfirst() {
+	local name
+	name="$(fqdn mp-tcpfirst)"
+	log "X1 the TCP mesh port of a TCP-primary service with an HTTP port: $name:$MESH_TCP_PORT"
+	expect_all X1 tcp_probe_batch "$name:$MESH_TCP_PORT" revtcp 180 \
+		"NOREPLY means the source has no :$MESH_TCP_PORT chain for the service; 'revhttp' means the floor forwarded to the HTTP port"
+	ok "$PROBES/$PROBES answered by the TCP container: :$MESH_TCP_PORT is the primary port, as raw TCP"
+
+	log "X2 raw TCP on its primary port: $name:$TCP_PORT"
+	expect_all X2 tcp_probe_batch "$name:$TCP_PORT" revtcp 90 \
+		"the primary port of a TCP-primary service is not served by the floor"
+	ok "$PROBES/$PROBES answered by the TCP container"
+
+	log "X3 HTTP on its secondary port: http://$name:$HTTP_PORT/"
+	expect_all X3 http_probe_batch "$name:$HTTP_PORT" revhttp 90 \
+		"the HTTP port of a TCP-primary service is not served as HTTP"
+	ok "$PROBES/$PROBES answered by the HTTP container"
+}
+
+# registry_protocols SERVICE — the protocols SERVICE has an endpoint under, one
+# per line, sorted. The etcd key is
+# .../services/<svc>/protocols/<PROTOCOL_X>/endpoints/<ip>.
+registry_protocols() {
+	docker exec "$ETCD_NAME" etcdctl get --prefix / --keys-only 2>/dev/null |
+		sed -n "s#.*/services/$1/protocols/\\([A-Z_]*\\)/endpoints/.*#\\1#p" | sort -u || true
+}
+
+# M6 — one pod, two keys. This replaces a check that read the pod's own
+# annotation back, which the pod carries whether or not anything honoured it.
+verify_registration() {
+	log "M6 registration: mp-mixed under BOTH protocol keys, mp-httponly under one"
+	local got
+	got="$(registry_protocols mp-mixed | tr '\n' ' ')"
+	[ "$got" = "PROTOCOL_HTTP PROTOCOL_TCP " ] ||
+		die "M6: mp-mixed is registered under '${got:-<nothing>}', want 'PROTOCOL_HTTP PROTOCOL_TCP' — a pod with an HTTP and a TCP port registers once per protocol"
+	got="$(registry_protocols mp-httponly | tr '\n' ' ')"
+	[ "$got" = "PROTOCOL_HTTP " ] ||
+		die "M6: mp-httponly is registered under '${got:-<nothing>}', want 'PROTOCOL_HTTP' only"
+	ok "mp-mixed: PROTOCOL_HTTP + PROTOCOL_TCP; mp-httponly: PROTOCOL_HTTP"
+}
+
+# M7 — the generated mesh Service.
+verify_service() {
+	log "M7 the generated mesh Service of mp-mixed"
+	local proto ports
+	proto="$(kc -n "$TEST_NS" get svc mp-mixed -o jsonpath='{.metadata.annotations.aether\.io/app-protocol}' 2>/dev/null || true)"
+	[ "$proto" = "http" ] ||
+		die "M7: the mesh Service mp-mixed carries aether.io/app-protocol='${proto:-<unset>}', want 'http' — its primary port is HTTP"
+	ports=" $(kc -n "$TEST_NS" get svc mp-mixed -o jsonpath='{.spec.ports[*].port}' 2>/dev/null || true) "
+	case "$ports" in
+	*" $MESH_HTTP_PORT "*) ;;
+	*) die "M7: the mesh Service mp-mixed does not expose $MESH_HTTP_PORT (ports:$ports)" ;;
+	esac
+	case "$ports" in
+	*" $MESH_TCP_PORT "*) ;;
+	*) die "M7: the mesh Service mp-mixed does not expose the TCP mesh port $MESH_TCP_PORT (ports:$ports)" ;;
+	esac
+	ok "app-protocol http; ports:$ports"
+}
+
+verify() {
+	kc -n "$TEST_NS" get deploy mp-mixed >/dev/null 2>&1 ||
+		die "the workloads are not deployed in '$CLUSTER': run '$0 up' first"
+	verify_control
+	verify_http
+	verify_tcp
+	verify_registration
+	verify_service
+	log "all multi-protocol assertions passed (control, three HTTP spellings, the TCP port, the TCP mesh port, dual registration, the mesh Service)"
+	if kc -n "$TEST_NS" get deploy mp-tcpfirst >/dev/null 2>&1; then
+		verify_tcpfirst
+		log "the mirror shape passed too (TCP primary + HTTP secondary)"
 	fi
-done
+}
 
-log "registry: the pod must appear under BOTH protocol keys (037 dual registration)"
-if k get pods -l app=mp-e2e-svc -o jsonpath='{.items[0].metadata.annotations}' 2>/dev/null | grep -c '9000=tcp' >/dev/null; then
-	ok "pod carries ports=8080,9000=tcp"
-else
-	bad "pod annotation missing the =tcp suffix"
-fi
+down() {
+	log "tearing down"
+	kind delete cluster --name "$CLUSTER" >/dev/null 2>&1 || true
+	docker rm -f "$ETCD_NAME" >/dev/null 2>&1 || true
+	ok "cluster '$CLUSTER' and its etcd removed"
+}
 
-if [ "$FAILED" = "0" ]; then
-	printf '\n\033[32mmulti-protocol e2e: PASS\033[0m\n'
-else
-	printf '\n\033[31mmulti-protocol e2e: FAIL\033[0m\n'
-	exit 1
-fi
+up() {
+	raise_inotify
+	build_images
+	create_cluster
+	start_etcd
+	load_images
+	install_spire
+	install_aether
+	deploy_workloads
+}
+
+case "${1:-}" in
+up) up ;;
+test) verify ;;
+verify) verify ;;
+down) down ;;
+"") up && verify ;;
+*)
+	echo "usage: $0 {up|test|verify|down}" >&2
+	exit 2
+	;;
+esac

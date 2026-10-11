@@ -1,0 +1,22 @@
+apiVersion: gateway.networking.k8s.io/v1
+date: "2026-10-11T02:39:54-03:00"
+gatewayAPIChannel: UNDEFINED
+gatewayAPIVersion: UNDEFINED
+implementation:
+  contact:
+  - '@bpalermo'
+  organization: aether
+  project: aether
+  url: https://github.com/bpalermo/aether
+  version: 0.53.0
+kind: ConformanceReport
+mode: default
+profiles:
+- core:
+    result: success
+    statistics:
+      Failed: 0
+      Passed: 7
+      Skipped: 0
+  name: MESH-HTTP
+  summary: Core tests succeeded.

@@ -234,6 +234,7 @@ helm_aether() {
 	helm --kube-context "$CTX" upgrade --install aether "$1/aether" \
 		-n "$NS" --create-namespace \
 		--set namespace.create=false \
+		--set "clusterName=$CLUSTER" \
 		--set "meshDomain=$MESH_DOMAIN" \
 		--set spire.enabled=false \
 		--set edge.enabled=false \
