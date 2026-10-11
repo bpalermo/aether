@@ -1,6 +1,4 @@
 #include <string>
-#include <utility>
-#include <vector>
 
 #include "envoy/config/bootstrap/v3/bootstrap.pb.h"
 
@@ -83,13 +81,25 @@ TEST_P(AetherStatsIntegrationTest, RecordsRequestCounter) {
   EXPECT_GE(counter->value(), 1);
 }
 
-// Reproduction: boot Envoy with the SAME bootstrap stats_config the agent ships
-// in production (charts/agent/templates/configmap.yaml): use_all_default_tags
-// off + custom stats_tags (aether.cluster/aether.pod) + a stats_matcher
-// exclusion_list. On the reference cluster the aether.requests_total counter exports with
-// the tags baked into the name and empty labels; this test asserts the tags
-// survive as real Stats tags under that config, to localize whether the break is
-// at the Envoy counter or downstream in the OTLP->Prometheus pipeline.
+// Reproduction: boot Envoy with the stats_config the chart ships for the node
+// proxy (charts/aether/templates/agent-proxy-configmap.yaml):
+// use_all_default_tags off + the chart's stats_tags (aether.cluster,
+// aether.namespace, aether.pod, aether.transport_socket_match) + a
+// stats_matcher exclusion_list. On the reference cluster the
+// aether.requests_total counter once exported with the tags baked into the name
+// and empty labels; this test asserts the tags survive as real Stats tags under
+// that config, to localize whether the break is at the Envoy counter or
+// downstream in the OTLP->Prometheus pipeline.
+//
+// The chart has NO stats_tags regex for the filter's own programmatic keys
+// (reporter, source_service, ...): they are tags when the counter is written,
+// and survive a hot restart natively (tag_extraction_test.cc). This test used to
+// add the one-regex-per-key fallback the chart carried before that; it does not
+// any more, so the 7 tags asserted below come from the filter alone.
+//
+// The four tag names and regexes below are compared with that template, text
+// for text, by //scripts:proxy_stats_tags_test in the root workspace: change
+// them together.
 TEST_P(AetherStatsIntegrationTest, RecordsRequestCounterUnderProdStatsConfig) {
   config_helper_.addConfigModifier([](envoy::config::bootstrap::v3::Bootstrap& bootstrap) {
     auto* sc = bootstrap.mutable_stats_config();
@@ -98,26 +108,14 @@ TEST_P(AetherStatsIntegrationTest, RecordsRequestCounterUnderProdStatsConfig) {
     t1->set_tag_name("aether.cluster");
     t1->set_regex("^cluster\\.(([^.]+)\\.)");
     auto* t2 = sc->add_stats_tags();
-    t2->set_tag_name("aether.pod");
-    t2->set_regex("^listener\\.(?:inbound|out_http)(?:_[^_.]+)?(_([^.]+))\\.");
+    t2->set_tag_name("aether.namespace");
+    t2->set_regex("^listener\\.(?:inbound|out_http)(_([^_.]+))_[^.]+\\.");
     auto* t3 = sc->add_stats_tags();
-    t3->set_tag_name("aether.namespace");
-    t3->set_regex("^listener\\.(?:inbound|out_http)(_([^_.]+))_[^.]+\\.");
-    // The aether_stats hot-restart fallback regexes (see configmap.yaml). On the
-    // fresh write path the programmatic tags win (these run only on the no-tags
-    // name), so the counter must still carry exactly the 7 real tags.
-    for (const auto& [name, re] : std::vector<std::pair<std::string, std::string>>{
-             {"reporter", "(\\.reporter\\.([^.]*))"},
-             {"source_service", "(\\.source_service\\.([^.]*))"},
-             {"source_pod", "(\\.source_pod\\.([^.]*))"},
-             {"destination_service", "(\\.destination_service\\.([^.]*))"},
-             {"destination_pod", "(\\.destination_pod\\.([^.]*))"},
-             {"response_code", "(\\.response_code\\.([^.]*))"},
-             {"response_flags", "(\\.response_flags\\.([^.]*))"}}) {
-      auto* t = sc->add_stats_tags();
-      t->set_tag_name(name);
-      t->set_regex(re);
-    }
+    t3->set_tag_name("aether.pod");
+    t3->set_regex("^listener\\.(?:inbound|out_http)_[^_.]+(_([^.]+))\\.");
+    auto* t4 = sc->add_stats_tags();
+    t4->set_tag_name("aether.transport_socket_match");
+    t4->set_regex("\\.((spiffe://.+)\\.)total_match_count$");
     auto* excl = sc->mutable_stats_matcher()->mutable_exclusion_list();
     excl->add_patterns()->set_contains("ssl.certificate.");
     excl->add_patterns()->mutable_safe_regex()->set_regex("^cluster\\..*\\.health_check\\..*");
