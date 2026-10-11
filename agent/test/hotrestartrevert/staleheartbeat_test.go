@@ -1,10 +1,14 @@
 package hotrestartrevert_test
 
 import (
+	"bytes"
 	"encoding/binary"
 	"fmt"
 	"os"
+	"os/exec"
+	"path/filepath"
 	"runtime"
+	"strconv"
 	"syscall"
 	"testing"
 	"time"
@@ -120,5 +124,103 @@ func TestStaleInitializingFlagIsClearedBeforeAHotRestart(t *testing.T) {
 	require.False(t, n.shmInitializing())
 	require.True(t, n.listenerAccepts())
 	_, cExited := c.returned()
+	require.False(t, cExited, "C's supervisor exited")
+}
+
+// leftTheFlag is what a supervisor logs when it finds the flag set and may not
+// clear it, and clearedTheFlag what it logs when it has.
+const (
+	leftTheFlag    = "leaving the flag"
+	clearedTheFlag = "cleared a stale initializing flag"
+)
+
+// startEnvoyHeldWhileItInitializes starts the pinned Envoy at the given epoch
+// and holds it where an Envoy legitimately has the "initializing" flag set:
+// after it has bound its hot-restart sockets and attached the shared memory,
+// before it has read its bootstrap. The bootstrap is a named pipe nobody
+// writes to, so it stays there until it is killed.
+//
+// That is earlier than the point at which a hot-restart child asks its parent
+// to close its admin, so the parent goes on answering LIVE at its own epoch:
+// the node as a supervisor sees it while another pod's Envoy starts.
+func (n *node) startEnvoyHeldWhileItInitializes(epoch int) *exec.Cmd {
+	n.t.Helper()
+	fifo := filepath.Join(n.t.TempDir(), "envoy.yaml")
+	require.NoError(n.t, syscall.Mkfifo(fifo, 0o600))
+	cmd := exec.Command(n.envoy, "-c", fifo, "--base-id", strconv.Itoa(int(n.baseID)),
+		"--restart-epoch", strconv.Itoa(epoch), "--drain-time-s", "2", "--parent-shutdown-time-s", "4",
+		"--concurrency", "1", "-l", "warn")
+	out := lockedWriter{n, "[held " + strconv.Itoa(epoch) + "]"}
+	cmd.Stdout, cmd.Stderr = out, out
+	require.NoError(n.t, cmd.Start())
+	n.t.Cleanup(func() { _ = cmd.Process.Kill(); _, _ = cmd.Process.Wait() })
+	return cmd
+}
+
+// running reports whether the process is alive and not a zombie.
+func running(cmd *exec.Cmd) bool {
+	b, err := os.ReadFile(fmt.Sprintf("/proc/%d/stat", cmd.Process.Pid))
+	return err == nil && !bytes.Contains(b, []byte(") Z "))
+}
+
+// TestInitializingFlagOfAnEnvoyThatIsInitializingIsLeft is the other half of
+// TestStaleInitializingFlagIsClearedBeforeAHotRestart, against the pinned
+// Envoy: the flag is set and it is TRUE. An Envoy of the base id is
+// initializing (another pod's hot-restart child, slow to start), the node's
+// Envoy answers LIVE on the admin at the parent epoch, and a supervisor is
+// about to fork at the same epoch.
+//
+// Clearing the flag then would take away the one thing that keeps a second
+// Envoy from hot-restarting from a parent that is in the middle of a handoff.
+// The supervisor must leave it, every time it looks: what tells it so is the
+// hot-restart socket the initializing Envoy holds, the admin cannot.
+//
+// When that Envoy is then killed where it stands, the same flag is stale, and
+// the supervisor's next look clears it: the case sharedmemory.go names second
+// ("a hot-restart child killed during its initialization").
+func TestInitializingFlagOfAnEnvoyThatIsInitializingIsLeft(t *testing.T) {
+	n := newNode(t)
+	a := n.start("A", podOpts{})
+	n.waitAdminEpoch(0, 20*time.Second, "A's envoy never went LIVE at epoch 0")
+	require.Eventually(t, a.ready, 10*time.Second, 50*time.Millisecond, "A never Ready")
+	require.False(t, n.shmInitializing(), "a LIVE envoy with no successor leaves the flag clear")
+
+	n.note("another pod's envoy starts at epoch 1 and is held while it initializes")
+	held := n.startEnvoyHeldWhileItInitializes(1)
+	require.Eventually(t, n.shmInitializing, 10*time.Second, 10*time.Millisecond,
+		"the held envoy never set the initializing flag: the pinned Envoy no longer attaches the shared memory "+
+			"before it reads its bootstrap, and this test needs another way to hold it")
+	require.True(t, running(held), "the held envoy exited")
+	require.Equal(t, 0, n.adminEpoch(), "the parent must still answer LIVE at epoch 0: the admin alone says the flag is stale")
+
+	n.note("pod C starts: it will fork at epoch 1 with the flag set and true")
+	c := n.start("C", podOpts{})
+	// The Envoy C forks exits on the socket the held one has bound, and C
+	// looks again on its retry, 3 s later: two looks, the flag left at both.
+	n.waitLog(lostAtOnce, 20*time.Second)
+	time.Sleep(4 * time.Second)
+	require.True(t, running(held), "the held envoy exited")
+	require.True(t, n.shmInitializing(),
+		"the supervisor cleared the initializing flag of an envoy that is initializing")
+	require.False(t, n.logged(clearedTheFlag), "the supervisor cleared the initializing flag of an envoy that is initializing")
+	require.True(t, n.logged(leftTheFlag), "the supervisor did not look at the flag before it forked")
+	require.Equal(t, 0, n.adminEpoch(), "the node's envoy must be untouched")
+	require.True(t, n.listenerAccepts())
+	_, cExited := c.returned()
+	require.False(t, cExited, "C's supervisor exited")
+
+	n.note("the held envoy is killed while it initializes")
+	require.NoError(t, held.Process.Kill())
+	_ = held.Wait()
+	require.True(t, n.shmInitializing(), "nothing clears the flag for an envoy that dies while it initializes: "+
+		"if the pinned Envoy now does, the repair in sharedmemory.go can be reconsidered")
+
+	n.waitAdminEpoch(1, 30*time.Second, "C could not hot-restart from the node's envoy once the flag was stale")
+	require.Eventually(t, c.ready, 30*time.Second, 50*time.Millisecond, "C never Ready")
+	require.True(t, n.logged(clearedTheFlag))
+	require.False(t, n.shmInitializing())
+	require.True(t, n.listenerAccepts())
+	require.Equal(t, 1, c.liveEnvoys())
+	_, cExited = c.returned()
 	require.False(t, cExited, "C's supervisor exited")
 }

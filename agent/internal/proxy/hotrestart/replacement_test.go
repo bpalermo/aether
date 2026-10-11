@@ -3,8 +3,12 @@ package hotrestart
 import (
 	"context"
 	"log/slog"
+	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
+	"sync"
+	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
@@ -102,6 +106,80 @@ func TestTerminationBeforeTheDrainDrainsNothing(t *testing.T) {
 	assert.Zero(t, f.drainHits.Load(), "a supervisor that was already told to stop drained the node's envoy")
 	assert.Zero(t, f.quitHits.Load())
 	assert.Empty(t, recordedEpochs(t, recordPath), "and it must start no envoy")
+}
+
+// heldTerminationLog signals, once, when the supervisor logs that it holds a
+// termination back for an unfinished replacement (awaitReplacement).
+type heldTerminationLog struct {
+	slog.Handler
+	once sync.Once
+	held chan struct{}
+}
+
+func (h *heldTerminationLog) Handle(_ context.Context, r slog.Record) error {
+	if strings.Contains(r.Message, "finishing the replacement first") {
+		h.once.Do(func() { close(h.held) })
+	}
+	return nil
+}
+
+func (h *heldTerminationLog) Enabled(context.Context, slog.Level) bool { return true }
+func (h *heldTerminationLog) WithAttrs([]slog.Attr) slog.Handler       { return h }
+func (h *heldTerminationLog) WithGroup(string) slog.Handler            { return h }
+
+// TestTerminationHeldForADrainThatIsRefusedStartsNoEnvoy: the termination
+// arrives after the replacement was begun and before the predecessor answers
+// the drain, and the predecessor then refuses it. The replacement is over
+// (nothing was drained), and the termination that was held for it is still
+// only on its way: the context the supervisor runs on is cancelled by a poll,
+// up to replacementPoll later. Run reaches its first fork inside that window.
+//
+// It must fork nothing: this pod is terminating, the predecessor serves, and
+// an Envoy hot-restarted from it now would take the node over only to be
+// drained. The context cannot say so yet; the recorded request does.
+func TestTerminationHeldForADrainThatIsRefusedStartsNoEnvoy(t *testing.T) {
+	f := newPredecessor(t, 4)
+	recordPath := filepath.Join(t.TempDir(), "epochs.txt")
+	s := newSurgeSupervisor(t, f, recordPath, 1*time.Second)
+	held := &heldTerminationLog{Handler: slog.DiscardHandler, held: make(chan struct{})}
+	s.log = slog.New(held)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	var heldInTime atomic.Bool
+	f.refuseDrain.Store(func() int {
+		// The DaemonSet deletes the surge pod while the drain request is in
+		// flight. Answer only once the supervisor holds the termination back.
+		cancel()
+		select {
+		case <-held.held:
+			heldInTime.Store(true)
+		case <-time.After(10 * time.Second):
+		}
+		return http.StatusInternalServerError
+	})
+
+	done := make(chan error, 1)
+	go func() { done <- s.Run(ctx) }()
+	t.Cleanup(func() {
+		for e := 0; e < 6; e++ {
+			s.signalEpoch(e, syscall.SIGKILL)
+		}
+	})
+	select {
+	case err := <-done:
+		require.NoError(t, err)
+	case <-time.After(30 * time.Second):
+		t.Fatal("Run did not return")
+	}
+	require.True(t, heldInTime.Load(), "the termination was never held back for the replacement: this test no longer "+
+		"reaches the window it is about")
+	assert.EqualValues(t, 1, f.drainHits.Load(), "the predecessor was not asked to drain exactly once")
+	assert.Zero(t, f.quitHits.Load(), "a predecessor that refused the drain serves: it must not be stopped")
+	assert.False(t, s.replacementUnfinished(), "a drain that was refused is not a replacement to finish")
+	assert.Empty(t, recordedEpochs(t, recordPath),
+		"a terminating supervisor started an envoy after the predecessor refused its drain: it takes the node over "+
+			"from an envoy that serves, only to be drained itself")
 }
 
 // TestBeginReplacementRefusesAfterTheTerminationRequest pins the ordering the
