@@ -253,6 +253,63 @@ log_lines:
     window_seconds: 60
     checked_by: //prober/internal/prober:prober_test
 
+# --- Access logs --------------------------------------------------------------
+#
+# The node proxy exports one record per HTTP request it handled, as an
+# OpenTelemetry log record whose attributes are the fields below. Each request
+# that crosses the mesh is therefore logged twice: by the caller's proxy
+# (`reporter` source) and by the proxy of the pod that received it
+# (`reporter` destination). A request the caller's proxy retried has ONE
+# source record and one destination record per attempt that reached a
+# destination proxy.
+#
+# `fields` is NOT the whole record: it lists what a harness may read, each
+# with the Envoy format operator that renders it. The operator is the field's
+# meaning, so another operator under the same name is a change of meaning.
+# The set is open: a consumer must ignore fields it does not know, and a field
+# listed here later is not a version bump.
+#
+# Which records exist is not a promise of this entry beyond this: a record
+# whose response has any response flag, or a status of 500 or more, is always
+# exported; every other record is sampled (the chart value
+# `accessLogSuccessSampleRate`). Whether an exported record reaches a store,
+# and under which stream or label names, is the logs pipeline's business.
+access_logs:
+  - id: proxy.access_log.http
+    component: proxy
+    log_name: aether_access_logs
+    reporter_field: reporter
+    reporters: [source, destination]
+    fields:
+      method: "%REQ(:METHOD)%"
+      user_agent: "%REQ(USER-AGENT)%"
+      x_request_id: "%REQ(X-REQUEST-ID)%"
+      response_code: "%RESPONSE_CODE%"
+      response_flags: "%RESPONSE_FLAGS%"
+      response_code_details: "%RESPONSE_CODE_DETAILS%"
+      us_tx_beg_ms: "%COMMON_DURATION(DS_RX_BEG:US_TX_BEG:ms)%"
+    notes: >-
+      Every field is a string, and one Envoy had no value for reads `-`.
+      `method` and `user_agent` are the request's own, as this proxy received
+      them: the mesh rewrites neither, so one client's requests are selected
+      by them on the records of both reporters.
+      `response_flags` is `-` for a response the next hop sent and a
+      comma-separated set of Envoy's short response flags otherwise.
+      `us_tx_beg_ms` is the time from the request's first byte to the first
+      byte this proxy sent upstream, in milliseconds: a number means the
+      request was written to the next hop (on a destination record, to the
+      application), `-` that nothing was. On a destination record,
+      `response_code`, `response_flags`, `method` and `response_code_details`
+      are what the caller's retry decision was made on (docs/runbook.md, "A
+      client gets a 503 the mesh did not retry").
+      `x_request_id` joins the records of one request: the caller's proxy
+      gives a request that carries no `x-request-id` one of its own, keeps it
+      across its retries, and the destination's proxy logs the one it
+      received. That join is kept by review (no test in this repository sends
+      a retried request through two proxies and compares the two records); the
+      field and its operator are held by the test.
+    checked_by: //agent/internal/xds/proxy:proxy_test
+
 # --- Envoy stats --------------------------------------------------------------
 #
 # The agent chooses the stat prefix; Envoy and the metrics pipeline make the

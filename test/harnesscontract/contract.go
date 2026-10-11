@@ -41,6 +41,7 @@ type Contract struct {
 	ReasonClasses      []ReasonClasses     `json:"reason_classes"`
 	ResourceAttributes []ResourceAttribute `json:"resource_attributes"`
 	LogLines           []LogLine           `json:"log_lines"`
+	AccessLogs         []AccessLog         `json:"access_logs"`
 	EnvoyStats         []EnvoyStat         `json:"envoy_stats"`
 	Names              []Name              `json:"names"`
 	Charts             []Render            `json:"charts"`
@@ -195,6 +196,28 @@ type LogLine struct {
 	CheckedBy     CheckedBy `json:"checked_by"`
 }
 
+// AccessLog is a stream of structured access-log records a proxy exports: one
+// record per request, its fields the attributes of the record.
+//
+// Fields is not the whole record. It lists the fields a harness may read, each
+// with the Envoy format operator that renders it, which is what the field
+// means. The set is open: a record has more fields than these, and one the
+// contract gains is a new promise.
+type AccessLog struct {
+	ID        string `json:"id"`
+	Component string `json:"component"`
+	// LogName is the record's `log_name`, by which a store keeps the stream
+	// apart from the proxy's other logs.
+	LogName string `json:"log_name"`
+	// ReporterField is the field that says which proxy wrote the record, and
+	// Reporters the closed set of its values.
+	ReporterField string            `json:"reporter_field"`
+	Reporters     []string          `json:"reporters"`
+	Fields        map[string]string `json:"fields"`
+	Notes         string            `json:"notes"`
+	CheckedBy     CheckedBy         `json:"checked_by"`
+}
+
 // EnvoyStat is an Envoy stat whose prefix the agent chooses.
 type EnvoyStat struct {
 	ID                string    `json:"id"`
@@ -264,6 +287,9 @@ func (c *Contract) entries() []entry {
 	for _, l := range c.LogLines {
 		out = append(out, entry{"log_lines", l.ID, l.CheckedBy})
 	}
+	for _, a := range c.AccessLogs {
+		out = append(out, entry{"access_logs", a.ID, a.CheckedBy})
+	}
 	for _, s := range c.EnvoyStats {
 		out = append(out, entry{"envoy_stats", s.ID, s.CheckedBy})
 	}
@@ -328,6 +354,9 @@ func (c *Contract) Validate() []string {
 	}
 	for _, l := range c.LogLines {
 		problems = append(problems, l.validate()...)
+	}
+	for _, a := range c.AccessLogs {
+		problems = append(problems, a.validate()...)
 	}
 	for _, n := range c.Names {
 		if n.Value == "" {
@@ -413,6 +442,30 @@ func (l LogLine) validate() []string {
 	for _, f := range l.TimeFields {
 		if !slices.Contains(l.Fields, f) {
 			problems = append(problems, fmt.Sprintf("%s: time field %q is not one of its fields", l.ID, f))
+		}
+	}
+	return problems
+}
+
+func (a AccessLog) validate() []string {
+	var problems []string
+	if a.LogName == "" || a.ReporterField == "" || len(a.Reporters) == 0 || len(a.Fields) == 0 {
+		problems = append(problems, fmt.Sprintf("%s needs a log_name, a reporter_field, its reporters and its fields", a.ID))
+	}
+	if v := yamlBoolean(append(sortedKeys(a.Fields), a.Reporters...)); v != "" {
+		problems = append(problems, fmt.Sprintf("%s has the field or reporter %q: an unquoted y, n, yes, no, on or off is a boolean in YAML, so quote the name", a.ID, v))
+	}
+	for i, r := range a.Reporters {
+		if slices.Contains(a.Reporters[:i], r) {
+			problems = append(problems, fmt.Sprintf("%s lists the reporter %q twice", a.ID, r))
+		}
+	}
+	for _, f := range sortedKeys(a.Fields) {
+		if a.Fields[f] == "" {
+			problems = append(problems, fmt.Sprintf("%s: the field %q has no format: say what renders it", a.ID, f))
+		}
+		if f == a.ReporterField {
+			problems = append(problems, fmt.Sprintf("%s lists its reporter_field %q among its fields: its values are the reporters", a.ID, f))
 		}
 	}
 	return problems
