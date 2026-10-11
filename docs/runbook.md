@@ -3577,6 +3577,37 @@ not: its bootstrap ConfigMap is the same but for the `helm.sh/chart` label
 Measured: unit tests of the reader and of a resolver started on, and reloaded
 onto, a bare-map file. Not run on a cluster.
 
+#### Chart 2.5.8: cni-install no longer accepts the OTLP flags
+
+The last row of the table under "Chart 2.5.7" is closed: `cni-install
+--otlp-endpoint` and `--otlp-pin-endpoint`, deprecated no-ops since chart
+`2.4.0` (#1166) and removable from `2.5.0` on, are gone from the binary.
+
+**A chart older than `2.4.0` cannot run a `cni-install` image from chart `2.5.8`
+on.** Charts before `2.4.0` passed both flags to the agent pod's `cni-install`
+init container whenever an OTLP endpoint was configured (`otel.endpoint` or
+`cniInstall.otlpEndpoint`), and neither when none was. Any chart from `2.4.0`
+on passes neither, whatever `otel.endpoint` is
+(`//charts/aether:aether_cni_no_otlp_test`).
+
+What it looks like: the init container exits 1 with
+`Error: unknown flag: --otlp-endpoint`, the agent pod sits in
+`Init:CrashLoopBackOff`, and the node's agent never starts.
+
+Who can hit it: only someone who overrides `cniInstall.image` on a chart older
+than `2.4.0` with an image built from this release or later, and has an OTLP
+endpoint configured. That is outside the one-chart-minor window. A chart pins
+its own images by digest, so installing, upgrading to, or rolling back to any
+released chart is unaffected, in either direction: an old chart runs its own
+old image, which still has the flags. If you are in that combination, upgrade
+the chart rather than the image.
+
+**What the upgrade rolls.** The `cni-install` image changed, so the agent
+DaemonSet rolls (it is that pod's init container). No template changed.
+
+Measured: a unit test that the binary refuses each flag by name before the
+installer runs. Not run on a cluster.
+
 #### The prober chart (#1372, #1373, #1374)
 
 The `prober` chart has the same rule since chart **1.0.5**: its DaemonSet's pod
