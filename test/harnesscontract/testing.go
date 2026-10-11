@@ -74,6 +74,18 @@ func (c *Contract) LogLine(tb testing.TB, id string) LogLine {
 	return LogLine{}
 }
 
+// AccessLog returns the access-log entry with the given id, or fails the test.
+func (c *Contract) AccessLog(tb testing.TB, id string) AccessLog {
+	tb.Helper()
+	for _, a := range c.AccessLogs {
+		if a.ID == id {
+			return a
+		}
+	}
+	tb.Fatalf("%s has no access log %q", File, id)
+	return AccessLog{}
+}
+
 // EnvoyStat returns the Envoy stat entry with the given id, or fails the test.
 func (c *Contract) EnvoyStat(tb testing.TB, id string) EnvoyStat {
 	tb.Helper()
