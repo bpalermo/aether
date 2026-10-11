@@ -15,11 +15,75 @@ external harness, where they install the published chart instead of building
 this tree. The runbook still names each beside the incident it reproduces.
 
 What is here is what something runs: the suites of the nightly `e2e` workflow
-(`multicluster_waypoint.sh`, `multicluster_replicator.sh`, `uds.sh`,
-`uds-csi.sh`, `authz.sh`, `l4routes.sh`, `eastwest-quic.sh`,
-`first-install.sh`), the version pins they source with their consistency
-tests, and two scripts run by hand: `multicluster_config.sh` (the runbook's
-"Local multi-cluster end-to-end") and `multiprotocol.sh`.
+and the version pins they source, with their consistency tests. No script here
+is run by hand only: `//e2e:suite_wiring_test` fails on a harness that creates
+a kind cluster and that no job of `.github/workflows/e2e.yaml` runs.
+
+## What runs nightly
+
+`.github/workflows/e2e.yaml`, at 04:17 UTC. One `build` job builds the images
+once; every suite is its own job on its own runner, against those images.
+
+| Job (`only=`) | Harness | Clusters | What it holds |
+| --- | --- | --- | --- |
+| `gateway-http`, `mesh-http` | `test/conformance` (through `.github/actions/run-conformance`) | 1 each | the Gateway API conformance profiles |
+| `waypoint` | `multicluster_waypoint.sh` | 2 + one etcd | proposal 019: client(a) to echo(b) over the node tunnel, mTLS end to end |
+| `replicator` | `multicluster_replicator.sh` | 2 + two etcds | proposal 006: mirror, failover on lease lapse, recovery |
+| `multicluster-config` | `multicluster_config.sh` | 2 + one etcd | proposal 026: an HTTPRoute exported from one cluster routes traffic in the other, and stops when the export is withdrawn |
+| `uds` | `uds.sh` | 1 | proposal 034: UDS delivery, both declarations, admission, drift |
+| `uds-csi` | `uds-csi.sh` | 1 | proposal 039: the CSI node plugin on its own |
+| `authz` | `authz.sh` | 1 | proposal 027: ext_authz decisions, sidecar ordering, policy reload |
+| `l4-routes` | `l4routes.sh` | 1 + etcd | TCPRoute, TLSRoute, UDPRoute on the capture path |
+| `multiprotocol` | `multiprotocol.sh` | 1 + etcd | proposal 037: HTTP and raw TCP on one pod, each port reaching its own listener |
+| `eastwest-quic` | `eastwest-quic.sh` | 1 | proposal 038: per-source HTTP/3 between pods |
+| `first-install` | `first-install.sh` | 1, under Helm 3 and Helm 4 | the documented first install and its upgrades |
+
+Run one on a branch: `gh workflow run e2e.yaml --ref <branch> -f only=<job>`.
+A scheduled run that fails opens or updates one issue (`report-failure`).
+
+## Running a suite locally
+
+Every harness takes the same verbs:
+
+```bash
+e2e/<suite>.sh up       # build + load the images, create the cluster(s), install, deploy
+e2e/<suite>.sh verify   # the assertions (re-runnable)
+e2e/<suite>.sh down     # delete the cluster(s) and any etcd container
+e2e/<suite>.sh          # up + verify
+```
+
+It needs `kind` at the release `kind-version.sh` pins (an older one is
+refused), `docker`, `kubectl`, `helm` and `bazel`. `up` builds the images with
+Bazel; set the suite's `*_SKIP_BUILD=1` (named in its header) when they are
+already in the local Docker daemon. A harness creates its own cluster and
+talks only to it (`--context kind-<name>`), but `kind` writes that context
+into your kubeconfig and makes it current, and deleting the cluster leaves no
+current context: point `KUBECONFIG` at a scratch file if you care which
+context you are on afterwards.
+
+A suite's header says what each assertion proves and how to see it fail. Two
+have a red half that CI does not run:
+
+- `MP_MIXED_PORTS=8080 e2e/multiprotocol.sh up && e2e/multiprotocol.sh verify`:
+  the mixed workload without its `=tcp` port. `M4` fails.
+- `CONFIG_IMPORT=off e2e/multicluster_config.sh up && e2e/multicluster_config.sh verify`:
+  the importing cluster without `agent.importConfig`. `C2` fails.
+
+`eastwest-quic.sh` has one too (`QUIC_DNS_SANS=off`).
+
+## Adding a suite
+
+A harness with the verbs above, its cluster named after the suite, sourcing
+the pins. Then, in `.github/workflows/e2e.yaml`: a job whose body is
+`.github/actions/run-e2e-script`, with `needs: build`, the `if:` its siblings
+have and a `timeout-minutes`; its name in the `only` choices, in
+`report-failure`'s `needs` and in its `RESULTS`; and its images in the `build`
+job if it needs one the others do not. `//e2e:suite_wiring_test` holds all of
+it, and holds every `helm` command on the aether chart to an explicit
+`--set clusterName=<name>` (no default of the chart can be the name of your
+cluster; a multi-cluster suite names each one differently).
+
+## The pins
 
 Every harness that creates a kind cluster sources
 [`kind-version.sh`](kind-version.sh) and passes `--image "$KIND_NODE_IMAGE"`, so

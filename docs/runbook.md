@@ -18,7 +18,7 @@ chart values and CLI/annotation reference, see
 | **Go** 1.27.1 | language toolchain | Managed by `rules_go`; you rarely invoke `go` directly (use `bazel run @rules_go//go …`). |
 | **Docker** (or **Colima** on macOS) | container images + integration tests | Integration tests spin up a real etcd via testcontainers-go. |
 | **kubectl**, **Helm 3** (OCI) | deploy / e2e | |
-| **kind** | local multi-cluster e2e | Only needed for `e2e/multicluster_config.sh`. |
+| **kind** | local e2e | Only needed for the `e2e/*.sh` harnesses (`e2e/README.md`). |
 
 ### macOS + Colima one-time setup
 
@@ -574,7 +574,7 @@ Reading the **Pull the node image through the Docker Hub mirror** step:
 
 What still pulls from Docker Hub anonymously: the workloads the nightly
 `e2e/*.sh` harnesses start inside their kind clusters (`curlimages/curl`,
-`hashicorp/http-echo`, `istio/tcp-echo-server`, `openpolicyagent/opa`). Those
+`hashicorp/http-echo`, `openpolicyagent/opa`). Those
 are pulled by the node's own containerd, which the runner's daemon
 configuration does not reach. No required job runs them; the per-PR `e2e` job's
 only other image is `echo-basic`, from `gcr.io`. A red nightly suite with the
@@ -1193,7 +1193,8 @@ an image have a content-derived one. A binary with no readable note reports
 
 [`e2e/multicluster_config.sh`](../e2e/multicluster_config.sh) stands up **two kind
 clusters** (`a` = exporter, `b` = importer) that share **one etcd** (a Docker
-container on kind's network) and drives the cross-cluster GAMMA config loop:
+container on kind's network) and drives the cross-cluster GAMMA config loop.
+It runs every night (the `multicluster-config` job of `e2e.yaml`):
 
 ```
 cluster a: HTTPRoute + ServiceExport ──(registrar config-export)──▶ shared etcd
@@ -1204,33 +1205,51 @@ cluster b: agent --import-config  ◀──(registrar ListAllConfig reads same e
 ### Commands
 
 ```bash
-e2e/multicluster_config.sh up      # build+load images, create clusters + etcd, install aether on both
-e2e/multicluster_config.sh test    # apply the Service+ServiceExport+HTTPRoute on 'a', assert propagation
-e2e/multicluster_config.sh verify  # re-run the assertions only
+e2e/multicluster_config.sh up      # build+load images, create clusters + etcd, install aether on both, deploy
+e2e/multicluster_config.sh verify  # the assertions below (re-runnable; `test` is the same)
 e2e/multicluster_config.sh down    # delete both clusters + the shared etcd
-e2e/multicluster_config.sh         # up + test (full run)
+e2e/multicluster_config.sh         # up + verify (full run)
 ```
 
-It builds images via `make load-all`, installs the Gateway API (experimental
+`up` builds the images with Bazel, installs the Gateway API (experimental
 channel) + MCS-API CRDs, then installs both aether charts per cluster with
-`spire.enabled=false`, `agent.gamma=true`, `registrar.registryBackend=etcd`, and
-`agent.importConfig=true` on cluster `b`.
+`spire.enabled=false`, `registrar.registryBackend=etcd`,
+`registrar.enableMCS=true`, a `clusterName` of its own (`cluster-a`,
+`cluster-b`: it is each cluster's partition of the shared store) and
+`agent.importConfig=true` on cluster `b`. Cluster `a` gets a Service `echo` and
+an HTTPRoute (`/v2` to `echo-v2`, everything else to `echo-v1`) and runs no
+workload; cluster `b` gets `echo`, `echo-v1`, `echo-v2` and a client, and no
+HTTPRoute.
+
+`verify` asserts, with one probe from the client in `b`:
+
+1. nothing exported: the store holds no projection for `demo/echo`, and `echo`
+   itself answers `/v2` and `/`;
+2. a `ServiceExport` for `echo` in `a`: the projection appears under
+   `cluster-a`'s partition of the store and names both backends;
+3. with nothing applied to `b`: `/v2` is answered by `echo-v2` and `/` by
+   `echo-v1`, 20 of 20;
+4. the `ServiceExport` deleted: the projection is pruned and `echo` answers
+   again.
+
+To see step 3 fail, bring `b` up without the import:
+`CONFIG_IMPORT=off e2e/multicluster_config.sh up`.
 
 ### The `fs.inotify` gotcha
 
 Two kind clusters each run an inotify-heavy agent DaemonSet; the host's default
 limits are easily exhausted, leaving cluster `b`'s agent stuck in `Init:Error`.
-`up` raises the limits (needs sudo):
+`up` raises the limits when it can (passwordless sudo), and says so when it
+cannot:
 
 ```bash
 sudo sysctl -w fs.inotify.max_user_instances=8192 fs.inotify.max_user_watches=524288
 ```
 
-Without it, the **control-plane** half of the loop (export → shared etcd,
-readable by `b`'s registrar) is still proven; only the agent-side materialization
-on `b` is unobservable. See the script header and `e2e/kind-cluster.yaml` (which
-also assigns non-overlapping pod/service CIDRs per cluster so cross-cluster
-endpoints in the shared registry never collide).
+Without it `up` fails, naming the agent DaemonSet that never became Ready: the
+suite asserts the import on `b`'s data path, so `b`'s agent is not optional.
+`e2e/kind-cluster.yaml` assigns non-overlapping pod/service CIDRs per cluster,
+so cross-cluster endpoints in the shared registry never collide.
 
 ### The other multi-cluster harnesses
 

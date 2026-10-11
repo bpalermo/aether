@@ -52,7 +52,10 @@ AETHER_CONFORMANCE=1 AETHER_CONFORMANCE_MESH=1 KUBECONFIG=/path/to/kubeconfig \
 ```
 
 Useful env vars: `AETHER_NOCLEANUP=1` (leave base resources for debugging),
-`AETHER_CONFORMANCE_REPORT=/path/report.yaml` (override the report output path).
+`AETHER_CONFORMANCE_REPORT=/path/report.yaml` (override the report output path),
+`AETHER_CONFORMANCE_VERSION=<what you tested>` (the report's
+`implementation.version`; unset, the report says `dev`. CI passes the aether
+chart version and the commit, `<chart version>+<short sha>`).
 
 In CI this is driven by `.github/workflows/e2e.yaml` (kind, no SPIRE), which performs
 the checkout + copy automatically. It has a job per profile — `gateway-http` and

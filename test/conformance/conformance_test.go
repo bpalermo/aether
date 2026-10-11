@@ -14,12 +14,15 @@
 // (alongside the suite's own conformance_test.go) and run there; the committed
 // `mesh/manifests.yaml` overlay is copied next to it. The `//go:build conformance`
 // tag keeps it out of `go test ./...` / `bazel test //...` in this repo. See
-// .github/workflows/conformance.yaml and docs/proposals/024_conformance-ci.md.
+// .github/actions/run-conformance (the body of the `gateway-http` and
+// `mesh-http` jobs of .github/workflows/e2e.yaml) and
+// docs/proposals/024_conformance-ci.md.
 //
-//   - TestAetherGatewayHTTP: the north-south edge profile. Fully conformant on the reference cluster
-//     (43/43, rev21). Runs and GATES in CI (kind, no SPIRE, cleartext backends).
-//   - TestAetherMeshHTTP: the east-west GAMMA profile. Runs in CI (kind, no SPIRE)
-//     via the `mesh-http` job, SOFT (continue-on-error) while the score is driven up.
+//   - TestAetherGatewayHTTP: the north-south edge profile. Runs and GATES in CI
+//     (the `gateway-http` job: kind, no SPIRE, cleartext backends).
+//   - TestAetherMeshHTTP: the east-west GAMMA profile. Runs and GATES in CI (the
+//     `mesh-http` job: kind, no SPIRE). The scores each job holds are stated on
+//     the jobs, in e2e.yaml, not here.
 //     Uses the committed mesh overlay (mesh/manifests.yaml) which adds the
 //     aether.io/managed namespace label and per-version ServiceAccounts. Capture is
 //     the chart DEFAULT (agent.captureRedirectAllDefault), so the managed-namespace
@@ -132,10 +135,19 @@ func meshManifestFS() fs.FS {
 	}
 }
 
-const (
-	aetherGatewayClassName = "aether"
-	aetherImplVersion      = "0.53.0"
-)
+const aetherGatewayClassName = "aether"
+
+// aetherImplVersion is the `implementation.version` of the conformance report:
+// what was tested, as the caller states it in AETHER_CONFORMANCE_VERSION
+// (.github/actions/run-conformance passes the aether chart version and the
+// commit). Unset, it is "dev": a constant here named a release long after the
+// code had moved on, in every report.
+func aetherImplVersion() string {
+	if v := os.Getenv("AETHER_CONFORMANCE_VERSION"); v != "" {
+		return v
+	}
+	return "dev"
+}
 
 func aetherClients(t *testing.T) (client.Client, *clientset.Clientset, client.Options, *rest.Config) {
 	t.Helper()
@@ -243,7 +255,7 @@ func aetherImpl() confv1.Implementation {
 		Organization: "aether",
 		Project:      "aether",
 		URL:          "https://github.com/bpalermo/aether",
-		Version:      aetherImplVersion,
+		Version:      aetherImplVersion(),
 		Contact:      []string{"@bpalermo"},
 	}
 }
@@ -309,7 +321,7 @@ func skipUnlessEnabled(t *testing.T) {
 // TestAetherGatewayHTTP runs the GATEWAY-HTTP (north-south edge) conformance
 // profile. Features are inferred from GatewayClass.status.supportedFeatures
 // (SupportedFeatures left nil + EnableAllSupportedFeatures=false). This is the
-// profile aether is fully conformant on (43/43 on the reference cluster, rev21) and the one CI gates.
+// north-south profile; CI gates on it (the `gateway-http` job of e2e.yaml).
 func TestAetherGatewayHTTP(t *testing.T) {
 	skipUnlessEnabled(t)
 	c, cs, copts, cfg := aetherClients(t)
@@ -370,10 +382,8 @@ var meshNamespaces = []string{
 // listener degrades to a no-mTLS HCM chain, symmetric with the cleartext outbound
 // clusters) — the suite asserts routing correctness, not mTLS.
 //
-// Unlike GATEWAY-HTTP, the score is not (yet) 100%: proposal 023 (route-by-Service)
-// makes the route target representable, but feature coverage is still being closed.
-// The CI job runs this soft (continue-on-error); Run failures are recorded in the
-// report rather than failing the test, so an honest per-test score is always emitted.
+// CI gates on it (the `mesh-http` job of e2e.yaml; `soft` on a manual dispatch
+// turns the gate off for debugging).
 func TestAetherMeshHTTP(t *testing.T) {
 	skipUnlessEnabled(t)
 	c, cs, copts, cfg := aetherClients(t)
