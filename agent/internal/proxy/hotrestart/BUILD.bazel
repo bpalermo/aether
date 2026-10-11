@@ -53,6 +53,7 @@ go_test(
         "adminidentity_test.go",
         "adminprobe_test.go",
         "adminreverify_test.go",
+        "chartterminationgrace_test.go",
         "childenv_test.go",
         "concurrencychange_test.go",
         "configwatch_test.go",
@@ -79,8 +80,14 @@ go_test(
     ],
     # The chart's proxy.hotRestart values are an input to the admin re-verify
     # derivation; TestAdminReverifyMarginHoldsAgainstDeployedChartValues pins
-    # them (#666). Gazelle does not manage `data` — keep this by hand.
-    data = ["//charts/aether:values.yaml"],
+    # them (#666). The chart's helpers hold the fixed part of the smallest
+    # termination grace period it renders, which
+    # TestChartTerminationGraceFloorMatchesTheSupervisor compares with this
+    # package's constants. Gazelle does not manage `data` — keep this by hand.
+    data = [
+        "//charts/aether:templates/_helpers.tpl",
+        "//charts/aether:values.yaml",
+    ],
     embed = [":hotrestart"],
     shard_count = 6,
     deps = [

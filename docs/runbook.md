@@ -3886,6 +3886,99 @@ object of it changes.
 Measured: the renders (offline, against 2.5.9) and the extractor on the pinned
 proxy. Not run on a cluster.
 
+#### Chart 2.6.2: a proxy termination grace period the supervisor cannot use is refused
+
+**What changed.** The chart refuses to render when
+`proxy.terminationGracePeriodSeconds` is not greater than
+`proxy.hotRestart.drainTime` + 15 s. At the default `drainTime: 10s` the
+smallest value that renders is `26`. The default, `180`, is not affected, and a
+release that never set either value has nothing to do.
+
+**Why.** The supervisor is told the grace period (`--termination-grace`) and
+works out from it the last moment at which it can still drain Envoy itself
+before the kubelet's SIGKILL: grace − (`drainTime` + 5 s for Envoy to exit) −
+10 s of margin. When that is zero or less there is no such moment, and it
+applies no bound at all:
+
+- a pod terminated where no successor comes (a node shutdown, a scale-down, an
+  uninstall) waits for the SIGKILL with its connections open (#771);
+- a pod terminated while it replaces a predecessor it has already asked to
+  drain (a roll that changes `proxy.concurrency` and is reverted, "A reverted
+  roll that changes the Envoy worker count" below) holds its termination until
+  its own Envoy is LIVE, for 56 s at most at the default drain time instead of
+  for what the grace period allows. The kubelet can kill it first, with the
+  predecessor's listeners closed and its own Envoy not started, and the node
+  then has no listeners until the kept pod restarts its Envoy in place.
+
+Such a grace period never worked. It used to render.
+
+**What fails, and how.** `helm install`, `helm upgrade` and `helm template`
+stop at the render (an upgrade says `UPGRADE FAILED:` first):
+
+```
+Error: execution error at (aether/templates/agent-proxy-daemonset.yaml:73:40): proxy.terminationGracePeriodSeconds (20) must be greater than proxy.hotRestart.drainTime (10s) + 15s: set it to at least 26. The proxy supervisor needs the drain time, 5s for Envoy to exit and a 10s margin before the kubelet's SIGKILL; …
+```
+
+Helm renders the whole chart before it sends anything, so the release is left
+as it was: no object changes and no pod is replaced. A GitOps controller
+reports the same message on its release object and keeps the running revision.
+(The render failing is tested; that Helm leaves the release alone follows from
+the order in which it works and was not run on a cluster.)
+
+**Who has to do something.** A release whose values set
+`proxy.terminationGracePeriodSeconds` to `drainTime` + 15 s or less. Read what
+the running DaemonSet has, before the upgrade:
+
+```bash
+NS=aether-system
+# The grace period of the proxy pods...
+kubectl -n "$NS" get daemonset aether-proxy \
+  -o jsonpath='{.spec.template.spec.terminationGracePeriodSeconds}{"\n"}'
+# ...and the drain time their supervisor runs with. The first must be greater
+# than the second plus 15 s.
+kubectl -n "$NS" get daemonset aether-proxy \
+  -o jsonpath='{range .spec.template.spec.containers[*].command[*]}{@}{"\n"}{end}' \
+  | grep -- '^--drain-time='
+```
+
+**What to set.** A grace period above the minimum the message names, in the
+release's values, or a shorter `proxy.hotRestart.drainTime`. The minimum is
+where the supervisor's bound starts to exist, not a good value: at the minimum
+a deleted pod waits one second for its successor before it drains Envoy
+itself, which no surge replacement meets, so no roll or pod delete is hitless.
+Unless there is a reason for a short grace period, remove the override and take
+the default.
+
+```bash
+helm get values aether -n "$NS" -o yaml > values.yaml   # never --reuse-values
+# edit proxy.terminationGracePeriodSeconds in values.yaml (or delete the line)
+helm upgrade aether oci://quay.io/aethermesh/chart-aether --version "$AETHER_VERSION" \
+  -n "$NS" -f values.yaml
+```
+
+Changing the value changes the proxy pod template, so that upgrade is a proxy
+roll.
+
+`proxy.shutdownDrainImmediately: true` does not lower the minimum. It skips the
+wait for a successor, not the drain, and a termination during a worker-count
+replacement is held the same way with it.
+
+`proxy.hotRestart.drainTime` is read as the supervisor reads it, a Go duration
+(`10s`, `1m30s`, `1.5s`, `500ms`, `0`). A value the supervisor's flag parser
+refuses, such as a number with no unit, is refused at render too, instead of
+at every proxy start.
+
+**What the upgrade rolls.** Nothing, by this change: with values that render,
+the output is the 2.6.1 output except for the `helm.sh/chart` labels, which are
+on no pod template (compared offline at the defaults).
+
+After the upgrade, the same two commands show the values in force. On a
+termination, the supervisor's log line `waiting for a successor before
+draining` carries `successorWaitBudget`: it is a positive duration, never `0s`.
+
+Measured: the renders and the template tests
+(`bazel test //charts/aether:all`), and a unit test that holds the chart's 15 s
+to the supervisor's two constants. Not run on a cluster.
 #### Chart 2.7.0: a port is typed by its own declaration, and the dialled port decides (proposal 043, Phase 1; #1672, #1682)
 
 Nothing to set and nothing removed. No value, flag or CRD changes, and every
@@ -5969,7 +6062,9 @@ waiting for a successor before draining
 ```
 
 The hold is bounded: twice the drain time plus 36 s (56 s at the defaults), and never more
-than the pod's `successor_wait` budget; the time it took comes off that budget. If it
+than the pod's `successor_wait` budget; the time it took comes off that budget. (A
+termination grace period with no such budget would leave the hold at its full length,
+longer than the grace period itself; the chart refuses to render one, "Chart 2.6.2".) If it
 runs out (`the replacement of the drained predecessor did not finish in its budget;
 terminating anyway`, ERROR), the kept pod's side below is what recovers the node.
 
