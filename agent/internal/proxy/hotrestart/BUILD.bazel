@@ -19,6 +19,7 @@ go_library(
         "metrics.go",
         "procstat.go",
         "stallsampler.go",
+        "superseded.go",
         "supervisor.go",
         "telemetry.go",
         "wedge.go",
@@ -39,6 +40,9 @@ go_library(
     ],
 )
 
+# Sharded: the supervisor's tests wait out real timers (the heartbeat's 8 s
+# staleness, the bind-collision pause, drain and wait budgets), about three
+# minutes in one process.
 go_test(
     name = "hotrestart_test",
     srcs = [
@@ -61,6 +65,7 @@ go_test(
         "metrics_test.go",
         "shutdown_test.go",
         "stallsampler_test.go",
+        "superseded_test.go",
         "supervisor_test.go",
         "telemetry_test.go",
         "wedge_test.go",
@@ -70,6 +75,7 @@ go_test(
     # them (#666). Gazelle does not manage `data` — keep this by hand.
     data = ["//charts/aether:values.yaml"],
     embed = [":hotrestart"],
+    shard_count = 4,
     deps = [
         "//common/readymarker",
         "@com_github_fsnotify_fsnotify//:fsnotify",

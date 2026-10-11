@@ -53,8 +53,26 @@ const initProbeInterval = 500 * time.Millisecond
 // While the file is fresh but admin unconfirmed, re-probe; the wait is bounded by
 // the heartbeat going stale.
 func (s *Supervisor) initStartEpoch(ctx context.Context) {
+	s.initStartEpochFrom(ctx, anyPredecessor)
+}
+
+// anyPredecessor is initStartEpochFrom's "whichever epoch the node's heartbeat
+// names".
+const anyPredecessor = -1
+
+// initStartEpochFrom is initStartEpoch restricted to one predecessor epoch
+// (only >= 0). A superseded supervisor that answers a terminating successor's
+// request (superseded.go) may hot-restart from the epoch that asked and from no
+// other. When the heartbeat names another epoch it returns at once, having
+// probed, drained and gated nothing: the worker-count check below drains and
+// stops the Envoy it compares itself with, and that must never reach an Envoy
+// nobody asked to have replaced. The caller reads the outcome from nextEpoch.
+func (s *Supervisor) initStartEpochFrom(ctx context.Context, only int) {
 	for {
 		epoch, hb, ok := s.readState()
+		if only != anyPredecessor && ok && epoch != only && time.Since(hb) < predecessorStale {
+			return
+		}
 		if !ok || time.Since(hb) >= predecessorStale {
 			// A retry that falls back to a fresh start has no successor epoch
 			// to re-anchor; drop any earlier attempt's so a later in-pod epoch
@@ -348,6 +366,15 @@ func (s *Supervisor) checkWedgeWatchdogs(ctx context.Context, epoch int, everLiv
 			return true
 		}
 		s.noteHandoffWaitingOnInit(ctx, epoch, now, launched)
+	}
+	// The streak is charged to this epoch from its launch at the earliest. A
+	// superseded supervisor has no Envoy and watches a silent admin for as
+	// long as it takes: that silence is what makes it start one again (see
+	// superseded.go). Charged to the Envoy it then forks, the old streak fired
+	// this watchdog on the first tick, before that Envoy had opened its admin,
+	// and the supervisor killed what it had just started.
+	if unreachableSince.Before(launched) {
+		unreachableSince = launched
 	}
 	if everLive && !reachable && s.childTracked(epoch) && s.now().Sub(unreachableSince) > s.adminUnresponsiveDeadline() {
 		s.metrics.wedged(wedgeAdminUnresponsive)

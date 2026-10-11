@@ -274,6 +274,21 @@ type Supervisor struct {
 	// watchLiveness goroutine; not guarded.
 	handoffWaitEpoch int
 
+	// supersededRelaunchEpoch is the epoch of the Envoy this supervisor started
+	// again after a successor had terminated its own and then gone away (-1:
+	// none; see superseded.go). Guarded by mu.
+	supersededRelaunchEpoch int
+	// supersededFromEpoch is the epoch this supervisor last ran before that
+	// relaunch, which a lost relaunch goes back to. Guarded by mu.
+	supersededFromEpoch int
+	// supersededLost counts the Envoys that were started again after a
+	// successor went away and lost at once, and supersededRelaunchTrigger and
+	// supersededRelaunchPeer say which recovery the last one was for (see
+	// supersededLosses). Read and written by the Run goroutine only.
+	supersededLost            supersededLosses
+	supersededRelaunchTrigger string
+	supersededRelaunchPeer    int
+
 	// drainedPredecessor is the admin identity of the predecessor this
 	// supervisor drained for a worker-count change (issue #1136), so the same
 	// Envoy is never drained twice. Written and read by the Run goroutine
@@ -383,25 +398,27 @@ func (s *Supervisor) liveAnchoredReadyGate(epoch int, liveObserved time.Time) (g
 func New(cfg Config, log *slog.Logger, metrics *SupervisorMetrics) *Supervisor {
 	authoritative, fast := newAdminClients()
 	return &Supervisor{
-		cfg:                cfg,
-		log:                commonlog.Named(log, "proxy-supervisor"),
-		metrics:            metrics,
-		adminAuthoritative: authoritative,
-		adminFast:          fast,
-		adminIdentity:      newAdminIdentity(cfg),
-		children:           make(map[int]*exec.Cmd),
-		gatedEpoch:         -1,
-		adminHeard:         make(map[int]time.Time),
-		adminHeardLatest:   -1,
-		handoffPeer:        -1,
-		childSilentEpoch:   -1,
-		handoffWaitEpoch:   -1,
-		cpus:               systemCPUSources{},
-		newConfigWatcher:   fsnotify.NewWatcher,
-		now:                time.Now,
-		childExited:        make(chan childExit, 8),
-		done:               make(chan struct{}),
-		watchdogFired:      make(chan watchdogFire, 1),
+		cfg:                     cfg,
+		log:                     commonlog.Named(log, "proxy-supervisor"),
+		metrics:                 metrics,
+		adminAuthoritative:      authoritative,
+		adminFast:               fast,
+		adminIdentity:           newAdminIdentity(cfg),
+		children:                make(map[int]*exec.Cmd),
+		gatedEpoch:              -1,
+		adminHeard:              make(map[int]time.Time),
+		adminHeardLatest:        -1,
+		handoffPeer:             -1,
+		childSilentEpoch:        -1,
+		supersededLost:          supersededLosses{askedBy: -1},
+		supersededRelaunchEpoch: -1,
+		handoffWaitEpoch:        -1,
+		cpus:                    systemCPUSources{},
+		newConfigWatcher:        fsnotify.NewWatcher,
+		now:                     time.Now,
+		childExited:             make(chan childExit, 8),
+		done:                    make(chan struct{}),
+		watchdogFired:           make(chan watchdogFire, 1),
 	}
 }
 
@@ -441,6 +458,14 @@ func (s *Supervisor) Run(ctx context.Context) error {
 	// Pick the start epoch from a confirmed-live predecessor (if any), then
 	// maintain the readiness marker and the LIVE-gated node epoch heartbeat.
 	s.initStartEpoch(ctx)
+	if ctx.Err() != nil {
+		// Terminated before the first fork (a surge pod deleted while its
+		// image was pulled is started and stopped in the same moment). An
+		// Envoy forked now would take the node over from a live predecessor
+		// only to be drained; with none, it would serve nothing either.
+		s.log.InfoContext(ctx, "termination requested before the first envoy was started; starting none")
+		return nil
+	}
 	go s.watchLiveness(ctx)
 	if s.cfg.StallSampleInterval > 0 {
 		go s.sampleStalls(ctx)
@@ -670,7 +695,13 @@ func (s *Supervisor) awaitSuccessor(ctx context.Context, midHandoff bool) {
 			"epoch", epoch, "successorWaitBudget", budget, "drainTime", s.cfg.DrainTime)
 	}
 
-	if s.awaitProtocolTermination(budget) {
+	// While we wait, say so: the pod that should take over may be one whose
+	// Envoy ours terminated, and it has no other way to learn that the
+	// DaemonSet deleted us and kept it (see superseded.go).
+	stopAdvertising := s.advertiseForSuccessor(ctx, budget)
+	tookOver := s.awaitProtocolTermination(budget)
+	stopAdvertising()
+	if tookOver {
 		s.log.InfoContext(ctx, "successor took over during shutdown wait",
 			"epoch", epoch, "midHandoff", midHandoff)
 		if midHandoff {
@@ -808,11 +839,31 @@ func (s *Supervisor) handleChildExit(ctx context.Context, exit childExit, bindRe
 		// is deliberate process state, not the shared epoch file — the
 		// successor publishes its epoch only once LIVE, which may be
 		// after it terminates us. Don't exit (restartPolicy=Always would
-		// relaunch and collide): await deletion by the DaemonSet.
+		// relaunch and collide): await deletion by the DaemonSet, or the
+		// successor going away without this pod being deleted (superseded).
 		s.log.InfoContext(ctx, "newest epoch terminated cleanly by successor; awaiting pod deletion", "epoch", exit.epoch)
 		s.reap(exit.epoch)
-		<-ctx.Done()
-		return nil, true, ""
+		s.supersededLost.reset()
+		return s.superseded(ctx, exit.epoch)
+	}
+	if s.lostSupersededRelaunch(exit) {
+		// The Envoy started again after a successor went away died at once.
+		// Not through retryBindCollision: its epoch detection has none of the
+		// limits a superseded supervisor is held to (see superseded.go). Wait
+		// again; superseded pauses first and gives up after a few.
+		s.metrics.childExited(exitUnexpected)
+		s.reap(exit.epoch)
+		attempt := s.supersededLost.note(s.supersededRelaunchTrigger, s.supersededRelaunchPeer)
+		from := s.abandonSupersededRelaunch()
+		s.log.WarnContext(ctx, "the envoy started again after the successor went away exited at once; awaiting pod deletion again",
+			"epoch", exit.epoch, "error", exit.err.Error(), "crashSignal", isCrashSignal(exit.err),
+			"trigger", s.supersededRelaunchTrigger, "attempt", attempt, "budget", maxSupersededRelaunches)
+		if s.supersededRelaunchTrigger == triggerSuccessorTerminating && !s.supersededLost.mayAnswer(s.supersededRelaunchPeer) {
+			s.log.ErrorContext(ctx, "every hot restart from the terminating successor's envoy exited at once; "+
+				"no longer answering its requests, and starting a fresh envoy once it is gone",
+				"askingEpoch", s.supersededRelaunchPeer, "attempts", attempt)
+		}
+		return s.superseded(ctx, from)
 	}
 	if retried, retErr, done := s.retryBindCollision(ctx, exit, bindRetries, crashRetries); retried {
 		return retErr, done, ""

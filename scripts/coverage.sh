@@ -209,8 +209,16 @@ missing=0
 while IFS= read -r label; do
 	path="${label#//}"
 	dat="$testlogs/${path/://}/coverage.dat"
+	# A sharded test (shard_count) has no tracefile of its own: each shard
+	# leaves one under shard_<n>_of_<total>/, and all <total> must be there.
+	shards=()
+	for shard in "$testlogs/${path/://}"/shard_*_of_*/coverage.dat; do
+		[ -f "$shard" ] && shards+=("$shard")
+	done
 	if [ -f "$dat" ]; then
 		cat "$dat" >>"$work/tests_only"
+	elif [ "${#shards[@]}" -gt 0 ] && [ "${#shards[@]}" = "$(basename "$(dirname "${shards[0]}")" | sed 's/.*_of_//')" ]; then
+		cat "${shards[@]}" >>"$work/tests_only"
 	else
 		echo "coverage: no coverage.dat for $label ($dat)" >&2
 		missing=$((missing + 1))
