@@ -298,6 +298,24 @@ func TestParseRejects(t *testing.T) {
 		"an id with a quote": {
 			"checked_by: //a:b", "checked_by: //a:b\nnames:\n  - {id: 'a\"b', value: v, checked_by: review-only}", `an id is one word`,
 		},
+		"an access log without a log_name": {
+			"checked_by: //a:b", "checked_by: //a:b\naccess_logs:\n  - {id: al, reporter_field: reporter, reporters: [source], fields: {code: \"%RESPONSE_CODE%\"}, checked_by: review-only}", "al needs a log_name, a reporter_field, its reporters and its fields",
+		},
+		"an access log without fields": {
+			"checked_by: //a:b", "checked_by: //a:b\naccess_logs:\n  - {id: al, log_name: logs, reporter_field: reporter, reporters: [source], checked_by: review-only}", "al needs a log_name, a reporter_field, its reporters and its fields",
+		},
+		"an access-log field with no format": {
+			"checked_by: //a:b", "checked_by: //a:b\naccess_logs:\n  - {id: al, log_name: logs, reporter_field: reporter, reporters: [source], fields: {code: \"\"}, checked_by: review-only}", `al: the field "code" has no format`,
+		},
+		"an access-log field named y": {
+			"checked_by: //a:b", "checked_by: //a:b\naccess_logs:\n  - {id: al, log_name: logs, reporter_field: reporter, reporters: [source], fields: {y: \"%RESPONSE_CODE%\"}, checked_by: review-only}", "is a boolean in YAML",
+		},
+		"an access log whose reporter field is also a field": {
+			"checked_by: //a:b", "checked_by: //a:b\naccess_logs:\n  - {id: al, log_name: logs, reporter_field: reporter, reporters: [source], fields: {reporter: \"%RESPONSE_CODE%\"}, checked_by: review-only}", `al lists its reporter_field "reporter" among its fields`,
+		},
+		"a reporter listed twice": {
+			"checked_by: //a:b", "checked_by: //a:b\naccess_logs:\n  - {id: al, log_name: logs, reporter_field: reporter, reporters: [source, source], fields: {code: \"%RESPONSE_CODE%\"}, checked_by: review-only}", `al lists the reporter "source" twice`,
+		},
 		"a field listed twice": {
 			"checked_by: //a:b", "checked_by: //a:b\nlog_lines:\n  - {id: l, marker: M, fields: [t, tier, t], checked_by: review-only}", "it says these more than once (a field, a component, a container or a host path listed twice): l fields t",
 		},

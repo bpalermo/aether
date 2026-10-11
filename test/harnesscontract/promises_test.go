@@ -99,6 +99,15 @@ log_lines:
     cap_per_window: 20
     window_seconds: 60
     checked_by: //a:b
+access_logs:
+  - id: al
+    component: proxy
+    log_name: logs
+    reporter_field: reporter
+    reporters: [source, destination]
+    fields: {code: "%RESPONSE_CODE%", flags: "%RESPONSE_FLAGS%"}
+    notes: prose
+    checked_by: //a:b
 envoy_stats:
   - {id: es, stat_prefix: p_, stat: tcp.p_<c>.x, stored_name_pattern: envoy_.*, notes: prose, checked_by: //a:b}
 names:
@@ -180,12 +189,13 @@ func TestCheckLock_SameVersion(t *testing.T) {
 	}{
 		"nothing": {},
 		// Not promises.
-		"a description":                  {changes: []change{{"notes: prose", "notes: other prose"}}},
-		"one more test holds the entry":  {changes: []change{{"checked_by: //a:b", "checked_by: [//a:b, //c:d]"}}},
-		"the order of a closed set":      {changes: []change{{"values: [x, w]", "values: [w, x]"}}},
-		"the order of a line's fields":   {changes: []change{{"fields: [t, tier, err]", "fields: [err, t, tier]"}}},
-		"the order within a class":       {changes: []change{{"one: [x, w]", "one: [w, x]"}}},
-		"the order of a metric's labels": {changes: []change{{"      - {name: pod, open: true}\n", ""}, {"    labels:\n", "    labels:\n      - {name: pod, open: true}\n"}}},
+		"a description":                          {changes: []change{{"notes: prose", "notes: other prose"}}},
+		"one more test holds the entry":          {changes: []change{{"checked_by: //a:b", "checked_by: [//a:b, //c:d]"}}},
+		"the order of a closed set":              {changes: []change{{"values: [x, w]", "values: [w, x]"}}},
+		"the order of a line's fields":           {changes: []change{{"fields: [t, tier, err]", "fields: [err, t, tier]"}}},
+		"the order of an access log's reporters": {changes: []change{{"reporters: [source, destination]", "reporters: [destination, source]"}}},
+		"the order within a class":               {changes: []change{{"one: [x, w]", "one: [w, x]"}}},
+		"the order of a metric's labels":         {changes: []change{{"      - {name: pod, open: true}\n", ""}, {"    labels:\n", "    labels:\n      - {name: pod, open: true}\n"}}},
 		// A tie moved to another entry that says the same: what is deployed and
 		// what a harness reads are as they were, so the only news is the entry.
 		// TestTies, not the lock, holds which entry a tie names.
@@ -227,6 +237,10 @@ func TestCheckLock_SameVersion(t *testing.T) {
 		"a new entry":           {changes: []change{{"names:\n", "names:\n  - {id: n2, value: v2, checked_by: //a:b}\n"}}, want: []string{noBumpNeeded, `"n2 value": "`}},
 		"a new field of a line": {changes: []change{{"fields: [t, tier, err]", "fields: [t, tier, err, extra]"}}, want: []string{noBumpNeeded, `"l fields extra": "`}},
 		"a new time field":      {changes: []change{{"fields: [t, tier, err]", "fields: [t, tier, err, at]"}, {"time_fields: [t]", "time_fields: [t, at]"}}, want: []string{noBumpNeeded, `"l fields at": "`}},
+		"a new field of an access log": {
+			changes: []change{{"fields: {code: \"%RESPONSE_CODE%\", flags: \"%RESPONSE_FLAGS%\"}", "fields: {code: \"%RESPONSE_CODE%\", flags: \"%RESPONSE_FLAGS%\", rid: \"%REQ(X-REQUEST-ID)%\"}"}},
+			want:    []string{noBumpNeeded, `"al fields rid": "`},
+		},
 		"a key an entry did not have": {
 			changes: []change{{"attribute: k8s.node.name,", "attribute: k8s.node.name, value: w,"}},
 			want:    []string{noBumpNeeded, `"ra value": "`},
@@ -281,22 +295,38 @@ func TestCheckLock_SameVersion(t *testing.T) {
 			changes: []change{{"otel_name: a.b", "otel_name: a.c"}, {"stored_name: a_b_total", "stored_name: a_c_total"}},
 			want:    []string{`"m" no longer promises what it did at version 3: otel_name changed; stored_name changed`, bumpNeeded},
 		},
-		"another type":               {changes: []change{{"type: counter", "type: gauge"}}, want: []string{"type changed", bumpNeeded}},
-		"another component":          {changes: []change{{"component: prober", "component: agent"}}, want: []string{`"l" no longer promises what it did at version 3: component changed`, bumpNeeded}},
-		"the classes regrouped":      {changes: []change{{"classes: {one: [x, w]}", "classes: {one: [x], two: [w]}"}}, want: []string{`"rc" no longer promises what it did at version 3: classes changed`, bumpNeeded}},
-		"an attribute renamed":       {changes: []change{{"attribute: k8s.node.name", "attribute: k8s.node"}}, want: []string{`"ra" no longer promises what it did at version 3: attribute changed`, bumpNeeded}},
-		"an attribute's value":       {changes: []change{{"value: svc", "value: other"}}, want: []string{`"sn" no longer promises what it did at version 3: value changed`, bumpNeeded}},
-		"a field of a line removed":  {changes: []change{{"fields: [t, tier, err]", "fields: [t, tier]"}}, want: []string{`"l" no longer promises what it did at version 3: fields err is gone`, bumpNeeded}},
-		"a field of a line renamed":  {changes: []change{{"fields: [t, tier, err]", "fields: [t, tier, error]"}}, want: []string{`fields err is gone`, bumpNeeded}},
-		"a field becomes a time":     {changes: []change{{"time_fields: [t]", "time_fields: [t, tier]"}}, want: []string{`"l" no longer promises what it did at version 3: fields tier changed`, bumpNeeded}},
-		"a field is no longer one":   {changes: []change{{"    time_fields: [t]\n", ""}}, want: []string{`fields t changed`, bumpNeeded}},
-		"another marker":             {changes: []change{{`marker: "M "`, `marker: "N "`}}, want: []string{`marker changed`, bumpNeeded}},
-		"another cap":                {changes: []change{{"cap_per_window: 20", "cap_per_window: 10"}}, want: []string{`cap_per_window changed`, bumpNeeded}},
-		"a cap no longer promised":   {changes: []change{{"    cap_per_window: 20\n", ""}}, want: []string{`cap_per_window is gone`, bumpNeeded}},
-		"another window":             {changes: []change{{"window_seconds: 60", "window_seconds: 30"}}, want: []string{`window_seconds changed`, bumpNeeded}},
-		"another stat prefix":        {changes: []change{{"stat_prefix: p_", "stat_prefix: q_"}}, want: []string{`"es" no longer promises what it did at version 3: stat_prefix changed`, bumpNeeded}},
-		"another stat":               {changes: []change{{"stat: tcp.p_<c>.x", "stat: tcp.p_<c>.y"}}, want: []string{`stat changed`, bumpNeeded}},
-		"another stored pattern":     {changes: []change{{"stored_name_pattern: envoy_.*", "stored_name_pattern: envoy_.+"}}, want: []string{`stored_name_pattern changed`, bumpNeeded}},
+		"another type":              {changes: []change{{"type: counter", "type: gauge"}}, want: []string{"type changed", bumpNeeded}},
+		"another component":         {changes: []change{{"component: prober", "component: agent"}}, want: []string{`"l" no longer promises what it did at version 3: component changed`, bumpNeeded}},
+		"the classes regrouped":     {changes: []change{{"classes: {one: [x, w]}", "classes: {one: [x], two: [w]}"}}, want: []string{`"rc" no longer promises what it did at version 3: classes changed`, bumpNeeded}},
+		"an attribute renamed":      {changes: []change{{"attribute: k8s.node.name", "attribute: k8s.node"}}, want: []string{`"ra" no longer promises what it did at version 3: attribute changed`, bumpNeeded}},
+		"an attribute's value":      {changes: []change{{"value: svc", "value: other"}}, want: []string{`"sn" no longer promises what it did at version 3: value changed`, bumpNeeded}},
+		"a field of a line removed": {changes: []change{{"fields: [t, tier, err]", "fields: [t, tier]"}}, want: []string{`"l" no longer promises what it did at version 3: fields err is gone`, bumpNeeded}},
+		"a field of a line renamed": {changes: []change{{"fields: [t, tier, err]", "fields: [t, tier, error]"}}, want: []string{`fields err is gone`, bumpNeeded}},
+		"a field becomes a time":    {changes: []change{{"time_fields: [t]", "time_fields: [t, tier]"}}, want: []string{`"l" no longer promises what it did at version 3: fields tier changed`, bumpNeeded}},
+		"a field is no longer one":  {changes: []change{{"    time_fields: [t]\n", ""}}, want: []string{`fields t changed`, bumpNeeded}},
+		"another marker":            {changes: []change{{`marker: "M "`, `marker: "N "`}}, want: []string{`marker changed`, bumpNeeded}},
+		"another cap":               {changes: []change{{"cap_per_window: 20", "cap_per_window: 10"}}, want: []string{`cap_per_window changed`, bumpNeeded}},
+		"a cap no longer promised":  {changes: []change{{"    cap_per_window: 20\n", ""}}, want: []string{`cap_per_window is gone`, bumpNeeded}},
+		"another window":            {changes: []change{{"window_seconds: 60", "window_seconds: 30"}}, want: []string{`window_seconds changed`, bumpNeeded}},
+		"another stat prefix":       {changes: []change{{"stat_prefix: p_", "stat_prefix: q_"}}, want: []string{`"es" no longer promises what it did at version 3: stat_prefix changed`, bumpNeeded}},
+		"another stat":              {changes: []change{{"stat: tcp.p_<c>.x", "stat: tcp.p_<c>.y"}}, want: []string{`stat changed`, bumpNeeded}},
+		"another stored pattern":    {changes: []change{{"stored_name_pattern: envoy_.*", "stored_name_pattern: envoy_.+"}}, want: []string{`stored_name_pattern changed`, bumpNeeded}},
+		"a field of an access log removed": {
+			changes: []change{{"fields: {code: \"%RESPONSE_CODE%\", flags: \"%RESPONSE_FLAGS%\"}", "fields: {code: \"%RESPONSE_CODE%\"}"}},
+			want:    []string{`"al" no longer promises what it did at version 3: fields flags is gone`, bumpNeeded},
+		},
+		"a field of an access log renamed": {
+			changes: []change{{"fields: {code: \"%RESPONSE_CODE%\", flags: \"%RESPONSE_FLAGS%\"}", "fields: {code: \"%RESPONSE_CODE%\", response_flags: \"%RESPONSE_FLAGS%\"}"}},
+			want:    []string{`fields flags is gone`, bumpNeeded},
+		},
+		"a field of an access log rendered by another operator": {
+			changes: []change{{"fields: {code: \"%RESPONSE_CODE%\", flags: \"%RESPONSE_FLAGS%\"}", "fields: {code: \"%RESPONSE_CODE_DETAILS%\", flags: \"%RESPONSE_FLAGS%\"}"}},
+			want:    []string{`"al" no longer promises what it did at version 3: fields code changed`, bumpNeeded},
+		},
+		"a reporter added":           {changes: []change{{"reporters: [source, destination]", "reporters: [source, destination, edge]"}}, want: []string{`"al" no longer promises what it did at version 3: reporters changed`, bumpNeeded}},
+		"a reporter removed":         {changes: []change{{"reporters: [source, destination]", "reporters: [source]"}}, want: []string{`reporters changed`, bumpNeeded}},
+		"another log name":           {changes: []change{{"log_name: logs", "log_name: other"}}, want: []string{`"al" no longer promises what it did at version 3: log_name changed`, bumpNeeded}},
+		"another reporter field":     {changes: []change{{"reporter_field: reporter", "reporter_field: side"}}, want: []string{`reporter_field changed`, bumpNeeded}},
 		"a render with another pair": {changes: []change{{`set: {a.b: "true"}`, `set: {a.b: "false"}`}}, want: []string{`"c" no longer promises what it did at version 3: set changed`, bumpNeeded}},
 		"a render with one more pair": {
 			changes: []change{{`set: {a.b: "true"}`, `set: {a.b: "true", c: d}`}},
@@ -520,7 +550,7 @@ func TestEveryKeyIsAPromise(t *testing.T) {
 			words[w] = true
 		}
 	}
-	for _, entry := range []any{Metric{}, ReasonClasses{}, ResourceAttribute{}, LogLine{}, EnvoyStat{}, Name{}, Render{}, Object{}, Container{}} {
+	for _, entry := range []any{Metric{}, ReasonClasses{}, ResourceAttribute{}, LogLine{}, AccessLog{}, EnvoyStat{}, Name{}, Render{}, Object{}, Container{}} {
 		typ := reflect.TypeOf(entry)
 		for i := range typ.NumField() {
 			key, _, _ := strings.Cut(typ.Field(i).Tag.Get("json"), ",")

@@ -2,9 +2,10 @@
 
 [`external-harness.yaml`](./external-harness.yaml) lists what a harness
 outside this repository may read from a deployed mesh: metric names, their
-labels and the closed sets of label values, the fields of a log line, an Envoy
-stat prefix, the annotations and ports a workload manifest names, and the
-chart objects a harness rolls or reads.
+labels and the closed sets of label values, the fields of a log line, the
+fields of the proxy's HTTP access log a harness reads, an Envoy stat prefix,
+the annotations and ports a workload manifest names, and the chart objects a
+harness rolls or reads.
 
 A harness that lives in this repository changes in the same pull request as
 the code it reads. One that lives elsewhere does not, and the first sign of a
@@ -54,6 +55,8 @@ and say so in its description.**
 | A render made with other `set` pairs, release or namespace | bump |
 | A new entry, a new object of a render | no bump |
 | A new field on a log line that keeps every field it had (add it to `fields`) | no bump |
+| A field of an access log listed for the first time (the record had it; the contract now promises it) | no bump |
+| A listed field of an access log that is renamed, dropped, or rendered by another format operator; another `log_name`; a reporter added or removed | bump |
 | Something more said of an entry that was said of nothing before: a key it did not have, one more pod label or container of an object, one more thing a container is held to | no bump |
 | `checked_by`, the order of a list, `notes` or a comment reworded without saying anything else | no bump |
 | What an entry MEANS, changed in `notes`, a comment or the code's behaviour while every key stays as it was (what a gauge counts, when a series is absent) | bump, and no check asks for it: see below |
@@ -139,6 +142,7 @@ that names a chart test is referred to by one of its renders.
 | `metrics` of the agent | The real instruments, collected after every series was recorded: registered name, type, attribute keys, and the values of each closed label in both directions | `//agent/internal/xds/cache/cachemetrics:cachemetrics_test` |
 | `metrics` of the prober, `resource_attributes` `service.name` | Every `tier*` and `result*` string constant of `prober.go` (read from the source, so a new one cannot be forgotten) recorded through the real `record()`; the resource the prober builds | `//prober/internal/prober:prober_test` |
 | `log_lines` | A burst written by the real fail log with the real cap and window, then flushed as a stopping prober does; the lines are parsed as a harness parses them (marker, one JSON object, exact keys in order, RFC 3339 times, the summary's `t` and `window_start`) | `//prober/internal/prober:prober_test` |
+| `access_logs` | The access log the real builder makes, for each reporter: its `log_name`, the field that names the reporter and the two values the code has for it, and every field the entry lists with the Envoy format operator that renders it. What Envoy renders for an operator, and that a store holds the record, are not compared | `//agent/internal/xds/proxy:proxy_test` |
 | `envoy_stats` | The stat prefix of the portless chain in a capture listener the real generator built | `//agent/internal/xds/proxy:proxy_test` |
 | `names` | The Go constant the product itself uses | `//test/harnesscontract:harnesscontract_test`, and `//agent/internal/xds/xdsconst:xdsconst_test` for the one constant that is internal to the agent |
 | `charts` | `helm template` of the packaged chart, run with the release name, namespace and `--set` pairs the entry gives | `//test/harnesscontract:{aether,prober,udsecho}_chart_test` |
@@ -198,6 +202,11 @@ class or in two, a chart test named by an entry it compares with nothing).
 
 ### What is review-only
 
+- **What joins two access-log records.** That the caller's proxy and the
+  destination's proxy log the same `x_request_id` for one request, and that
+  the caller keeps it across its retries, is Envoy's request-id handling with
+  the connection managers as the agent configures them. The test holds the
+  field and its operator, not the join.
 - **What a pipeline does to a name.** The `node` and `job` labels of a stored
   series come from OpenTelemetry resource attributes (`k8s.node.name`,
   `service.name`) through the metrics pipeline's own configuration. That the
