@@ -590,14 +590,17 @@ func TestGenerator_FrozenAnnotations(t *testing.T) {
 			declaredPort: [2]string{"tcp", "6379"},
 		},
 		{
-			// Not a row either backend writes: its declared port is of a class
-			// it is not listed under. The service keeps its Service.
+			// A partial view: the pod is seen in the HTTP listing and not yet
+			// in the TCP one (the kubernetes backend is listed one protocol at
+			// a time). The declared-port rule still answers with the class of
+			// the declared port, which the row itself names. See
+			// TestGenerator_DeclaredPortRuleOnAPartialListing.
 			name: "a declared port of a class the row is not listed under",
 			listings: map[registryv1.Service_Protocol][]*registryv1.ServiceEndpoint{
 				listHTTP: {pod("ns", "10.0.0.1", 9000, classes{9000: classTCP, 8080: classHTTP})},
 			},
 			firstListing: [2]string{"http", "9000"},
-			declaredPort: [2]string{"http", "9000"},
+			declaredPort: [2]string{"tcp", "9000"},
 		},
 	}
 	for _, tt := range tests {

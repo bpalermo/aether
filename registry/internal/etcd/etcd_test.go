@@ -802,12 +802,14 @@ func TestEtcdRegistry_PerPortProtocolContract(t *testing.T) {
 	// The single read the registrar's sync uses must satisfy it too.
 	state, _, err := reg.ListAllEndpointsRevisioned(ctx, registry.ServedProtocols)
 	require.NoError(t, err)
+	// Every protocol is a key, also one the read returned nothing for: the
+	// contract looks for a row only in the listings it is given.
 	revisioned := map[registryv1.Service_Protocol]map[string][]*registryv1.ServiceEndpoint{}
+	for _, protocol := range registry.ServedProtocols {
+		revisioned[protocol] = map[string][]*registryv1.ServiceEndpoint{}
+	}
 	for service, byProtocol := range state {
 		for protocol, eps := range byProtocol {
-			if revisioned[protocol] == nil {
-				revisioned[protocol] = map[string][]*registryv1.ServiceEndpoint{}
-			}
 			revisioned[protocol][service] = eps
 		}
 	}

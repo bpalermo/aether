@@ -970,9 +970,12 @@ func TestKubernetesRegistry_HTTPPodIsNotReturnedForTCP(t *testing.T) {
 
 	// Shared cross-backend contract: every row under a protocol serves a port
 	// of it, and one pod is the same row in every listing it is in.
+	udpAll, err := r.ListAllEndpoints(context.Background(), registryv1.Service_PROTOCOL_UDP)
+	require.NoError(t, err)
 	registrytest.RequirePerPortProtocols(t, map[registryv1.Service_Protocol]map[string][]*registryv1.ServiceEndpoint{
 		registryv1.Service_PROTOCOL_HTTP: httpAll,
 		registryv1.Service_PROTOCOL_TCP:  tcpAll,
+		registryv1.Service_PROTOCOL_UDP:  udpAll,
 	})
 
 	// Single-service TCP read is empty as well.
@@ -1525,9 +1528,12 @@ func TestListAllEndpointsFiltersByPodProtocol(t *testing.T) {
 	// The shared cross-backend contract, with BOTH maps non-empty.
 	require.NotEmpty(t, httpAll)
 	require.NotEmpty(t, tcpAll)
+	udpAll, err := r.ListAllEndpoints(context.Background(), registryv1.Service_PROTOCOL_UDP)
+	require.NoError(t, err)
 	registrytest.RequirePerPortProtocols(t, map[registryv1.Service_Protocol]map[string][]*registryv1.ServiceEndpoint{
 		registryv1.Service_PROTOCOL_HTTP: httpAll,
 		registryv1.Service_PROTOCOL_TCP:  tcpAll,
+		registryv1.Service_PROTOCOL_UDP:  udpAll,
 	})
 }
 
