@@ -64,8 +64,23 @@ namespace:
   create: false
   name: ""
 
-# Cluster name passed to the agent and registrar (`--cluster-name`).
-clusterName: talos-main
+# REQUIRED, no default (chart 2.6.0): this cluster's name in the mesh. A render
+# without it fails and names this value; nothing is installed or upgraded.
+#   helm upgrade --install aether ... --set clusterName=<name>
+# It is passed to the agent, the registrar and the edge control plane as
+# `--cluster-name`. The agent stamps it on every endpoint it registers and
+# deregisters only endpoints that carry it; with the etcd backend it is a
+# segment of every key the registrar writes
+# (/aether/v1/regions/<region>/clusters/<clusterName>/...). Choose it once and
+# keep it: unique among the clusters that share a registry, and one path
+# segment (no "/").
+# Upgrading a release that never set it: charts before 2.6.0 had a default, and
+# that release runs with it. Pass the SAME name, the one the running agent has
+# as `--cluster-name`:
+#   helm get values <release> -n <namespace> -a -o yaml | grep '^clusterName:'
+# docs/runbook.md, "Chart 2.6.0", has the upgrade and what a different name
+# breaks.
+clusterName: ""
 
 # Cross-cluster config authority (proposal 026 EM3, Option E). When set to a cluster
 # name, ONLY that cluster's registrar exports GAMMA config and every cluster imports

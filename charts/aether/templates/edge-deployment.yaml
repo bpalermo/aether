@@ -109,7 +109,7 @@ spec:
           args:
             - "edge"
             - "--debug={{ .Values.debug }}"
-            - "--cluster-name={{ .Values.clusterName }}"
+            - "--cluster-name={{ include "aether.clusterName" . }}"
             # The registrar stays in the release namespace; the edge reaches it
             # cross-namespace (the binary default assumes aether-system, so pass the
             # release-namespace-correct address explicitly).

@@ -3700,6 +3700,192 @@ the name and that the value gauge is unchanged; `promtool test rules` on the
 shipped rule (`bazel test //:observability_rules_test`), which never read the
 old metric. Not run on a cluster.
 
+#### Chart 2.6.0: `clusterName` is required; the `aether.pod` stats extractor requires the namespace
+
+Two changes, and both need a look before the upgrade.
+
+##### `clusterName` has no default any more
+
+**Breaking.** Until 2.5.x `values.yaml` carried a default cluster name, so a
+release that never set `clusterName` ran under that default without anyone
+having chosen it. The default is gone and nothing replaces it: the chart
+refuses to render without the value.
+
+**What fails, and how.** `helm install`, `helm upgrade` and `helm template`
+stop at the render, with (as `helm template` prints it; an upgrade or an
+install says `UPGRADE FAILED:` or `INSTALLATION FAILED:` first)
+
+```
+Error: execution error at (aether/templates/registrar-deployment.yaml:44:33): clusterName is required and has no default: pass --set clusterName=<name>, or set clusterName in your values. It is this cluster's name in the mesh (--cluster-name of the agent, the registrar and the edge control plane) and a part of the registry's keys, so choose it once and keep it. …
+```
+
+Helm renders the whole chart before it sends anything, so the release is left
+exactly as it was: no object is changed, no pod is replaced, and no new
+revision is recorded. `--set clusterName=` (the empty string) is refused the
+same way. `helm lint` only warns. A GitOps controller reports the same message
+on its release object and keeps the revision that is running. (The render
+failing is tested, `//charts/aether:aether_cluster_name_required_test` and its
+neighbours; that Helm leaves the release alone follows from the order in which
+it works and was not run on a cluster.)
+
+**Who has to do something.** Every release whose values do not set
+`clusterName`. A release that sets it already is not affected by this half.
+
+**Pass the name the release runs with. Not a new one.** Read it from the
+running agent before the upgrade:
+
+```bash
+NS=aether-system
+kubectl -n "$NS" get daemonset -l app.kubernetes.io/component=agent \
+  -o jsonpath='{range .items[*].spec.template.spec.containers[?(@.name=="agent")].args[*]}{@}{"\n"}{end}' \
+  | grep -- '^--cluster-name='
+# The same answer from the release (-a: computed values, the chart's defaults
+# included):
+helm get values aether -n "$NS" -a -o yaml | grep '^clusterName:'
+```
+
+Then pass that name, and put it where the release's values live (a
+`clusterName:` line in the values file, or the values of the GitOps release) so
+every later upgrade carries it. Helm stores a `--set` value with the release,
+so the read-back below returns it from then on:
+
+```bash
+helm get values aether -n "$NS" -o yaml > values.yaml   # never --reuse-values
+helm upgrade aether oci://quay.io/aethermesh/chart-aether --version "$AETHER_VERSION" \
+  -n "$NS" -f values.yaml --set 'clusterName=<the name read above>'
+```
+
+With the same name the render is the 2.5.9 render in everything that follows
+from this value: compared offline (`helm template` of 2.5.9 at its defaults
+against this chart with the old default passed explicitly), the only lines
+that differ for this half are the `helm.sh/chart` labels.
+
+**What a different name does.** The name is not a label. It is
+`--cluster-name` of the agent, the registrar and the edge control plane, and:
+
+- **Every endpoint carries it**, stamped by the agent that registers the pod
+  (and, with the `kubernetes` backend, by the registrar that derives the
+  endpoint from the pod).
+- **An agent removes only endpoints that carry its own name.** Its sweep for
+  endpoints whose pod is gone skips every endpoint of another cluster, because
+  node names are not unique across the clusters that share a registry.
+- **With the `etcd` backend it is a segment of every key the registrar
+  writes**: `/aether/v1/regions/<region>/clusters/<clusterName>/…` (endpoints,
+  the MCS export marks and the cross-cluster config projections). A registrar
+  writes and deletes under its own name only, and reads every cluster's keys.
+- With `agent.eastWestWaypoint`, an endpoint whose cluster name is not the
+  agent's own is a **remote** endpoint, dialed at its node's address and the
+  tunnel port instead of at the pod.
+- With `controlCluster` set, the registrar exports configuration only when its
+  own name equals it, and an agent imports only what originates there.
+
+So an upgrade that passes another name is a rename of the cluster, and this is
+what it does:
+
+| Backend | What happens |
+|---|---|
+| `etcd` | Everything registered so far stays under the old name's keys, and nothing removes it any more: endpoint keys have no TTL, a deregistration deletes the key under the **new** name, and the agents' sweep skips endpoints of the old name. The registry is read across all names, so every proxy keeps those endpoints. Pods that are still running are fine at first (the address is right), and are listed a second time once their agent registers them under the new name. **Each of them that later goes away leaves its old endpoint behind for good**: callers are balanced onto an address that no longer answers, or that another pod has been given since. The export marks and config projections written under the old name stay as well, and now read as another cluster's: with `agent.importConfig`, this cluster's own agents import its old route configuration as a peer's (local routes win where both exist). |
+| `etcd`, `controlCluster` set to the old name | Additionally the hub's registrar stops exporting configuration (its name no longer equals `controlCluster`), and what it exported before stays in the registry, unmaintained, as the configuration every spoke trusts. |
+| `kubernetes` | Nothing is stored under the name, so the rename settles once the registrar and every agent have rolled. Until then the two names coexist. |
+| either, with `agent.eastWestWaypoint` | While the two names coexist (and, with `etcd`, for every endpoint left under the old name) an agent treats endpoints of its own cluster as remote and sends that traffic to the node's tunnel port. |
+
+Undoing a rename made by mistake: upgrade again with the name the cluster had,
+let the registrar and the agents roll, and with the `etcd` backend remove what
+was written under the wrong name
+(`etcdctl del --prefix /aether/v1/regions/<region>/clusters/<wrong name>/`).
+There is no in-place rename procedure in this runbook; the table is why.
+
+The consequences above are read from the code (`registry/internal/etcd`, the
+agent's ghost sweep in `agent/internal/cni/server`, `proxy.WaypointRewrite`,
+the registrar's export gate). None of them was reproduced on a cluster for
+this change.
+
+**After the upgrade.**
+
+```bash
+NS=aether-system
+# One name, the one read before the upgrade, on every component (the edge
+# control plane runs in its own namespace when it is enabled). The label's
+# value is the release's name.
+kubectl get pods -A -l app.kubernetes.io/instance=aether -o yaml \
+  | grep -o -- '--cluster-name=[^"]*' | sort | uniq -c
+```
+
+```bash
+# etcd backend: the cluster names that own keys. Only names you know.
+etcdctl get --prefix --keys-only /aether/v1/regions/ \
+  | sed -n 's|.*/clusters/\([^/]*\)/.*|\1|p' | sort | uniq -c
+```
+
+##### The `aether.pod` extractor requires the namespace
+
+The first row of the table under "Chart 2.5.7" is closed. Chart 2.5.0 made the
+namespace part of the proxy bootstrap's `aether.pod` stats extractor optional,
+so that a 2.5.x proxy under an agent older than 2.5.0 (which names a pod's
+listeners `inbound_<pod>`, without the namespace) still exported one metric
+family per stat. That tolerance was announced for one chart minor ("Chart
+2.5.0") and is removed:
+
+| | 2.5.x | 2.6.0 |
+|---|---|---|
+| `aether.pod` | `^listener\.(?:inbound\|out_http)(?:_[^_.]+)?(_([^.]+))\.` | `^listener\.(?:inbound\|out_http)_[^_.]+(_([^.]+))\.` |
+
+For the names every agent since 2.5.0 writes (`inbound_<namespace>_<pod>`,
+`inbound_<namespace>_<pod>_h3`, `out_http_<namespace>_<pod>`) nothing changes:
+the same two labels, `aether_namespace` and `aether_pod`, on the same
+families. `//agent/test/envoy_validate`
+(`TestChartStatsConfigOnNamespacedPodNames`) runs the pinned proxy with the
+chart's `stats_config` and reads them.
+
+**A 2.6.0 proxy under an agent older than chart 2.5.0 is unsupported.** That
+is an upgrade that skipped 2.5.x, or one started before every agent of the
+2.5.x roll was replaced. Go through 2.5.x and let it finish first
+(`charts/README.md`, "Compatibility window"). What an operator who skipped it
+sees, measured on the pinned proxy by the same test: no traffic is affected,
+and for as long as a node's agent is the old one, that node's proxy exports
+each pod's listener stats under a name of its own
+(`envoy_listener_inbound_<pod>_downstream_cx_total`, one metric family per
+pod and stat, no `aether_pod` label). The families stop being written when the
+agent is replaced, and stay in the metrics store's name index for as long as
+the store keeps names.
+
+```promql
+# Empty when no proxy is being sent names without a namespace. (Envoy's own
+# per-worker listener stats are excluded.)
+count by (__name__) ({__name__=~"envoy_listener_(inbound|out_http)_.+_downstream_cx_total", __name__!~".+_worker_[0-9]+_.+"})
+```
+
+##### What the upgrade restarts and rolls
+
+| Object | What changes | Effect |
+| --- | --- | --- |
+| `aether-proxy-config` ConfigMap | its `envoy.yaml`: the `aether.pod` regex above, and comments (the chart's templates no longer name the environment the project is developed on; the comments of the bootstrap are part of the file) | no pod is replaced; **the supervisor hot-restarts Envoy in place once, on every node** |
+| agent DaemonSet | the agent image (the description of one metric, `aether.agent.liveness.inbound_gate_pods`, was reworded; its name, labels and values are as they were) | rolls |
+| edge Deployment (`edge.enabled`) | it runs the agent image | rolls |
+| controller Deployment | its `--identity-gate-image` flag names the agent image | rolls |
+| every other workload | no pod template change: the comments that left the agent, proxy and registrar templates were YAML comments, which are in `helm template` output and in no object | not rolled by the chart |
+
+The hot restart is the one described under "Chart 2.4.26": each node's
+supervisor starts a new Envoy epoch when that node's kubelet delivers the
+file, on every node independently and **not one node at a time**, and two
+Envoy processes run on the node for the length of it. Check the headroom of
+"Sizing nodes for a proxy hot restart" before the upgrade and watch it as you
+would a proxy roll. A rollback to 2.5.x changes `envoy.yaml` back and costs
+the same again. It needs nothing for the cluster name: `helm rollback` applies
+the stored manifest of the older revision, which has the name in it.
+
+```promql
+# Each node's Envoy epoch. Compare with the value before the upgrade: a node
+# whose epoch did not move has not picked the bootstrap up.
+max by (node) (envoy_server_hot_restart_epoch{job="aether-proxy"})
+```
+
+The `prober` chart is 1.0.10 with a comment reworded in one template: no
+object of it changes.
+
+Measured: the renders (offline, against 2.5.9) and the extractor on the pinned
+proxy. Not run on a cluster.
+
 #### The prober chart (#1372, #1373, #1374)
 
 The `prober` chart has the same rule since chart **1.0.5**: its DaemonSet's pod

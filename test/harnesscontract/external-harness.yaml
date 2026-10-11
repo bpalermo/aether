@@ -36,7 +36,7 @@
 # what a metrics pipeline or Envoy does to a name after it leaves the product,
 # and meanings that exist only in prose. Those entries are promises kept by
 # review alone.
-version: 2
+version: 3
 
 # --- Metrics ------------------------------------------------------------------
 #
@@ -420,6 +420,10 @@ charts:
       # render has no use for one.
       controller.webhook.spire: "true"
       edge.enabled: "true"
+      # Required since chart 2.6.0, which has no default for it: a render
+      # without it fails. A harness that installs or renders the chart passes
+      # its own cluster's name; nothing held here depends on which.
+      clusterName: test-cluster
     objects:
       - id: chart.aether.agent
         kind: DaemonSet
@@ -509,6 +513,7 @@ charts:
     set:
       controller.webhook.spire: "true"
       agent.updateStrategy.surge: "true"
+      clusterName: test-cluster
     objects:
       - id: chart.aether.agent_surge.agent
         kind: DaemonSet

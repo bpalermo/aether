@@ -89,6 +89,14 @@ A chart's tests live in its `BUILD.bazel`. Which rule to use:
 
 All but the first are in `//bazel/helm:defs.bzl`, which documents each.
 
+`charts/aether/BUILD.bazel` loads the rules it uses from
+`charts/aether/test_defs.bzl`, not from there. The `aether` chart requires
+`clusterName` and has no default for it, so every render has to name a cluster;
+those wrappers pass `--set clusterName=test-cluster` ahead of a target's own
+`opts` (which win), and a new test needs nothing for it. A test of the
+requirement itself renders without the value and loads the rule straight from
+`//bazel/helm:defs.bzl` (`:aether_cluster_name_required_test`).
+
 The last row is for what a pattern cannot say: a pattern holds a literal, and a
 literal in a BUILD file agrees with a literal in a template while the constant
 the agent reads has moved on. `charts/prober` and `charts/udsecho` write the
@@ -209,8 +217,16 @@ kubectl label namespace aether-system \
 # Use the commit-pinned tag; the bare `--version <aether-version>` also
 # resolves, but that tag is mutable: see below.
 helm install aether oci://quay.io/aethermesh/chart-aether \
-  --version <aether-version>-<git-commit> -n aether-system --create-namespace
+  --version <aether-version>-<git-commit> -n aether-system --create-namespace \
+  --set clusterName=my-cluster
 ```
+
+`clusterName` is **required** and has no default since chart 2.6.0: without it
+the render fails and names the value, and nothing is installed or upgraded. It
+is this cluster's name in the mesh (`--cluster-name` of the agent, the
+registrar and the edge control plane, and a part of the registry's keys):
+choose it once and keep it. Upgrading a release that never set it is in
+`docs/runbook.md`, "Chart 2.6.0".
 
 **Pin the commit tag or the digest, never the bare tag with a digest (#1588).**
 `chart-aether:<aether-version>` is pushed again by every commit on `main` that

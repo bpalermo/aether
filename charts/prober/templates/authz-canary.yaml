@@ -7,8 +7,8 @@
 # `ext_authz` stat family — ok / denied / error / timeout / failure_mode_allowed —
 # and the `authz_sidecar` cluster's stats simply do not exist, and neither does any
 # evidence that the sidecar still EVALUATES policy. The 2026-09-19 OPA
-# 1.18.2 -> 1.20.2 bump on talos-main could only be validated as "starts, compiles
-# the policy, listens on its socket".
+# 1.18.2 -> 1.20.2 bump on the reference cluster could only be validated as
+# "starts, compiles the policy, listens on its socket".
 #
 # So this gives the cluster one route that really uses the filter, and one client
 # that asserts BOTH decisions every cycle: with the allow header it must get

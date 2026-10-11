@@ -109,29 +109,31 @@ spec:
         {{- if .Values.proxy.authzSidecar.enabled }}
         {{- $authz := .Values.proxy.authzSidecar }}
         {{- $authzDefaultProbe := and $authz.startupProbe.enabled (empty $authz.startupProbe.override) }}
-        # External authorization sidecar (proposal 027): serves
-        # envoy.service.auth.v3.Authorization on the shared Unix socket. The proxy's
-        # bootstrap carries a static `authz_sidecar` cluster pointing at it.
-        #
-        # #1275: a Kubernetes NATIVE sidecar (an init container with
-        # restartPolicy: Always), not a regular container. The kubelet starts
-        # regular containers in order without waiting for any of them, so as the
-        # second container it started AFTER the proxy: when its image had to be
-        # pulled (7-13 s on talos-main, the first roll onto a new OPA tag) the new
-        # Envoy took over the node's listeners with nothing behind the authz
-        # socket, and every check in that window was an ext_authz error — a 403
-        # under failureMode DENY. As a native sidecar:
-        #   - startup: the kubelet does not start the proxy container until this
-        #     one's startupProbe has passed, i.e. until the authz socket accepts.
-        #     The new Envoy cannot take traffic before its authz is up.
-        #   - shutdown: the kubelet stops native sidecars only after every
-        #     regular container has exited. The old pod's Envoy (the hot-restart
-        #     parent, which keeps serving and draining until the successor's
-        #     protocol stops it) therefore has its authz for as long as it runs,
-        #     instead of both getting SIGTERM at once.
-        # It sits after install-supervisor because its default startupProbe execs
-        # the proxy-ready binary that container stages. Requires Kubernetes >= 1.29
-        # (native sidecars on by default; GA in 1.33), enforced at render time.
+        {{- /*
+        External authorization sidecar (proposal 027): serves
+        envoy.service.auth.v3.Authorization on the shared Unix socket. The proxy's
+        bootstrap carries a static `authz_sidecar` cluster pointing at it.
+
+        #1275: a Kubernetes NATIVE sidecar (an init container with
+        restartPolicy: Always), not a regular container. The kubelet starts
+        regular containers in order without waiting for any of them, so as the
+        second container it started AFTER the proxy: when its image had to be
+        pulled (7-13 s on the reference cluster, the first roll onto a new OPA
+        tag) the new Envoy took over the node's listeners with nothing behind the
+        authz socket, and every check in that window was an ext_authz error — a
+        403 under failureMode DENY. As a native sidecar:
+          - startup: the kubelet does not start the proxy container until this
+            one's startupProbe has passed, i.e. until the authz socket accepts.
+            The new Envoy cannot take traffic before its authz is up.
+          - shutdown: the kubelet stops native sidecars only after every
+            regular container has exited. The old pod's Envoy (the hot-restart
+            parent, which keeps serving and draining until the successor's
+            protocol stops it) therefore has its authz for as long as it runs,
+            instead of both getting SIGTERM at once.
+        It sits after install-supervisor because its default startupProbe execs
+        the proxy-ready binary that container stages. Requires Kubernetes >= 1.29
+        (native sidecars on by default; GA in 1.33), enforced at render time.
+        */}}
         - name: authz
           restartPolicy: Always
           {{- if $authz.opa.enabled }}

@@ -223,7 +223,7 @@ func (m *cniMetrics) registerLifecycleInstruments(meter metric.Meter) error {
 		return fmt.Errorf("promotion delay: %w", err)
 	}
 	if m.inboundGatePods, err = meter.Int64Gauge("aether.agent.liveness.inbound_gate_pods",
-		metric.WithDescription("Local pods by whether the inbound-readiness promotion gate is programmed for them (state=gated) or absent (state=ungated), recorded every liveness pass; a standing ungated count with SPIRE on means the gate is silently missing (#815, main-worker-05 2026-09-19)")); err != nil {
+		metric.WithDescription("Local pods by whether the inbound-readiness promotion gate is programmed for them (state=gated) or absent (state=ungated), recorded every liveness pass; a standing ungated count with SPIRE on means the gate is silently missing (#815)")); err != nil {
 		return fmt.Errorf("inbound gate pods: %w", err)
 	}
 	if m.inboundGateHeld, err = meter.Int64Gauge("aether.agent.liveness.inbound_gate_held_pods",

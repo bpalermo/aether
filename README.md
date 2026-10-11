@@ -153,9 +153,12 @@ kubectl label namespace aether-system \
   pod-security.kubernetes.io/audit=privileged \
   pod-security.kubernetes.io/warn=privileged
 helm upgrade --install aether oci://quay.io/aethermesh/chart-aether --version <X.Y.Z>-<full git sha> \
-  -n aether-system --create-namespace
+  -n aether-system --create-namespace \
+  --set clusterName=my-cluster
 ```
 
+`clusterName` is required and has no default: it is this cluster's name in the
+mesh, chosen once and kept.
 The chart does not create the `aether-system` namespace (Helm or you do), and
 nothing labels it for you: on a cluster that enforces Pod Security admission the
 agent's pods need the three labels above. See

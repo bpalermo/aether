@@ -173,22 +173,23 @@ data:
         # as before: nothing else tells a pod's two inbound listeners apart in
         # a family whose name no longer carries the pod.
         #
-        # The namespace part is OPTIONAL in the aether.pod regex, for the
-        # length of an upgrade: the agent and the proxy roll separately, and a
-        # proxy that already runs this bootstrap under an agent older than
-        # #1584 is sent inbound_<pod> and out_http_<pod>. Those must still
-        # collapse into the two families (aether.pod="<pod>", no namespace
-        # label). A stat prefix no extractor matches stays in the metric NAME:
-        # one metric family per pod, kept by the metrics store's name index
-        # long after the upgrade. (The old agent's inbound_<pod>_h3 reads as
-        # namespace "<pod>", pod "h3" for that window: wrong labels, still one
-        # family.)
+        # The namespace part is REQUIRED by both regexes since chart 2.6.0.
+        # Chart 2.5.x made it optional in the aether.pod regex, for the length
+        # of the upgrade from 2.4.x: an agent older than #1584 sends
+        # inbound_<pod> and out_http_<pod>, and those still collapsed into the
+        # two families. That tolerance was announced for one chart minor and is
+        # gone: a proxy with this bootstrap under an agent older than chart
+        # 2.5.0 is unsupported. Neither regex matches such a prefix, so it
+        # stays in the metric NAME: one metric family per pod, kept by the
+        # metrics store's name index long after. (That agent's
+        # inbound_<pod>_h3 reads as namespace "<pod>", pod "h3".) See
+        # docs/runbook.md, "Chart 2.6.0".
         # //agent/test/envoy_validate (TestChartStatsConfigOnNamespacedPodNames)
         # runs the pinned proxy with this block and reads the result.
         - tag_name: aether.namespace
           regex: "^listener\\.(?:inbound|out_http)(_([^_.]+))_[^.]+\\."
         - tag_name: aether.pod
-          regex: "^listener\\.(?:inbound|out_http)(?:_[^_.]+)?(_([^.]+))\\."
+          regex: "^listener\\.(?:inbound|out_http)_[^_.]+(_([^.]+))\\."
         # Per-transport-socket-match counter. Envoy scopes it as
         #   cluster.<cluster>.<match name>.total_match_count
         #
@@ -200,8 +201,8 @@ data:
         # connection from filter state, and a selector emits no per-identity
         # counter. Anything querying
         # envoy_cluster_match_count_total{aether_transport_socket_match=...} on a
-        # mesh cluster — notably the AetherClusterIdentityNoMatch alert in
-        # k8s-talos-main — now measures NOTHING and reads as a clean zero.
+        # mesh cluster (an alert on "no identity matched", for one) now
+        # measures NOTHING and reads as a clean zero.
         # The replacement no-match signal is the access log; see
         # docs/runbook.md, "#842: per-connection certificate selection".
         #
@@ -243,8 +244,8 @@ data:
       #   * The parent has been latching that pending increment away every
       #     `stats_flush_interval` for its whole life (5s default; deliberately
       #     unset here), so the child inherits only the last ≤5s of the
-      #     parent's traffic — on talos-main every first post-restart sample
-      #     was < 1 minute of that node's rate.
+      #     parent's traffic — on the reference cluster every first
+      #     post-restart sample was < 1 minute of that node's rate.
       #   * The OTel sink then exports `counter.value()` as CUMULATIVE with
       #     `start_time_unix_nano` = THIS process's start, i.e. an honest new
       #     cumulative series per Envoy generation. Plain
@@ -416,8 +417,8 @@ data:
     # (xds_manager_impl.cc: SubscriptionFactory::RetryInitialDelayMs /
     # RetryMaxDelayMs; backoff_strategy.cc: random() % interval, interval
     # doubling), so the longer the agent was away the longer the proxy waits
-    # after it is back. On talos-main (2026-10-01 TRIPLE) a 15 s agent restart
-    # left main-worker-04's proxy reconnecting 8.4 s after the agent's xDS
+    # after it is back. On the reference cluster (2026-10-01) a 15 s agent
+    # restart left one node's proxy reconnecting 8.4 s after the agent's xDS
     # socket was serving, and it sent three requests to a pod drained 3.4 s
     # earlier. With a 1 s cap the proxy reconnects within 1 s of the socket
     # opening, however long the agent was down. Each failed attempt is a
