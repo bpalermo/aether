@@ -34,7 +34,7 @@ once; every suite is its own job on its own runner, against those images.
 | `uds-csi` | `uds-csi.sh` | 1 | proposal 039: the CSI node plugin on its own |
 | `authz` | `authz.sh` | 1 | proposal 027: ext_authz decisions, sidecar ordering, policy reload |
 | `l4-routes` | `l4routes.sh` | 1 + etcd | TCPRoute, TLSRoute, UDPRoute on the capture path |
-| `multiprotocol` | `multiprotocol.sh` | 1 + etcd | proposal 037: HTTP and raw TCP on one pod, each port reaching its own listener |
+| `multiprotocol` | `multiprotocol.sh` | 1 + etcd | proposal 037: HTTP and raw TCP on one pod, in both orders (HTTP primary, raw-TCP primary), each port reaching its own listener |
 | `eastwest-quic` | `eastwest-quic.sh` | 1 | proposal 038: per-source HTTP/3 between pods |
 | `first-install` | `first-install.sh` | 1, under Helm 3 and Helm 4 | the documented first install and its upgrades |
 
@@ -66,6 +66,8 @@ have a red half that CI does not run:
 
 - `MP_MIXED_PORTS=8080 e2e/multiprotocol.sh up && e2e/multiprotocol.sh verify`:
   the mixed workload without its `=tcp` port. `M4` fails.
+  (`MP_REGISTRY_BACKEND=kubernetes` runs the same suite on the chart's default
+  registry backend instead of etcd; CI runs etcd.)
 - `CONFIG_IMPORT=off e2e/multicluster_config.sh up && e2e/multicluster_config.sh verify`:
   the importing cluster without `agent.importConfig`. `C2` fails.
 

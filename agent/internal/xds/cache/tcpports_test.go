@@ -74,7 +74,7 @@ func TestDeriveTCPPorts(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			assert.Equal(t, tt.want, deriveTCPPorts(tt.in))
+			assert.Equal(t, tt.want, derivedTCPPorts(tt.in))
 		})
 	}
 }
@@ -104,11 +104,11 @@ func TestDeriveTCPPortsIsStableUnderEndpointChurn(t *testing.T) {
 		},
 	}
 
-	assert.Equal(t, deriveTCPPorts(before), deriveTCPPorts(after),
+	assert.Equal(t, derivedTCPPorts(before), derivedTCPPorts(after),
 		"endpoint churn must not change the derived port set, or every pod ADD/DEL drains capture listeners")
 
-	entriesBefore := []captureTCPEntry{{serviceName: "ns/mixed", clusterIP: "10.96.0.1", tcpPorts: deriveTCPPorts(before)["ns/mixed"]}}
-	entriesAfter := []captureTCPEntry{{serviceName: "ns/mixed", clusterIP: "10.96.0.1", tcpPorts: deriveTCPPorts(after)["ns/mixed"]}}
+	entriesBefore := []captureTCPEntry{{serviceName: "ns/mixed", clusterIP: "10.96.0.1", tcpPorts: derivedTCPPorts(before)["ns/mixed"]}}
+	entriesAfter := []captureTCPEntry{{serviceName: "ns/mixed", clusterIP: "10.96.0.1", tcpPorts: derivedTCPPorts(after)["ns/mixed"]}}
 	assert.True(t, equalTCPEntries(entriesBefore, entriesAfter),
 		"the change detector must agree, or the stability above buys nothing")
 
@@ -117,4 +117,17 @@ func TestDeriveTCPPortsIsStableUnderEndpointChurn(t *testing.T) {
 	entriesNewPort := []captureTCPEntry{{serviceName: "ns/mixed", clusterIP: "10.96.0.1", tcpPorts: []uint32{5432, 9000}}}
 	assert.False(t, equalTCPEntries(entriesBefore, entriesNewPort),
 		"adding a declared TCP port MUST regenerate the listeners")
+}
+
+// derivedTCPPorts is the per-port half of deriveCaptureServices for one
+// listing: each service's non-primary raw-TCP ports, with services that have
+// none left out.
+func derivedTCPPorts(listing map[string][]*registryv1.ServiceEndpoint) map[string][]uint32 {
+	out := map[string][]uint32{}
+	for service, d := range deriveCaptureServices(nil, listing, nil) {
+		if len(d.tcpPorts) > 0 {
+			out[service] = d.tcpPorts
+		}
+	}
+	return out
 }

@@ -41,13 +41,21 @@ type CaptureTCPService struct {
 	// matches on (original-dst recovered via SO_ORIGINAL_DST). Must be a valid
 	// non-None IP address (headless/unallocated Services are skipped).
 	ClusterIP string
-	// PrimaryIsTCP reports whether the service's PRIMARY port is raw TCP, from
-	// the registrar-stamped aether.io/app-protocol annotation.
+	// PrimaryIsTCP reports whether the service's PRIMARY port is raw TCP, as
+	// the registrar-stamped aether.io/app-protocol annotation says.
 	//
-	// It gates the PORTLESS /32 floor chain and nothing else (proposal 037
-	// design (d)). An HTTP-primary service must not have one — a per-IP chain
-	// outranks the HCM's application-protocol match and would swallow the VIP's
-	// HTTP traffic — but it may still serve raw-TCP ports, which get
+	// It is the consumer's FALLBACK, not its answer. The cache reads the
+	// primary's protocol from the registry endpoints it holds
+	// (cache.deriveCaptureServices) and uses this value only for a service it
+	// holds no endpoint of yet. Keying the floor on the annotation alone was
+	// #1672: a registrar that labelled a service by the first protocol it was
+	// listed under said "http" about a raw-TCP primary with an HTTP secondary,
+	// and the service got no TCP path.
+	//
+	// What it gates is the service's floor (proposal 037 design (d)). An
+	// HTTP-primary service must not have one — a per-IP chain outranks the
+	// HCM's application-protocol match and would swallow the VIP's HTTP
+	// traffic — but it may still serve raw-TCP ports, which get
 	// destination_port-qualified chains that do not.
 	PrimaryIsTCP bool
 }
@@ -177,11 +185,15 @@ func (r *Reconciler) Reconcile(ctx context.Context, _ reconcile.Request) (reconc
 		// Envoy evaluates ahead of prefix_ranges and which therefore do not
 		// disturb the VIP's HTTP traffic.
 		//
-		// The annotation is still the primary's protocol -- the registrar stamps
-		// it from the primary port -- but it is no longer the gate on delivery.
-		// Which PORTS are raw TCP is derived by the cache from the endpoints it
-		// already holds, one hop closer to the source than this annotation, and
-		// #878 is what happened when the two copies disagreed.
+		// The annotation is the primary's protocol -- the registrar stamps it
+		// from the primary port's own class since #1672; before that, from the
+		// first protocol the service was listed under -- but it is neither the
+		// gate on delivery nor the last word on the floor. The primary's class
+		// and which PORTS are raw TCP are derived by the cache from the
+		// endpoints it already holds, one hop closer to the source than this
+		// annotation; #878 and #1672 are what happened when the two copies
+		// disagreed. What is read here is used until the cache holds an
+		// endpoint of the service, and not after.
 		if ip != "" && ip != corev1.ClusterIPNone {
 			appProto := s.Annotations[aetherlabels.AnnotationMeshAppProtocol]
 			tcpServices = append(tcpServices, CaptureTCPService{

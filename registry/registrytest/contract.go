@@ -53,7 +53,9 @@ func RequireNamespaceQualifiedKeys(t testing.TB, services map[string][]*registry
 // the kubernetes backend since #878. The agent no longer breaks in that case
 // (037 Phase 1 keys TCP cache entries by their Envoy cluster name, so the two
 // passes stop colliding), which is exactly why this assertion is no longer
-// load-bearing.
+// load-bearing. Since #1672 it is also true of ONE pod on both backends: a pod
+// that declares ports of two protocols is in both listings, so call this only
+// with pods that each declare a single protocol.
 //
 // It is kept rather than deleted because the replacement 037 specifies — every
 // endpoint returned under protocol P advertises at least one P port, and the two

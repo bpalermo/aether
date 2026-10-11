@@ -2,7 +2,10 @@ load("@rules_go//go:def.bzl", "go_library", "go_test")
 
 go_library(
     name = "endpointmeta",
-    srcs = ["endpointmeta.go"],
+    srcs = [
+        "endpointmeta.go",
+        "primary.go",
+    ],
     importpath = "aethermesh.dev/registry/endpointmeta",
     visibility = ["//visibility:public"],
     deps = [
@@ -18,6 +21,7 @@ go_test(
     srcs = [
         "portprotocol_test.go",
         "portprotocols_test.go",
+        "primary_test.go",
     ],
     embed = [":endpointmeta"],
     deps = [

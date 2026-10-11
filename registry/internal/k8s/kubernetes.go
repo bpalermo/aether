@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"log/slog"
 	"maps"
+	"slices"
 	"sync"
 	"time"
 
@@ -252,9 +253,9 @@ func (r *KubernetesRegistry) UnregisterEndpoints(_ context.Context, _ string, _ 
 // ListEndpoints returns all endpoints for a service by listing managed pods whose ServiceAccount
 // matches the given service name. Node topology labels are used for locality information.
 //
-// Endpoints are filtered by the protocol each POD declares in
-// endpoint.aether.io/protocol, so a query for P returns exactly the pods serving P
-// (#878).
+// Endpoints are filtered by the protocols each POD declares its ports to speak
+// (endpoint.aether.io/protocol and the per-port suffixes of /ports), so a query
+// for P returns exactly the pods serving a port of P (#878, #1672).
 //
 // This backend used to return nothing at all for a TCP query. That was a workaround,
 // not a property of Kubernetes: podToEndpoint ignored the protocol annotation, so
@@ -265,15 +266,15 @@ func (r *KubernetesRegistry) UnregisterEndpoints(_ context.Context, _ string, _ 
 // vhost-less tcp:true entry from the TCP listing. The CDS cluster and GAMMA vhost
 // vanished and captured requests 503'd with no_healthy_upstream.
 //
-// Reading the annotation removes the need for the workaround: a pod declaring "tcp"
-// appears only in the TCP listing and a pod declaring "http" only in the HTTP one,
-// so the two listings are disjoint and the agent's second pass has nothing to
-// clobber. The "a service is HTTP or TCP, never both" invariant still holds, because
-// every pod behind one ServiceAccount carries the same annotation.
+// Reading the annotations removes the need for the workaround: a pod declaring
+// only "tcp" appears only in the TCP listing and a pod declaring only "http" only
+// in the HTTP one. A pod that declares ports of both (proposal 037) is in both,
+// with the same row, and the agent keys its HTTP and TCP entries apart, so the
+// second pass has nothing to clobber.
 //
-// Filtering runs in BOTH directions on purpose. Returning HTTP-declaring pods under
-// TCP is the bug above; returning TCP-declaring pods under HTTP is the same bug
-// mirrored, and would put a raw-TCP pod behind an h2 cluster.
+// Filtering runs in BOTH directions on purpose. Returning a pod with no TCP port
+// under TCP is the bug above; returning a pod with no HTTP port under HTTP is the
+// same bug mirrored, and would put a raw-TCP pod behind an h2 cluster.
 func (r *KubernetesRegistry) ListEndpoints(ctx context.Context, service string, protocol registryv1.Service_Protocol) ([]*registryv1.ServiceEndpoint, error) {
 	r.log.DebugContext(ctx, "listing endpoints", "service", service)
 
@@ -322,7 +323,7 @@ func (r *KubernetesRegistry) ListEndpoints(ctx context.Context, service string, 
 // ListAllEndpoints returns all endpoints for all services, grouped by service name (ServiceAccount).
 // It lists all managed pods, resolves node localities, and converts each pod to a ServiceEndpoint.
 //
-// Pods are filtered by the protocol each declares in endpoint.aether.io/protocol,
+// Pods are filtered by the protocols each declares its ports to speak,
 // exactly as in ListEndpoints — see there for why this backend used to return an
 // empty map for TCP and why it no longer has to (#878). A service with no pod
 // serving the requested protocol is absent from the result rather than present and
@@ -484,28 +485,36 @@ func nodeCacheContainsAll(cache map[string]locality, names map[string]struct{}) 
 	return true
 }
 
-// podServesProtocol reports whether pod serves want, per its
-// endpoint.aether.io/protocol annotation. UNSPECIFIED matches HTTP, which is what
-// the annotation itself defaults to, so a caller that does not care still gets the
+// podServesProtocol reports whether pod serves at least one port of want, per
+// its endpoint.aether.io/protocol, /port and /ports annotations
+// (endpointmeta.PortProtocols). UNSPECIFIED matches HTTP, which is what the
+// annotations default to, so a caller that does not care still gets the
 // mesh-inbound endpoints it always did.
 //
-// A pod whose annotation does not parse is EXCLUDED from every listing, and says so
+// "At least one port", not "the pod-level protocol": a pod serving an HTTP port
+// and a raw-TCP port is in BOTH listings, with the same row, exactly as the
+// write-based backends hold it under both protocol keys (proposal 037, "the two
+// backends converge"). Filtering on the pod-level annotation alone left such a
+// pod in one listing, and on this backend its other protocol had no cluster
+// (#1672). A pod declaring one protocol is in one listing, as before.
+//
+// A pod whose annotations do not parse is EXCLUDED from every listing, and says so
 // at WARN. The alternative — treating it as HTTP — is how a typo becomes a pod
 // quietly serving the wrong protocol, which is the failure this whole change exists
 // to remove. Excluding it makes the pod visibly absent instead, and the registering
-// agent rejects the same value outright (endpointmeta.Protocol), so a pod in this
-// state could only have been annotated after registration.
+// agent rejects the same value outright (endpointmeta.PortProtocols), so a pod in
+// this state could only have been annotated after registration.
 func (r *KubernetesRegistry) podServesProtocol(ctx context.Context, pod *corev1.Pod, want registryv1.Service_Protocol) bool {
-	got, err := endpointmeta.Protocol(pod.Annotations)
+	portProtocols, err := endpointmeta.PortProtocols(pod.Annotations)
 	if err != nil {
-		r.log.WarnContext(ctx, "pod has an invalid protocol annotation; excluding it from endpoint listings",
+		r.log.WarnContext(ctx, "pod has an invalid protocol or ports annotation; excluding it from endpoint listings",
 			"error", err, "pod", pod.Name, "namespace", pod.Namespace)
 		return false
 	}
 	if want == registryv1.Service_PROTOCOL_UNSPECIFIED {
 		want = registryv1.Service_PROTOCOL_HTTP
 	}
-	return got == want
+	return slices.Contains(endpointmeta.ProtocolsServed(portProtocols), want)
 }
 
 // podToEndpoint converts a Kubernetes Pod to a ServiceEndpoint.

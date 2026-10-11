@@ -840,7 +840,9 @@ func applyURLRewrite(ra *routev3.RouteAction, rw *GammaURLRewrite, matchPrefix s
 }
 
 // NoHTTPPortErrorHeader is the response header naming why a mesh HTTP request
-// was refused: the authority resolves to a service that serves no HTTP port.
+// was refused with 421: "no-http-port" when the authority resolves to a service
+// that serves no HTTP port, "primary-not-http" when it serves HTTP but not on
+// the primary port the authority names.
 const NoHTTPPortErrorHeader = "x-aether-error"
 
 // BuildNoHTTPPortVirtualHost returns a cap_http virtual host whose every route
@@ -866,6 +868,34 @@ func BuildNoHTTPPortVirtualHost(name string, domains []string, tcpSpellings stri
 	body := fmt.Sprintf(
 		"aether: %s serves no HTTP port. Reach it over TCP instead: %s\n",
 		name, tcpSpellings)
+	return misdirectedVirtualHost(name, domains, "no-http-port", body)
+}
+
+// BuildPrimaryNotHTTPVirtualHost returns a cap_http virtual host whose every
+// route answers 421 Misdirected Request, for a service in scope whose PRIMARY
+// port is raw TCP and which also serves HTTP on other ports (#1672).
+//
+// domains are the service's portless and mesh-port (:18081) authorities. Both
+// name "the primary port, over HTTP" (docs/workload-requirements.md, "How a
+// spelling resolves"), and this primary does not speak HTTP, so they name
+// nothing -- the mirror of raw TCP to :18082 on an HTTP-primary service, which
+// is not answered either. HTTP has a way to say so that TCP lacks: the
+// response carries x-aether-error: primary-not-http and a body naming where
+// HTTP is served (httpSpellings, "<fqdn>:<port>") and how to reach the primary
+// (tcpSpellings).
+//
+// The service's HTTP ports are addressed by number, and "<fqdn>:<port>" is not
+// among domains: those requests take the per-port cluster as before.
+func BuildPrimaryNotHTTPVirtualHost(name string, domains []string, httpSpellings, tcpSpellings string) *routev3.VirtualHost {
+	body := fmt.Sprintf(
+		"aether: the primary port of %s is raw TCP, so this address names no HTTP port. HTTP is served on: %s. The primary port, over TCP: %s\n",
+		name, httpSpellings, tcpSpellings)
+	return misdirectedVirtualHost(name, domains, "primary-not-http", body)
+}
+
+// misdirectedVirtualHost is the 421 direct-response virtual host both refusals
+// above share: reason goes in the NoHTTPPortErrorHeader response header.
+func misdirectedVirtualHost(name string, domains []string, reason, body string) *routev3.VirtualHost {
 	return &routev3.VirtualHost{
 		Name:    name,
 		Domains: domains,
@@ -882,7 +912,7 @@ func BuildNoHTTPPortVirtualHost(name string, domains []string, tcpSpellings stri
 			ResponseHeadersToAdd: []*corev3.HeaderValueOption{{
 				Header: &corev3.HeaderValue{
 					Key:   NoHTTPPortErrorHeader,
-					Value: "no-http-port",
+					Value: reason,
 				},
 			}},
 		}},

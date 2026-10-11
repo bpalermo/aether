@@ -82,6 +82,20 @@ type CaptureTCPService struct {
 	// (proposal 037). Zero when unknown, in which case that spelling is
 	// omitted and the any-port shim still serves it.
 	PrimaryPort uint32
+	// ServesHTTP reports that the service also serves at least one HTTP port.
+	// It withholds the any-port shim from a TCP-primary service and changes
+	// nothing else (#1672).
+	//
+	// The shim matches the VIP on EVERY port no other chain claims. On a
+	// service that is raw TCP throughout that is the deprecated "any port
+	// reaches the primary" spelling. On a service with an HTTP port it would
+	// outrank the HCM catch-all for the VIP (prefix_ranges is matched before
+	// application_protocols) and forward HTTP sent to <VIP>:8080, :18081 and
+	// :80 to the raw-TCP primary as bytes. Such a service keeps the two
+	// qualified floor chains -- the TCP mesh port and its primary port -- and
+	// its HTTP ports are left to the HCM chain. No caller loses a spelling: a
+	// mixed service never had the any-port one.
+	ServesHTTP bool
 }
 
 // CaptureListenerName returns the per-pod transparent-capture listener name.
@@ -151,12 +165,16 @@ func GenerateCaptureListener(cniPod *cniv1.CNIPod, sourceSpiffeID string, captur
 				chains = append(chains, pc)
 			}
 		}
-		// A TCP-primary service's floor, in three parts (proposal 037).
+		// A TCP-primary service's floor, in three parts (proposal 037): the
+		// TCP mesh port, the primary port and, for a service that serves no
+		// HTTP port, the any-port shim.
 		//
 		// An HTTP-primary service gets NONE of these: a portless /32 chain
 		// would intercept the VIP's HTTP traffic before the HCM chain could see
 		// it (design (d)). Its raw-TCP ports are served by the
-		// destination_port-qualified chains above.
+		// destination_port-qualified chains above. A TCP-primary service that
+		// also serves HTTP gets the two qualified parts and not the shim, for
+		// the same reason (CaptureTCPService.ServesHTTP).
 		if svc.PrimaryIsTCP {
 			chains = append(chains, tcpPrimaryFloorChains(svc, sourceSpiffeID)...)
 		}
@@ -630,6 +648,10 @@ func tcpPrimaryFloorChains(svc CaptureTCPService, sourceSpiffeID string) []*list
 		if p != 0 {
 			out = append(out, qualifyChainByPort(tc, p, fmt.Sprintf("cap_tcp_%s_%d", svc.ClusterName, p)))
 		}
+	}
+	if svc.ServesHTTP {
+		// No any-port shim on a VIP that also serves HTTP: see ServesHTTP.
+		return out
 	}
 	return append(out, qualifyChainByPort(tc, 0, "cap_tcp_anyport_"+svc.ClusterName))
 }

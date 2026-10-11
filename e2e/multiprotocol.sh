@@ -1,27 +1,29 @@
 #!/usr/bin/env bash
 # Single-cluster kind e2e for proposal 037 (multi-protocol ports on one mesh
 # service): ONE pod that serves HTTP on :8080 and a raw-TCP protocol on :9000,
-# under one ServiceAccount, with both ports on the mesh.
+# under one ServiceAccount, with both ports on the mesh — in both orders, an
+# HTTP primary with a TCP secondary and a TCP primary with an HTTP secondary.
 #
-# It is the only end-to-end test of that shape. e2e/l4routes.sh covers services
-# whose primary port is TCP; every HTTP suite covers services with no TCP port.
-# Neither builds what a mixed service needs and nothing else does: a capture
-# chain per TCP port on a VIP that also serves HTTP, a per-port "tcp:" cluster
-# that carries the port as SNI (it is not the pod's primary), a per-port floor
-# chain on the destination's inbound, and one pod registered under both
-# protocols.
+# It is the only end-to-end test of those shapes. e2e/l4routes.sh covers
+# services that are raw TCP throughout; every HTTP suite covers services with no
+# TCP port. Neither builds what a mixed service needs and nothing else does: a
+# capture chain per TCP port on a VIP that also serves HTTP, a per-port "tcp:"
+# cluster that carries the port as SNI (it is not the pod's primary), a per-port
+# floor chain on the destination's inbound, one pod registered under both
+# protocols, and a mesh Service labelled by what its PRIMARY port speaks.
 #
-# The declaration under test is one pod annotation:
+# The declarations under test are pod annotations:
 #
-#   endpoint.aether.io/port:  "8080"
-#   endpoint.aether.io/ports: "8080,9000=tcp"
+#   mp-mixed     endpoint.aether.io/port: "8080"   ports: "8080,9000=tcp"
+#   mp-tcpfirst  endpoint.aether.io/port: "9000"   ports: "9000,8080=h1"   protocol: "tcp"
 #
-# Two workloads with the SAME two containers and the same two listeners:
+# Three workloads with the SAME two containers and the same two listeners:
 #
 #   mp-mixed     ports "8080,9000=tcp"   http answers "mixhttp",  tcp answers "mixtcp"
+#   mp-tcpfirst  ports "9000,8080=h1"    http answers "revhttp",  tcp answers "revtcp"
 #   mp-httponly  ports "8080"            http answers "ctlhttp",  tcp answers "ctltcp"
 #
-# mp-httponly is the control: its :9000 listener is as alive as mp-mixed's, and
+# mp-httponly is the control: its :9000 listener is as alive as the others', and
 # is not declared. What a probe reads back is the marker of the container that
 # served it, so every assertion names WHICH listener answered, not just that
 # something did.
@@ -48,6 +50,22 @@
 #   M7  the Service   the generated mesh Service of mp-mixed is classified
 #                     http and exposes both mesh ports, 18081 and 18082
 #
+# The mirror shape, mp-tcpfirst (#1672):
+#
+#   X1  tcp, mesh     raw TCP to :18082 -> "revtcp": the TCP mesh port is the
+#                     primary port, as raw TCP
+#   X2  tcp, port     raw TCP to :9000 -> "revtcp": the primary port by number
+#   X3  http, port    http://<name>:8080/ -> "revhttp": the HTTP secondary, on
+#                     a VIP that also has floor chains
+#   X4  http, mesh    http://<name>:18081/ and http://<name>/ are REFUSED, 421
+#                     with x-aether-error: primary-not-http — they name the
+#                     primary port over HTTP, and this primary is raw TCP. The
+#                     mirror of M5, said by name because HTTP can
+#   X5  the Service   the generated mesh Service of mp-tcpfirst is classified
+#                     tcp: what its primary port speaks, not the first protocol
+#                     it is listed under
+#   X6  both keys     the registry holds mp-tcpfirst's pod under both keys too
+#
 # M0 is an assertion and not setup — it is the state in which the TCP probe
 # gives the other answer, re-observed on every run, so a green M4 cannot be a
 # probe that only ever says one thing (#853). M5 is the same probe on the same
@@ -62,22 +80,18 @@
 # M0 to M3 pass (HTTP never depended on the suffix) and M4 fails: no probe to
 # :9000 is answered, exactly as on mp-httponly.
 #
-# THE MIRROR SHAPE IS NOT IN THE GATE. A pod with a TCP primary and an HTTP
-# secondary (endpoint.aether.io/protocol: tcp, port 9000, ports "9000,8080=h1")
-# is the other way to be mixed. On the build this suite was written against its
-# HTTP port is served and its TCP primary is not reachable through the mesh at
-# all, on :18082 or on :9000. To reproduce, or to see it fixed:
-#
-#   MP_TCP_PRIMARY=1 e2e/multiprotocol.sh up && e2e/multiprotocol.sh verify
-#
-# which runs X1..X3 on mp-tcpfirst after the gate. Once they pass, deploy the
-# workload unconditionally and move them into the gate.
+# The mirror shape has no declaration to cut down: its red half is the build
+# from before #1672, on which X1, X2, X4 and X5 fail (no floor chain for the
+# service on the source, a 502 where the refusal should be, and a Service
+# labelled http) while X3 passes.
 #
 # SPIRE IS ON AND THE REGISTRY BACKEND IS etcd, for the reasons the header of
 # e2e/l4routes.sh gives in full: with SPIRE off the mesh has no TCP path at
 # either end (no node SVID => no "tcp:" clusters; the cleartext inbound has no
 # floor chain), and etcd is the backend that keys an endpoint by protocol,
-# which is what M6 reads.
+# which is what M6 and X6 read. MP_REGISTRY_BACKEND=kubernetes runs the same
+# legs on the chart's default backend, which derives the listings from the
+# pods (M6 and X6 are skipped there: it has no key to read). CI runs etcd.
 #
 # Usage: e2e/multiprotocol.sh {up|test|verify|down}   (bare = up + verify)
 #
@@ -110,9 +124,6 @@ MESH_TCP_PORT="18082"
 # The mixed workload's endpoint.aether.io/ports. The default is the declaration
 # under test; the red half (see the header) overrides it. CI never sets it.
 MP_MIXED_PORTS="${MP_MIXED_PORTS:-$HTTP_PORT,$TCP_PORT=tcp}"
-# "1" also deploys the mirror shape and verifies it after the gate (see "THE
-# MIRROR SHAPE" in the header). CI never sets it.
-MP_TCP_PRIMARY="${MP_TCP_PRIMARY:-0}"
 # How many probes each measured batch sends.
 PROBES=20
 # SPIRE >= 1.15.2 is required since proposal 036 (the SPIFFE Broker API); these
@@ -126,6 +137,18 @@ CURL_IMAGE="curlimages/curl:8.22.0@sha256:58adaa4e8dca9c988bae2aba4ab3434a0bb2da
 KIND_NET="kind"
 REGION="local"
 ETCD_NAME="${ETCD_NAME:-aether-multiprotocol-etcd}"
+# The registrar's registry backend: "etcd" (what CI runs; see the header) or
+# "kubernetes", the chart default, which derives endpoints from the pods
+# themselves and has no key to read back (M6 is skipped there). CI never sets
+# it.
+MP_REGISTRY_BACKEND="${MP_REGISTRY_BACKEND:-etcd}"
+case "$MP_REGISTRY_BACKEND" in
+etcd | kubernetes) ;;
+*)
+	echo "MP_REGISTRY_BACKEND must be 'etcd' or 'kubernetes', not '$MP_REGISTRY_BACKEND'" >&2
+	exit 2
+	;;
+esac
 # shellcheck source=e2e/etcd-image.sh
 . "$REPO_ROOT/e2e/etcd-image.sh"
 
@@ -153,9 +176,11 @@ dump_state() {
 	printf '\033[1;33m  -- mesh services (classification + ports) --\033[0m\n' >&2
 	kc -n "$TEST_NS" get svc -o custom-columns=NAME:.metadata.name,CLUSTERIP:.spec.clusterIP,PROTO:.metadata.annotations.aether\\.io/app-protocol,PORTS:.spec.ports[*].port 2>&1 |
 		sed 's/^/    /' >&2 || true
-	printf '\033[1;33m  -- registry keys of the test services (one line per protocol the pod is registered under) --\033[0m\n' >&2
-	docker exec "$ETCD_NAME" etcdctl get --prefix / --keys-only 2>/dev/null |
-		grep -E '/services/mp-(mixed|tcpfirst|httponly)/' | sed 's/^/    /' >&2 || true
+	if [ "$MP_REGISTRY_BACKEND" = "etcd" ]; then
+		printf '\033[1;33m  -- registry keys of the test services (one line per protocol the pod is registered under) --\033[0m\n' >&2
+		docker exec "$ETCD_NAME" etcdctl get --prefix / --keys-only 2>/dev/null |
+			grep -E '/services/mp-(mixed|tcpfirst|httponly)/' | sed 's/^/    /' >&2 || true
+	fi
 	# The agent and the proxy are hostNetwork, so the kind node shares their
 	# netns and reaches Envoy's loopback-only admin. Names only: which chains and
 	# which "tcp:" clusters exist is the whole question.
@@ -235,6 +260,10 @@ create_cluster() {
 etcd_ip() { docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' "$ETCD_NAME"; }
 
 start_etcd() {
+	if [ "$MP_REGISTRY_BACKEND" != "etcd" ]; then
+		ok "no etcd: the registry backend is '$MP_REGISTRY_BACKEND'"
+		return
+	fi
 	log "starting etcd (the registry backend; see the header) on the '$KIND_NET' docker network"
 	docker rm -f "$ETCD_NAME" >/dev/null 2>&1 || true
 	docker run -d --name "$ETCD_NAME" --network "$KIND_NET" "$ETCD_IMAGE" \
@@ -316,9 +345,14 @@ chart_dir() {
 
 install_aether() {
 	# Declared and assigned separately (SC2155), so `set -e` sees etcd_ip fail.
-	local charts etcd
+	local charts
+	local -a backend
 	charts="$(chart_dir)"
-	etcd="http://$(etcd_ip):2379"
+	backend=(--set "registrar.registryBackend=$MP_REGISTRY_BACKEND")
+	if [ "$MP_REGISTRY_BACKEND" = "etcd" ]; then
+		backend+=(--set "registrar.region=$REGION" --set "registrar.etcd.region=$REGION"
+			--set "registrar.etcd.endpoints[0]=http://$(etcd_ip):2379")
+	fi
 	img() { echo "--set $1.image.repository=${IMAGE_REGISTRY}/$2 --set $1.image.tag=latest --set $1.image.digest= --set $1.image.pullPolicy=Never"; }
 	log "installing the aether CRDs"
 	helm --kube-context "$CTX" upgrade --install aether-crds "$charts/crds" \
@@ -327,7 +361,7 @@ install_aether() {
 	# Everything except SPIRE and the registry backend is chart default:
 	# transparent capture with redirect-all (which is what captures a dial to
 	# :9000 and to :80), mesh DNS. Per-port protocols have no values gate.
-	log "installing aether (SPIRE ON, etcd registry — see the header)"
+	log "installing aether (SPIRE ON, $MP_REGISTRY_BACKEND registry — see the header)"
 	# shellcheck disable=SC2046
 	helm --kube-context "$CTX" upgrade --install aether "$charts/aether" \
 		-n "$NS" --create-namespace \
@@ -336,10 +370,7 @@ install_aether() {
 		--set "meshDomain=$MESH_DOMAIN" \
 		--set spire.enabled=true \
 		--set edge.enabled=false \
-		--set registrar.registryBackend=etcd \
-		--set "registrar.region=$REGION" \
-		--set "registrar.etcd.region=$REGION" \
-		--set "registrar.etcd.endpoints[0]=$etcd" \
+		"${backend[@]}" \
 		$(img agent agent) $(img agent.meshDnsDaemon mesh-dns) \
 		$(img proxy.supervisor proxy-supervisor) $(img cniInstall cni-install) \
 		$(img registrar registrar) $(img controller controller) $(img udsCsi uds-csi) \
@@ -414,17 +445,13 @@ YAML
 }
 
 deploy_workloads() {
-	log "deploying mp-mixed (ports: $MP_MIXED_PORTS), mp-httponly (ports: $HTTP_PORT) and the client"
+	log "deploying mp-mixed (ports: $MP_MIXED_PORTS), mp-tcpfirst (TCP primary :$TCP_PORT, ports: $TCP_PORT,$HTTP_PORT=h1), mp-httponly (ports: $HTTP_PORT) and the client"
 	kc create ns "$TEST_NS" >/dev/null 2>&1 || true
 	deploy_two_port_workload mp-mixed "$MP_MIXED_PORTS" mixhttp mixtcp
+	deploy_two_port_workload mp-tcpfirst "$TCP_PORT,$HTTP_PORT=h1" revhttp revtcp "$TCP_PORT" tcp
 	deploy_two_port_workload mp-httponly "$HTTP_PORT" ctlhttp ctltcp
-	local workloads="mp-mixed mp-httponly" upstreams="mp-mixed.$TEST_NS,mp-httponly.$TEST_NS"
-	if [ "$MP_TCP_PRIMARY" = "1" ]; then
-		log "MP_TCP_PRIMARY=1: also deploying mp-tcpfirst (TCP primary :$TCP_PORT, ports: $TCP_PORT,$HTTP_PORT=h1)"
-		deploy_two_port_workload mp-tcpfirst "$TCP_PORT,$HTTP_PORT=h1" revhttp revtcp "$TCP_PORT" tcp
-		workloads="$workloads mp-tcpfirst"
-		upstreams="$upstreams,mp-tcpfirst.$TEST_NS"
-	fi
+	local workloads="mp-mixed mp-tcpfirst mp-httponly"
+	local upstreams="mp-mixed.$TEST_NS,mp-tcpfirst.$TEST_NS,mp-httponly.$TEST_NS"
 
 	# The upstreams annotation is NOT an optimisation: there is no on-demand
 	# discovery for tcp_proxy. An undeclared TCP upstream yields a chain that
@@ -614,11 +641,21 @@ verify_tcp() {
 	ok "unanswered (3/3): the primary is HTTP, and raw TCP is never forwarded to it"
 }
 
-# X1..X3 — the mirror shape, a TCP primary with an HTTP secondary. NOT part of
-# the gate: see "THE MIRROR SHAPE" in the header. Runs only when `up` deployed
-# mp-tcpfirst (MP_TCP_PRIMARY=1).
+# http_refusal AUTHORITY — one GET of http://AUTHORITY/ from the client. Prints
+# "<status> <x-aether-error value>" ("000 " when there is no response).
+http_refusal() {
+	# shellcheck disable=SC2016  # evaluated by the POD's shell; see http_probe_batch
+	kc -n "$TEST_NS" exec deploy/client -c curl -- sh -c '
+		out=$(curl -s --max-time 5 -o /dev/null -D - -w "STATUS %{http_code}\n" "$1" 2>/dev/null | tr -d "\r")
+		status=$(printf "%s\n" "$out" | sed -n "s/^STATUS //p")
+		reason=$(printf "%s\n" "$out" | sed -n "s/^[Xx]-[Aa]ether-[Ee]rror: *//p" | sed -n "1p")
+		printf "%s %s\n" "${status:-000}" "$reason"
+	' sh "http://$1/" 2>/dev/null || true
+}
+
+# X1..X6 — the mirror shape, a TCP primary with an HTTP secondary (#1672).
 verify_tcpfirst() {
-	local name
+	local name target got proto deadline
 	name="$(fqdn mp-tcpfirst)"
 	log "X1 the TCP mesh port of a TCP-primary service with an HTTP port: $name:$MESH_TCP_PORT"
 	expect_all X1 tcp_probe_batch "$name:$MESH_TCP_PORT" revtcp 180 \
@@ -632,8 +669,43 @@ verify_tcpfirst() {
 
 	log "X3 HTTP on its secondary port: http://$name:$HTTP_PORT/"
 	expect_all X3 http_probe_batch "$name:$HTTP_PORT" revhttp 90 \
-		"the HTTP port of a TCP-primary service is not served as HTTP"
+		"the HTTP port of a TCP-primary service is not served as HTTP ('revtcp' or NOREPLY: a per-VIP chain with no port took the connection from the HTTP chain)"
 	ok "$PROBES/$PROBES answered by the HTTP container"
+
+	# :18081 and the portless URL are "the primary port, over HTTP"
+	# (docs/workload-requirements.md, "How a spelling resolves"), and this
+	# primary is raw TCP: they name no port. HTTP can say so, so it does: 421 and
+	# a reason, at once. A 502 is the request forwarded to the raw-TCP port as
+	# h2; a 200 'revhttp' means these spellings now resolve to a non-primary HTTP
+	# port: update this leg and the document together.
+	log "X4 the HTTP mesh port and the portless URL of a TCP-primary service are refused by name"
+	for target in "$name:$MESH_HTTP_PORT" "$name"; do
+		deadline=$((SECONDS + 60))
+		while true; do
+			got="$(http_refusal "$target")"
+			[ "$got" = "421 primary-not-http" ] && break
+			[ "$SECONDS" -lt "$deadline" ] ||
+				die "X4: http://$target/ answered '${got:-<nothing>}', want '421 primary-not-http' — 502 is the request sent to the raw-TCP primary; 200 means the spelling resolves to the HTTP secondary"
+			sleep 5
+		done
+	done
+	ok "http://$name:$MESH_HTTP_PORT/ and http://$name/: 421, x-aether-error: primary-not-http"
+
+	log "X5 the generated mesh Service of mp-tcpfirst"
+	proto="$(kc -n "$TEST_NS" get svc mp-tcpfirst -o jsonpath='{.metadata.annotations.aether\.io/app-protocol}' 2>/dev/null || true)"
+	[ "$proto" = "tcp" ] ||
+		die "X5: the mesh Service mp-tcpfirst carries aether.io/app-protocol='${proto:-<unset>}', want 'tcp' — its primary port is raw TCP, whatever protocols it is listed under"
+	ok "app-protocol tcp"
+
+	if [ "$MP_REGISTRY_BACKEND" != "etcd" ]; then
+		log "X6 registration: skipped — see M6"
+		return
+	fi
+	log "X6 registration: mp-tcpfirst under BOTH protocol keys"
+	got="$(registry_protocols mp-tcpfirst | tr '\n' ' ')"
+	[ "$got" = "PROTOCOL_HTTP PROTOCOL_TCP " ] ||
+		die "X6: mp-tcpfirst is registered under '${got:-<nothing>}', want 'PROTOCOL_HTTP PROTOCOL_TCP'"
+	ok "mp-tcpfirst: PROTOCOL_HTTP + PROTOCOL_TCP"
 }
 
 # registry_protocols SERVICE — the protocols SERVICE has an endpoint under, one
@@ -647,6 +719,10 @@ registry_protocols() {
 # M6 — one pod, two keys. This replaces a check that read the pod's own
 # annotation back, which the pod carries whether or not anything honoured it.
 verify_registration() {
+	if [ "$MP_REGISTRY_BACKEND" != "etcd" ]; then
+		log "M6 registration: skipped — the '$MP_REGISTRY_BACKEND' backend derives endpoints from the pods and has no per-protocol key to read"
+		return
+	fi
 	log "M6 registration: mp-mixed under BOTH protocol keys, mp-httponly under one"
 	local got
 	got="$(registry_protocols mp-mixed | tr '\n' ' ')"
@@ -685,11 +761,8 @@ verify() {
 	verify_tcp
 	verify_registration
 	verify_service
-	log "all multi-protocol assertions passed (control, three HTTP spellings, the TCP port, the TCP mesh port, dual registration, the mesh Service)"
-	if kc -n "$TEST_NS" get deploy mp-tcpfirst >/dev/null 2>&1; then
-		verify_tcpfirst
-		log "the mirror shape passed too (TCP primary + HTTP secondary)"
-	fi
+	verify_tcpfirst
+	log "all multi-protocol assertions passed (control; HTTP primary + TCP secondary: three HTTP spellings, the TCP port, the TCP mesh port, dual registration, the mesh Service; TCP primary + HTTP secondary: the TCP mesh port, the primary port, the HTTP port, the refused HTTP spellings, the mesh Service, dual registration)"
 }
 
 down() {

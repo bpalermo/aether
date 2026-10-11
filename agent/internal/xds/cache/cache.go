@@ -43,23 +43,52 @@ import (
 	"go.uber.org/atomic"
 )
 
-// captureTCPEntry describes a non-HTTP mesh service that needs a per-ClusterIP
-// TCP-proxy floor chain on the capture listener.
+// captureTCPEntry describes one mesh service with a routable VIP and the TCP
+// chains it gets on the capture listener. Built by resolveCaptureEntry from
+// what the mesh-Service reconciler delivered and what the cache derived from
+// the registry endpoints.
 type captureTCPEntry struct {
 	serviceName string // bare service name (for cluster name derivation)
 	clusterIP   string // k8s Service ClusterIP (filter-chain prefix_ranges match)
+	// annotatedTCP is the mesh Service's aether.io/app-protocol read as "the
+	// primary port is raw TCP". It is the FALLBACK for primaryIsTCP, used only
+	// while the cache holds no endpoint of the service, and is kept so the
+	// entry can be resolved again when the derivation arrives or goes.
+	annotatedTCP bool
 	// tcpPorts are the service's NON-PRIMARY raw-TCP ports, derived from its
 	// endpoints' port_protocols at registry-load time (proposal 037). Sorted,
 	// so two derivations of the same set compare equal and endpoint churn does
 	// not look like a change -- see equalTCPEntries and Risk 4.
 	tcpPorts []uint32
-	// primaryIsTCP gates the portless /32 floor chain (proposal 037 design (d)).
+	// primaryIsTCP gates the service's floor chains (proposal 037 design (d)):
+	// the TCP mesh port, the primary port and the any-port shim. From the
+	// endpoints when the cache holds any, else annotatedTCP.
 	primaryIsTCP bool
-	// primaryPort is the service's primary application port, derived from its
-	// TCP floor entry. It gives the TCP-primary floor a
-	// destination_port-qualified spelling of its own, so that spelling survives
-	// the any-port shim's removal in Phase 4.
+	// servesHTTP withholds the any-port shim from a TCP-primary service that
+	// also serves an HTTP port (#1672, proxy.CaptureTCPService.ServesHTTP).
+	// Only ever set together with primaryIsTCP, so that an HTTP-primary
+	// service's entry does not change when it is first derived.
+	servesHTTP bool
+	// primaryPort is the service's primary application port when that port is
+	// raw TCP. It gives the TCP-primary floor a destination_port-qualified
+	// spelling of its own, so that spelling survives the any-port shim's
+	// removal in Phase 4.
 	primaryPort uint32
+}
+
+// captureDerivation is what the cache derives about one service from the
+// registry endpoints it holds (deriveCaptureServices). A service the cache
+// holds no endpoint of has none.
+type captureDerivation struct {
+	// primaryIsTCP: the service's primary port is raw TCP
+	// (endpointmeta.ServicePrimaryOf over every listing the service is in).
+	primaryIsTCP bool
+	// primaryPort is that port; zero unless primaryIsTCP.
+	primaryPort uint32
+	// tcpPorts are the raw-TCP ports other than the primary, sorted.
+	tcpPorts []uint32
+	// servesHTTP: at least one endpoint declares an HTTP port.
+	servesHTTP bool
 }
 
 // SnapshotCache wraps go-control-plane's SnapshotCache and manages Envoy
@@ -551,17 +580,16 @@ type SnapshotCache struct {
 	// name, that need per-ClusterIP TCP-proxy floor chains on the capture listener.
 	// A nil/empty slice means all captured traffic goes through the HCM chain.
 	captureTCPServices []captureTCPEntry
-	// captureDerivedTCPPorts / captureDerivedPrimaryPorts are the last per-port
-	// derivation from the registry endpoints (refreshCaptureTCPPorts), keyed by
-	// service and guarded by captureMu. They are kept apart from
-	// captureTCPServices because the two halves of an entry come from different
-	// sources in no fixed order -- the mesh-Service reconciler supplies
-	// name/VIP/class, a registry load supplies the ports -- and either may run
-	// first, or again. SetCaptureTCPServices re-applies them to the entries it
-	// builds; without that, every mesh-Service re-projection erased the
-	// declared-port chains until the next registry load (#1094).
-	captureDerivedTCPPorts     map[string][]uint32
-	captureDerivedPrimaryPorts map[string]uint32
+	// captureDerived is the last derivation from the registry endpoints
+	// (refreshCaptureTCPPorts), keyed by service and guarded by captureMu. It
+	// is kept apart from captureTCPServices because the two halves of an entry
+	// come from different sources in no fixed order -- the mesh-Service
+	// reconciler supplies name and VIP, a registry load supplies the primary's
+	// class and the ports -- and either may run first, or again.
+	// SetCaptureTCPServices re-applies it to the entries it builds; without
+	// that, every mesh-Service re-projection erased the declared-port chains
+	// until the next registry load (#1094).
+	captureDerived map[string]captureDerivation
 	// captureProjected is closed by the first SetCaptureTCPServices call: the
 	// mesh-Service reconciler has delivered the service set that defines the
 	// capture listener's TCP chains at least once (CaptureProjected).
@@ -772,6 +800,11 @@ type clusterEntry struct {
 	// were already protocol-agnostic in behaviour, so UDP needed no new branch
 	// at either, only a name that did not claim otherwise.
 	l4Floor bool
+	// httpPorts are the ports a TCP floor entry's endpoints declare as HTTP,
+	// sorted: non-empty only for a service that serves both protocols. Read by
+	// the cap_http refusal of a TCP-primary service's portless authority
+	// (httpRefusalLocked, #1672); nothing is built from it.
+	httpPorts []uint32
 	// plaintext marks an entry whose published cluster carries NO transport
 	// socket: the UDP floor's "udp:<svc>" (proxy.NewUDPServiceCluster). Such an
 	// entry has no handshake, so its empty sanURIs is not a missing

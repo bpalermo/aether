@@ -19,6 +19,7 @@ import (
 	"aethermesh.dev/common/serviceref"
 	"aethermesh.dev/registrar/internal/server"
 	"aethermesh.dev/registry"
+	"aethermesh.dev/registry/endpointmeta"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -35,6 +36,10 @@ type Generator struct {
 	MeshPort int32
 	Interval time.Duration
 	Log      *slog.Logger
+
+	// primaryDisagreements is what reportPrimaryDisagreements last reported,
+	// by service key. Only the reconcile loop touches it.
+	primaryDisagreements map[string]string
 }
 
 // NeedLeaderElection makes the generator run only on the elected leader (single writer).
@@ -60,21 +65,20 @@ type desiredService struct {
 	service     string
 	namespace   string
 	port        uint32
-	appProtocol string // "http", "tcp" or "udp" -- see protocolAppProtocol
+	appProtocol string // "http", "tcp" or "udp" -- see portProtocolAppProtocol
 }
 
-// protocolAppProtocol maps a registry service protocol to the AnnotationMeshAppProtocol
-// value the generator stamps on the mesh Service (the agent's capture reconciler reads
-// it to decide HCM vs. TCP-floor vs. UDP-floor chain emission).
+// portProtocolAppProtocol maps the protocol of a service's PRIMARY port to the
+// AnnotationMeshAppProtocol value the generator stamps on the mesh Service.
 //
 // A protocol missing from this map yields "", which apply() coerces to
 // AppProtocolHTTP -- so an omission here does not fail, it mislabels the service
-// as HTTP and sends its traffic down the HCM path. Keep it total over
-// registry.ServedProtocols; TestProtocolAppProtocolIsTotal enforces that.
-var protocolAppProtocol = map[registryv1.Service_Protocol]string{
-	registryv1.Service_PROTOCOL_HTTP: AppProtocolHTTP,
-	registryv1.Service_PROTOCOL_TCP:  AppProtocolTCP,
-	registryv1.Service_PROTOCOL_UDP:  AppProtocolUDP,
+// as HTTP. Keep it total over registry.ServedProtocols;
+// TestProtocolAppProtocolIsTotal enforces that.
+var portProtocolAppProtocol = map[registryv1.PortProtocol]string{
+	registryv1.PortProtocol_PORT_PROTOCOL_HTTP: AppProtocolHTTP,
+	registryv1.PortProtocol_PORT_PROTOCOL_TCP:  AppProtocolTCP,
+	registryv1.PortProtocol_PORT_PROTOCOL_UDP:  AppProtocolUDP,
 }
 
 // reconcile makes the managed Services equal the snapshot catalog: create missing,
@@ -93,46 +97,77 @@ func (g *Generator) reconcile(ctx context.Context) {
 	}
 }
 
-// buildDesiredServices iterates all protocols in the snapshot and builds the
-// desired map of mesh VIP Services. Ordered (registry.ServedProtocols) for
-// determinism.
+// buildDesiredServices builds the desired map of mesh VIP Services: one per
+// service name, labelled with the protocol of the service's PRIMARY port.
+//
+// A service may be registered under MORE than one protocol since proposal 037:
+// a pod advertising an HTTP port and a raw-TCP port is written under both keys,
+// with the same row. Which listings a service is in therefore says which
+// protocols it SERVES, not what its primary port speaks, and the two differ
+// for a pod with a raw-TCP primary and an HTTP secondary.
+//
+// This used to give the Service to the first protocol iterated (HTTP), so such
+// a service was labelled "http" (#1672). The label is now read from the
+// endpoints themselves -- port_protocols[port], through
+// endpointmeta.ServicePrimaryOf, the one rule the agent applies too -- over
+// every listing the service is in, and does not depend on iteration order.
 func (g *Generator) buildDesiredServices(ctx context.Context) map[client.ObjectKey]desiredService {
-	desired := map[client.ObjectKey]desiredService{}
-	// A service may be registered under MORE than one protocol since proposal
-	// 037: a pod advertising an HTTP port and a raw TCP port is written under
-	// both keys. Iterate every protocol so each service gets a mesh Service
-	// labelled with the app-protocol its primary port speaks.
-	//
-	// Iteration order is registry.ServedProtocols' order (HTTP, TCP, UDP), which
-	// makes the no-clobber convergence below deterministic when a name appears
-	// under several: the first protocol iterated wins.
+	// Every protocol is read, so a service registered under any of them gets a
+	// mesh Service. Only endpoints carrying a Kubernetes namespace count: the
+	// Service lives in that namespace.
+	listings := map[string][]endpointmeta.Listing{}
 	for _, protocol := range registry.ServedProtocols {
-		appProto := protocolAppProtocol[protocol]
 		for svcKey, eps := range g.Snapshot.GetAll(protocol) {
-			// The registry key is namespace-qualified "<ns>/<svc>" (020 Part 1):
-			// the mesh VIP Service lives in <ns> with the bare ServiceAccount name.
-			ref, ok := serviceref.ParseKey(svcKey)
-			if !ok {
-				g.Log.WarnContext(ctx, "skipping malformed (non-namespaced) service key", "key", svcKey)
-				continue
-			}
-			ep := firstNamespaced(eps)
-			if ep == nil {
-				continue
-			}
-			key := client.ObjectKey{Namespace: ref.Namespace, Name: ref.Name}
-			if _, exists := desired[key]; exists {
-				continue // already claimed by an earlier protocol; one Service per name
-			}
-			desired[key] = desiredService{
-				service:     ref.Name,
-				namespace:   ref.Namespace,
-				port:        ep.GetPort(),
-				appProtocol: appProto,
+			if namespaced := namespacedEndpoints(eps); len(namespaced) > 0 {
+				listings[svcKey] = append(listings[svcKey], endpointmeta.Listing{Protocol: protocol, Endpoints: namespaced})
 			}
 		}
 	}
+
+	desired := make(map[client.ObjectKey]desiredService, len(listings))
+	disagreeing := make(map[string]string)
+	for svcKey, ls := range listings {
+		// The registry key is namespace-qualified "<ns>/<svc>" (020 Part 1):
+		// the mesh VIP Service lives in <ns> with the bare ServiceAccount name.
+		ref, ok := serviceref.ParseKey(svcKey)
+		if !ok {
+			g.Log.WarnContext(ctx, "skipping malformed (non-namespaced) service key", "key", svcKey)
+			continue
+		}
+		primary := endpointmeta.ServicePrimaryOf(ls...)
+		if primary.Disagree() {
+			disagreeing[svcKey] = primary.String()
+		}
+		desired[client.ObjectKey{Namespace: ref.Namespace, Name: ref.Name}] = desiredService{
+			service:     ref.Name,
+			namespace:   ref.Namespace,
+			port:        primary.Port,
+			appProtocol: portProtocolAppProtocol[primary.Protocol],
+		}
+	}
+	g.reportPrimaryDisagreements(ctx, disagreeing)
 	return desired
+}
+
+// reportPrimaryDisagreements says, once per distinct state, which services have
+// endpoints that declare different primary ports or protocols, and what each
+// side declares. now maps a service key to ServicePrimary.String().
+//
+// It is expected for the length of a rollout that changes a workload's primary
+// port or its protocol, and a misconfiguration when it lasts (two workloads
+// under one ServiceAccount with different declarations): the mesh Service can
+// carry one label, so the callers of the losing side's primary are not served
+// on the mesh ports. The reconcile loop runs every Interval, so an unchanged
+// disagreement is not repeated; a change in the counts is.
+func (g *Generator) reportPrimaryDisagreements(ctx context.Context, now map[string]string) {
+	for svcKey, candidates := range now {
+		if g.primaryDisagreements[svcKey] == candidates {
+			continue
+		}
+		g.Log.WarnContext(ctx, "the endpoints of a mesh service declare different primary ports or protocols; the mesh Service is labelled for the first candidate",
+			"service", svcKey, "candidates", candidates)
+	}
+	g.primaryDisagreements = now
 }
 
 // pruneServices deletes managed mesh Services that are no longer in desired.
@@ -164,8 +199,9 @@ func (g *Generator) pruneServices(ctx context.Context, managed corev1.ServiceLis
 //     uncaptured `https://<svc>/` fails immediately with ECONNREFUSED instead
 //     of hanging in a CNI-dependent way. They carry no data path of their own.
 //
-// All four are TCP at the Kubernetes level; the mesh protocol is a separate
-// axis carried by the aether.io/app-protocol annotation.
+// All four are TCP at the Kubernetes level; the mesh protocol of the service's
+// primary port is a separate axis carried by the aether.io/app-protocol
+// annotation.
 func meshServicePorts(meshPort int32) []corev1.ServicePort {
 	return []corev1.ServicePort{
 		{Name: "mesh", Port: meshPort, Protocol: corev1.ProtocolTCP, TargetPort: intstr.FromInt32(meshPort)},
@@ -197,8 +233,10 @@ func samePorts(got, want []corev1.ServicePort) bool {
 }
 
 // AppProtocolHTTP / AppProtocolTCP / AppProtocolUDP are the
-// AnnotationMeshAppProtocol values the generator writes (and the agent reads to
-// decide HCM vs. TCP-floor vs. UDP-floor chain emission).
+// AnnotationMeshAppProtocol values the generator writes: the protocol of the
+// service's primary port. The agent reads the same fact from the endpoints it
+// holds and falls back on this annotation only for a service it has no
+// endpoint of yet (agent/internal/xds/cache, captureTCPEntry).
 const (
 	AppProtocolHTTP = "http"
 	AppProtocolTCP  = "tcp"
@@ -272,11 +310,24 @@ func (g *Generator) apply(ctx context.Context, d desiredService) {
 	}
 }
 
-func firstNamespaced(eps []*registryv1.ServiceEndpoint) *registryv1.ServiceEndpoint {
+// namespacedEndpoints returns the endpoints that carry a Kubernetes namespace,
+// in order. It returns eps itself when all of them do, which is the usual case.
+func namespacedEndpoints(eps []*registryv1.ServiceEndpoint) []*registryv1.ServiceEndpoint {
+	all := true
 	for _, ep := range eps {
-		if ep.GetKubernetesMetadata().GetNamespace() != "" {
-			return ep
+		if ep.GetKubernetesMetadata().GetNamespace() == "" {
+			all = false
+			break
 		}
 	}
-	return nil
+	if all {
+		return eps
+	}
+	out := make([]*registryv1.ServiceEndpoint, 0, len(eps))
+	for _, ep := range eps {
+		if ep.GetKubernetesMetadata().GetNamespace() != "" {
+			out = append(out, ep)
+		}
+	}
+	return out
 }

@@ -14,6 +14,7 @@ import (
 	registryv1 "aethermesh.dev/api/aether/registry/v1"
 	meshconst "aethermesh.dev/common/constants/mesh"
 	"aethermesh.dev/registry"
+	"aethermesh.dev/registry/endpointmeta"
 	clusterv3 "github.com/envoyproxy/go-control-plane/envoy/config/cluster/v3"
 	endpointv3 "github.com/envoyproxy/go-control-plane/envoy/config/endpoint/v3"
 	routev3 "github.com/envoyproxy/go-control-plane/envoy/config/route/v3"
@@ -364,27 +365,16 @@ func (c *SnapshotCache) LoadClustersFromRegistry(ctx context.Context, clusterNam
 	c.subsetHeaderKeys = proxy.SortSubsetKeys(nodeSubsetKeys)
 	c.subsetMu.Unlock()
 
-	// Refresh each capture-TCP service's derived per-port set (proposal 037).
-	// Derived from BOTH listings: a service whose pods split across protocols
-	// appears in each, and either carries the full port_protocols map.
+	// Refresh what the capture chains are decided from: each service's
+	// primary class and its per-port set (proposal 037, #1672). Derived from
+	// EVERY listing: a pod serving several protocols is in each, and a
+	// service's primary is decided once over all of them.
 	//
-	// This is a no-op unless a declared port set actually changed — endpoint
-	// churn yields the same sorted slice — which is what keeps per-pod capture
+	// This is a no-op unless a resolved entry actually changed — endpoint
+	// churn yields the same derivation — which is what keeps per-pod capture
 	// listeners from being regenerated, and their connections drained, on every
 	// pod ADD/DEL (Risk 4).
-	derived := deriveTCPPorts(tcpServiceEndpoints)
-	for svc, ports := range deriveTCPPorts(serviceEndpoints) {
-		if _, have := derived[svc]; !have {
-			derived[svc] = ports
-		}
-	}
-	primary := make(map[string]uint32, len(tcpServiceEndpoints))
-	for svc, eps := range tcpServiceEndpoints {
-		if len(eps) > 0 {
-			primary[svc] = eps[0].GetPort()
-		}
-	}
-	c.refreshCaptureTCPPorts(derived, primary)
+	c.refreshCaptureTCPPorts(deriveCaptureServices(serviceEndpoints, tcpServiceEndpoints, udpServiceEndpoints))
 
 	c.log.DebugContext(ctx, "loaded clusters from registry", "count", loaded,
 		"servicesReused", reusedN, "servicesBuilt", builtN)
@@ -468,7 +458,7 @@ func (c *SnapshotCache) buildHTTPClustersLocked(deps map[string]struct{}, servic
 			c.buildHTTPServiceEntryLocked(dst, serviceName, endpoints, gammaRoutes, chainFilters, in, subsetKeys)
 		}
 		refresh := func(names []string) {
-			c.refreshReusedVhostsLocked(names, serviceName, endpoints, gammaRoutes, chainFilters)
+			c.refreshReusedVhostsLocked(names, serviceName, gammaRoutes, chainFilters)
 		}
 		keys, _ := c.reuseOrBuildLocked(reusePassHTTP, serviceName, endpoints, false, in, prev, reuse, build, refresh)
 		for _, k := range keys {
@@ -484,7 +474,13 @@ func (c *SnapshotCache) buildHTTPClustersLocked(deps map[string]struct{}, servic
 // costs no version and keeps it exact. The default entry is keyed by the bare
 // service name; every other entry carrying a vhost is a per-port one, keyed by
 // its cluster name. Port aliases carry none. Caller must hold clusterMu.
-func (c *SnapshotCache) refreshReusedVhostsLocked(names []string, serviceName string, endpoints []*registryv1.ServiceEndpoint, gammaRoutes map[string][]proxy.GammaRoute, chainFilters map[string]proxy.ExtensionFilter) {
+//
+// The default entry's port is read back from the entry (its sni is the default
+// port, set when it was built from these same rows) rather than decided again
+// from the endpoints: this runs for every reused service on every refresh, and
+// the point of reuse is that a refresh does not walk the rows of a service
+// that did not change.
+func (c *SnapshotCache) refreshReusedVhostsLocked(names []string, serviceName string, gammaRoutes map[string][]proxy.GammaRoute, chainFilters map[string]proxy.ExtensionFilter) {
 	fqdn := proxy.ServiceClusterName(serviceName, c.meshDomain)
 	for _, name := range names {
 		e := c.clusters[name]
@@ -492,7 +488,7 @@ func (c *SnapshotCache) refreshReusedVhostsLocked(names []string, serviceName st
 			continue
 		}
 		if name == serviceName {
-			e.vhost = outboundVhostWithChainFilter(fqdn, []string{fqdn, fmt.Sprintf("%s:%d", fqdn, endpoints[0].GetPort())}, gammaRoutes[serviceName], chainFilters, serviceName)
+			e.vhost = outboundVhostWithChainFilter(fqdn, []string{fqdn, fmt.Sprintf("%s:%d", fqdn, primaryPortOf(e))}, gammaRoutes[serviceName], chainFilters, serviceName)
 		} else {
 			e.vhost = outboundPortVhostWithChainFilter(name, chainFilters, serviceName)
 		}
@@ -500,11 +496,34 @@ func (c *SnapshotCache) refreshReusedVhostsLocked(names []string, serviceName st
 	}
 }
 
-// buildHTTPServiceEntryLocked builds the cluster entries for one HTTP service
-// (default port cluster + per-non-default-port clusters + port aliases) into
-// dst. Every input it reads is either in the #1115 reuse key (registryreuse.go)
-// or re-derived on reuse (the vhosts); keep it that way when adding one. Caller
-// must hold clusterMu.
+// httpListingPrimary is the primary port of a service as its HTTP listing
+// declares it, with the class of that port.
+//
+// The HTTP listing is every endpoint that serves AN HTTP port, so the primary
+// it yields is not necessarily an HTTP port: a pod with a raw-TCP primary and
+// an HTTP secondary is listed here too (#1672). Decided over this listing
+// alone, by the rule every component uses (endpointmeta.ServicePrimaryOf): the
+// listing's rows are the whole of this builder's #1115 reuse key, so it cannot
+// read another listing without that listing entering the key.
+func httpListingPrimary(endpoints []*registryv1.ServiceEndpoint) endpointmeta.ServicePrimary {
+	return endpointmeta.ServicePrimaryOf(endpointmeta.Listing{Protocol: registryv1.Service_PROTOCOL_HTTP, Endpoints: endpoints})
+}
+
+// buildHTTPServiceEntryLocked builds the cluster entries for one service in the
+// HTTP listing into dst: when its primary port speaks HTTP, the default cluster
+// and its port aliases; and one cluster per other HTTP port. Every input it
+// reads is either in the #1115 reuse key (registryreuse.go) or re-derived on
+// reuse (the vhosts); keep it that way when adding one. Caller must hold
+// clusterMu.
+//
+// A service whose primary port is NOT HTTP gets no default cluster (#1672).
+// "<fqdn>" and "<fqdn>:18081" address the primary port over HTTP; aimed at a
+// raw-TCP port they produced an h2 cluster whose every request was a 502. Such
+// a service is in this listing only because it also serves an HTTP port, and
+// that port gets its per-port cluster like any other non-default one. Its
+// bare-name load assignment is then owned by its TCP floor entry
+// (ownsBareCLALocked), and cap_http refuses the two authorities by name
+// (httpRefusalLocked).
 func (c *SnapshotCache) buildHTTPServiceEntryLocked(dst map[string]clusterEntry, serviceName string, endpoints []*registryv1.ServiceEndpoint, gammaRoutes map[string][]proxy.GammaRoute, chainFilters map[string]proxy.ExtensionFilter, in reuseInputs, nodeSubsetKeys map[string]struct{}) {
 	// The outbound service cluster speaks per-source mTLS HTTP/2 to each
 	// destination pod's mesh inbound (pod_ip:18008). The per-source mTLS transport
@@ -515,25 +534,29 @@ func (c *SnapshotCache) buildHTTPServiceEntryLocked(dst map[string]clusterEntry,
 	sortedKeys := endpointSubsetKeys(endpoints, nodeSubsetKeys)
 
 	fqdn := proxy.ServiceClusterName(serviceName, c.meshDomain)
-	// Default/primary port: what the portless FQDN resolves to. Endpoints of
-	// one service share the primary; take the first.
-	defaultPort := endpoints[0].GetPort()
+	// Default/primary port: what the portless FQDN resolves to, when it
+	// speaks HTTP. Endpoints of one service share the primary.
+	primary := httpListingPrimary(endpoints)
+	defaultPort := primary.Port
+	defaultIsHTTP := primary.Protocol == registryv1.PortProtocol_PORT_PROTOCOL_HTTP
 
-	defaultCla, defaultEpMap, buckets := buildHTTPEndpointBuckets(serviceName, endpoints, in.localRegion, in.localZone, in.waypoint, defaultPort)
+	defaultCla, defaultEpMap, buckets := buildHTTPEndpointBuckets(serviceName, endpoints, in.localRegion, in.localZone, in.waypoint, defaultPort, defaultIsHTTP)
 
-	dst[serviceName] = clusterEntry{
-		cluster:        proxy.NewServiceCluster(fqdn, serviceName, serviceName, sortedKeys),
-		loadAssignment: defaultCla,
-		endpoints:      defaultEpMap,
-		vhost:          outboundVhostWithChainFilter(fqdn, []string{fqdn, fmt.Sprintf("%s:%d", fqdn, defaultPort)}, gammaRoutes[serviceName], chainFilters, serviceName),
-		sanNamespaces:  sanNamespaces,
-		service:        serviceName,
-		sni:            strconv.Itoa(int(defaultPort)),
+	if defaultIsHTTP {
+		dst[serviceName] = clusterEntry{
+			cluster:        proxy.NewServiceCluster(fqdn, serviceName, serviceName, sortedKeys),
+			loadAssignment: defaultCla,
+			endpoints:      defaultEpMap,
+			vhost:          outboundVhostWithChainFilter(fqdn, []string{fqdn, fmt.Sprintf("%s:%d", fqdn, defaultPort)}, gammaRoutes[serviceName], chainFilters, serviceName),
+			sanNamespaces:  sanNamespaces,
+			service:        serviceName,
+			sni:            strconv.Itoa(int(defaultPort)),
+		}
+
+		c.buildPortAliasesLocked(dst, serviceName, fqdn, defaultPort, sanNamespaces, sortedKeys, buckets)
 	}
 
-	c.buildPortAliasesLocked(dst, serviceName, fqdn, defaultPort, sanNamespaces, sortedKeys, buckets)
-
-	// One cluster per non-default advertised port.
+	// One cluster per non-default advertised HTTP port.
 	for port, b := range buckets {
 		portName := proxy.PortClusterName(serviceName, c.meshDomain, port)
 		pcla := proxy.NewClusterLoadAssignment(portName)
@@ -651,9 +674,29 @@ type portBucket struct {
 	epMap map[string]*endpointv3.LocalityLbEndpoints
 }
 
+// servesPortAsHTTP reports whether an endpoint read from the HTTP listing serves
+// port as HTTP. A port its port_protocols does not name takes the protocol the
+// endpoint was listed under (the rule of an endpoint written before proposal
+// 037), which here is HTTP.
+func servesPortAsHTTP(endpoint *registryv1.ServiceEndpoint, port uint32) bool {
+	switch endpoint.GetPortProtocols()[port] {
+	case registryv1.PortProtocol_PORT_PROTOCOL_UNSPECIFIED, registryv1.PortProtocol_PORT_PROTOCOL_HTTP:
+		return true
+	default:
+		return false
+	}
+}
+
 // buildHTTPEndpointBuckets builds the default CLA/epMap and per-port buckets for a
 // service's endpoints.
-func buildHTTPEndpointBuckets(serviceName string, endpoints []*registryv1.ServiceEndpoint, localRegion, localZone string, waypoint proxy.WaypointRewrite, defaultPort uint32) (*endpointv3.ClusterLoadAssignment, map[string]*endpointv3.LocalityLbEndpoints, map[uint32]*portBucket) {
+//
+// A bucket holds the endpoints that serve its port AS HTTP: membership is by
+// (port, protocol), not by port (proposal 037 design (c)). A port an endpoint
+// declares raw TCP or UDP gets no bucket from it, so no h2 cluster is built
+// for a port that cannot answer one. defaultIsHTTP is false for a service
+// whose primary port is not HTTP: nothing is then set aside as the default,
+// and the returned default CLA is not published.
+func buildHTTPEndpointBuckets(serviceName string, endpoints []*registryv1.ServiceEndpoint, localRegion, localZone string, waypoint proxy.WaypointRewrite, defaultPort uint32, defaultIsHTTP bool) (*endpointv3.ClusterLoadAssignment, map[string]*endpointv3.LocalityLbEndpoints, map[uint32]*portBucket) {
 	// Default cluster: name = FQDN, EDS = bare service (all endpoints), vhost
 	// carries both the portless and :defaultPort domains, SNI = default port.
 	defaultCla := proxy.NewClusterLoadAssignment(serviceName)
@@ -673,7 +716,10 @@ func buildHTTPEndpointBuckets(serviceName string, endpoints []*registryv1.Servic
 			served = []uint32{endpoint.GetPort()}
 		}
 		for _, p := range served {
-			if p == defaultPort {
+			if defaultIsHTTP && p == defaultPort {
+				continue
+			}
+			if !servesPortAsHTTP(endpoint, p) {
 				continue
 			}
 			b := buckets[p]
@@ -770,7 +816,9 @@ func (c *SnapshotCache) buildTCPClustersLocked(deps map[string]struct{}, tcpServ
 // clusterMu.
 func (c *SnapshotCache) buildTCPServiceEntriesLocked(dst map[string]clusterEntry, serviceName string, endpoints []*registryv1.ServiceEndpoint, owns bool, in reuseInputs) {
 	sanNamespaces := endpointSANNamespaces(endpoints)
-	defaultPort := endpoints[0].GetPort()
+	// The primary as this listing declares it, by the rule every component
+	// uses; see httpListingPrimary for why one listing.
+	defaultPort := endpointmeta.ServicePrimaryOf(endpointmeta.Listing{Protocol: registryv1.Service_PROTOCOL_TCP, Endpoints: endpoints}).Port
 	cla, epMap := buildTCPEndpoints(serviceName, endpoints, owns, in.localRegion, in.localZone, in.waypoint)
 
 	tcpName := proxy.TCPClusterName(serviceName, c.meshDomain)
@@ -781,6 +829,7 @@ func (c *SnapshotCache) buildTCPServiceEntriesLocked(dst map[string]clusterEntry
 		service:        serviceName,
 		sni:            strconv.Itoa(int(defaultPort)),
 		l4Floor:        true,
+		httpPorts:      declaredHTTPPorts(endpoints),
 	}
 
 	buildTCPPortEntries(dst, serviceName, tcpName, endpoints, defaultPort, sanNamespaces, in.localRegion, in.localZone, in.waypoint)
@@ -843,10 +892,7 @@ func buildTCPPortEntries(
 		l4Floor:       true,
 	}
 
-	for _, port := range nonPrimaryTCPPorts(endpoints) {
-		if port == defaultPort {
-			continue
-		}
+	for _, port := range nonPrimaryTCPPorts(defaultPort, endpoints) {
 		members := make([]*registryv1.ServiceEndpoint, 0, len(endpoints))
 		for _, ep := range endpoints {
 			if ep.GetPortProtocols()[port] == registryv1.PortProtocol_PORT_PROTOCOL_TCP {
@@ -876,6 +922,23 @@ func buildTCPPortEntries(
 			l4Floor:        true,
 		}
 	}
+}
+
+// declaredHTTPPorts returns the ports a TCP-listed service's endpoints declare
+// as HTTP, sorted. Non-empty only for a service that serves both protocols; it
+// is what cap_http names when it refuses the portless authority of a service
+// whose primary port is raw TCP (httpRefusalLocked).
+func declaredHTTPPorts(endpoints []*registryv1.ServiceEndpoint) []uint32 {
+	var ports []uint32
+	for _, ep := range endpoints {
+		for port, proto := range ep.GetPortProtocols() {
+			if proto == registryv1.PortProtocol_PORT_PROTOCOL_HTTP && !slices.Contains(ports, port) {
+				ports = append(ports, port)
+			}
+		}
+	}
+	slices.Sort(ports)
+	return ports
 }
 
 // buildTCPEndpoints builds a TCP service's endpoint map and, when this entry

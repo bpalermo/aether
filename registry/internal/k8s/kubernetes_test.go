@@ -1552,3 +1552,95 @@ func TestPodToEndpointPopulatesPorts(t *testing.T) {
 	assert.Equal(t, []uint32{7070, 8080, 9090}, got[0].GetPorts())
 	assert.Equal(t, uint32(8080), got[0].GetPort())
 }
+
+// TestListingsCarryAPodUnderEveryProtocolItServes is the kubernetes half of
+// #1672, and of proposal 037's "the two backends converge".
+//
+// The write-based backends hold a pod that serves an HTTP port and a raw-TCP
+// port under BOTH protocol keys, because the registering agent writes it once
+// per protocol. This backend derives the listings from the pods, and it
+// filtered them by the pod-level endpoint.aether.io/protocol alone. A mixed pod
+// was therefore in one listing only, and on this backend:
+//
+//   - HTTP primary + `9000=tcp`: absent from the TCP listing, so the agent
+//     built the per-port capture chain (from the row) and no cluster for it;
+//   - TCP primary + `8080=h1`: absent from the HTTP listing, so its HTTP port
+//     had no cluster at all.
+//
+// A listing for P is now every pod that serves at least one port of P.
+func TestListingsCarryAPodUnderEveryProtocolItServes(t *testing.T) {
+	httpFirst := withAnnotations(
+		managedPod("pod-httpfirst", "default", "httpfirst", "10.0.0.1", "node-1"),
+		map[string]string{
+			aetherannotations.AnnotationEndpointPort:  "8080",
+			aetherannotations.AnnotationEndpointPorts: "8080,9000=tcp",
+		},
+	)
+	tcpFirst := withAnnotations(
+		managedPod("pod-tcpfirst", "default", "tcpfirst", "10.0.0.2", "node-1"),
+		map[string]string{
+			aetherannotations.AnnotationEndpointProtocol: aetherannotations.ProtocolTCP,
+			aetherannotations.AnnotationEndpointPort:     "9000",
+			aetherannotations.AnnotationEndpointPorts:    "9000,8080=h1",
+		},
+	)
+	httpOnly := managedPod("pod-http", "default", "httponly", "10.0.0.3", "node-1")
+	tcpOnly := withAnnotations(
+		managedPod("pod-tcp", "default", "tcponly", "10.0.0.4", "node-1"),
+		map[string]string{aetherannotations.AnnotationEndpointProtocol: aetherannotations.ProtocolTCP},
+	)
+	udpWithTCP := withAnnotations(
+		managedPod("pod-udp", "default", "udpfirst", "10.0.0.5", "node-1"),
+		map[string]string{
+			aetherannotations.AnnotationEndpointProtocol: aetherannotations.ProtocolUDP,
+			aetherannotations.AnnotationEndpointPort:     "5353",
+			aetherannotations.AnnotationEndpointPorts:    "5353,9000=tcp",
+		},
+	)
+	r := newTestRegistry("test-cluster", httpFirst.DeepCopy(), tcpFirst.DeepCopy(), httpOnly.DeepCopy(),
+		tcpOnly.DeepCopy(), udpWithTCP.DeepCopy(), topologyNode("node-1", "us-east-1", "us-east-1a"))
+
+	services := func(protocol registryv1.Service_Protocol) []string {
+		t.Helper()
+		all, err := r.ListAllEndpoints(context.Background(), protocol)
+		require.NoError(t, err)
+		names := make([]string, 0, len(all))
+		for name := range all {
+			names = append(names, name)
+		}
+		return names
+	}
+	assert.ElementsMatch(t, []string{"default/httpfirst", "default/tcpfirst", "default/httponly"},
+		services(registryv1.Service_PROTOCOL_HTTP))
+	assert.ElementsMatch(t, []string{"default/httpfirst", "default/tcpfirst", "default/tcponly", "default/udpfirst"},
+		services(registryv1.Service_PROTOCOL_TCP))
+	assert.ElementsMatch(t, []string{"default/udpfirst"}, services(registryv1.Service_PROTOCOL_UDP))
+
+	// The same row under each protocol, with the primary and the class of every
+	// port: that is what the primary's protocol is read from, on either side.
+	for _, protocol := range []registryv1.Service_Protocol{registryv1.Service_PROTOCOL_HTTP, registryv1.Service_PROTOCOL_TCP} {
+		got, err := r.ListEndpoints(context.Background(), "default/tcpfirst", protocol)
+		require.NoError(t, err)
+		require.Len(t, got, 1, "protocol=%v", protocol)
+		assert.Equal(t, uint32(9000), got[0].GetPort())
+		assert.Equal(t, map[uint32]registryv1.PortProtocol{
+			9000: registryv1.PortProtocol_PORT_PROTOCOL_TCP,
+			8080: registryv1.PortProtocol_PORT_PROTOCOL_HTTP,
+		}, got[0].GetPortProtocols())
+		assert.Equal(t, registryv1.PortProtocol_PORT_PROTOCOL_TCP, endpointmeta.PrimaryProtocol(got[0], protocol),
+			"listed under %v, and its primary port is still raw TCP", protocol)
+	}
+
+	// A pod whose ports annotation does not parse is in no listing, like one
+	// whose protocol annotation does not.
+	bad := withAnnotations(
+		managedPod("pod-bad", "default", "bad", "10.0.0.9", "node-1"),
+		map[string]string{aetherannotations.AnnotationEndpointPorts: "8080,9000=sctp"},
+	)
+	r = newTestRegistry("test-cluster", bad.DeepCopy(), httpOnly.DeepCopy(), topologyNode("node-1", "us-east-1", "us-east-1a"))
+	for _, protocol := range []registryv1.Service_Protocol{registryv1.Service_PROTOCOL_HTTP, registryv1.Service_PROTOCOL_TCP} {
+		all, err := r.ListAllEndpoints(context.Background(), protocol)
+		require.NoError(t, err, "one malformed pod must not fail the listing")
+		assert.NotContains(t, all, "default/bad", "protocol=%v", protocol)
+	}
+}

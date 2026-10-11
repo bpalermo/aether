@@ -233,12 +233,20 @@ func TestNoNonDefaultClusterSharesTheBareServiceEDSName(t *testing.T) {
 		9000: registryv1.PortProtocol_PORT_PROTOCOL_TCP,
 		8080: registryv1.PortProtocol_PORT_PROTOCOL_TCP,
 	}
+	// Two TCP pods to the one HTTP pod. The service's pods disagree about its
+	// primary port (9000 raw TCP here, 8080 HTTP there), and the capture chains
+	// are decided for the primary of the most endpoints
+	// (endpointmeta.ServicePrimaryOf) rather than by the mesh Service's
+	// annotation, as they were when this fixture had one pod of each (#1672).
+	tcpMulti2 := makeEndpoint("10.0.0.21", "cluster-1", "node-2", 9000)
+	tcpMulti2.Ports = tcpMulti.Ports
+	tcpMulti2.PortProtocols = tcpMulti.PortProtocols
 	reg := &mockRegistry{
 		tcpAware: true,
 		listAllEndpointsFunc: func(_ context.Context, protocol registryv1.Service_Protocol) (map[string][]*registryv1.ServiceEndpoint, error) {
 			if protocol == registryv1.Service_PROTOCOL_TCP {
 				return map[string][]*registryv1.ServiceEndpoint{
-					"demo/mixed": {tcpMulti},
+					"demo/mixed": {tcpMulti, tcpMulti2},
 				}, nil
 			}
 			return map[string][]*registryv1.ServiceEndpoint{

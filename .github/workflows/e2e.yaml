@@ -529,20 +529,23 @@ jobs:
             # data path being broken (#873/#874).
             grep -i "UDPRoute input discarded" /tmp/l4-logs/agent.log > /tmp/l4-logs/udp-discards.log 2>&1 || true
 
-  # --- Proposal 037: HTTP and raw TCP on ONE pod (endpoint.aether.io/ports
-  # "8080,9000=tcp").
+  # --- Proposal 037: HTTP and raw TCP on ONE pod, in both orders
+  # (endpoint.aether.io/ports "8080,9000=tcp" with an HTTP primary, and
+  # "9000,8080=h1" with a raw-TCP primary).
   # ONE kind cluster, SPIRE on and the etcd registry, for l4-routes' reasons (no
-  # TCP path without mTLS; the backend that keys an endpoint by protocol). Two
-  # workloads with the same two listeners, one declaring the TCP port and one
-  # not (the control). Asserts by the marker of the container that answered:
-  # the undeclared :9000 is never reachable through the mesh; on the mixed
-  # service HTTP on :18081, portless and on :8080 reaches the HTTP container and
-  # raw TCP on :9000 the TCP one (the per-port capture chain and the inbound's
-  # per-port floor chain); :18082 names no port of an HTTP-primary service; the
-  # pod is registered under both protocol keys; the generated Service exposes
-  # both mesh ports. Harness: e2e/multiprotocol.sh (its header has the red
-  # half, MP_MIXED_PORTS=8080, and the mirror shape that is not in the gate;
-  # neither is run here).
+  # TCP path without mTLS; the backend that keys an endpoint by protocol). Three
+  # workloads with the same two listeners: the two mixed shapes and one that
+  # does not declare the TCP port (the control). Asserts by the marker of the
+  # container that answered: the undeclared :9000 is never reachable through
+  # the mesh; on the HTTP-primary service HTTP on :18081, portless and on :8080
+  # reaches the HTTP container and raw TCP on :9000 the TCP one (the per-port
+  # capture chain and the inbound's per-port floor chain), and :18082 names no
+  # port; on the TCP-primary service raw TCP on :18082 and :9000 reaches the
+  # TCP container, HTTP on :8080 the HTTP one, and HTTP on :18081 and portless
+  # is refused 421 by name (#1672); each pod is registered under both protocol
+  # keys; each generated Service exposes both mesh ports and is labelled by
+  # what its primary port speaks. Harness: e2e/multiprotocol.sh (its header has
+  # the red half, MP_MIXED_PORTS=8080, which is not run here).
   multiprotocol:
     needs: build
     if: github.event_name == 'schedule' || github.event.inputs.only == 'all' || github.event.inputs.only == 'multiprotocol'

@@ -6,6 +6,7 @@ import (
 	cniv1 "aethermesh.dev/api/aether/cni/v1"
 	registryv1 "aethermesh.dev/api/aether/registry/v1"
 	aetherannotations "aethermesh.dev/common/constants/annotations"
+	clusterv3 "github.com/envoyproxy/go-control-plane/envoy/config/cluster/v3"
 	corev3 "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
 	endpointv3 "github.com/envoyproxy/go-control-plane/envoy/config/endpoint/v3"
 	"github.com/stretchr/testify/assert"
@@ -226,4 +227,53 @@ func sockAddr(ip string, port uint32) *corev3.Address {
 			PortSpecifier: &corev3.SocketAddress_PortValue{PortValue: port},
 		},
 	}}
+}
+
+// TestNewAppDeliveryClusters_ProbeFollowsThePrimaryPortsClass: the delegated
+// liveness probe is on the PRIMARY port and takes that port's protocol, which
+// is the pod-level annotation only when the primary carries no suffix of its
+// own (endpointmeta.PortProtocols). A pod declaring `ports: "9000=tcp,8080"`
+// with port 9000 and the default pod-level protocol has a raw-TCP primary; it
+// was probed with an HTTP GET, which a raw-TCP listener never answers, so the
+// endpoint was never promoted. A sibling of #1672: the same question, "what
+// does the primary port speak", answered from the wrong field.
+func TestNewAppDeliveryClusters_ProbeFollowsThePrimaryPortsClass(t *testing.T) {
+	pod := func(annotations map[string]string) *cniv1.CNIPod {
+		return &cniv1.CNIPod{
+			Name: "p-0", Namespace: "aether-test", NetworkNamespace: "/var/run/netns/x",
+			Annotations: annotations,
+		}
+	}
+	isHTTPProbe := func(c *clusterv3.Cluster) bool {
+		return c.GetHealthChecks()[0].GetHttpHealthCheck() != nil
+	}
+
+	// The suffix on the primary port decides, over the pod-level default.
+	_, health := NewAppDeliveryClusters(pod(map[string]string{
+		aetherannotations.AnnotationEndpointPort:  "9000",
+		aetherannotations.AnnotationEndpointPorts: "9000=tcp,8080",
+	}), "")
+	require.NotNil(t, health)
+	assert.False(t, isHTTPProbe(health), "the primary port is declared raw TCP: a TCP connect, not an HTTP GET")
+
+	_, health = NewAppDeliveryClusters(pod(map[string]string{
+		aetherannotations.AnnotationEndpointProtocol: aetherannotations.ProtocolTCP,
+		aetherannotations.AnnotationEndpointPort:     "8080",
+		aetherannotations.AnnotationEndpointPorts:    "8080=h1,9000",
+	}), "")
+	require.NotNil(t, health)
+	assert.True(t, isHTTPProbe(health), "the primary port is declared HTTP although the pod-level default is tcp")
+
+	// Both orders of a mixed pod whose primary takes the pod-level protocol.
+	_, health = NewAppDeliveryClusters(pod(map[string]string{
+		aetherannotations.AnnotationEndpointProtocol: aetherannotations.ProtocolTCP,
+		aetherannotations.AnnotationEndpointPort:     "9000",
+		aetherannotations.AnnotationEndpointPorts:    "9000,8080=h1",
+	}), "")
+	assert.False(t, isHTTPProbe(health))
+	_, health = NewAppDeliveryClusters(pod(map[string]string{
+		aetherannotations.AnnotationEndpointPort:  "8080",
+		aetherannotations.AnnotationEndpointPorts: "8080,9000=tcp",
+	}), "")
+	assert.True(t, isHTTPProbe(health))
 }

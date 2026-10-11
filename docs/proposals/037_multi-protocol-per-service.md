@@ -7,9 +7,19 @@ per-port protocol, port-qualified L4 routes, the any-port shim and the soak's
 per-port TCP leg); L4 observability shipped (#1043, per-service `tcp_`/`udp_`
 floor stat keys and the `aether_l4_access_logs` stream). Phase 4 (remove the
 portless floor chain) is pending: the any-port shim (`cap_tcp_anyport_<svc>`)
-is still emitted for a TCP-primary service. One Phase 3 item was not built: the
+is still emitted for a service that is raw TCP throughout (not for a TCP-primary
+service that also serves HTTP, #1672). One Phase 3 item was not built: the
 GAMMA projector does not reject an HTTPRoute `backendRef.port` that names a
 raw-TCP port (see *Open questions*).
+
+**What shipped differs from this text in three places**, each marked *Shipped*
+where it occurs: the two mesh ports name the **primary** port and never a
+"default port of protocol P" (*Two mesh ports*); `aether.io/app-protocol` is the
+class of the primary port, and `aether.io/port-protocols` was not built (design
+(d), *Registrar generator*); and the TCP-primary-with-HTTP-secondary shape, which
+the phases above left without a raw-TCP path, works since #1672. The user-facing
+statement of the rules is `docs/workload-requirements.md`, "How a spelling
+resolves".
 **Author:** Bruno Palermo
 **Date:** 2026-09-20
 **History:** first draft resolved the bare-name spelling to "the primary port,
@@ -230,6 +240,16 @@ What the port means, precisely:
   if it is of protocol P, else the lowest-numbered port of protocol P, else
   none. Deterministic, order-independent, and equal to "the primary" for every
   single-protocol service that exists today.
+
+> **Shipped.** The "else the lowest-numbered port of protocol P" arm was not
+> built, and is not the rule. `:18081` and the portless HTTP URL are **the
+> primary port, over HTTP**; `:18082` is **the primary port, as raw TCP**. On a
+> service whose primary is of the other class the spelling names nothing: raw
+> TCP to `:18082` of an HTTP-primary service is not answered, and HTTP to
+> `:18081` or the portless URL of a TCP-primary service is refused with 421 and
+> `x-aether-error: primary-not-http` (#1672). A secondary port is addressed by
+> its number. Read every "default HTTP port" / "default TCP port" below as "the
+> primary port, when it is of that class".
 
 The bare name is protocol-neutral: mesh DNS answers it with the ClusterIP
 (`SetMeshDNSRecords`, `agent/internal/capture/reconciler.go:112`), which has no
@@ -680,6 +700,19 @@ today. The generator additionally stamps `aether.io/port-protocols:
 "8080=http,9000=tcp"` for tooling and for the webhook; the agent does not
 depend on it.
 
+> **Shipped.** `aether.io/app-protocol` is the class of the service's
+> **primary** port (`endpointmeta.ServicePrimaryOf`, read from the endpoints'
+> `port_protocols[port]` over every listing the service is in), not "http when
+> any HTTP port exists". Until #1672 the generator gave the label to the first
+> protocol it iterated, which is the "any HTTP port" rule by accident; the
+> agent read it as the primary's class, built a TCP-primary service with an
+> HTTP secondary no floor, and aimed its default HTTP cluster at the raw-TCP
+> port. The cache now decides the floor from the endpoints it holds, as this
+> section says it should, and uses the annotation only for a service it holds
+> no endpoint of yet. A TCP-primary service that also serves HTTP gets
+> `cap_tcp_<S>` on `:18082` and on its primary port and **no** any-port shim.
+> `aether.io/port-protocols` was not built.
+
 ### (e) Inbound: per-port floor chains
 
 `buildInboundFilterChains` (`ingress.go:167-185`) emits, per served port, an HCM
@@ -819,6 +852,15 @@ the union. The merge is order-independent (a sorted union; map order is
 protocol-visible, #135). The generated Service exposes `mesh` (18081) and
 `mesh-tcp` (18082), and `apply` converges `Spec.Ports` on existing Services,
 which it does not do today.
+
+> **Shipped.** `port` and `appProtocol` both come from the service's primary
+> (`endpointmeta.ServicePrimaryOf`): `appProtocol` is the class of the primary
+> port, see design (d). When the endpoints of one service declare different
+> primaries, the pair most endpoints declare wins (on a tie HTTP, then TCP,
+> then UDP, then the lower port) and the generator logs the disagreement once
+> per distinct state. The kubernetes backend lists a pod under every protocol
+> it serves a port of since #1672; before, it filtered by the pod-level
+> annotation alone and a mixed pod was in one listing.
 
 ## Migration path
 

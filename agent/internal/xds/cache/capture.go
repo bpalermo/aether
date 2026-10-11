@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"aethermesh.dev/common/serviceref"
+	"aethermesh.dev/registry/endpointmeta"
 
 	"aethermesh.dev/agent/internal/capture"
 	"aethermesh.dev/agent/internal/meshdns"
@@ -152,6 +153,7 @@ func (c *SnapshotCache) generateCaptureListener(cniPod *cniv1.CNIPod, trustDomai
 			TCPPorts:     e.tcpPorts,
 			PrimaryIsTCP: e.primaryIsTCP,
 			PrimaryPort:  e.primaryPort,
+			ServesHTTP:   e.servesHTTP,
 			ClusterIP:    e.clusterIP,
 			// L4 route rules (Phase 3b): override the passthrough floor chain when
 			// a TCPRoute or TLSRoute is attached to this service.
@@ -285,10 +287,11 @@ func (c *SnapshotCache) SetCaptureAuthorities(authorities map[string]string) {
 // and regenerates the xDS snapshot so Envoy picks up the new filter chains.
 func (c *SnapshotCache) SetCaptureTCPServices(services []capture.CaptureTCPService) {
 	c.captureMu.Lock()
-	// The reconciler knows a service's name, VIP and primary class; its PORTS
-	// are derived by the cache from the registry endpoints
-	// (refreshCaptureTCPPorts), on the registry's schedule. Carry the last
-	// derivation into every entry built here. Dropping it -- as this did until
+	// The reconciler knows a service's name and VIP, and what the mesh Service
+	// says its primary speaks; the primary's class and the PORTS are derived by
+	// the cache from the registry endpoints (refreshCaptureTCPPorts), on the
+	// registry's schedule, and the endpoints win (resolveCaptureEntry). Carry
+	// the last derivation into every entry built here. Dropping it -- as this did until
 	// #1094 -- made an unchanged re-projection compare as a change (the derived
 	// fields went to zero), so every mesh-Service event rebuilt every capture
 	// listener WITHOUT its destination_port chains: a connection to a declared
@@ -300,13 +303,8 @@ func (c *SnapshotCache) SetCaptureTCPServices(services []capture.CaptureTCPServi
 	entries := make([]captureTCPEntry, 0, len(services))
 	for _, s := range services {
 		if s.ServiceName != "" && s.ClusterIP != "" {
-			entries = append(entries, captureTCPEntry{
-				serviceName:  s.ServiceName,
-				clusterIP:    s.ClusterIP,
-				primaryIsTCP: s.PrimaryIsTCP,
-				tcpPorts:     c.captureDerivedTCPPorts[s.ServiceName],
-				primaryPort:  c.captureDerivedPrimaryPorts[s.ServiceName],
-			})
+			d, known := c.captureDerived[s.ServiceName]
+			entries = append(entries, resolveCaptureEntry(s.ServiceName, s.ClusterIP, s.PrimaryIsTCP, d, known))
 		}
 	}
 	changed := !equalTCPEntries(c.captureTCPServices, entries)
@@ -849,8 +847,18 @@ func (c *SnapshotCache) appendSABackedCaptureVhosts(vhosts []*routev3.VirtualHos
 		// the caller would get a 503 with cluster_not_found —
 		// indistinguishable from a cluster that vanished mid-reload, and never
 		// reaching ODCDS so even the coordinator's 404 does not occur.
-		if spellings := c.tcpSpellingsIfNoHTTPPortLocked(svc); spellings != "" {
-			vhosts = append(vhosts, proxy.BuildNoHTTPPortVirtualHost(mesh, domains, spellings))
+		//
+		// A service whose primary port is raw TCP and which ALSO serves HTTP
+		// (#1672) is refused on the same authorities, with a different
+		// reason: the portless and :18081 spellings name the primary port
+		// over HTTP, and that port does not speak it. Its HTTP ports are
+		// addressed by number and are not in these domains.
+		if refusal := c.httpRefusalLocked(svc); refusal.tcpSpellings != "" {
+			if refusal.httpSpellings != "" {
+				vhosts = append(vhosts, proxy.BuildPrimaryNotHTTPVirtualHost(mesh, domains, refusal.httpSpellings, refusal.tcpSpellings))
+			} else {
+				vhosts = append(vhosts, proxy.BuildNoHTTPPortVirtualHost(mesh, domains, refusal.tcpSpellings))
+			}
 			continue
 		}
 
@@ -1207,8 +1215,14 @@ func equalTCPEntries(a, b []captureTCPEntry) bool {
 		// That is the whole of Risk 4's mitigation: regenerating a per-pod
 		// capture listener drains its connections, so this comparison has to be
 		// over the DERIVED set and not over the reload event.
+		//
+		// annotatedTCP is deliberately NOT compared: it is an input, and it
+		// changes nothing while the endpoints decide. A registrar that
+		// corrects a mesh Service's label (#1672) therefore rebuilds no
+		// listener on a node that already holds the service's endpoints.
 		if !slices.Equal(prev.tcpPorts, e.tcpPorts) ||
 			prev.primaryIsTCP != e.primaryIsTCP ||
+			prev.servesHTTP != e.servesHTTP ||
 			prev.primaryPort != e.primaryPort {
 			return false
 		}
@@ -1300,54 +1314,130 @@ func (c *SnapshotCache) podExtensionHTTPFilters(cniPod *cniv1.CNIPod, shared []*
 	return shared
 }
 
-// deriveTCPPorts returns each service's NON-PRIMARY raw-TCP ports, from the
-// port_protocols its endpoints declare (proposal 037).
+// deriveCaptureServices returns, for every service the listings hold an
+// endpoint of, what the capture chains are decided from: whether its primary
+// port is raw TCP and which port that is, its NON-PRIMARY raw-TCP ports, and
+// whether it serves an HTTP port (proposal 037, #1672).
 //
-// The primary port is excluded on purpose: it is what the portless floor chain
-// already reaches, so a chain for it would add nothing and would need the same
-// cluster the floor already uses. Everything returned here is a port that has
-// no data path today.
+// The three arguments are the HTTP, TCP and UDP listings. A pod serving ports
+// of several protocols is in several of them with the same row; the primary is
+// decided once over all of them (endpointmeta.ServicePrimaryOf, the rule the
+// registrar labels the mesh Service by).
+//
+// The primary port is excluded from tcpPorts on purpose: it is what the floor
+// chains already reach, so a per-port chain for it would add nothing and would
+// need the same cluster the floor already uses.
 //
 // Classification comes from the ENDPOINTS rather than from the mesh Service's
 // aether.io/app-protocol annotation. That annotation is the registrar's
 // projection of a per-pod fact, one hop removed from its source, and #878 is
-// what happens when the two copies disagree. Deriving here means the chain and
-// the cluster that serves it are built from one map in one snapshot
-// generation, which is also the structural half of #877 — a chain whose
-// cluster was never built kills connections silently, and tcp_proxy has no
-// ODCDS cold path to recover.
+// what happens when the two copies disagree -- as is #1672, where the
+// annotation said "http" about a service whose primary port is raw TCP and the
+// floor was keyed on it. Deriving here means the chain and the cluster that
+// serves it are built from one map in one snapshot generation, which is also
+// the structural half of #877: a chain whose cluster was never built kills
+// connections silently, and tcp_proxy has no ODCDS cold path to recover.
 //
-// The result is sorted so that two derivations over the same declared ports
-// compare equal regardless of map iteration order. equalTCPEntries depends on
-// that: endpoint churn must not read as a change, or every pod ADD/DEL would
-// regenerate per-pod capture listeners and drain their connections (Risk 4).
-func deriveTCPPorts(endpointsByService map[string][]*registryv1.ServiceEndpoint) map[string][]uint32 {
-	out := make(map[string][]uint32, len(endpointsByService))
-	for service, endpoints := range endpointsByService {
-		if ports := nonPrimaryTCPPorts(endpoints); len(ports) > 0 {
-			out[service] = ports
+// Every slice in the result is sorted so that two derivations over the same
+// declared ports compare equal regardless of map iteration order.
+// equalTCPEntries depends on that: endpoint churn must not read as a change,
+// or every pod ADD/DEL would regenerate per-pod capture listeners and drain
+// their connections (Risk 4).
+func deriveCaptureServices(httpEndpoints, tcpEndpoints, udpEndpoints map[string][]*registryv1.ServiceEndpoint) map[string]captureDerivation {
+	out := make(map[string]captureDerivation, len(httpEndpoints)+len(tcpEndpoints)+len(udpEndpoints))
+	derive := func(service string) {
+		if _, done := out[service]; done {
+			return
 		}
+		h, t, u := httpEndpoints[service], tcpEndpoints[service], udpEndpoints[service]
+		primary := endpointmeta.ServicePrimaryOf(
+			endpointmeta.Listing{Protocol: registryv1.Service_PROTOCOL_HTTP, Endpoints: h},
+			endpointmeta.Listing{Protocol: registryv1.Service_PROTOCOL_TCP, Endpoints: t},
+			endpointmeta.Listing{Protocol: registryv1.Service_PROTOCOL_UDP, Endpoints: u},
+		)
+		if !primary.Known() {
+			return
+		}
+		d := captureDerivation{
+			primaryIsTCP: primary.Protocol == registryv1.PortProtocol_PORT_PROTOCOL_TCP,
+			tcpPorts:     nonPrimaryTCPPorts(primary.Port, t, h, u),
+			// Being in the HTTP listing is serving an HTTP port. The rows are
+			// read as well because a registrar on the kubernetes backend from
+			// before #1672 lists a pod under its pod-level protocol only.
+			servesHTTP: len(h) > 0 || declaresHTTPPort(t, u),
+		}
+		if d.primaryIsTCP {
+			d.primaryPort = primary.Port
+		}
+		out[service] = d
+	}
+	for service := range tcpEndpoints {
+		derive(service)
+	}
+	for service := range httpEndpoints {
+		derive(service)
+	}
+	for service := range udpEndpoints {
+		derive(service)
 	}
 	return out
 }
 
-// nonPrimaryTCPPorts returns one service's raw-TCP ports excluding its primary,
-// sorted and de-duplicated across its endpoints. Empty when the service has
-// none — which is every service that existed before proposal 037, since a pod
-// with one declared protocol has exactly one class and its primary carries it.
-func nonPrimaryTCPPorts(endpoints []*registryv1.ServiceEndpoint) []uint32 {
-	if len(endpoints) == 0 {
-		return nil
+// declaresHTTPPort reports whether any endpoint of the listings declares a port
+// of class HTTP in its port_protocols.
+func declaresHTTPPort(listings ...[]*registryv1.ServiceEndpoint) bool {
+	for _, endpoints := range listings {
+		for _, ep := range endpoints {
+			for _, proto := range ep.GetPortProtocols() {
+				if proto == registryv1.PortProtocol_PORT_PROTOCOL_HTTP {
+					return true
+				}
+			}
+		}
 	}
-	// Endpoints of one service share a primary port (proposal 005), so the
-	// first is representative.
-	primary := endpoints[0].GetPort()
+	return false
+}
+
+// resolveCaptureEntry builds a service's capture entry from what the
+// mesh-Service reconciler delivered (name, VIP, annotatedTCP) and the cache's
+// derivation d, which is authoritative when known.
+//
+// Without a derivation the cache holds no endpoint of the service, and the
+// annotation is all there is. It is used exactly as before the endpoints
+// decided -- including the any-port shim for a "tcp" service -- because a
+// restarted agent projects the mesh Services before it has loaded every
+// service's endpoints, and serving a listener without a chain the running
+// proxy has connections on would drain them (#1094).
+func resolveCaptureEntry(serviceName, clusterIP string, annotatedTCP bool, d captureDerivation, known bool) captureTCPEntry {
+	e := captureTCPEntry{
+		serviceName:  serviceName,
+		clusterIP:    clusterIP,
+		annotatedTCP: annotatedTCP,
+		primaryIsTCP: annotatedTCP,
+	}
+	if known {
+		e.primaryIsTCP = d.primaryIsTCP
+		e.servesHTTP = d.primaryIsTCP && d.servesHTTP
+		e.primaryPort = d.primaryPort
+		e.tcpPorts = d.tcpPorts
+	}
+	return e
+}
+
+// nonPrimaryTCPPorts returns one service's raw-TCP ports excluding primary,
+// sorted and de-duplicated across the endpoints of every listing given. Empty
+// when the service has none — which is every service that existed before
+// proposal 037, since a pod with one declared protocol has exactly one class
+// and its primary carries it.
+func nonPrimaryTCPPorts(primary uint32, listings ...[]*registryv1.ServiceEndpoint) []uint32 {
 	seen := map[uint32]struct{}{}
-	for _, ep := range endpoints {
-		for port, proto := range ep.GetPortProtocols() {
-			if proto == registryv1.PortProtocol_PORT_PROTOCOL_TCP &&
-				port != primary && port > 0 && port <= 65535 {
-				seen[port] = struct{}{}
+	for _, endpoints := range listings {
+		for _, ep := range endpoints {
+			for port, proto := range ep.GetPortProtocols() {
+				if proto == registryv1.PortProtocol_PORT_PROTOCOL_TCP &&
+					port != primary && port > 0 && port <= 65535 {
+					seen[port] = struct{}{}
+				}
 			}
 		}
 	}
@@ -1362,9 +1452,10 @@ func nonPrimaryTCPPorts(endpoints []*registryv1.ServiceEndpoint) []uint32 {
 	return ports
 }
 
-// refreshCaptureTCPPorts updates each capture-TCP service's derived per-port
-// set and, ONLY if any of them changed, rebuilds the per-pod capture listeners
-// so the new destination_port chains reach Envoy (proposal 037).
+// refreshCaptureTCPPorts updates each capture service's derivation -- the
+// class of its primary port and its per-port set -- and, ONLY if a resolved
+// entry changed, rebuilds the per-pod capture listeners so the new chains
+// reach Envoy (proposal 037).
 //
 // It reuses SetCaptureTCPServices' entry list and its change detection rather
 // than adding a second regeneration trigger: one comparison, over the derived
@@ -1373,20 +1464,18 @@ func nonPrimaryTCPPorts(endpoints []*registryv1.ServiceEndpoint) []uint32 {
 // every pod ADD/DEL anywhere on the node — so a trigger keyed on "a reload
 // occurred" rather than "the derived set changed" would turn ordinary churn
 // into dropped connections.
-func (c *SnapshotCache) refreshCaptureTCPPorts(derived map[string][]uint32, primary map[string]uint32) {
+func (c *SnapshotCache) refreshCaptureTCPPorts(derived map[string]captureDerivation) {
 	c.captureMu.Lock()
 	// Keep the derivation itself, not only its application to today's entries:
 	// a service the reconciler projects AFTER this load (the order at agent
-	// start) or projects again later gets these ports from
-	// SetCaptureTCPServices (#1094). Both maps are freshly built by the caller
-	// and never mutated afterwards, so holding them is safe.
-	c.captureDerivedTCPPorts = derived
-	c.captureDerivedPrimaryPorts = primary
+	// start) or projects again later gets it from SetCaptureTCPServices
+	// (#1094). The map is freshly built by the caller and never mutated
+	// afterwards, so holding it is safe.
+	c.captureDerived = derived
 	next := make([]captureTCPEntry, 0, len(c.captureTCPServices))
 	for _, e := range c.captureTCPServices {
-		e.tcpPorts = derived[e.serviceName]
-		e.primaryPort = primary[e.serviceName]
-		next = append(next, e)
+		d, known := derived[e.serviceName]
+		next = append(next, resolveCaptureEntry(e.serviceName, e.clusterIP, e.annotatedTCP, d, known))
 	}
 	changed := !equalTCPEntries(c.captureTCPServices, next)
 	c.captureTCPServices = next
@@ -1399,7 +1488,7 @@ func (c *SnapshotCache) refreshCaptureTCPPorts(derived map[string][]uint32, prim
 	// embed the TCP chains, so they all have to be regenerated.
 	shared := c.extensionHTTPFilters()
 	c.listenerMu.Lock()
-	c.rebuildPodListenersLocked("derived TCP port set change", shared)
+	c.rebuildPodListenersLocked("derived TCP chain set change", shared)
 	c.listenerMu.Unlock()
 }
 
@@ -1483,10 +1572,11 @@ func (c *SnapshotCache) reconcileCaptureTCPChains() {
 	c.listenerMu.Unlock()
 }
 
-// primaryPortOf returns the primary application port a TCP floor entry
-// addresses, from its sni field (which buildTCPClustersLocked sets to the
-// service's default port). Zero when unset or unparseable, which callers treat
-// as "no alias".
+// primaryPortOf returns the primary application port a TCP floor entry or a
+// default HTTP entry addresses, from its sni field (which
+// buildTCPServiceEntriesLocked and buildHTTPServiceEntryLocked set to the
+// service's default port). Zero when unset or unparseable, which the floor's
+// callers treat as "no alias".
 func primaryPortOf(entry clusterEntry) uint32 {
 	if entry.sni == "" {
 		return 0
@@ -1554,33 +1644,50 @@ func (c *SnapshotCache) tcpPortClustersLocked(
 	return out, clas
 }
 
-// tcpSpellingsIfNoHTTPPortLocked returns the TCP spellings a caller should use
-// for a service that serves NO HTTP port, or "" when the service has one (and
-// therefore gets an ordinary vhost). Caller must hold clusterMu or be on a path
-// that does.
+// httpRefusal is why and how cap_http refuses the portless and mesh-port
+// authorities of a service whose primary port does not speak HTTP.
+type httpRefusal struct {
+	// tcpSpellings are the addresses that reach the primary port as raw TCP.
+	// Empty when the service is not refused.
+	tcpSpellings string
+	// httpSpellings are the addresses of the HTTP ports the service does
+	// serve. Empty for a service that serves none.
+	httpSpellings string
+}
+
+// httpRefusalLocked returns the refusal for a service that has no default HTTP
+// cluster, or the zero value when it has one (and therefore gets an ordinary
+// vhost). Takes clusterMu itself; the caller holds captureMu.
 //
-// "No HTTP port" is read from the CACHE, not from the app-protocol annotation:
-// a service has an HTTP port exactly when the HTTP pass built it a default
-// entry under the bare service key. That is the same fact the vhost would point
-// at, so the two cannot disagree — which is the failure #878 was.
+// "No default HTTP cluster" is read from the CACHE, not from the app-protocol
+// annotation: the HTTP pass builds a default entry under the bare service key
+// exactly when the service's primary port speaks HTTP. That is the same fact
+// the vhost would point at, so the two cannot disagree — which is the failure
+// #878 was.
 //
-// Returns "" for a service the cache knows nothing about yet, so a service
+// The zero value for a service the cache knows nothing about yet, so a service
 // mid-warm gets the ordinary cold path rather than a 421 it would have to
 // retry past.
-func (c *SnapshotCache) tcpSpellingsIfNoHTTPPortLocked(svc string) string {
+func (c *SnapshotCache) httpRefusalLocked(svc string) httpRefusal {
 	c.clusterMu.RLock()
 	_, hasHTTP := c.clusters[svc]
 	tcpEntry, hasTCP := c.clusters[proxy.TCPClusterName(svc, c.meshDomain)]
 	c.clusterMu.RUnlock()
 
 	if hasHTTP || !hasTCP {
-		return ""
+		return httpRefusal{}
 	}
 
 	fqdn := proxy.ServiceClusterName(svc, c.meshDomain)
-	spellings := fmt.Sprintf("%s:%d", fqdn, meshconst.ProxyL4OutboundPort)
+	out := httpRefusal{tcpSpellings: fmt.Sprintf("%s:%d", fqdn, meshconst.ProxyL4OutboundPort)}
 	if p := primaryPortOf(tcpEntry); p != 0 {
-		spellings += fmt.Sprintf(" or %s:%d", fqdn, p)
+		out.tcpSpellings += fmt.Sprintf(" or %s:%d", fqdn, p)
 	}
-	return spellings
+	for i, p := range tcpEntry.httpPorts {
+		if i > 0 {
+			out.httpSpellings += " or "
+		}
+		out.httpSpellings += fmt.Sprintf("%s:%d", fqdn, p)
+	}
+	return out
 }

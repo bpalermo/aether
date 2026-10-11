@@ -182,3 +182,56 @@ func TestAnyPortShimIsCountedSeparately(t *testing.T) {
 	assert.Equal(t, uint32(9000), prefixes["cap_tcp_tcp:echo-tcp.aether-test.aether.internal_9000"],
 		"the service's own primary port keeps working after the shim is removed")
 }
+
+// TestGenerateCaptureListener_TCPPrimaryWithHTTPPortGetsNoAnyPortShim is the
+// third shape of the same gate (#1672): a service whose primary port is raw TCP
+// and which also serves an HTTP port.
+//
+// It needs the floor on the TCP mesh port and on its primary port, or it has
+// no raw-TCP path at all. It must NOT get the any-port shim: that chain matches
+// the VIP on every port nothing else claims, outranks the HCM catch-all
+// (prefix_ranges is matched before application_protocols), and would forward
+// HTTP sent to <VIP>:8080, :18081 and :80 to the raw-TCP primary as bytes.
+func TestGenerateCaptureListener_TCPPrimaryWithHTTPPortGetsNoAnyPortShim(t *testing.T) {
+	pod := &cniv1.CNIPod{Name: "p1", NetworkNamespace: "/var/run/netns/p1"}
+	const cluster = "tcp:tcpfirst.aether-test.aether.internal"
+
+	chainsOf := func(svc CaptureTCPService) (qualified map[uint32]string, portless []string) {
+		t.Helper()
+		l, err := GenerateCaptureListener(pod, "spiffe://aether.internal/ns/default/sa/test",
+			15001, "aether.internal", false, []CaptureTCPService{svc}, true, nil)
+		require.NoError(t, err)
+		qualified = map[uint32]string{}
+		for _, fc := range l.GetFilterChains() {
+			m := fc.GetFilterChainMatch()
+			if len(m.GetPrefixRanges()) == 0 {
+				continue // the HCM catch-all
+			}
+			if m.GetDestinationPort() == nil {
+				portless = append(portless, fc.GetName())
+				continue
+			}
+			qualified[m.GetDestinationPort().GetValue()] = fc.GetName()
+		}
+		return qualified, portless
+	}
+
+	svc := CaptureTCPService{ClusterName: cluster, ClusterIP: "10.96.1.50", PrimaryIsTCP: true, PrimaryPort: 9000, ServesHTTP: true}
+	qualified, portless := chainsOf(svc)
+	assert.Empty(t, portless, "a per-VIP chain with no destination_port takes the VIP's HTTP ports from the HCM chain")
+	assert.Equal(t, map[uint32]string{
+		18082: "cap_tcp_" + cluster + "_18082",
+		9000:  "cap_tcp_" + cluster + "_9000",
+	}, qualified, "the TCP mesh port and the primary port, as raw TCP, and nothing on the HTTP port")
+
+	// The control: the same service without an HTTP port keeps the shim, so the
+	// assertion above is about ServesHTTP and not about a shim that is gone.
+	svc.ServesHTTP = false
+	_, portless = chainsOf(svc)
+	assert.Equal(t, []string{"cap_tcp_anyport_" + cluster}, portless)
+
+	// An HTTP-primary service is not given a floor by ServesHTTP.
+	qualified, portless = chainsOf(CaptureTCPService{ClusterName: cluster, ClusterIP: "10.96.1.50", PrimaryPort: 8080, ServesHTTP: true})
+	assert.Empty(t, portless)
+	assert.Empty(t, qualified)
+}

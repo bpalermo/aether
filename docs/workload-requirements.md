@@ -287,6 +287,63 @@ the protocols, not to this mesh, and it is why TCP gets a well-known port of
 its own (`18082`) rather than the bare name changing meaning depending on
 which protocol a service's primary port happens to be.
 
+#### A pod that serves both HTTP and raw TCP
+
+One pod may declare ports of both classes, in either order. Which port is the
+**primary** (`endpoint.aether.io/port`) decides what the two mesh ports and the
+portless URL mean; every declared port is always reachable by its own number.
+
+```yaml
+# HTTP primary, raw-TCP secondary
+endpoint.aether.io/port:  "8080"
+endpoint.aether.io/ports: "8080,9000=tcp"
+```
+
+```yaml
+# raw-TCP primary, HTTP secondary
+endpoint.aether.io/protocol: "tcp"      # the class of an unsuffixed port
+endpoint.aether.io/port:     "9000"
+endpoint.aether.io/ports:    "9000,8080=h1"
+```
+
+| Client dials | HTTP primary `8080`, TCP `9000` | TCP primary `9000`, HTTP `8080` |
+|---|---|---|
+| `http://<svc>.<ns>.<domain>/` | port 8080, HTTP | refused: `421`, `x-aether-error: primary-not-http` |
+| `<svc>.<ns>.<domain>:18081` | port 8080, HTTP | refused: `421`, `x-aether-error: primary-not-http` |
+| `http://<svc>.<ns>.<domain>:8080/` | port 8080, HTTP | port 8080, HTTP |
+| `<svc>.<ns>.<domain>:18082` | not answered | port 9000, raw TCP |
+| `<svc>.<ns>.<domain>:9000` | port 9000, raw TCP | port 9000, raw TCP |
+
+The two mesh ports name **the primary port**, each in its own protocol, and
+never a secondary one. So one of them names nothing on a mixed service: raw
+TCP to `:18082` of an HTTP-primary service is not answered (the bytes are never
+forwarded to an HTTP port), and HTTP to `:18081` or to the portless URL of a
+TCP-primary service is refused at once with `421 Misdirected Request` — HTTP
+can say why, so the response carries `x-aether-error: primary-not-http` and a
+body naming the service's HTTP ports and the two TCP spellings. Address the
+secondary port by its number.
+
+Details worth knowing:
+
+- The pod is registered under both protocols, and the generated mesh Service
+  carries `aether.io/app-protocol` = the class of the **primary** port (`tcp`
+  for the second manifest above), on both registry backends.
+- A service that is raw TCP throughout still answers on *any* port of its
+  address (deprecated, proposal 037 Phase 4). A TCP-primary service that also
+  serves HTTP does not: only `:18082` and its declared TCP ports are raw TCP,
+  because an any-port rule on that address would take its HTTP ports too.
+- Delegated liveness probes the primary port in the primary port's protocol:
+  an HTTP GET for an HTTP primary, a TCP connect for a raw-TCP one.
+- If the pods behind one ServiceAccount disagree about the primary (a rollout
+  that changes it, or two workloads sharing the ServiceAccount), the mesh
+  treats the service as what most of its endpoints declare (on a tie: HTTP,
+  then the lower port) and the registrar logs the disagreement once per change.
+  Callers of the other declaration's primary are not served on the mesh ports
+  until the pods agree; change a primary with a new ServiceAccount, or accept
+  that window.
+- An `HTTPRoute` parented to a TCP-primary Service is not applied on the
+  portless and `:18081` authorities (they are refused, as above).
+
 **`:18082` does not require redirect-all.** The scoped capture rule diverts
 it alongside `:18081` — on both transports — and the generated mesh Service
 exposes it. A dial to a service's **own** application port (`<svc>:9000`) is

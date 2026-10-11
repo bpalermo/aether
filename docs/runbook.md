@@ -3886,6 +3886,111 @@ object of it changes.
 Measured: the renders (offline, against 2.5.9) and the extractor on the pinned
 proxy. Not run on a cluster.
 
+#### After chart 2.6.0: a service with HTTP and raw-TCP ports is labelled and served by its primary port (#1672)
+
+No chart template changed: this is in the agent and registrar images, and
+reaches a cluster with the first chart published after it. It concerns only
+services whose pods declare ports of **both** classes
+(`endpoint.aether.io/ports` with a `=tcp` or `=h1`/`=h2` suffix that differs
+from the pod's `endpoint.aether.io/protocol`). A service that is HTTP
+throughout, raw TCP throughout or UDP is built exactly as before.
+
+**What was wrong.** A pod with a raw-TCP primary port and an HTTP secondary
+(`protocol: tcp`, port 9000, `ports: "9000,8080=h1"`) had no working primary:
+
+| Registry backend | Before |
+|---|---|
+| `etcd` | mesh Service labelled `aether.io/app-protocol: http`; raw TCP to `:18082` and `:9000` not answered; `http://<svc>:8080/` 200; `http://<svc>:18081/` and `http://<svc>/` **502** |
+| `kubernetes` | mesh Service labelled `tcp`; raw TCP answered on `:18082`, `:9000` **and every other port of the address, the HTTP port included**, so HTTP to the service was never answered. And the mirror shape (HTTP primary, `9000=tcp`) had no raw-TCP path to `:9000` on this backend |
+
+**What is true now, on both backends.** The table in
+`docs/workload-requirements.md`, "A pod that serves both HTTP and raw TCP".
+For the shape above: raw TCP on `:18082` and `:9000`, HTTP on `:8080`, and
+`:18081` and the portless URL refused with `421` and
+`x-aether-error: primary-not-http`. The generated Service's
+`aether.io/app-protocol` is the class of the service's primary port. On the
+`kubernetes` backend a pod is listed under every protocol it serves a port of.
+
+**What an operator sees at the upgrade.**
+
+- The label of an existing mixed, TCP-primary Service changes from `http` to
+  `tcp` on `etcd` (updated in place: same object, same ClusterIP). No other
+  Service changes.
+- A `502` on `http://<svc>:18081/` of such a service becomes a `421` with a
+  body naming the addresses that work. A client that treated the 502 as
+  retriable now gets an answer it should not retry.
+- On the `kubernetes` backend, raw TCP to a port such a service does **not**
+  declare (anything but `:18082` and its declared TCP ports) used to be
+  forwarded to its primary port, and is now refused like any unregistered
+  port. That any-port rule is what took the service's HTTP port; a service
+  that is raw TCP throughout keeps it (deprecated, proposal 037 Phase 4).
+- A new agent decides a service's TCP chains from the endpoints it holds, not
+  from the label, so the label changing rebuilds no listener on a node whose
+  agent is already new.
+
+**Order of the roll, and skew.** The registrar and the agents roll
+independently, and a rollback is a roll, so both mixed states occur. Measured
+on kind (`etcd`), one probe a second across each roll, for the TCP-primary
+shape:
+
+| Registrar | Agent | raw TCP `:18082`, `:9000` | HTTP `:8080` | HTTP `:18081` |
+|---|---|---|---|---|
+| old | old | not answered | 200 | 502 |
+| **new** | old | answered | **not answered** | not answered |
+| old | **new** | answered | 200 | 421 |
+| new | new | answered | 200 | 421 |
+
+The second row is the one to know about: with a new registrar and an old
+agent, the label says `tcp`, the old agent builds the any-port rule for the
+address, and that rule takes the service's HTTP port. On the nodes whose agent
+has not rolled yet, such a service's raw-TCP primary starts working and its
+HTTP secondary stops, until that node's agent is new. It lasts for the agent
+DaemonSet's roll (and for as long as an agent is held back or rolled back
+while the registrar is new). The HTTP-primary shape (`ports: "8080,9000=tcp"`)
+was probed through the same rolls and never changed its answers.
+
+On the `kubernetes` backend the label of a TCP-primary service was already
+`tcp`, and the same rolls were measured with the registrar first: behind a new
+registrar an old agent keeps answering such a service exactly as before (raw
+TCP yes, HTTP no), and the HTTP-primary shape's raw-TCP port **starts**
+working on old agents, because the new registrar lists the pod under TCP too.
+Nothing gets worse in that order. The other order (new agent, old registrar)
+was not run on this backend; by the code, a new agent there serves the raw-TCP
+primary on `:18082` and its declared port only, and the HTTP secondary still
+has no cluster until the registrar is new.
+
+To avoid the second row for a service you depend on, upgrade with the agents
+first (`helm upgrade` rolls both at once; a staged rollout can hold the
+registrar image back), or accept the window: the half that stops was the only
+half that worked, and it comes back with the node's agent.
+
+**If the pods of one service disagree about its primary** the registrar logs,
+once per change of the counts:
+
+```
+the endpoints of a mesh service declare different primary ports or protocols; the mesh Service is labelled for the first candidate  service=<ns>/<svc> candidates="9000/tcp (2 endpoints), 8080/http (1 endpoint)"
+```
+
+The service is treated as what most of its endpoints declare (on a tie HTTP,
+then TCP, then UDP, then the lower port). Expected for the length of a rollout
+that changes a workload's primary port; otherwise two workloads are sharing a
+ServiceAccount with different declarations.
+
+**Troubleshooting a mixed service.**
+
+| Symptom | Cause |
+|---|---|
+| `421`, `x-aether-error: primary-not-http` | HTTP to `:18081` or the portless URL of a service whose primary port is raw TCP. Use `<svc>:<http port>`; the body names it |
+| `421`, `x-aether-error: no-http-port` | HTTP to a service that serves no HTTP port at all |
+| `502` on `:18081` or the portless URL of a TCP-primary service | an agent from before this change on the calling node |
+| HTTP to the service's HTTP port hangs or returns bytes that are not HTTP, raw TCP works | an agent from before this change on the calling node, behind a new registrar (the second row above) or on the `kubernetes` backend |
+| raw TCP to `:18082` of an HTTP-primary service is not answered | by design: `:18082` is the primary port, as raw TCP. Dial the TCP port by its number |
+
+Measured: both shapes on kind with the `etcd` and the `kubernetes` backend
+(`e2e/multiprotocol.sh`, `MP_REGISTRY_BACKEND`), before and after; the four
+rows above on `etcd`, and the registrar-first order on `kubernetes`. Not run
+on a multi-node cluster.
+
 #### The prober chart (#1372, #1373, #1374)
 
 The `prober` chart has the same rule since chart **1.0.5**: its DaemonSet's pod
