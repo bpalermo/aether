@@ -166,6 +166,10 @@ type podOpts struct {
 	adminUnresponsive time.Duration
 	terminationGrace  time.Duration
 	concurrency       int
+	// envoyNeverStarts makes every Envoy the pod's supervisor forks a process
+	// that never becomes one: it holds no hot-restart socket, binds nothing
+	// and answers nothing, until it is signalled.
+	envoyNeverStarts bool
 }
 
 // start launches the pod's supervisor. Envoy is run through a wrapper that
@@ -175,7 +179,11 @@ func (n *node) start(name string, o podOpts) *pod {
 	dir := n.t.TempDir()
 	p := &pod{name: name, n: n, marker: filepath.Join(dir, "ready"), pidFile: filepath.Join(dir, "pids"), done: make(chan error, 1)}
 	wrapper := filepath.Join(dir, "envoy-wrapper.sh")
-	require.NoError(n.t, os.WriteFile(wrapper, []byte("#!/bin/sh\necho $$ >> "+p.pidFile+"\nexec "+n.envoy+" \"$@\"\n"), 0o755))
+	run := "exec " + n.envoy + " \"$@\""
+	if o.envoyNeverStarts {
+		run = "exec sleep 3600"
+	}
+	require.NoError(n.t, os.WriteFile(wrapper, []byte("#!/bin/sh\necho $$ >> "+p.pidFile+"\n"+run+"\n"), 0o755))
 	if o.adminUnresponsive == 0 {
 		o.adminUnresponsive = 5 * time.Second
 	}
