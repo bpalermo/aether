@@ -247,6 +247,8 @@ func equalGammaMatches(a, b []proxy.GammaMatch) bool {
 }
 
 // equalGammaRedirect reports content equality for two *GammaRedirect values.
+// The one copy for both route models: a mesh GammaRoute (equalGammaRoute) and
+// an edge Route (equalRoute) carry the same redirect type.
 func equalGammaRedirect(a, b *proxy.GammaRedirect) bool {
 	if a == nil && b == nil {
 		return true
@@ -258,6 +260,7 @@ func equalGammaRedirect(a, b *proxy.GammaRedirect) bool {
 }
 
 // equalGammaURLRewrite reports content equality for two *GammaURLRewrite values.
+// Shared by equalGammaRoute and equalRoute, like equalGammaRedirect.
 func equalGammaURLRewrite(a, b *proxy.GammaURLRewrite) bool {
 	if a == nil && b == nil {
 		return true
