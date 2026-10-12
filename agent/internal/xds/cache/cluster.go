@@ -149,7 +149,9 @@ func (c *SnapshotCache) clustersEndpointsVhostsAndPinsInto(buf []entryClass, mtl
 		clusters = append(clusters, twins...)
 		clas = append(clas, twinCLAs...)
 		quicClusters += len(twins)
-		if vhost != nil {
+		// A virtual host with no domain claims no authority (a pod port
+		// behind a user Service that has no port for it): not in the table.
+		if vhost != nil && len(vhost.GetDomains()) > 0 {
 			vhosts = append(vhosts, vhost)
 		}
 	}
@@ -163,8 +165,6 @@ func (c *SnapshotCache) clustersEndpointsVhostsAndPinsInto(buf []entryClass, mtl
 	// what their ports are: routed and refused by those ports, like a
 	// service it knows.
 	vhosts = append(vhosts, c.outboundDeclaredVhostsLocked(rules)...)
-	// The short names, last: they answer as the full names above do.
-	vhosts = append(vhosts, proxy.ShortNameVirtualHosts(vhosts, c.meshDomain)...)
 	c.noteQUICFanout(quicClusters, len(quic.pairs), len(quic.identities), len(quic.awaitingCert))
 	sortResourcesByName(clusters)
 	sortResourcesByName(clas)
@@ -295,6 +295,11 @@ func (c *SnapshotCache) LoadClustersFromRegistry(ctx context.Context, clusterNam
 	}
 
 	deps := c.DependencySet()
+	// The generation of the rule inputs, read BEFORE them:
+	// the virtual hosts this refresh builds are recorded as built at it.
+	c.depMu.RLock()
+	loadRuleGen := c.ruleGen
+	c.depMu.RUnlock()
 	// GAMMA L7 rules per service (empty unless --gamma), snapshotted once before
 	// the cluster lock so the per-service outbound vhost can be enriched.
 	gammaRoutes := c.serviceRoutesSnapshot()
@@ -360,6 +365,15 @@ func (c *SnapshotCache) LoadClustersFromRegistry(ctx context.Context, clusterNam
 		listed[svc] = struct{}{}
 	}
 	portMaps := c.servicePortMapsSnapshot()
+	// What the generated Services say of the ports of the services this node
+	// holds no endpoint of: a rule's backendRef to such a service is judged by
+	// them here exactly as in the capture tables and in a snapshot build
+	// (effectivePorts). Without them this refresh, and the rebuild of the
+	// entries' virtual hosts on a rule event, took a cold backend's port on
+	// trust: the loopback table parked a backendRef to a port the backend
+	// does not declare (503 after the on-demand timeout) where the capture
+	// table of the same snapshot answered 500.
+	declared := c.declaredByService()
 
 	c.clusterMu.Lock()
 	// A service that left every listing keeps what was last derived for it
@@ -388,12 +402,18 @@ func (c *SnapshotCache) LoadClustersFromRegistry(ctx context.Context, clusterNam
 	// memo does not re-marshal and re-hash them (#1115, registryreuse.go).
 	in := reuseInputs{localRegion: localRegion, localZone: localZone, waypoint: waypoint}
 	reuse := c.beginRegistryReuseLocked()
-	rules := ruleInputs{routes: gammaRoutes, chainFilters: chainFilters, portMaps: portMaps}
+	rules := ruleInputs{routes: gammaRoutes, chainFilters: chainFilters, portMaps: portMaps, declared: declared}
+	rules.ports = effectivePorts(c.servicePorts, declared)
 	c.buildHTTPClustersLocked(deps, serviceEndpoints, rules, in, nodeSubsetKeys, prev, reuse)
 	c.buildTCPClustersLocked(deps, tcpServiceEndpoints, in, prev, reuse)
 	c.buildUDPClustersLocked(ctx, deps, udpServiceEndpoints, in, prev, reuse)
 	c.commitRegistryReuseLocked(reuse)
 	c.retainAbsentClustersLocked(ctx, prev, deps)
+	// Every virtual host built or refreshed above came from the rule inputs
+	// read at loadRuleGen. If a newer generation exists (an event landed while
+	// the listings were being read), the next snapshot build must rebuild
+	// them: say which generation they are at, never leave a newer one standing.
+	c.vhostRuleGen = loadRuleGen
 	c.pruneServicePortsLocked(listed)
 	c.noteServicePortsLocked(prevPorts)
 	conflicts := c.servicePortConflictsLocked()
@@ -571,6 +591,7 @@ func (c *SnapshotCache) refreshEntryVhosts(ruleGen uint64, rules ruleInputs) {
 	if c.vhostRuleGen == ruleGen {
 		return
 	}
+	rules.ports = effectivePorts(c.servicePorts, rules.declared)
 	for name, e := range c.clusters {
 		if e.vhost == nil || e.l4Floor {
 			continue
@@ -755,6 +776,20 @@ func aliasAuthorityPorts(defaultPort uint32, buckets map[uint32]*portBucket) []u
 	return []uint32{defaultPort}
 }
 
+// hasOwnHTTPCluster reports whether endpoint is a member of an h2 cluster of
+// port p: it serves p as HTTP, and so does the SERVICE.
+//
+// A port the service does not serve as HTTP (its pods disagree, and most
+// declare it raw TCP or UDP) gets no h2 cluster from the pods that do. No
+// route leads to one: the service's answer for the port is the other class,
+// and its HTTP authority is refused. But a cluster that exists can be asked
+// for by name, and it was: a request for "<fqdn>:<port>" parked while the node
+// knew nothing of the service was delivered to those pods when the cluster
+// arrived, where every later request is refused.
+func hasOwnHTTPCluster(endpoint *registryv1.ServiceEndpoint, p uint32, ports servicePorts) bool {
+	return servesPortAsHTTP(endpoint, p) && (!ports.known() || ports.hasHTTP(p))
+}
+
 // portBucket accumulates per-port endpoints for a service.
 type portBucket struct {
 	eps   []*endpointv3.LocalityLbEndpoints
@@ -836,7 +871,7 @@ func buildHTTPEndpointBuckets(serviceName string, endpoints []*registryv1.Servic
 		}
 
 		for _, p := range servedPortNumbers(endpoint) {
-			if (defaultIsHTTP && p == defaultPort) || !servesPortAsHTTP(endpoint, p) {
+			if (defaultIsHTTP && p == defaultPort) || !hasOwnHTTPCluster(endpoint, p, in.ports) {
 				continue
 			}
 			b := buckets[p]

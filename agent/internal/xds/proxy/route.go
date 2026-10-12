@@ -6,6 +6,7 @@ import (
 	"regexp"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	meshconst "aethermesh.dev/common/constants/mesh"
@@ -20,6 +21,7 @@ import (
 	previoushostsv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/retry/host/previous_hosts/v3"
 	matcherv3 "github.com/envoyproxy/go-control-plane/envoy/type/matcher/v3"
 	typev3 "github.com/envoyproxy/go-control-plane/envoy/type/v3"
+	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/anypb"
 	"google.golang.org/protobuf/types/known/durationpb"
 	"google.golang.org/protobuf/types/known/wrapperspb"
@@ -330,11 +332,16 @@ func BuildCaptureCatchAllVirtualHost(meshDomain string, port uint32, portless, r
 // (redirect-all), an authority that is not a mesh name leaves through the
 // ORIGINAL_DST passthrough, as on every other capture table, instead of 404:
 // all of the pod's egress is captured, and something else may listen on 18081.
-func BuildProxyPortCaptureRouteConfiguration(name string, vhosts []*routev3.VirtualHost, meshDomain string, passthrough bool) *routev3.RouteConfiguration {
-	withCatchAll := make([]*routev3.VirtualHost, 0, len(vhosts)+1)
+func BuildProxyPortCaptureRouteConfiguration(name string, vhosts []*routev3.VirtualHost, meshDomain string, passthrough bool, known []string) *routev3.RouteConfiguration {
+	floor := refuseReservedPorts(buildOnDemandCatchAllVirtualHost(MeshAuthorityRegex(meshDomain, ":[0-9]+"), passthrough), meshDomain)
+	withCatchAll := make([]*routev3.VirtualHost, 0, 2*len(vhosts)+1)
 	withCatchAll = append(withCatchAll, vhosts...)
-	withCatchAll = append(withCatchAll, refuseReservedPorts(buildOnDemandCatchAllVirtualHost(MeshAuthorityRegex(meshDomain, ":[0-9]+"), passthrough), meshDomain))
-	return &routev3.RouteConfiguration{Name: name, VirtualHosts: withCatchAll}
+	// The short names, against THIS table's floor: a short name that is no
+	// mesh name for its caller leaves as any Host that is no mesh name does
+	// here (the passthrough with redirect-all, 404 without).
+	withCatchAll = append(withCatchAll, ShortNameVirtualHosts(vhosts, meshDomain, known, LoopbackShortNameFloor, floor.GetRoutes())...)
+	withCatchAll = append(withCatchAll, floor)
+	return &routev3.RouteConfiguration{Name: name, VirtualHosts: oneClaimPerDomain(name, withCatchAll)}
 }
 
 // BuildOutboundRouteConfiguration creates a route configuration for outbound traffic.
@@ -355,8 +362,12 @@ func BuildProxyPortCaptureRouteConfiguration(name string, vhosts []*routev3.Virt
 // the caller's slice would write it into that slice's spare capacity, handing a
 // caller that reuses the backing array a table with someone else's catch-all in
 // it.
-func BuildOutboundRouteConfiguration(vhosts []*routev3.VirtualHost, meshDomain string) *routev3.RouteConfiguration {
-	all := make([]*routev3.VirtualHost, 0, len(vhosts)+1)
+//
+// known are the mesh names ("<svc>.<ns>.<meshDomain>") of the services with a
+// generated Service: the short names are built here, from vhosts and those,
+// against this table's floor (ShortNameVirtualHosts).
+func BuildOutboundRouteConfiguration(vhosts []*routev3.VirtualHost, meshDomain string, known []string) *routev3.RouteConfiguration {
+	all := make([]*routev3.VirtualHost, 0, 2*len(vhosts)+1)
 	all = append(all, vhosts...)
 	// Only an authority WITH a port names a cluster on demand: the cluster
 	// is the one the authority spells, and "<fqdn>:<port>" is a port's
@@ -365,10 +376,15 @@ func BuildOutboundRouteConfiguration(vhosts []*routev3.VirtualHost, meshDomain s
 	// the pods declare): a name without a port is port 80, and a service the
 	// node knows gets a virtual host that says so. Unknown and port-less
 	// falls through.
-	all = append(all, refuseReservedPorts(buildOnDemandCatchAllVirtualHost(MeshAuthorityRegex(meshDomain, ":[0-9]+"), false), meshDomain))
+	floor := refuseReservedPorts(buildOnDemandCatchAllVirtualHost(MeshAuthorityRegex(meshDomain, ":[0-9]+"), false), meshDomain)
+	// A short name that is no mesh name for its caller gets what any Host
+	// that is no mesh name gets on the loopback listener: 404. Nothing was
+	// dialled there, so there is nowhere else for it to go.
+	all = append(all, ShortNameVirtualHosts(vhosts, meshDomain, known, LoopbackShortNameFloor, floor.GetRoutes())...)
+	all = append(all, floor)
 	return &routev3.RouteConfiguration{
 		Name:         OutboundHTTPRouteName,
-		VirtualHosts: all,
+		VirtualHosts: oneClaimPerDomain(OutboundHTTPRouteName, all),
 	}
 }
 
@@ -758,10 +774,75 @@ func splitInvalidBackends(backends []GammaBackend, dropped uint32) (valid []Gamm
 		return backends, nil
 	}
 	valid = slices.DeleteFunc(slices.Clone(backends), func(b GammaBackend) bool { return b.Invalid })
-	return valid, &corev3.RuntimeFractionalPercent{DefaultValue: &typev3.FractionalPercent{
+	return independentWeights(valid), &corev3.RuntimeFractionalPercent{DefaultValue: &typev3.FractionalPercent{
 		Numerator:   uint32(invalid * 1_000_000 / total),
 		Denominator: typev3.FractionalPercent_MILLION,
 	}}
+}
+
+// independentWeightTotal is the total the valid backends' weights are rescaled
+// to behind an invalid share: a prime just under a million.
+const independentWeightTotal = 999_983
+
+// independentWeights rescales the weights of the valid backends of a rule that
+// also has an invalid share, keeping their proportions (to one part in a
+// million), so that their total is independentWeightTotal.
+//
+// The proxy draws ONE random value per request and uses it twice: the route
+// that answers the invalid share's 500 takes the requests whose value modulo
+// 1 000 000 is below the share, and the pick among the valid backends is the
+// same value modulo their total weight. The requests that are left all have a
+// value in the upper part of the range, so with a total that shares factors
+// with a million the pick is made from a biased set: measured on the pinned
+// proxy, weights 500000 and 500000 behind a 50 % invalid share sent EVERY
+// delivered request to the second backend and none to the first. With a total
+// that is coprime to a million the two remainders are independent, and the
+// valid backends share what is left in their proportions.
+//
+// Backends with weight 0 keep 0. One backend, or none with a weight, needs no
+// rescaling: there is no pick to bias.
+func independentWeights(valid []GammaBackend) []GammaBackend {
+	var total uint64
+	weighted := 0
+	for _, b := range valid {
+		total += uint64(b.Weight)
+		if b.Weight > 0 {
+			weighted++
+		}
+	}
+	if weighted < 2 {
+		return valid
+	}
+	// Largest remainder: floor each share, then hand the units that are left
+	// to the largest fractional parts, in order (deterministic).
+	type part struct {
+		i    int
+		frac uint64
+	}
+	parts := make([]part, 0, len(valid))
+	var given uint64
+	for i := range valid {
+		scaled := uint64(valid[i].Weight) * independentWeightTotal
+		valid[i].Weight = uint32(scaled / total)
+		given += uint64(valid[i].Weight)
+		if scaled%total != 0 {
+			parts = append(parts, part{i: i, frac: scaled % total})
+		}
+	}
+	slices.SortStableFunc(parts, func(a, b part) int {
+		switch {
+		case a.frac > b.frac:
+			return -1
+		case a.frac < b.frac:
+			return 1
+		}
+		return a.i - b.i
+	})
+	for k := 0; given < independentWeightTotal && k < len(parts); k++ {
+		valid[parts[k].i].Weight++
+		given++
+	}
+	return valid
 }
 
 // setServiceCluster points a route action at a service's own cluster: the
@@ -1262,4 +1343,75 @@ func QUICSelectionArms(r *routev3.Route) (arms map[string]string, noMatch string
 	nm := &matcher_cluster_specifierv3.ClusterAction{}
 	_ = spec.GetClusterMatcher().GetOnNoMatch().GetAction().GetTypedConfig().UnmarshalTo(nm)
 	return arms, nm.GetCluster(), true
+}
+
+// duplicateDomainHook is told of every authority that two virtual hosts of
+// one route table claimed, and which of the two kept it.
+var duplicateDomainHook atomic.Pointer[func(table, domain, kept, dropped string)]
+
+// OnDuplicateDomain sets the function that is told of every authority two
+// virtual hosts of one route table claimed (oneClaimPerDomain). The cache sets
+// it to log: a duplicate is always a defect upstream of the table builders.
+func OnDuplicateDomain(f func(table, domain, kept, dropped string)) { duplicateDomainHook.Store(&f) }
+
+// oneClaimPerDomain makes sure no authority is claimed by two virtual hosts of
+// a route table, which the proxy rejects: not the virtual host, the WHOLE
+// table, so that one malformed input (a hand-edited Service is enough) would
+// take every service's routes on the node with it. The first virtual host in
+// the table's order keeps the authority; a later one loses that domain, and is
+// dropped when it has none left. Every builder of a table calls it last. It
+// writes to no virtual host it was given: a loser is copied.
+func oneClaimPerDomain(table string, vhosts []*routev3.VirtualHost) []*routev3.VirtualHost {
+	owner, clean := domainOwners(vhosts)
+	if clean {
+		return vhosts
+	}
+	seen := make(map[string]struct{}, len(owner))
+	out := make([]*routev3.VirtualHost, 0, len(vhosts))
+	for _, vh := range vhosts {
+		kept := firstClaims(table, vh, owner, seen)
+		switch {
+		case len(kept) == len(vh.GetDomains()):
+			out = append(out, vh)
+		case len(kept) > 0:
+			c := proto.Clone(vh).(*routev3.VirtualHost)
+			c.Domains = kept
+			out = append(out, c)
+		}
+	}
+	return out
+}
+
+// domainOwners returns the first virtual host to claim each domain, and
+// whether no domain is claimed twice.
+func domainOwners(vhosts []*routev3.VirtualHost) (owner map[string]string, clean bool) {
+	owner = make(map[string]string, 4*len(vhosts))
+	clean = true
+	for _, vh := range vhosts {
+		for _, d := range vh.GetDomains() {
+			if _, taken := owner[d]; taken {
+				clean = false
+				continue
+			}
+			owner[d] = vh.GetName()
+		}
+	}
+	return owner, clean
+}
+
+// firstClaims returns the domains of vh that no earlier virtual host claimed,
+// records them in seen, and reports the ones it lost.
+func firstClaims(table string, vh *routev3.VirtualHost, owner map[string]string, seen map[string]struct{}) []string {
+	kept := make([]string, 0, len(vh.GetDomains()))
+	for _, d := range vh.GetDomains() {
+		if _, taken := seen[d]; taken {
+			if f := duplicateDomainHook.Load(); f != nil {
+				(*f)(table, d, owner[d], vh.GetName())
+			}
+			continue
+		}
+		seen[d] = struct{}{}
+		kept = append(kept, d)
+	}
+	return kept
 }

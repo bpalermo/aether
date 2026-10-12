@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"aethermesh.dev/agent/internal/capture"
 	"aethermesh.dev/agent/internal/xds/proxy"
 	registryv1 "aethermesh.dev/api/aether/registry/v1"
 	routev3 "github.com/envoyproxy/go-control-plane/envoy/config/route/v3"
@@ -89,12 +90,14 @@ func shortResolve(t *testing.T, table *routev3.RouteConfiguration, ns, host stri
 		}
 	}
 	ans.marks = strings.Join(marks, ",")
-	// An authority-named cluster carries the name that was typed: compare it
-	// by its port.
-	if ans.onDemand {
-		_, port, _ := strings.Cut(host, ":")
-		ans.cluster = "on-demand:" + port
-	}
+	// The cluster is compared AS NAMED. A route that takes it from the
+	// authority names what was typed, and under a short name that must not
+	// happen: "echo:8080" is no cluster's name. (This helper used to rewrite
+	// every authority-named cluster to its port before comparing, which hid
+	// exactly that: the third review found a cold short name asking for a
+	// cluster nobody answers for.) Whether the name came from the authority
+	// or from the route is not part of the answer.
+	ans.onDemand = false
 	return ans
 }
 
@@ -111,9 +114,11 @@ func a043VhostNamed(table *routev3.RouteConfiguration, name string) *routev3.Vir
 // means the service of that name in the CALLER's namespace. On every table,
 // for every port spelling, a short name is routed, refused, parked and
 // filtered exactly as "<name>.<caller's namespace>.<mesh domain>" is, with
-// the same HTTPRoute rules; and when the caller's namespace has no service of
-// the name, or the connection carries no namespace, it is refused, never
-// answered by another namespace's service and never left to the catch-all.
+// the same HTTPRoute rules. When the caller's namespace has no service of the
+// name it is not a mesh name for that caller: it gets exactly what a Host
+// that is no mesh name gets in that table, whether or not another namespace
+// has a mesh service called the same, and never that other service. A
+// connection that carries no namespace is refused.
 //
 // Both with the endpoints held and without (the node then knows the ports
 // from the generated Services alone).
@@ -133,22 +138,26 @@ func TestShortName_AnswersAsTheFullName(t *testing.T) {
 						assert.Equalf(t, full, short, "table %s, caller in %s: Host echo%s must answer as echo.%s.%s%s", tname, ns, suffix, ns, a043Mesh, suffix)
 						compared++
 					}
-					// A namespace with no service of the name, and a
-					// connection with no namespace at all.
-					for _, ns := range []string{"third", ""} {
-						got := shortResolve(t, table, ns, "echo"+suffix)
-						assert.Equalf(t, uint32(421), got.status, "table %s, caller in %q, Host echo%s: %+v", tname, ns, suffix, got)
-						assert.Equalf(t, proxy.RefusalNameNotInNamespace, got.refusal, "table %s, caller in %q, Host echo%s", tname, ns, suffix)
-						assert.Emptyf(t, got.cluster, "table %s, caller in %q, Host echo%s reached a cluster", tname, ns, suffix)
-						refused++
-					}
+					// What a Host that is no mesh name gets in this table.
+					notMesh := shortResolve(t, table, "third", "no-such-name"+suffix)
+					// A namespace with no service of the name: exactly that.
+					got := shortResolve(t, table, "third", "echo"+suffix)
+					assert.Equalf(t, notMesh, got, "table %s, caller in a namespace with no echo, Host echo%s: not a mesh name for it", tname, suffix)
+					assert.NotContainsf(t, got.cluster, "echo.", "table %s, Host echo%s from a namespace with no echo reached a service called echo", tname, suffix)
+					assert.Emptyf(t, got.refusal, "table %s, Host echo%s: refused by the mesh, where a name that is not the mesh's is not", tname, suffix)
 					// A name only one namespace has is still that namespace's.
-					got := shortResolve(t, table, "other", "solo"+suffix)
-					assert.Equalf(t, proxy.RefusalNameNotInNamespace, got.refusal, "table %s: solo%s from a namespace that has no solo: %+v", tname, suffix, got)
+					got = shortResolve(t, table, "other", "solo"+suffix)
+					assert.Equalf(t, notMesh, got, "table %s: solo%s from a namespace that has no solo", tname, suffix)
+					// A connection with no caller namespace at all: refused.
+					got = shortResolve(t, table, "", "echo"+suffix)
+					assert.Equalf(t, uint32(421), got.status, "table %s, no caller namespace, Host echo%s: %+v", tname, suffix, got)
+					assert.Equalf(t, proxy.RefusalCallerUnknown, got.refusal, "table %s, no caller namespace, Host echo%s", tname, suffix)
+					assert.Emptyf(t, got.cluster, "table %s, no caller namespace, Host echo%s reached a cluster", tname, suffix)
+					refused++
 				}
 			}
 			require.Greater(t, compared, 60)
-			require.Greater(t, refused, 60)
+			require.Greater(t, refused, 30)
 
 			// The two namespaces really differ, or the comparison above says
 			// nothing: the same short authority reaches different clusters.
@@ -196,8 +205,16 @@ func TestShortName_EveryArmCarriesTheServicesFilter(t *testing.T) {
 						}
 					}
 				}
+				// A caller whose namespace has no echo gets the table's floor:
+				// never a route to a cluster of a service called echo, and
+				// never one that carries a service's filter.
 				for _, r := range matcherArm(t, vh.GetMatcher(), "third") {
-					assert.Nilf(t, r.GetRoute(), "table %s, %s: the no-match arm delivers", tname, vh.GetName())
+					assert.NotContainsf(t, r.GetRoute().GetCluster(), "echo.", "table %s, %s: the not-a-mesh-name arm delivers to a mesh service", tname, vh.GetName())
+					assert.Emptyf(t, r.GetTypedPerFilterConfig(), "table %s, %s: the not-a-mesh-name arm carries a filter", tname, vh.GetName())
+				}
+				// And a connection with no caller namespace is refused.
+				for _, r := range matcherArm(t, vh.GetMatcher(), "") {
+					assert.Nilf(t, r.GetRoute(), "table %s, %s: delivered with no caller namespace on the connection", tname, vh.GetName())
 				}
 			}
 		}
@@ -281,4 +298,105 @@ func TestPerPort_ColdService_ADeclaredPortAddedLater(t *testing.T) {
 	const host = "multi." + a043NS + "." + a043Mesh + ":9090"
 	got := spResolve(t, tables["cap_http_9090"], host)
 	assert.Equal(t, "multi."+a043NS+"."+a043Mesh+":9090", got.cluster, "%+v", got)
+}
+
+// TestShortName_OfAServiceKnownByNameOnly: the caller's namespace HAS the
+// service, and the node knows nothing of it but its name (a generated Service
+// with no real port on it, no endpoint held). On the tables whose floor takes
+// the port from the authority, its full name is offered on demand by the
+// floor; its short name has an arm that does the same where it can:
+//
+//   - a port the short domain spells (here because another namespace's "echo"
+//     declares 8080): the cluster the FULL name spells, named by the route;
+//   - any other port: refused at once, short-name-cold. A request can only
+//     wait for a cluster named by its authority, and "echo:7777" names none;
+//   - no port: refused, port-required, as the service's stand-in says when it
+//     has one.
+//
+// It is never refused as a name its namespace does not have, never left to
+// the floor as a name that is not the mesh's, and never another namespace's.
+// With and without a service-wide filter on it (with one it has a stand-in
+// virtual host, without one only the floor).
+func TestShortName_OfAServiceKnownByNameOnly(t *testing.T) {
+	ctx := context.Background()
+	for _, filtered := range []bool{false, true} {
+		t.Run(fmt.Sprintf("service-wide filter=%v", filtered), func(t *testing.T) {
+			c := a043Cache(t, nil)
+			c.SetCaptureAuthorities(map[string]string{"demo/echo": "echo.demo.svc.cluster.local", "other/echo": "echo.other.svc.cluster.local"})
+			c.SetCaptureTCPServices([]capture.CaptureTCPService{
+				{ServiceName: "demo/echo", ClusterIP: "10.96.9.1"}, // name only
+				{ServiceName: "other/echo", ClusterIP: "10.96.9.2", DeclaredHTTP: []uint32{8080}},
+			})
+			if filtered {
+				c.SetServiceChainFilters(map[string]proxy.ExtensionFilter{"demo/echo": spChainCfg(t)})
+			}
+			require.NoError(t, c.LoadClustersFromRegistry(ctx, "cluster-1", "node-1", a043Registry(nil)))
+			tables := a043Tables(t, c)
+			callingFrom(t, "demo")
+			const full = "echo.demo." + a043Mesh
+			for _, tname := range []string{proxy.OutboundHTTPRouteName, "cap_http_18081"} {
+				table := tables[tname]
+				require.NotNil(t, table, tname)
+
+				got := a043Resolve(t, table, "echo:8080")
+				assert.Zerof(t, got.status, "%s, Host echo:8080: %+v", tname, got)
+				assert.Equalf(t, full+":8080", got.cluster, "%s, Host echo:8080: the cluster the full name spells", tname)
+				assert.Falsef(t, got.onDemand, "%s, Host echo:8080: the cluster is named by the authority, and \"echo:8080\" is no cluster's name", tname)
+
+				got = a043Resolve(t, table, "echo:7777")
+				assert.Equalf(t, uint32(421), got.status, "%s, Host echo:7777: %+v", tname, got)
+				assert.Equalf(t, proxy.RefusalShortNameCold, got.refusal, "%s, Host echo:7777", tname)
+				assert.Emptyf(t, got.cluster, "%s, Host echo:7777 names a cluster", tname)
+				assert.Falsef(t, got.onDemand, "%s, Host echo:7777 is parked", tname)
+
+				got = a043Resolve(t, table, "echo")
+				assert.Equalf(t, uint32(421), got.status, "%s, Host echo: %+v", tname, got)
+				assert.Equalf(t, proxy.RefusalPortRequired, got.refusal, "%s, Host echo", tname)
+
+				// The full name, for comparison: offered on demand.
+				got = a043Resolve(t, table, full+":7777")
+				assert.Truef(t, got.onDemand, "%s, Host %s:7777: %+v", tname, full, got)
+			}
+		})
+	}
+}
+
+// TestShortName_APlainServiceIsNotAMeshName: the agent has the port map of
+// every Service in the cluster. A plain Service "echo" in namespace "third",
+// which fronts no mesh pod and carries no route and no filter, is not a mesh
+// name because of that map: from "third", Host echo:8080 gets what any name
+// that is not the mesh's gets (on a captured dial, the passthrough to the
+// plain Service that was dialled), although another namespace has a mesh
+// service "echo". It gets no virtual host of its own in any table, under its
+// short name or its mesh-shaped one.
+//
+// Found on kind: such a Service was given a stand-in virtual host from its
+// port map, its namespace an arm, and the request to it was parked for a
+// cluster that never came (503).
+func TestShortName_APlainServiceIsNotAMeshName(t *testing.T) {
+	ctx := context.Background()
+	h := registryv1.PortProtocol_PORT_PROTOCOL_HTTP
+	mesh := a043Service{name: "echo", ns: "other", legacy: 8080, ports: map[uint32]registryv1.PortProtocol{8080: h}, ip: "10.0.9.2", vip: "10.96.9.2"}
+	for _, held := range []bool{true, false} {
+		c := a043Cache(t, nil)
+		a043Project(c, []a043Service{mesh})
+		c.SetServicePortMaps(map[string]map[uint32]uint32{"third/echo": {8080: 8080, 80: 8080}})
+		var listed []a043Service
+		if held {
+			listed = []a043Service{mesh}
+		}
+		require.NoError(t, c.LoadClustersFromRegistry(ctx, "cluster-1", "node-1", a043Registry(listed)))
+		for tname, table := range a043Tables(t, c) {
+			for _, vh := range table.GetVirtualHosts() {
+				for _, d := range vh.GetDomains() {
+					assert.NotContainsf(t, d, "echo.third.", "held=%v, table %s: virtual host %s claims %q for a plain Service", held, tname, vh.GetName(), d)
+				}
+			}
+			for _, suffix := range []string{":8080", ":80", ""} {
+				notMesh := shortResolve(t, table, "third", "no-such-name"+suffix)
+				got := shortResolve(t, table, "third", "echo"+suffix)
+				assert.Equalf(t, notMesh, got, "held=%v, table %s, Host echo%s from the plain Service's namespace", held, tname, suffix)
+			}
+		}
+	}
 }

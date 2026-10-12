@@ -27,7 +27,12 @@ func findVHost(vhosts []*routev3.VirtualHost, want string) *routev3.VirtualHost 
 // captureTable returns the virtual hosts of the capture route table of dialled
 // port port (0 for cap_http_other), without the table's catch-all.
 func captureTable(c *SnapshotCache, port uint32) []*routev3.VirtualHost {
-	return c.captureTableVhosts(c.captureTableInputs(), port)
+	in := c.captureTableInputs()
+	// As the table's builder assembles it (the short names are its work),
+	// less the catch-all it ends with.
+	rc := proxy.BuildCaptureRouteConfiguration("t", c.captureTableVhosts(in, port),
+		proxy.BuildCaptureCatchAllVirtualHost(c.meshDomain, port, false, c.captureRedirectAll), c.shortNamesOf(in, port))
+	return rc.GetVirtualHosts()[:len(rc.GetVirtualHosts())-1]
 }
 
 // TestCaptureVhosts_RouteTargetRealPort verifies that a GAMMA route TARGET with no
@@ -223,8 +228,13 @@ func routedCluster(c *SnapshotCache, port uint32, authority string) (string, boo
 	if vh != nil && vh.GetMatcher() != nil {
 		// A short name: the arm of the namespace the test calls from.
 		var list routev3.RouteList
-		on := vh.GetMatcher().GetOnNoMatch()
-		if arm, ok := vh.GetMatcher().GetMatcherTree().GetExactMatchMap().GetMap()[testCallerNamespace]; ok {
+		fields := vh.GetMatcher().GetMatcherList().GetMatchers()
+		if len(fields) != 1 {
+			return "", false
+		}
+		byCaller := fields[0].GetOnMatch().GetMatcher()
+		on := byCaller.GetOnNoMatch()
+		if arm, ok := byCaller.GetMatcherTree().GetExactMatchMap().GetMap()[testCallerNamespace]; ok {
 			on = arm
 		}
 		if on.GetAction().GetTypedConfig().UnmarshalTo(&list) != nil {

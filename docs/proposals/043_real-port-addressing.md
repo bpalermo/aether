@@ -746,7 +746,7 @@ rewritten with the last change of the release.
 **2026-10-12: a short name resolves in the caller's namespace.** A `Host` with
 no namespace (`echo`, `echo:8080`) means `echo.<the caller's namespace>`, as
 the cluster's DNS search does. Never a service in another namespace, unique or
-not; refused (`421`, `x-aether-error: name-not-in-namespace`) when the
+not; refused (`421`, `x-aether-error: name-not-in-namespace`; superseded the same day, see the next ruling) when the
 caller's namespace has no mesh service of the name. This replaces "a bare name
 that two namespaces share is refused" (decided 2026-10-11) and the older
 "served where exactly one namespace owns it". Both paths; the per-port rules,
@@ -793,6 +793,42 @@ no rule of its own: 18081 is a port no service declares, and gets the general
   runs anyway the registrar does not write the port onto the Service and the
   agent does not serve it, each with a WARN that names the service and the
   port. One definition (`mesh.ReservedPort`), three enforcers.
+
+**2026-10-12: a short name that is not a mesh service in the caller's
+namespace is not a mesh name for that caller.** It replaces the refusal
+(`421 name-not-in-namespace`) in the ruling above. A name without a namespace
+means `<name>.<caller's namespace>`; when that namespace has no MESH service of
+the name, the request is treated exactly like any other destination that is
+not the mesh's, whether or not another namespace has a mesh service called the
+same: on a captured dial, the passthrough to the original destination; on the
+proxy port, where nothing was dialled, what any such name gets there (`404`).
+A connection that carries no caller namespace is still refused
+(`caller-namespace-unknown`): that is a fault state, not a name that is not the
+mesh's. The passthrough goes to the address that was dialled and so cannot
+reach another namespace's mesh service.
+
+- *Mechanism.* The short name's virtual host asks first whether the caller's
+  namespace is on the connection (refused when it is not), then picks that
+  namespace's arm, or, when it has none, a copy of the routes of the table's
+  own catch-all. The short names are built by each table's builder for that
+  reason: the loopback table and the proxy port's capture table have the same
+  virtual hosts and different catch-alls.
+
+**After the third review (2026-10-12).** What the rulings above came to mean
+where they met another feature:
+
+- *Filter levels.* A short name's arm has one place for a filter's per-route
+  config, the route; the service's own virtual host has two, and the allow-
+  listed filters do not combine them alike. `extensionfilter.CombineLevels`
+  says, per filter, what the two amount to, and a test over the allow-list
+  keeps a filter from being added without saying it.
+- *A user's Service.* The port in an authority is the Service's port on the
+  proxy port as on a dial; a pod port's number is no port of the name. Cold,
+  the name is routed and refused by the Service's port map.
+- *Imported rules* apply on every known HTTP port while the port the pods
+  declare is not known. Interim: the projection should carry the parent port.
+- *One limit*: a service known by name only whose route has a backendRef (the
+  mixed-version window with a chart 2.6 registrar). See the runbook.
 
 ## Phases
 

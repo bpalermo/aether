@@ -308,7 +308,7 @@ func TestBuildCaptureRouteConfiguration(t *testing.T) {
 	// dialled port since proposal 043; it was the single "cap_http".
 	name := CaptureHTTPRouteName(meshconst.ProxyOutboundPort)
 	rc := BuildCaptureRouteConfiguration(name, []*routev3.VirtualHost{vh},
-		BuildCaptureCatchAllVirtualHost("aether.internal", meshconst.ProxyOutboundPort, true, false))
+		BuildCaptureCatchAllVirtualHost("aether.internal", meshconst.ProxyOutboundPort, true, false), nil)
 	assert.Equal(t, "cap_http_18081", rc.GetName())
 	require.Len(t, rc.GetVirtualHosts(), 2, "the service vhost + the on-demand catch-all")
 
@@ -333,7 +333,7 @@ func TestBuildCaptureRouteConfiguration(t *testing.T) {
 	assert.True(t, has404, "scoped-capture catch-all 404s non-mesh authorities")
 
 	// The table owns its virtual_hosts slice, and a nil catch-all adds none.
-	bare := BuildCaptureRouteConfiguration(name, []*routev3.VirtualHost{vh}, nil)
+	bare := BuildCaptureRouteConfiguration(name, []*routev3.VirtualHost{vh}, nil, nil)
 	require.Len(t, bare.GetVirtualHosts(), 1)
 }
 
@@ -343,7 +343,7 @@ func TestBuildCaptureRouteConfiguration(t *testing.T) {
 // dependency-set vhost still reaches its backend via kube-proxy) instead of 404'ing.
 func TestBuildCaptureRouteConfigurationRedirectAll(t *testing.T) {
 	rc := BuildCaptureRouteConfiguration(CaptureHTTPRouteName(8080), nil,
-		BuildCaptureCatchAllVirtualHost("aether.internal", 8080, false, true))
+		BuildCaptureCatchAllVirtualHost("aether.internal", 8080, false, true), nil)
 	require.Len(t, rc.GetVirtualHosts(), 1, "just the on-demand catch-all")
 	catchAll := rc.GetVirtualHosts()[0]
 

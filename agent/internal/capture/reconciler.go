@@ -15,6 +15,7 @@ import (
 	"aethermesh.dev/common/serviceref"
 
 	aetherlabels "aethermesh.dev/common/constants/labels"
+	"aethermesh.dev/common/constants/mesh"
 	"aethermesh.dev/common/ctrlqueue"
 	commonlog "aethermesh.dev/common/log"
 	corev1 "k8s.io/api/core/v1"
@@ -59,9 +60,21 @@ type CaptureTCPService struct {
 var realPortName = regexp.MustCompile(`^p[0-9]+-(tcp|udp)$`)
 
 // declaredPorts reads a generated Service's real ports, sorted.
+//
+// A port number is in ONE of the two lists. The registrar writes one class per
+// number, but the Service is an object anyone with the rights can edit, and a
+// number carried as HTTP and as something else (p8080-tcp with appProtocol
+// http beside p8080-udp) used to land in both: the route tables then claimed
+// one authority in two virtual hosts, and the proxy rejects such a table
+// WHOLE. HTTP wins, as it does when pods disagree. A number reserved for the
+// mesh (mesh.ReservedPort) is no port of a service whatever the Service says:
+// a registrar of chart 2.6 wrote a declared 18082 as a real port.
 func declaredPorts(s *corev1.Service) (http, other []uint32) {
+	defer func() {
+		other = slices.DeleteFunc(other, func(p uint32) bool { return slices.Contains(http, p) })
+	}()
 	for _, sp := range s.Spec.Ports {
-		if !realPortName.MatchString(sp.Name) || sp.Port <= 0 {
+		if !realPortName.MatchString(sp.Name) || sp.Port <= 0 || mesh.ReservedPort(uint32(sp.Port)) {
 			continue
 		}
 		tcp := sp.Protocol == "" || sp.Protocol == corev1.ProtocolTCP

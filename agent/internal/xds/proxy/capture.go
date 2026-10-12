@@ -573,15 +573,22 @@ func BuildCapturePassthroughFilterChain() *listenerv3.FilterChain {
 // Like the outbound table it is emitted unconditionally, catch-all and all,
 // and it owns its virtual_hosts slice rather than appending onto the caller's
 // (see BuildOutboundRouteConfiguration).
-func BuildCaptureRouteConfiguration(name string, vhosts []*routev3.VirtualHost, catchAll *routev3.VirtualHost) *routev3.RouteConfiguration {
-	all := make([]*routev3.VirtualHost, 0, len(vhosts)+1)
+//
+// short, when set, adds the short names of the table (ShortNameVirtualHosts),
+// built from vhosts against catchAll: a short name that is no mesh name for
+// its caller gets what catchAll gives any Host that is no mesh name.
+func BuildCaptureRouteConfiguration(name string, vhosts []*routev3.VirtualHost, catchAll *routev3.VirtualHost, short *ShortNames) *routev3.RouteConfiguration {
+	all := make([]*routev3.VirtualHost, 0, 2*len(vhosts)+1)
 	all = append(all, vhosts...)
+	if short != nil {
+		all = append(all, ShortNameVirtualHosts(vhosts, short.MeshDomain, short.Known, short.Floor, catchAll.GetRoutes())...)
+	}
 	if catchAll != nil {
 		all = append(all, catchAll)
 	}
 	return &routev3.RouteConfiguration{
 		Name:         name,
-		VirtualHosts: all,
+		VirtualHosts: oneClaimPerDomain(name, all),
 	}
 }
 

@@ -1498,7 +1498,13 @@ func TestAddressing_EveryChainAndRouteHasItsCluster(t *testing.T) {
 	// So it has no default h2 cluster, although one of its pods, read alone,
 	// declares an HTTP port as its own: every builder reads the one answer.
 	assert.NotContains(t, clusters, "split.demo.aether.internal")
-	assert.Contains(t, clusters, "split.demo.aether.internal:8080", "the pod that serves 8080 as HTTP keeps its endpoint set")
+	// And no h2 cluster for 8080 from the one pod that declares it HTTP: no
+	// route leads to it (the service's 8080 is raw TCP, and its HTTP
+	// authority is refused), and a cluster that exists can be asked for by
+	// name. It was: a request for "<fqdn>:8080" parked while the node knew
+	// nothing of the service was delivered to that pod when the cluster
+	// arrived, where every later request is refused.
+	assert.NotContains(t, clusters, "split.demo.aether.internal:8080")
 	assert.Contains(t, clusters, "tcp:split.demo.aether.internal:8080")
 
 	tcpChains := 0

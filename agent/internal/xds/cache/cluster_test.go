@@ -579,7 +579,7 @@ func TestSnapshotCache_ClustersEndpointsAndVhosts(t *testing.T) {
 					"svc": {
 						cluster:        &clusterv3.Cluster{Name: "svc"},
 						loadAssignment: &endpointv3.ClusterLoadAssignment{ClusterName: "svc"},
-						vhost:          &routev3.VirtualHost{Name: "svc"},
+						vhost:          &routev3.VirtualHost{Name: "svc", Domains: []string{"svc"}},
 					},
 				}
 			},
@@ -608,12 +608,12 @@ func TestSnapshotCache_ClustersEndpointsAndVhosts(t *testing.T) {
 					"a": {
 						cluster:        &clusterv3.Cluster{Name: "a"},
 						loadAssignment: &endpointv3.ClusterLoadAssignment{ClusterName: "a"},
-						vhost:          &routev3.VirtualHost{Name: "a"},
+						vhost:          &routev3.VirtualHost{Name: "a", Domains: []string{"a"}},
 					},
 					"b": {
 						cluster:        &clusterv3.Cluster{Name: "b"},
 						loadAssignment: &endpointv3.ClusterLoadAssignment{ClusterName: "b"},
-						vhost:          &routev3.VirtualHost{Name: "b"},
+						vhost:          &routev3.VirtualHost{Name: "b", Domains: []string{"b"}},
 					},
 					"no-cla": {
 						cluster: &clusterv3.Cluster{Name: "no-cla"},

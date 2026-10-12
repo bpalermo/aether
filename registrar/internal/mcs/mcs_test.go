@@ -205,7 +205,10 @@ func TestImportGenerator_MaterializesImportAndVIP(t *testing.T) {
 	assert.Empty(t, svc.Spec.Selector, "selectorless clusterset VIP: endpoints stay in the registry")
 	assert.Equal(t, "svc-1", svc.Annotations[aetherlabels.AnnotationMeshService])
 	assert.Equal(t, "svc-1", svc.Annotations[aetherlabels.AnnotationClustersetImport])
-	assert.Equal(t, "18081", svc.Annotations[aetherlabels.AnnotationMeshPort])
+	// aether.io/port said "the port the pods declare" about a whole service.
+	// Nothing reads it, and the generated mesh Services stopped carrying it;
+	// the clusterset Service must not be the one object that still does.
+	assert.NotContains(t, svc.Annotations, aetherlabels.AnnotationMeshPort)
 	require.Len(t, svc.Spec.Ports, 1)
 	assert.Equal(t, int32(18081), svc.Spec.Ports[0].Port)
 	require.NotEmpty(t, svc.Spec.ClusterIP, "the clusterset VIP gets its own ClusterIP")
@@ -225,6 +228,32 @@ func TestImportGenerator_MaterializesImportAndVIP(t *testing.T) {
 	assert.Equal(t, svc.Spec.ClusterIP, si.Spec.IPs[0])
 	require.Len(t, si.Status.Clusters, 1)
 	assert.Equal(t, "cluster-2", si.Status.Clusters[0].Cluster)
+}
+
+// TestImportGenerator_RemovesTheStalePortAnnotation: a clusterset Service an
+// earlier registrar created carries aether.io/port. It is removed on the next
+// reconcile, and nothing else about the Service changes (its ClusterIP is the
+// address clients hold).
+func TestImportGenerator_RemovesTheStalePortAnnotation(t *testing.T) {
+	ctx := context.Background()
+	c := newIPAllocatingClient(t)
+	exp := newFakeExporter("cluster-1")
+	exp.seeded = []export.ServiceExport{{Service: "svc-1", Namespace: "team-a", Cluster: "cluster-2"}}
+	g := newImportGen(c, exp)
+	g.reconcile(ctx)
+
+	key := types.NamespacedName{Name: "svc-1-clusterset", Namespace: "team-a"}
+	svc := &corev1.Service{}
+	require.NoError(t, c.Get(ctx, key, svc))
+	ip := svc.Spec.ClusterIP
+	svc.Annotations[aetherlabels.AnnotationMeshPort] = "18081" // as a 2.6 registrar left it
+	require.NoError(t, c.Update(ctx, svc))
+
+	g.reconcile(ctx)
+	require.NoError(t, c.Get(ctx, key, svc))
+	assert.NotContains(t, svc.Annotations, aetherlabels.AnnotationMeshPort)
+	assert.Equal(t, "svc-1", svc.Annotations[aetherlabels.AnnotationMeshService])
+	assert.Equal(t, ip, svc.Spec.ClusterIP)
 }
 
 func TestImportGenerator_SingleClusterExportGetsVIP(t *testing.T) {

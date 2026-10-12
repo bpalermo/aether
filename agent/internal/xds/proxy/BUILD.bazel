@@ -261,6 +261,7 @@ go_test(
         "//api/aether/registry/v1:registry",
         "//common/constants/annotations",
         "//common/constants/mesh",
+        "//common/extensionfilter",
         "//common/gammaproject",
         "//test/harnesscontract",
         "@com_github_cncf_xds_go//xds/type/matcher/v3:matcher",

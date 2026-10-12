@@ -422,14 +422,14 @@ func TestCallerRoutesMatchAndRemoveTheOutcome(t *testing.T) {
 	outbound := BuildOutboundRouteConfiguration([]*routev3.VirtualHost{
 		BuildOutboundClusterVirtualHost("api.shop.mesh.local", []string{"api.shop.mesh.local"}),
 		gamma,
-	}, "mesh.local")
+	}, "mesh.local", nil)
 	// A capture table as the cache builds one: the service's virtual host
 	// (with rules, so every route shape is in it) and the table's catch-all.
 	capture := BuildCaptureRouteConfiguration(CaptureHTTPRouteName(8080), []*routev3.VirtualHost{
 		BuildServiceVirtualHost("api.shop.mesh.local|8080", "api.shop.mesh.local:8080", []string{"api.shop", "api.shop:8080"}, []GammaRoute{
 			{Matches: []GammaMatch{{Prefix: "/v1"}}, Backends: []GammaBackend{{Cluster: "v1.shop.mesh.local:8080", Weight: 1}}},
 		}),
-	}, BuildCaptureCatchAllVirtualHost("mesh.local", 8080, false, true))
+	}, BuildCaptureCatchAllVirtualHost("mesh.local", 8080, false, true), nil)
 
 	for name, rc := range map[string]*routev3.RouteConfiguration{"out_http": outbound, "cap_http": capture} {
 		routes := retryRoutes(rc.GetVirtualHosts())

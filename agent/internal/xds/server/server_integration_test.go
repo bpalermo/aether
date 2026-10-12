@@ -136,7 +136,7 @@ func setConsistentSnapshot(t *testing.T, ctx context.Context, snapshotCache cach
 	cla.Endpoints = append(cla.Endpoints, lbEp)
 	vhost := proxy.BuildOutboundClusterVirtualHost("my-service.aether.internal", []string{"my-service.aether.internal"})
 
-	routeCfg := proxy.BuildOutboundRouteConfiguration([]*routev3.VirtualHost{vhost}, "aether.internal")
+	routeCfg := proxy.BuildOutboundRouteConfiguration([]*routev3.VirtualHost{vhost}, "aether.internal", nil)
 
 	snapshot, err := cachev3.NewSnapshot("1", map[resourcev3.Type][]types.Resource{
 		resourcev3.ListenerType: {inbound, outbound},

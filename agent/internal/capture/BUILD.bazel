@@ -10,6 +10,7 @@ go_library(
     visibility = ["//agent:__subpackages__"],
     deps = [
         "//common/constants/labels",
+        "//common/constants/mesh",
         "//common/ctrlqueue",
         "//common/log",
         "//common/serviceref",
@@ -31,6 +32,7 @@ go_test(
     size = "small",
     srcs = [
         "declaredports_test.go",
+        "declaredports_wiring_test.go",
         "heartbeat_test.go",
         "initial_projection_test.go",
         "reconciler_test.go",

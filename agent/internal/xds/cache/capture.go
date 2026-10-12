@@ -326,7 +326,7 @@ func (c *SnapshotCache) SetCaptureTCPServices(services []capture.CaptureTCPServi
 				serviceName: s.ServiceName,
 				clusterIP:   s.ClusterIP,
 				ports:       c.captureDerived[s.ServiceName],
-				declared:    servicePorts{http: slices.Clone(s.DeclaredHTTP), tcp: slices.Clone(s.DeclaredOther)},
+				declared:    declaredServicePorts(s.DeclaredHTTP, s.DeclaredOther),
 			})
 		}
 	}
@@ -353,6 +353,9 @@ func (c *SnapshotCache) SetCaptureTCPServices(services []capture.CaptureTCPServi
 	}
 	c.depMu.Lock()
 	c.captureTCPDeps = names
+	// The declared ports are an input of the entries' loopback virtual hosts
+	// too (a backendRef to a service known by them): rebuild those.
+	c.bumpRuleGenLocked(true)
 	c.bumpDepGenLocked()
 	c.depMu.Unlock()
 
@@ -1174,6 +1177,21 @@ func (c *SnapshotCache) tcpPortClustersLocked(
 	return out, clas
 }
 
+// generatedMeshNames returns, sorted, the mesh name of every service that has
+// a generated Service with an address.
+func (c *SnapshotCache) generatedMeshNames() []string {
+	c.captureMu.RLock()
+	defer c.captureMu.RUnlock()
+	out := make([]string, 0, len(c.captureTCPServices))
+	for _, e := range c.captureTCPServices {
+		if name := proxy.ServiceClusterName(e.serviceName, c.meshDomain); name != "" {
+			out = append(out, name)
+		}
+	}
+	slices.Sort(out)
+	return out
+}
+
 // declaredByService returns what the generated Services say their real ports
 // are, per service (captureTCPEntry.declared). The map is built per call; the
 // slices in it are shared and read-only.
@@ -1213,4 +1231,24 @@ func effectivePorts(all, declared map[string]servicePorts) map[string]servicePor
 		}
 	}
 	return out
+}
+
+// declaredServicePorts is what a generated Service says of a service's ports,
+// as the cache keeps it: sorted, a number in one class only (HTTP wins), and
+// never a port reserved for the mesh. The reconciler already hands it over
+// that way; the cache does not depend on it, because a number in two classes
+// puts one authority in two virtual hosts and the proxy rejects the table.
+func declaredServicePorts(http, other []uint32) servicePorts {
+	keep := func(in []uint32, not []uint32) []uint32 {
+		out := make([]uint32, 0, len(in))
+		for _, p := range in {
+			if p != 0 && !reservedMeshPort(p) && !slices.Contains(not, p) {
+				out = append(out, p)
+			}
+		}
+		slices.Sort(out)
+		return slices.Compact(out)
+	}
+	h := keep(http, nil)
+	return servicePorts{http: h, tcp: keep(other, h)}
 }

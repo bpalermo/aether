@@ -128,7 +128,7 @@ func PerPortRouteTable(port uint32) *routev3.RouteConfiguration {
 		vhosts = append(vhosts, s.tableVhosts(port, legacyTable)...)
 	}
 	return proxy.BuildCaptureRouteConfiguration(name, vhosts,
-		proxy.BuildCaptureCatchAllVirtualHost(meshDomain, port, legacyTable, true))
+		proxy.BuildCaptureCatchAllVirtualHost(meshDomain, port, legacyTable, true), nil)
 }
 
 // tableVhosts returns the service's virtual hosts in the table of dialled

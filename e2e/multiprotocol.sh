@@ -146,8 +146,12 @@
 #                  the proxy port, and when the other's address is dialled
 #   N2  short name the mirror, from the second namespace (shortb); and the
 #                  per-port refusals apply to the short name
-#   N3  short name from a third namespace, which has no mp-short: refused,
-#                  421 name-not-in-namespace, on both paths
+#   N3  short name from a third namespace, which has no MESH mp-short but a
+#                  plain Service of that name: not a mesh name there. It
+#                  reaches its own plain Service (shortplain); a dial to the
+#                  other namespaces' mesh addresses with the short Host is
+#                  answered by neither; on the proxy port, what any name
+#                  that is not the mesh's gets
 #   V1  reserved   18081 and 18082 are the mesh's: Host <a name nothing
 #                  serves>:18081 -> 421 port-not-declared at once, on both
 #                  paths; a pod that declares one is denied at admission
@@ -274,6 +278,8 @@ TEST_NS3="aether-test-3"
 SHORT_NAME="mp-short"
 SHORT_MARKER_A="shorta"
 SHORT_MARKER_B="shortb"
+# A Service of the same name in the third namespace that is NOT a mesh service.
+SHORT_MARKER_PLAIN="shortplain"
 MESH_DOMAIN="aether.internal"
 TRUST_DOMAIN="aether.internal"
 # The application ports of the workloads, a port nobody declares, and the two
@@ -886,6 +892,7 @@ deploy_workloads() {
 	local short_upstreams="$SHORT_NAME.$TEST_NS2,$SHORT_NAME.$TEST_NS"
 	TEST_NS="$TEST_NS2" deploy_client client "$short_upstreams"
 	TEST_NS="$TEST_NS3" deploy_client client "$short_upstreams"
+	deploy_plain_service "$TEST_NS3" "$SHORT_NAME" "$HTTP_PORT" "$SHORT_MARKER_PLAIN"
 
 	local d
 	for d in "${WORKLOADS[@]}" "$TCP_ONLY" "${CLIENTS[@]}" "$SHORT_NAME"; do
@@ -896,7 +903,37 @@ deploy_workloads() {
 		kc -n "$TEST_NS2" rollout status "deploy/$d" --timeout=180s >/dev/null || die "workload '$d' in $TEST_NS2 never became Ready"
 	done
 	kc -n "$TEST_NS3" rollout status deploy/client --timeout=180s >/dev/null || die "the client in $TEST_NS3 never became Ready"
+	kc -n "$TEST_NS3" rollout status "deploy/$SHORT_NAME-plain" --timeout=180s >/dev/null || die "the plain $SHORT_NAME in $TEST_NS3 never became Ready"
 	ok "workloads deployed"
+}
+
+# deploy_plain_service NS NAME PORT TEXT — a Service NAME in NS that is NOT a
+# mesh service: its pod is not mesh-managed (no aether.io/managed label, no
+# annotation), and the Service is an ordinary one with a selector. It answers
+# TEXT on PORT.
+deploy_plain_service() {
+	local ns="$1" name="$2" port="$3" text="$4"
+	kc apply -f - >/dev/null <<YAML || die "plain service $name apply failed"
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: $name-plain, namespace: $ns}
+spec:
+  replicas: 1
+  selector: {matchLabels: {app: $name-plain}}
+  template:
+    metadata:
+      labels: {app: $name-plain}
+    spec:
+      containers:
+$(container_yaml "$name" http "$port" "$text")
+---
+apiVersion: v1
+kind: Service
+metadata: {name: $name, namespace: $ns}
+spec:
+  selector: {app: $name-plain}
+  ports: [{name: http, port: $port, targetPort: $port}]
+YAML
 }
 
 # --- probes -------------------------------------------------------------------
@@ -1965,7 +2002,7 @@ leg_N1() {
 	log "N1 Host $SHORT_NAME:$HTTP_PORT from $TEST_NS is $SHORT_NAME.$TEST_NS, captured and through the proxy port"
 	local other meaning
 	other="$SHORT_NAME.$TEST_NS2.svc.cluster.local"
-	meaning="'$SHORT_MARKER_B' is the short name answered by ANOTHER namespace's service; 'HTTP421:name-not-in-namespace' is the caller's namespace not read off the connection"
+	meaning="'$SHORT_MARKER_B' is the short name answered by ANOTHER namespace's service; 'HTTP421:caller-namespace-unknown' is the caller's namespace not read off the connection"
 	expect "from $TEST_NS, captured http://$SHORT_NAME:$HTTP_PORT/" "$SHORT_MARKER_A" 240 "$A_PROBES" "$meaning" \
 		ns_tokens "$TEST_NS" client "http://$SHORT_NAME:$HTTP_PORT/" ""
 	expect "from $TEST_NS, loopback, Host $SHORT_NAME:$HTTP_PORT" "$SHORT_MARKER_A" "$A_TIMEOUT" "$A_PROBES" "$meaning" \
@@ -2001,20 +2038,49 @@ leg_N2() {
 		ns_loopback_tokens "$TEST_NS2" client "$SHORT_NAME"
 }
 
-# N3 — a caller in a namespace that has no service of the name is refused by
-# name, on both paths: it is never answered by either of the two namespaces
-# that do. The cluster's DNS would not resolve the short name there, so the
-# captured request dials a full name and carries the short one in Host.
+# N3 — a caller in a namespace that has NO MESH service of the name. The name
+# is then not a mesh name for that caller (the owner's ruling of 2026-10-12),
+# whether or not another namespace has a mesh service called the same: it is
+# handled like any destination that is not the mesh's. $TEST_NS3 has a plain
+# Service "$SHORT_NAME" of its own, not a mesh service.
+#
+#   - http://$SHORT_NAME:$HTTP_PORT/ resolves, in the cluster's DNS, to that
+#     plain Service, and reaches it: the passthrough to the address dialled.
+#     Until the ruling it was refused 421, because two other namespaces have
+#     a mesh service of the name.
+#   - The passthrough is not a way to another namespace's mesh service. A dial
+#     to the address of the mesh service of $TEST_NS or $TEST_NS2 with the
+#     short name in Host goes to the address that was dialled, a mesh Service
+#     address that nothing but the mesh serves: it is answered by neither
+#     service.
+#   - On the proxy port nothing was dialled: the name gets what any name that
+#     is not the mesh's gets there.
 leg_N3() {
-	log "N3 Host $SHORT_NAME:$HTTP_PORT from $TEST_NS3, which has no $SHORT_NAME, is refused by name"
+	log "N3 Host $SHORT_NAME:$HTTP_PORT from $TEST_NS3, which has no MESH $SHORT_NAME, is not a mesh name there"
 	local meaning target
-	meaning="'$SHORT_MARKER_A' or '$SHORT_MARKER_B' is the short name answered by a namespace the caller is not in"
+	meaning="'$SHORT_MARKER_A' or '$SHORT_MARKER_B' is the short name answered by a mesh service of a namespace the caller is not in; 'HTTP421' is the name refused instead of treated as not the mesh's"
+	expect "from $TEST_NS3, captured http://$SHORT_NAME:$HTTP_PORT/ (its own plain Service)" "$SHORT_MARKER_PLAIN" 240 "$A_PROBES" "$meaning" \
+		ns_tokens "$TEST_NS3" client "http://$SHORT_NAME:$HTTP_PORT/" ""
 	for target in "$SHORT_NAME.$TEST_NS.svc.cluster.local" "$SHORT_NAME.$TEST_NS2.svc.cluster.local"; do
-		expect "from $TEST_NS3, captured dial to $target:$HTTP_PORT with Host $SHORT_NAME:$HTTP_PORT" "HTTP421:name-not-in-namespace" 240 "$A_PROBES" "$meaning" \
+		expect "from $TEST_NS3, captured dial to $target:$HTTP_PORT with Host $SHORT_NAME:$HTTP_PORT" "HTTP503" "$A_TIMEOUT" "$A_PROBES" \
+			"$meaning; '$SHORT_MARKER_PLAIN' cannot be: that address was not dialled" \
 			ns_tokens "$TEST_NS3" client "http://$target:$HTTP_PORT/" "$SHORT_NAME:$HTTP_PORT"
 	done
-	expect "from $TEST_NS3, loopback, Host $SHORT_NAME:$HTTP_PORT" "HTTP421:name-not-in-namespace" "$A_TIMEOUT" "$A_PROBES" "$meaning" \
-		ns_loopback_tokens "$TEST_NS3" client "$SHORT_NAME:$HTTP_PORT"
+	# The proxy port: whatever a name that is not the mesh's gets there, the
+	# short name gets too. (Measured, not assumed: 404 on the loopback
+	# listener; from a pod on redirect-all the dial to 127.0.0.1:18081 can be
+	# the proxy port's capture chain, whose floor is the passthrough.)
+	local control
+	control="$(ns_loopback_tokens "$TEST_NS3" client "mp-not-a-mesh-name:$HTTP_PORT" 1 | tr -d '[:space:]')"
+	case "$control" in
+	HTTP404 | HTTP503)
+		expect "from $TEST_NS3, proxy port, Host $SHORT_NAME:$HTTP_PORT (a name that is not the mesh's gets $control there)" "$control" "$A_TIMEOUT" "$A_PROBES" "$meaning" \
+			ns_loopback_tokens "$TEST_NS3" client "$SHORT_NAME:$HTTP_PORT"
+		;;
+	*)
+		fail "from $TEST_NS3, proxy port: a name that is not the mesh's was answered '$control'" "expected a 404 or the passthrough's failure"
+		;;
+	esac
 	# And its own full-name requests are served as for anyone.
 	expect "from $TEST_NS3, captured http://$SHORT_NAME.$TEST_NS.$MESH_DOMAIN:$HTTP_PORT/" "$SHORT_MARKER_A" "$A_TIMEOUT" "$A_PROBES" \
 		"the full name must answer from any namespace" \

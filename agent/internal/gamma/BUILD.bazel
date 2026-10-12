@@ -45,6 +45,7 @@ go_test(
         "dropped_test.go",
         "ports_043_test.go",
         "portstatus_test.go",
+        "portstatus_unknown_test.go",
         "reconciler_test.go",
         "stalestatus_test.go",
         "watches_test.go",

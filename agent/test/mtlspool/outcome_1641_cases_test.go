@@ -265,8 +265,8 @@ func startOutcomeMesh(t *testing.T) *outcomeMesh {
 	})
 
 	listeners = append(listeners, edge,
-		bypassOverload(productionOutbound(t, "source", proxy.BuildOutboundRouteConfiguration(vhosts, begunMeshDomain))),
-		bypassOverload(productionOutbound(t, "source_previous", previousReleaseRoutes(proxy.BuildOutboundRouteConfiguration(vhosts, begunMeshDomain)))),
+		bypassOverload(productionOutbound(t, "source", proxy.BuildOutboundRouteConfiguration(vhosts, begunMeshDomain, nil))),
+		bypassOverload(productionOutbound(t, "source_previous", previousReleaseRoutes(proxy.BuildOutboundRouteConfiguration(vhosts, begunMeshDomain, nil)))),
 	)
 	const heap = "envoy.resource_monitors.fixed_heap"
 	bs := &bootstrapv3.Bootstrap{

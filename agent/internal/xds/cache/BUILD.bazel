@@ -134,6 +134,13 @@ go_test(
         "perport_second_043_test.go",
         "perport_shapes_043_test.go",
         "perport_skew_043_test.go",
+        "perport_third_043_test.go",
+        "perport_third_gaps_043_test.go",
+        "perport_third_imported_043_test.go",
+        "perport_third_modes_043_test.go",
+        "perport_third_more_043_test.go",
+        "perport_third_partly_043_test.go",
+        "perport_third_rulegen_043_test.go",
         "pinreport_test.go",
         "podchurn_cds_test.go",
         "podname_namespace_1584_test.go",
@@ -172,6 +179,10 @@ go_test(
         "waypoint_test.go",
     ],
     embed = [":cache"],
+    # The randomized tests of proposal 043 (the walk, the cold/warm modes)
+    # are most of the suite's time and share nothing: in four shards the race
+    # leg stays well inside the timeout instead of at its edge.
+    shard_count = 4,
     deps = [
         "//agent/internal/capture",
         "//agent/internal/meshdns",
@@ -198,6 +209,7 @@ go_test(
         "@com_github_envoyproxy_go_control_plane//pkg/server/stream/v3:stream",
         "@com_github_envoyproxy_go_control_plane//pkg/server/v3:server",
         "@com_github_envoyproxy_go_control_plane_envoy//config/cluster/v3:cluster",
+        "@com_github_envoyproxy_go_control_plane_envoy//config/common/mutation_rules/v3:mutation_rules",
         "@com_github_envoyproxy_go_control_plane_envoy//config/core/v3:core",
         "@com_github_envoyproxy_go_control_plane_envoy//config/endpoint/v3:endpoint",
         "@com_github_envoyproxy_go_control_plane_envoy//config/listener/v3:listener",
