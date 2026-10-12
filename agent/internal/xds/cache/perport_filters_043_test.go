@@ -113,6 +113,32 @@ func TestPerPort_ServiceFiltersOnEveryVirtualHost(t *testing.T) {
 				got := a043Resolve(t, tables[tc.table], tc.host)
 				assert.NotEqualf(t, "on_demand_catch_all", got.vhost, "%s, Host %s", tc.table, tc.host)
 			}
+			// Nor on the loopback path: whatever port the Host spells, and
+			// with none, the virtual host that takes the request is the
+			// service's own and enables its filter. For a service with no
+			// cluster here that is the on-demand route under the service's
+			// name, which no cluster name identifies, so the walk above does
+			// not see it.
+			for _, host := range []string{"multi.demo." + a043Mesh, "multi.demo." + a043Mesh + ":8080", "multi.demo." + a043Mesh + ":9090", "multi.demo." + a043Mesh + ":18081", "multi.demo." + a043Mesh + ":7777"} {
+				got := a043Resolve(t, tables[proxy.OutboundHTTPRouteName], host)
+				if !assert.NotEqualf(t, "on_demand_catch_all", got.vhost, "out_http, Host %s: the request takes the catch-all, without the filter", host) {
+					continue
+				}
+				var vh *routev3.VirtualHost
+				for _, v := range tables[proxy.OutboundHTTPRouteName].GetVirtualHosts() {
+					if v.GetName() == got.vhost {
+						vh = v
+					}
+				}
+				require.NotNil(t, vh)
+				delivers := false
+				for _, r := range vh.GetRoutes() {
+					delivers = delivers || r.GetRoute() != nil
+				}
+				if _, enabled := vh.GetTypedPerFilterConfig()[filter]; delivers {
+					assert.Truef(t, enabled, "out_http, Host %s: virtual host %s delivers without the service's HTTP filter", host, vh.GetName())
+				}
+			}
 		})
 	}
 }
