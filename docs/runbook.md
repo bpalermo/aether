@@ -4264,28 +4264,36 @@ new names. The HTTP stat prefix (`capture_http`) is unchanged.
 **This upgrade is not hitless, by decision**: no compatibility with chart 2.6
 components is kept. The helm upgrade replaces the registrar at once and rolls
 the agents node by node, so for the length of the agent roll the cluster is
-mixed. What each mix does (read from the code; the measured run is recorded
-with the release):
+mixed. What each mix does, measured on kind with chart 2.6.2 images on one
+side and this release on the other, both registry backends
+(`e2e/README.md`, "Version skew with multiprotocol.sh"):
 
-- **A 2.6 agent behind the 2.7 registrar** (every node not yet rolled). The
-  generated Services have lost `aether.io/app-protocol`, which a 2.6 agent
-  reads to choose a service's capture chain: it now takes every service for
-  HTTP. On those nodes a service whose declared port is **raw TCP** has no
-  raw-TCP chain for new connections (its declared port and `:18082` stop
-  working from clients on that node) until the node's agent is 2.7. HTTP
-  services are not affected by this.
-- **A 2.7 agent behind a 2.6 registrar** (only if the registrar is held back).
-  The agent needs nothing from the Service but its address. On the
-  `kubernetes` backend the mixed shapes stay as broken as on 2.6 until the
-  registrar is 2.7.
+- **2.6 agents behind the 2.7 registrar** (every node not yet rolled; the
+  window of a normal helm upgrade). The generated Services have lost
+  `aether.io/app-protocol`, which a 2.6 agent reads to choose a service's
+  capture chain: it takes every service for HTTP.
+  - A service whose declared port is **raw TCP** gets no reply from clients
+    on those nodes, on its declared port and on `:18082` (measured on a
+    service with only a raw-TCP port, both backends). HTTP sent to such a
+    service answers 502 or 503 where it was refused by name.
+  - HTTP services answer exactly as on 2.6, old spellings included: the
+    addressing is the source agent's, and it is still 2.6.
+- **2.7 agents behind a 2.6 registrar** (only if the registrar is held back).
+  - On `etcd` every data-plane check passes; only the generated Service still
+    has its 2.6 shape (placeholders and annotations, no real ports).
+  - On `kubernetes` the services whose pods serve both HTTP and raw TCP are
+    half-served until the registrar is 2.7: its listing puts such a pod under
+    one protocol only, so the other class's ports are refused
+    (`421 no-http-port` or `port-not-declared`) or get no reply.
 - **A client on a 2.7 node** is held to the new addressing from the moment its
   node's agent is 2.7, whatever version the destination's node runs: the
   refusals are decided by the source proxy.
 - **A 2.7 source and a 2.6 destination, or the reverse:** the hop between
-  proxies is unchanged.
+  proxies is unchanged (not measured separately: both cells above mix
+  versions only between agents and registrar, on one node).
 - **Rollback** to 2.6.x: the 2.6 registrar stamps the annotations and the
   placeholder ports back on its next reconcile, and the old spellings work
-  again node by node as the agents roll back.
+  again node by node as the agents roll back (read from the code, not run).
 
 Do it in a maintenance window, clients moved first (see the two BREAKING
 sections above and "Prober chart 1.1.0"), and expect raw-TCP services to be
