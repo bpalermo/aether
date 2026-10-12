@@ -73,6 +73,12 @@ rules:
   - apiGroups: [""]
     resources: ["services"]
     verbs: ["list", "get", "watch"]
+  # GAMMA: a route-named Service whose targetPort is a NAME is resolved to the
+  # pod port through its EndpointSlices (the registry carries no port names).
+  # Read on demand for those Services only; never watched, never cached.
+  - apiGroups: ["discovery.k8s.io"]
+    resources: ["endpointslices"]
+    verbs: ["list", "get"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding

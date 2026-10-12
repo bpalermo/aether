@@ -387,11 +387,11 @@ func TestCaptureChains_NoAnyPortChainForAServiceWithHTTP(t *testing.T) {
 			ports: []uint32{9000, 18082},
 		},
 		"HTTP legacy target, one raw-TCP port": {
-			svc:   CaptureTCPService{ClusterName: cluster, ClusterIP: "10.96.0.1", HTTPPorts: []uint32{8080}, TCPPorts: []uint32{9000}, LegacyHTTP: true},
+			svc:   CaptureTCPService{ClusterName: cluster, ClusterIP: "10.96.0.1", HTTPPorts: []uint32{8080}, TCPPorts: []uint32{9000}},
 			ports: []uint32{9000},
 		},
 		"HTTP only": {
-			svc: CaptureTCPService{ClusterName: cluster, ClusterIP: "10.96.0.1", HTTPPorts: []uint32{8080}, LegacyHTTP: true},
+			svc: CaptureTCPService{ClusterName: cluster, ClusterIP: "10.96.0.1", HTTPPorts: []uint32{8080}},
 		},
 	} {
 		for _, withPassthrough := range []bool{true, false} {
@@ -478,17 +478,20 @@ func TestCaptureChains_AnyPortTwinsOnHTTPPortNumbers(t *testing.T) {
 	assert.ElementsMatch(t, []string{claimed[9000], claimed[9100], claimed[18082]}, names)
 }
 
-// TestCaptureChains_TLSTwinsAndTheLegacyHTTPNumbers: the TLS twin rule for the
-// two legacy HTTP numbers. A service whose legacy target is HTTP is served
-// its cleartext HTTP on the mesh HTTP port (18081) and on 80 as well as on
-// its declared HTTP ports. A twin of its SNI chain on one of those numbers
-// claims the service's address there; the address is decided before the
-// protocol, so a cleartext request matches the address, has no server name,
-// and leaves through the listener's default instead of reaching cap_http_<P>.
-// So: no twin on 18081, on 80, or on a declared HTTP port. A service whose
-// legacy target is raw TCP serves no HTTP on 18081 or 80, and its twins there
-// are what keeps its TLSRoute working on those numbers.
-func TestCaptureChains_TLSTwinsAndTheLegacyHTTPNumbers(t *testing.T) {
+// TestCaptureChains_TLSTwinsAndTheProxyPort: the TLS twin rule for the proxy
+// port (18081) and for port 80. A service that serves HTTP is sent its
+// cleartext HTTP on its declared HTTP ports and on the proxy port, where a
+// pod writes "Host: <name>:<port>" to "<name>:18081". A twin of its SNI chain
+// on one of those numbers claims the service's address there; the address is
+// decided before the protocol, so a cleartext request matches the address,
+// has no server name, and leaves through the listener's default instead of
+// reaching cap_http_<P>. So: no twin on a declared HTTP port, and none on
+// 18081 for a service with any HTTP port. Port 80 is a port like any other: a
+// twin stands there unless the service declares it as HTTP (until chart 2.7.0
+// 18081 and 80 both carried the HTTP of "the port the pods declare"). A
+// service with no HTTP port has no HTTP on 18081 either, and its twins there
+// are what keeps its TLSRoute working on that number.
+func TestCaptureChains_TLSTwinsAndTheProxyPort(t *testing.T) {
 	const sni = "a.example.com"
 	rules := []L4ServiceRoute{{
 		SNIHostnames: []string{sni},
@@ -502,35 +505,36 @@ func TestCaptureChains_TLSTwinsAndTheLegacyHTTPNumbers(t *testing.T) {
 		svc  CaptureTCPService
 		want []uint32 // destination ports of the SNI chains; 0 is the unqualified one
 	}{
-		"HTTP legacy target": {
+		"HTTP and raw TCP": {
 			svc: CaptureTCPService{
 				ClusterName: "tcp:web.t.aether.internal", ClusterIP: "10.96.0.1",
-				HTTPPorts: []uint32{8080}, TCPPorts: []uint32{9000}, LegacyHTTP: true, TLSRouteRules: rules,
+				HTTPPorts: []uint32{8080}, TCPPorts: []uint32{9000}, TLSRouteRules: rules,
 			},
-			// not 8080 (declared HTTP), not 80, not 18081
-			want: []uint32{0, 5432, 9000, 9090, 18082},
+			// not 8080 (declared HTTP), not 18081 (the proxy port carries
+			// its HTTP). 80 is not a port of it: a twin stands there.
+			want: []uint32{0, 80, 5432, 9000, 9090, 18082},
 		},
-		"HTTP legacy target, HTTP only": {
+		"HTTP only": {
 			svc: CaptureTCPService{
 				ClusterName: "tcp:web.t.aether.internal", ClusterIP: "10.96.0.1",
-				HTTPPorts: []uint32{8080, 9090}, LegacyHTTP: true, TLSRouteRules: rules,
+				HTTPPorts: []uint32{8080, 9090}, TLSRouteRules: rules,
 			},
-			want: []uint32{0, 5432, 18082},
+			want: []uint32{0, 80, 5432, 18082},
 		},
-		"raw-TCP legacy target": {
+		"raw TCP only": {
 			svc: CaptureTCPService{
 				ClusterName: "tcp:db.t.aether.internal", ClusterIP: "10.96.0.1",
 				LegacyTCPPort: 9000, TLSRouteRules: rules,
 			},
 			want: []uint32{0, 80, 5432, 8080, 9000, 9090, 18081, 18082},
 		},
-		"raw-TCP legacy target, with an HTTP port of its own": {
+		"raw-TCP declared port, with an HTTP port of its own": {
 			svc: CaptureTCPService{
 				ClusterName: "tcp:db.t.aether.internal", ClusterIP: "10.96.0.1",
 				HTTPPorts: []uint32{8080}, LegacyTCPPort: 9000, TLSRouteRules: rules,
 			},
-			// 8080 is its own HTTP; 80 and 18081 are not its legacy numbers
-			want: []uint32{0, 80, 5432, 9000, 9090, 18081, 18082},
+			// 8080 is its own HTTP, and the proxy port carries it too
+			want: []uint32{0, 80, 5432, 9000, 9090, 18082},
 		},
 	} {
 		l := perPortListener(t, []CaptureTCPService{tt.svc, other}, httpPorts, true)
@@ -556,7 +560,7 @@ func TestCaptureChains_TLSTwinsAndTheLegacyHTTPNumbers(t *testing.T) {
 				continue
 			}
 			p := m.GetDestinationPort().GetValue()
-			carriesHTTP := slices.Contains(tt.svc.HTTPPorts, p) || (tt.svc.LegacyHTTP && (p == 80 || p == meshconst.ProxyOutboundPort))
+			carriesHTTP := slices.Contains(tt.svc.HTTPPorts, p) || (len(tt.svc.HTTPPorts) > 0 && p == meshconst.ProxyOutboundPort)
 			assert.False(t, carriesHTTP, "%s: chain %s claims the address on port %d, which carries the service's HTTP", name, fc.GetName(), p)
 		}
 	}
@@ -566,7 +570,9 @@ func TestCaptureChains_TLSTwinsAndTheLegacyHTTPNumbers(t *testing.T) {
 // (address + server_names) is never considered for a connection to a port some
 // chain names (#911), so it gets a twin on every named port of the listener,
 // the HTTP port numbers and OTHER services' raw-TCP ports included. Except the
-// ports its own service declares as HTTP: a twin there claims the service's
+// ports that carry its own service's cleartext HTTP: the ports the service
+// declares as HTTP, and the proxy port (18081) of a service that serves HTTP,
+// where a pod sends "Host: <name>:<port>". A twin there claims the service's
 // address on that port, its cleartext HTTP matches the address, fails the SNI
 // and leaves through the passthrough.
 func TestCaptureChains_TLSTwinsOnNamedPortsButNotTheServicesOwnHTTP(t *testing.T) {
@@ -593,13 +599,13 @@ func TestCaptureChains_TLSTwinsOnNamedPortsButNotTheServicesOwnHTTP(t *testing.T
 		got[m.GetDestinationPort().GetValue()] = true
 	}
 	want := map[uint32]bool{
-		0:  true,                          // the unqualified chain: every port nothing names
-		80: true, 9090: true, 18081: true, // HTTP port numbers of the mesh that are not this service's
+		0:  true,             // the unqualified chain: every port nothing names
+		80: true, 9090: true, // HTTP port numbers of the mesh that are not this service's
 		9000:  true, // its own raw-TCP port
 		5432:  true, // another service's raw-TCP port
 		18082: true, // the TCP mesh port, named by the other service's legacy chain
 	}
-	assert.Equal(t, want, got, "no twin on 8080: that is the service's own HTTP port")
+	assert.Equal(t, want, got, "no twin on 8080, the service's own HTTP port, nor on 18081, the proxy port that carries its HTTP")
 	assert.Empty(t, duplicateMatches(l.GetFilterChains()))
 
 	// The helper on its own, with its negative control: the same chains with
@@ -609,9 +615,16 @@ func TestCaptureChains_TLSTwinsOnNamedPortsButNotTheServicesOwnHTTP(t *testing.T
 	named := namedDestinationPorts([]CaptureTCPService{svc, other}, []uint32{80, 8080, 9090, 18081})
 	assert.Equal(t, []uint32{80, 5432, 8080, 9000, 9090, 18081, 18082}, named)
 	assert.False(t, hasSNIChainAt(qualifyTLSChainsByPorts(svc, tls, named), 8080))
+	assert.False(t, hasSNIChainAt(qualifyTLSChainsByPorts(svc, tls, named), 18081))
+	assert.True(t, hasSNIChainAt(qualifyTLSChainsByPorts(svc, tls, named), 80), "port 80 is not this service's: a twin stands there")
 	noHTTP := svc
 	noHTTP.HTTPPorts = nil
 	assert.True(t, hasSNIChainAt(qualifyTLSChainsByPorts(noHTTP, tls, named), 8080))
+	assert.True(t, hasSNIChainAt(qualifyTLSChainsByPorts(noHTTP, tls, named), 18081), "a service with no HTTP port has no HTTP on the proxy port either")
+	// A service that declares port 80 as HTTP keeps it.
+	eighty := svc
+	eighty.HTTPPorts = []uint32{80, 8080}
+	assert.False(t, hasSNIChainAt(qualifyTLSChainsByPorts(eighty, tls, named), 80))
 	// No named port, or no TLS chain: nothing to do.
 	assert.Len(t, qualifyTLSChainsByPorts(svc, tls, nil), len(tls))
 	assert.Empty(t, qualifyTLSChainsByPorts(svc, nil, named))

@@ -123,10 +123,6 @@ type CaptureTCPService struct {
 	// No service-level protocol is read to set it: the cache derives it from
 	// the registry endpoints, never from the mesh Service's annotation.
 	LegacyTCPPort uint32
-	// LegacyHTTP reports that the service's legacy target is an HTTP port, so
-	// that the two legacy HTTP numbers (the mesh HTTP port, and 80) carry its
-	// cleartext HTTP like its declared HTTP ports do. See HTTPPorts.
-	LegacyHTTP bool
 }
 
 // CaptureListenerName returns the per-pod transparent-capture listener name.
@@ -708,7 +704,9 @@ func qualifyTLSChainsByPorts(svc CaptureTCPService, tlsChains []*listenerv3.Filt
 	out := make([]*listenerv3.FilterChain, 0, len(tlsChains)*(len(named)+1))
 	out = append(out, tlsChains...)
 	for _, p := range named {
-		if slices.Contains(svc.HTTPPorts, p) || (svc.LegacyHTTP && (p == meshconst.ProxyOutboundPort || p == 80)) {
+		// The proxy port carries the cleartext HTTP of every service that
+		// serves HTTP: a pod sends "Host: <name>:<port>" to "<name>:18081".
+		if slices.Contains(svc.HTTPPorts, p) || (p == meshconst.ProxyOutboundPort && len(svc.HTTPPorts) > 0) {
 			continue
 		}
 		for _, c := range tlsChains {

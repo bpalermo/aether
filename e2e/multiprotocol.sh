@@ -59,8 +59,10 @@
 #   M0  control       mp-httponly: HTTP on :18081 answers ctl8080; raw TCP to
 #                     :9000 and to :18082 is NEVER answered: a port that is not
 #                     declared is not on the mesh
-#   M1  http, mesh    mp-mixed http://<name>:18081/ -> mix8080
-#   M2  http, bare    mp-mixed http://<name>/ (dials 80) -> mix8080
+#   M1  http, mesh    mp-mixed http://<name>:18081/ -> 421 port-not-declared:
+#                     18081 is the proxy's port, not a port of the service
+#   M2  http, bare    mp-mixed http://<name>/ (dials 80) -> 421
+#                     port-not-declared: it does not declare 80
 #   M3  http, port    mp-mixed http://<name>:8080/ -> mix8080
 #   M4  tcp, port     mp-mixed raw TCP to :9000 -> mixtcp (cap_tcp_<svc>_9000 ->
 #                     tcp:<name>:9000 -> the inbound's per-port chain)
@@ -118,7 +120,9 @@
 #                  -> mixtcp (the declaration decides, not the bytes); bytes
 #                  that are not HTTP to mp-nine's :9000 -> no application
 #                  answers
-#   A12 both       the legacy spellings, unchanged in this phase: :18081, the
+#   A12 both       NO spelling means "the port the pods declare" (see leg_A12);
+#                  what follows is what the three spellings meant until chart
+#                  2.7.0: :18081, the
 #                  port-less URL, the port-less svc.cluster.local URL, and on
 #                  loopback a port-less Host and Host <mesh name>:18081 reach
 #                  the port the pods declare in endpoint.aether.io/port when
@@ -290,13 +294,8 @@ AGENT_GROUP=(agent mesh-dns proxy-supervisor cni-install uds-csi)
 REGISTRAR_GROUP=(registrar controller)
 # Red-run aids (see "A RED RUN" in the header). CI sets none of them.
 ALL_LEGS=(M0 M1 M2 M3 M4 M5 M6 M7 X1 X2 X3 X4 X5 X6 A1 A2 A3 A4 A5 A6 A7 A8 A9 A10 A11 A12
-	W1 W2 W3 P1 P2 P3 P4 P5 R1 R2 R3)
-# P3 (a captured dial to :18081 routed by its Host port alone) is not in the
-# default run yet: a dial to 18081 with another Host port is still refused as
-# port-mismatch. It joins the default with the change that makes 18081 the
-# mesh's HTTP proxy port on the captured path. MP_LEGS=P3 runs it.
-DEFAULT_LEGS=("${ALL_LEGS[@]/P3/}")
-MP_LEGS="${MP_LEGS:-${DEFAULT_LEGS[*]}}"
+	W1 W2 W3 P1 P2 P3 P4 P5 R1 R2 R3 S1)
+MP_LEGS="${MP_LEGS:-${ALL_LEGS[*]}}"
 MP_KEEP_GOING="${MP_KEEP_GOING:-0}"
 MP_TIMEOUT="${MP_TIMEOUT:-}"
 # How many probes a measured batch sends: PROBES for the 037 legs, A_PROBES for
@@ -887,10 +886,20 @@ HTTP_POD_SCRIPT="$(
 url="$1"; host="$2"; n="$3"; proxy="${4:-}"; i=1
 set -- -s --max-time 5 -D - -w "\nMPSTAT %{http_code} %{time_total} %{time_namelookup}\n"
 if [ -n "$host" ]; then set -- "$@" -H "Host: $host"; fi
-if [ -n "$proxy" ]; then
+case "$proxy" in
+env:*)
+	# The proxy from the environment, as a workload has it: curl reads the
+	# lower-case http_proxy for an http:// URL (most other clients read
+	# HTTP_PROXY as well).
+	http_proxy="${proxy#env:}"
+	export http_proxy
+	;;
+"") ;;
+*)
 	set -- "$@" --proxy "$proxy"
 	if [ -n "$host" ]; then set -- "$@" --request-target "$url"; fi
-fi
+	;;
+esac
 while [ "$i" -le "$n" ]; do
 	curl "$@" "$url" 2>/dev/null | tr -d "\r" | awk '
 		BEGIN { st = "000"; t = "0"; dns = "0"; err = "-"; rt = "-"; body = "-"; inbody = 0 }
@@ -1267,9 +1276,9 @@ leg_M0() {
 	log "M0 control: mp-httponly declares only its HTTP port — its :$TCP_PORT listener must not be reachable through the mesh"
 	local name target
 	name="$(mesh_name mp-httponly)"
-	expect "captured http://$name:$MESH_HTTP_PORT/" "$(marker mp-httponly "$HTTP_PORT")" 240 "$PROBES" \
+	expect "captured http://$name:$HTTP_PORT/" "$(marker mp-httponly "$HTTP_PORT")" 240 "$PROBES" \
 		"the control workload does not serve HTTP through the mesh, so nothing below could mean anything" \
-		http_tokens client "http://$name:$MESH_HTTP_PORT/" ""
+		http_tokens client "http://$name:$HTTP_PORT/" ""
 	for target in "$name:$TCP_PORT" "$name:$MESH_TCP_PORT"; do
 		expect_unanswered "raw TCP to $target" "$target" line \
 			"the pod does not declare a TCP port: the probe cannot tell a declared port from an undeclared one, or the mesh forwards a port nobody registered"
@@ -1282,18 +1291,18 @@ leg_M0() {
 leg_M1() {
 	local name
 	name="$(mesh_name mp-mixed)"
-	log "M1 http on the mesh port: http://$name:$MESH_HTTP_PORT/"
-	expect "captured http://$name:$MESH_HTTP_PORT/" "$(marker mp-mixed "$HTTP_PORT")" 240 "$PROBES" \
-		"HTTP to the mesh port of a mixed service is not served by its HTTP port" \
+	log "M1 the proxy port is not a port of the service: http://$name:$MESH_HTTP_PORT/ (Host says :$MESH_HTTP_PORT) is refused by name"
+	expect "captured http://$name:$MESH_HTTP_PORT/" "HTTP421:port-not-declared" 240 "$PROBES" \
+		"'$(marker mp-mixed "$HTTP_PORT")' is :$MESH_HTTP_PORT read as 'the port the pods declare', which it meant until chart 2.7.0" \
 		http_tokens client "http://$name:$MESH_HTTP_PORT/" ""
 }
 
 leg_M2() {
 	local name
 	name="$(mesh_name mp-mixed)"
-	log "M2 http, portless: http://$name/ (the client dials 80)"
-	expect "captured http://$name/" "$(marker mp-mixed "$HTTP_PORT")" 90 "$PROBES" \
-		"a portless http:// URL does not reach the service's HTTP port" \
+	log "M2 http, portless: http://$name/ dials port 80, which mp-mixed does not declare: refused by name"
+	expect "captured http://$name/" "HTTP421:port-not-declared" 90 "$PROBES" \
+		"'$(marker mp-mixed "$HTTP_PORT")' is a port-less URL read as 'the port the pods declare', which it meant until chart 2.7.0" \
 		http_tokens client "http://$name/" ""
 }
 
@@ -1401,20 +1410,19 @@ leg_X3() {
 # the raw-TCP port as h2; '<marker>' means the spelling now reaches an HTTP
 # port that is not the declared one.
 leg_X4() {
-	log "X4 (= A12 for mp-tcpfirst) the legacy HTTP spellings of a service whose declared port is raw TCP are refused by name"
+	log "X4 (= A12 for mp-tcpfirst) a service whose declared port is raw TCP: :$MESH_HTTP_PORT and the port-less name are refused by name, like for any service that does not declare 80"
 	shared tcpfirst_refused check_tcpfirst_refused
 }
 
 check_tcpfirst_refused() {
-	local name want meaning
+	local name meaning
 	name="$(mesh_name mp-tcpfirst)"
-	want="HTTP421:port-required"
-	meaning="HTTP502 is the request sent to the raw-TCP port; '$(marker mp-tcpfirst "$HTTP_PORT")' means the legacy spelling reaches the HTTP port; ':slow' is a refusal that was not immediate"
-	captured "$want" "$name:$MESH_HTTP_PORT" "" "$meaning"
-	captured "$want" "$name" "" "$meaning"
-	captured "$want" "$(k8s_fqdn mp-tcpfirst)" "" "$meaning"
-	loopback "$want" "$name" "$meaning"
-	loopback "$want" "$name:$MESH_HTTP_PORT" "$meaning"
+	meaning="HTTP502 is the request sent to the raw-TCP port; '$(marker mp-tcpfirst "$HTTP_PORT")' means a spelling without a declared port reaches the HTTP port; ':slow' is a refusal that was not immediate"
+	captured "HTTP421:port-not-declared" "$name:$MESH_HTTP_PORT" "" "$meaning"
+	captured "HTTP421:port-not-declared" "$name" "" "$meaning"
+	captured "HTTP421:port-not-declared" "$(k8s_fqdn mp-tcpfirst)" "" "$meaning"
+	loopback "HTTP421:port-required" "$name" "$meaning"
+	loopback "HTTP421:port-not-declared" "$name:$MESH_HTTP_PORT" "$meaning"
 }
 
 leg_X5() {
@@ -1683,34 +1691,36 @@ leg_A11() {
 		"'HTTP/1.1' is mp-nine's HTTP server answering raw bytes that were forwarded to it; '$(tcp_marker mp-mixed)' is another service's TCP port"
 }
 
-# A12 — the legacy spellings, which this phase deliberately leaves alone. The
-# legacy target of a service is the port its pods declare in
-# endpoint.aether.io/port; :18081, the port-less URL (a dial to 80) and a
-# port-less or :18081 Host on loopback reach it when it is HTTP.
+# A12 — no spelling means "the port the pods declare". Until chart 2.7.0 three
+# did: <name>:18081, the port-less URL (a dial to 80), and a port-less or
+# :18081 Host on the loopback listener.
 #
-# mp-eighty is the case to read twice: it DECLARES port 80, so a port-less
-# dial of port 80 is port 80, like a dial to any declared port, and answers
-# from 80, not from 8080, its legacy target. Only a service that does not
-# declare 80 keeps the legacy meaning of that dial.
+#   - 18081 is the proxy's port, not a port of a service: Host "<name>:18081"
+#     is a port the service does not declare, on both paths.
+#   - A port-less name is port 80 and nothing else. mp-eighty declares 80 and
+#     answers from it; every other workload refuses: by the dialled port when
+#     captured (port-not-declared), and on the loopback listener, where nothing
+#     was dialled, by asking for a port (port-required).
 leg_A12() {
-	log "A12 the legacy spellings reach the port declared in endpoint.aether.io/port, unchanged in this phase"
-	local w name want meaning dialled80
+	log "A12 :$MESH_HTTP_PORT and the port-less name never mean 'the port the pods declare': port 80 answers when declared, everything else is refused by name"
+	local w name meaning portless80 portlessLoop
 	for w in "${WORKLOADS[@]}"; do
 		[ "$w" != "mp-tcpfirst" ] || continue
 		name="$(mesh_name "$w")"
-		want="$(marker "$w" "$(wl_legacy_port "$w")")"
-		meaning="the legacy target of $w is :$(wl_legacy_port "$w"); another marker is a legacy spelling that changed meaning in this phase"
-		captured "$want" "$name:$MESH_HTTP_PORT" "" "$meaning"
-		dialled80="$want"
+		meaning="'$(marker "$w" "$(wl_legacy_port "$w")")' is the spelling read as the port $w's pods declare (:$(wl_legacy_port "$w")), which it meant until chart 2.7.0"
+		portless80="HTTP421:port-not-declared"
+		portlessLoop="HTTP421:port-required"
 		if [ "$w" = "mp-eighty" ]; then
-			dialled80="$(marker "$w" "$LOW_PORT")"
+			portless80="$(marker "$w" "$LOW_PORT")"
+			portlessLoop="$portless80"
 		fi
-		captured "$dialled80" "$name" "" "a port-less dial is a dial to port 80: a declared port 80 answers it, else the legacy target of $w, :$(wl_legacy_port "$w")"
-		captured "$dialled80" "$(k8s_fqdn "$w")" "" "a port-less dial is a dial to port 80: a declared port 80 answers it, else the legacy target of $w, :$(wl_legacy_port "$w")"
-		loopback "$want" "$name" "$meaning"
-		loopback "$want" "$name:$MESH_HTTP_PORT" "$meaning"
+		captured "HTTP421:port-not-declared" "$name:$MESH_HTTP_PORT" "" "$meaning"
+		captured "$portless80" "$name" "" "$meaning"
+		captured "$portless80" "$(k8s_fqdn "$w")" "" "$meaning"
+		loopback "$portlessLoop" "$name" "$meaning"
+		loopback "HTTP421:port-not-declared" "$name:$MESH_HTTP_PORT" "$meaning"
 	done
-	note "mp-tcpfirst, whose legacy target is raw TCP: its HTTP spellings are refused (X4) and :$MESH_TCP_PORT reaches it (X1)"
+	note "mp-tcpfirst, whose declared port is raw TCP: the same refusals (X4), and :$MESH_TCP_PORT reaches it (X1)"
 	shared tcpfirst_refused check_tcpfirst_refused
 	shared tcpfirst_meshtcp check_tcpfirst_meshtcp
 }
@@ -1831,14 +1841,17 @@ YAML
 			"'True/Accepted' is the status not reading the parentRef's port (parentRef port $port)"
 		captured "$own" "$name:$HTTP_PORT" "" \
 			"parentRef port $port: '$(marker mp-multi "$ALT_PORT")' is the route applied to a port its parentRef did not name"
-		captured "$own" "$name:$MESH_HTTP_PORT" "" \
-			"parentRef port $port, dial :$MESH_HTTP_PORT: '$(marker mp-multi "$ALT_PORT")' is $port read as 'the port the pods declare'"
-		captured "$own" "$name" "" \
-			"parentRef port $port, port-less dial: '$(marker mp-multi "$ALT_PORT")' is $port read as 'the port the pods declare'"
+		# The two spellings that used to mean "the port the pods declare" are
+		# refused by name whether or not the route exists; what matters here
+		# is that the route does not answer for them either.
+		captured "HTTP421:port-not-declared" "$name:$MESH_HTTP_PORT" "" \
+			"parentRef port $port, dial :$MESH_HTTP_PORT: '$(marker mp-multi "$ALT_PORT")' is the route applied through the proxy port"
+		captured "HTTP421:port-not-declared" "$name" "" \
+			"parentRef port $port, port-less dial: '$(marker mp-multi "$ALT_PORT")' is the route applied to a port mp-httponly does not declare"
 		loopback "$own" "$name:$HTTP_PORT" \
 			"parentRef port $port, loopback: '$(marker mp-multi "$ALT_PORT")' is the route applied to a port its parentRef did not name"
-		loopback "$own" "$name" \
-			"parentRef port $port, loopback, port-less: '$(marker mp-multi "$ALT_PORT")' is $port read as 'the port the pods declare'"
+		loopback "HTTP421:port-required" "$name" \
+			"parentRef port $port, loopback, port-less: '$(marker mp-multi "$ALT_PORT")' is the route applied to a name without a port"
 	done
 	remove_route "$R_PARENT_ROUTE"
 }
@@ -1922,9 +1935,12 @@ leg_W3() {
 	name="$(mesh_name "$TCP_ONLY")"
 	log "W3 HTTP to $TCP_ONLY, which has no HTTP port, is refused by name"
 	meaning="NOREPLY is the HTTP request carried as raw bytes to the declared port (the any-port chain) or leaving through the passthrough; ':slow' is a refusal that was not immediate"
-	captured "HTTP421:port-not-declared" "$name:$HTTP_PORT" "" "$meaning"
-	captured "HTTP421:no-http-port" "$name:$MESH_HTTP_PORT" "" "$meaning"
+	captured "HTTP421:no-http-port" "$name:$HTTP_PORT" "" "$meaning"
 	captured "HTTP421:no-http-port" "$name" "" "$meaning"
+	# The proxy port: Host says :$MESH_HTTP_PORT, a port the service does not
+	# declare; with no port in Host, there is no HTTP port to ask for.
+	captured "HTTP421:port-not-declared" "$name:$MESH_HTTP_PORT" "" "$meaning"
+	loopback "HTTP421:no-http-port" "$name" "$meaning"
 	loopback "HTTP421:port-not-http" "$name:$TCP_PORT" \
 		"HTTP502/503 is the request forwarded to the raw-TCP port or to a cluster nobody published; ':slow' is a refusal that was not immediate"
 }
@@ -1982,14 +1998,50 @@ leg_P2() {
 leg_P3() {
 	log "P3 captured: dial <name>:$MESH_HTTP_PORT, the proxy port, with Host <name>:P"
 	local name p
-	for name in "$(mesh_name mp-multi)" "$(k8s_fqdn mp-multi)"; do
-		for p in "$ALT_PORT" "$HTTP_PORT"; do
-			captured "$(marker mp-multi "$p")" "$name:$MESH_HTTP_PORT" "$name:$p" \
-				"'HTTP421:port-mismatch' is the proxy port read as a real port of the service; '$(marker mp-multi "$(wl_legacy_port mp-multi)")' for another port is the Host port ignored"
-		done
-		captured "HTTP421:port-not-declared" "$name:$MESH_HTTP_PORT" "$name:$UNDECLARED_PORT" \
-			"'HTTP421:port-mismatch' is the proxy port read as a real port of the service; a marker is another port answering for an undeclared one"
+	# Mesh names only, as on the loopback listener: the proxy port has no
+	# virtual host for a cluster.local name.
+	name="$(mesh_name mp-multi)"
+	for p in "$ALT_PORT" "$HTTP_PORT"; do
+		captured "$(marker mp-multi "$p")" "$name:$MESH_HTTP_PORT" "$name:$p" \
+			"'HTTP421:port-mismatch' is the proxy port read as a real port of the service; another marker is the Host port ignored"
 	done
+	captured "HTTP421:port-not-declared" "$name:$MESH_HTTP_PORT" "$name:$UNDECLARED_PORT" \
+		"'HTTP421:port-mismatch' is the proxy port read as a real port of the service; a marker is another port answering for an undeclared one"
+}
+
+# S1 — a pod that is NOT on redirect-all (capture.aether.io/redirect-all:
+# "false"; client-nocapture is one). Only the two mesh ports are diverted for
+# it, so a dial to a service's own port is not the mesh's. Its ways into the
+# mesh are the proxy port's:
+#
+#   a. the proxy from the environment (http_proxy=$PROXY_URL), two ports;
+#   b. an explicit Host "<name>:<port>" to the loopback listener, two ports;
+#   c. the same Host to "<name>:$MESH_HTTP_PORT", which IS diverted for it;
+#   d. and "curl http://<name>:$MESH_HTTP_PORT/" alone, whose Host says
+#      :$MESH_HTTP_PORT, is refused by name: until chart 2.7.0 that was how
+#      such a pod reached a service.
+#
+# What a dial to the service's own port gets from such a pod is recorded, not
+# asserted: it is not captured, and the cluster answers for it.
+leg_S1() {
+	log "S1 a pod that is not on redirect-all reaches the mesh through the proxy port, and <name>:$MESH_HTTP_PORT alone is refused by name"
+	local name p hist
+	name="$(mesh_name mp-multi)"
+	for p in "$HTTP_PORT" "$ALT_PORT"; do
+		expect "client-nocapture, http_proxy=$PROXY_URL, http://$name:$p/" "$(marker mp-multi "$p")" "$A_TIMEOUT" "$A_PROBES" \
+			"NOREPLY is curl not using the proxy from the environment, or the proxy port refusing an absolute-form request; another marker is another port answering" \
+			tokens_via "env:$PROXY_URL" client-nocapture "http://$name:$p/" ""
+		loopback "$(marker mp-multi "$p")" "$name:$p" \
+			"the loopback listener with Host $name:$p: another marker is another port answering"
+		expect "client-nocapture, dial http://$name:$MESH_HTTP_PORT/ with Host: $name:$p" "$(marker mp-multi "$p")" "$A_TIMEOUT" "$A_PROBES" \
+			"NOREPLY is the dial to :$MESH_HTTP_PORT not diverted for a pod that is not on redirect-all; 'HTTP421:port-mismatch' is the proxy port read as a port of the service" \
+			http_tokens client-nocapture "http://$name:$MESH_HTTP_PORT/" "$name:$p"
+	done
+	expect "client-nocapture, http://$name:$MESH_HTTP_PORT/ and nothing else" "HTTP421:port-not-declared" "$A_TIMEOUT" "$A_PROBES" \
+		"'$(marker mp-multi "$(wl_legacy_port mp-multi)")' is :$MESH_HTTP_PORT read as 'the port the pods declare', which it meant until chart 2.7.0" \
+		http_tokens client-nocapture "http://$name:$MESH_HTTP_PORT/" ""
+	hist="$(http_tokens client-nocapture "http://$name:$HTTP_PORT/" "" 3 | sort | uniq -c | awk '{printf "%s=%s ", $2, $1}')"
+	note "S1-OBSERVED client-nocapture, a dial to the service's own port, http://$name:$HTTP_PORT/ (not captured): $hist"
 }
 
 # P4 — a service's HTTP filters and route rules are applied on every path to
@@ -2098,7 +2150,8 @@ await_converged() {
 		authority="$name:$HTTP_PORT"
 		want="$(marker "$w" "$HTTP_PORT")"
 		if [ "$w" = "mp-nine" ]; then
-			authority="$name:$MESH_HTTP_PORT"
+			# Its one HTTP port has the number the others use for raw TCP.
+			authority="$name:$TCP_PORT"
 			want="$(marker "$w" "$TCP_PORT")"
 		fi
 		await_answer "$w" "http://$authority/" "$want" http_tokens client "http://$authority/" ""

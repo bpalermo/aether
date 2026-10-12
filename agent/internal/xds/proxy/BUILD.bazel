@@ -112,6 +112,7 @@ go_test(
         "captureport_test.go",
         "cluster_test.go",
         "clusterfamily_test.go",
+        "droppedbackend_test.go",
         "eastwest_port_test.go",
         "edge_test.go",
         "edgeconfig_test.go",
@@ -246,6 +247,7 @@ go_test(
         "capture_perport_043_test.go",
         "route_perport_043_test.go",
         "invalidbackend_test.go",
+        "droppedbackend_test.go",
     ],
     deps = [
         "//agent/internal/xds/config",

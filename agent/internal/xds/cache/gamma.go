@@ -218,6 +218,9 @@ func equalGammaRoute(a, b proxy.GammaRoute) bool {
 	if len(a.Matches) != len(b.Matches) || len(a.Backends) != len(b.Backends) || a.ParentPort != b.ParentPort || a.Imported != b.Imported {
 		return false
 	}
+	if a.DroppedBackends != b.DroppedBackends || a.DroppedBackendWeight != b.DroppedBackendWeight {
+		return false
+	}
 	if timeoutNanos(a) != timeoutNanos(b) {
 		return false
 	}

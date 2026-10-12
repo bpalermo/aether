@@ -2,8 +2,9 @@ package mtlspool
 
 // Which chain does the pinned proxy select for cleartext HTTP to the address
 // of a service that is also the parent of a TLSRoute, on each port its HTTP is
-// reachable by: its declared HTTP port, the mesh HTTP port (18081) and port 80
-// (the two legacy spellings of its declared port)?
+// reachable by: the HTTP ports it declares (8080, and 80, which this one
+// declares too) and the mesh's HTTP proxy port (18081), where the port in Host
+// is the port?
 //
 // The capture listener is the one SnapshotCache generates. To run it outside
 // a pod's network namespace, one listener is published per dialled port D:
@@ -90,7 +91,7 @@ func TestPerPort_TLSRouteParent_CleartextHTTP_Live(t *testing.T) {
 	ctx := context.Background()
 	h, tcp := registryv1.PortProtocol_PORT_PROTOCOL_HTTP, registryv1.PortProtocol_PORT_PROTOCOL_TCP
 	services := []ppaSvc{
-		{ns: "demo", name: "httponly", ip: "10.0.3.1", vip: "10.96.3.1", legacy: 8080, ports: map[uint32]registryv1.PortProtocol{8080: h}},
+		{ns: "demo", name: "httponly", ip: "10.0.3.1", vip: "10.96.3.1", legacy: 8080, ports: map[uint32]registryv1.PortProtocol{80: h, 8080: h}},
 		{ns: "demo", name: "plain", ip: "10.0.3.2", vip: "10.96.3.2", legacy: 8080, ports: map[uint32]registryv1.PortProtocol{8080: h}},
 		{ns: "demo", name: "tcponly", ip: "10.0.3.3", vip: "10.96.3.3", legacy: 9000, ports: map[uint32]registryv1.PortProtocol{9000: tcp}},
 	}
@@ -195,21 +196,38 @@ func TestPerPort_TLSRouteParent_CleartextHTTP_Live(t *testing.T) {
 	}
 	time.Sleep(time.Second)
 
+	// What a client writes in Host for each dialled port: the port it dialled
+	// (none for 80, as a URL without a port), and on the proxy port the port
+	// of the service it wants.
 	host := func(svc string, d uint32) string {
-		if d == 80 {
+		switch d {
+		case 80:
 			return svc + ".demo.aether.internal"
+		case 18081:
+			return svc + ".demo.aether.internal:8080"
 		}
 		return fmt.Sprintf("%s.demo.aether.internal:%d", svc, d)
 	}
 	for _, d := range dialled {
 		control := pptGet(fmt.Sprintf("127.0.0.3:%d", ports[d]), host("plain", d))
 		got := pptGet(fmt.Sprintf("127.0.0.2:%d", ports[d]), host("httponly", d))
-		t.Logf("dialled %-5d  plain (no TLSRoute): %-18s  httponly (TLSRoute parent): %s", d, control, got)
-		if control != "200 mesh" {
-			t.Errorf("control: HTTP to plain:%d answered %q; the rig does not show the mesh path", d, control)
+		t.Logf("dialled %-5d  plain (no TLSRoute): %-18.18s  httponly (TLSRoute parent): %.60s", d, control, got)
+		// plain does not declare port 80: a dial to it is refused by name,
+		// which still shows that the HTTP chain of port 80 took it.
+		wantControl := "200 mesh"
+		if d == 80 {
+			wantControl = "421 "
+		}
+		if !strings.HasPrefix(control, wantControl) {
+			t.Errorf("control: HTTP to plain:%d answered %q, want %q; the rig does not show the mesh path", d, control, wantControl)
 		}
 		if got != "200 mesh" {
 			t.Errorf("cleartext HTTP to the TLSRoute parent's address on port %d did not reach the mesh: %q", d, got)
 		}
+	}
+	// On the proxy port nothing dialled decides: a Host that names 18081
+	// itself is a port the service does not declare, and is refused there.
+	if got := pptGet(fmt.Sprintf("127.0.0.2:%d", ports[18081]), "httponly.demo.aether.internal:18081"); !strings.HasPrefix(got, "421 ") {
+		t.Errorf("Host httponly:18081 on the proxy port: want a 421 (18081 is not a port of the service), got %q", got)
 	}
 }

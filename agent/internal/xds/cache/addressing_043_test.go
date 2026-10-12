@@ -270,33 +270,36 @@ func a043BareIsUnique(services []a043Service, s a043Service) bool {
 // TestAddressing_CapturedDialledPortDecides is legs A1, A2, A5, A7 and A9 of
 // proposal 043 on the captured path, for every workload, every HTTP port and
 // every name family: the table of the dialled port routes a request to that
-// port's cluster or refuses it, and never anything else.
+// port's cluster or refuses it, and never anything else. No port has another
+// meaning: a dial to port 80 is port 80, served when the service declares it
+// and refused otherwise. (The proxy port, 18081, is not a dialled SERVICE
+// port: its table is held by TestAddressing_ProxyPortOnTheCapturedPath.)
 func TestAddressing_CapturedDialledPortDecides(t *testing.T) {
 	services := a043Fixture()
 	c := a043Cache(t, services)
 	tables := a043Tables(t, c)
 
-	// Every HTTP port number of the fixture has a table, and so do the two
-	// legacy numbers and cap_http_other.
+	// Every HTTP port number of the fixture has a table, and so do port 80,
+	// the proxy port and cap_http_other.
 	for _, name := range []string{"cap_http_80", "cap_http_7070", "cap_http_8080", "cap_http_9000", "cap_http_9090", "cap_http_18081", "cap_http_other"} {
 		require.Contains(t, tables, name)
 	}
 	require.NotContains(t, tables, "cap_http_18082", "the TCP mesh port is never an HTTP chain's port")
 	require.NotContains(t, tables, "cap_http", "the single table is gone")
 
-	dialled := []uint32{80, 7070, 7777, 8080, 9000, 9090, 18081}
+	dialled := []uint32{80, 7070, 7777, 8080, 9000, 9090}
 	for _, s := range services {
 		mesh, kube := a043Names(s, a043BareIsUnique(services, s))
 		for _, d := range dialled {
 			table := tables[proxy.CaptureHTTPRouteName(d)]
-			if table == nil {
+			other := table == nil
+			if other {
 				table = tables[proxy.CaptureHTTPOtherRouteName]
 			}
 			for _, name := range append([]string{mesh}, kube...) {
 				t.Run(fmt.Sprintf("%s/dial_%d/%s", s.key(), d, name), func(t *testing.T) {
 					class, declared := s.ports[d]
 					isHTTP := declared && class == registryv1.PortProtocol_PORT_PROTOCOL_HTTP
-					legacyHTTP := s.ports[s.legacy] == registryv1.PortProtocol_PORT_PROTOCOL_HTTP
 
 					// A1/A2: the Host names the dialled port. A9: a port-less
 					// Host means the dialled port.
@@ -308,20 +311,19 @@ func TestAddressing_CapturedDialledPortDecides(t *testing.T) {
 							// a declared port 80 is port 80, like any port.
 							assert.Equalf(t, a043Cluster(s, d), got.cluster, "Host %q on dialled port %d must reach port %d and no other (%+v)", host, d, d, got)
 							assert.False(t, got.onDemand, "a known service is routed by its own virtual host")
-						case d == 18081 || d == 80:
-							// A12: the legacy spellings.
-							switch {
-							case legacyHTTP:
-								assert.Equalf(t, a043Cluster(s, s.legacy), got.cluster, "the legacy target (%+v)", got)
-							case len(httpPortsOf(s)) > 0:
-								assert.Equal(t, proxy.RefusalPortRequired, got.refusal)
-							default:
-								assert.Equal(t, proxy.RefusalNoHTTPPort, got.refusal)
-							}
+						case other:
+							// A7, on a port number no service declares as HTTP.
+							assert.Equalf(t, proxy.RefusalPortNotDeclared, got.refusal, "%+v", got)
+						case len(httpPortsOf(s)) == 0:
+							// HTTP to a service that serves none, whatever was
+							// dialled: it is told where it is reached.
+							assert.Equalf(t, proxy.RefusalNoHTTPPort, got.refusal, "%+v", got)
 						case declared:
 							assert.Equalf(t, proxy.RefusalPortNotHTTP, got.refusal, "%+v", got)
 						default:
-							// A7.
+							// A7. Port 80 of a service that does not declare
+							// it is one more undeclared port: it used to
+							// reach the port the pods declare.
 							assert.Equalf(t, proxy.RefusalPortNotDeclared, got.refusal, "%+v", got)
 						}
 						if got.refusal != "" {
@@ -337,15 +339,15 @@ func TestAddressing_CapturedDialledPortDecides(t *testing.T) {
 
 					// A5: a Host that names ANOTHER port is refused, whatever
 					// that port is, and never obeyed.
-					for _, other := range []uint32{80, 8080, 9000, 9090, 18081, 7777} {
-						if other == d {
+					for _, otherPort := range []uint32{80, 8080, 9000, 9090, 18081, 7777} {
+						if otherPort == d {
 							continue
 						}
-						got := a043Resolve(t, table, fmt.Sprintf("%s:%d", name, other))
+						got := a043Resolve(t, table, fmt.Sprintf("%s:%d", name, otherPort))
 						if d == 7777 {
 							assert.Equalf(t, proxy.RefusalPortNotDeclared, got.refusal, "%+v", got)
 						} else {
-							assert.Equalf(t, proxy.RefusalPortMismatch, got.refusal, "dialled %d, Host port %d: %+v", d, other, got)
+							assert.Equalf(t, proxy.RefusalPortMismatch, got.refusal, "dialled %d, Host port %d: %+v", d, otherPort, got)
 						}
 						assert.Empty(t, got.cluster)
 					}
@@ -366,11 +368,170 @@ func httpPortsOf(s a043Service) []uint32 {
 	return out
 }
 
+// a043HostDecides holds the rule of a table where nothing was dialled that
+// could decide, so the port in Host is the port: the loopback table, and the
+// table of the proxy port on the captured path.
+//
+//   - "<mesh name>:<P>", P an HTTP port: port P's cluster;
+//   - P declared raw TCP: 421 port-not-http; any other P: 421
+//     port-not-declared. 18081 is such a P: it is the proxy's port, not a
+//     port of the service (it used to mean "the port the pods declare");
+//   - the port-less name: port 80 when the service declares it, else 421
+//     port-required, or no-http-port for a service with no HTTP port. Never
+//     another port.
+func a043HostDecides(t *testing.T, table *routev3.RouteConfiguration, s a043Service) {
+	t.Helper()
+	mesh, _ := a043Names(s, false)
+	for port, class := range s.ports {
+		got := a043Resolve(t, table, fmt.Sprintf("%s:%d", mesh, port))
+		if class == registryv1.PortProtocol_PORT_PROTOCOL_HTTP {
+			// A3.
+			assert.Equalf(t, a043Cluster(s, port), got.cluster, "port %d: %+v", port, got)
+			assert.False(t, got.onDemand)
+		} else {
+			// A6.
+			assert.Equalf(t, proxy.RefusalPortNotHTTP, got.refusal, "port %d: %+v", port, got)
+			assert.Equal(t, uint32(421), got.status)
+		}
+	}
+	// A7, and the proxy's own port, which is one more undeclared port.
+	for _, p := range []uint32{7777, 18081} {
+		got := a043Resolve(t, table, fmt.Sprintf("%s:%d", mesh, p))
+		assert.Equalf(t, proxy.RefusalPortNotDeclared, got.refusal, "port %d: %+v", p, got)
+		assert.Empty(t, got.cluster, "port %d reaches no cluster", p)
+	}
+	// The port-less name is port 80, or refused.
+	got := a043Resolve(t, table, mesh)
+	switch {
+	case s.ports[80] == registryv1.PortProtocol_PORT_PROTOCOL_HTTP:
+		assert.Equalf(t, a043Cluster(s, 80), got.cluster, "%+v", got)
+	case len(httpPortsOf(s)) > 0:
+		assert.Equalf(t, proxy.RefusalPortRequired, got.refusal, "%+v", got)
+		assert.Equal(t, mesh+"|port-required", got.vhost)
+		assert.Empty(t, got.cluster, "a port-less name never reaches the port the pods declare")
+	default:
+		assert.Equalf(t, proxy.RefusalNoHTTPPort, got.refusal, "%+v", got)
+	}
+	for _, vh := range table.GetVirtualHosts() {
+		assert.NotContains(t, vh.GetName(), "|legacy", "no virtual host serves a legacy spelling")
+	}
+}
+
+// TestAddressing_ProxyPortOnTheCapturedPath: a captured dial to port 18081 is
+// the mesh's HTTP proxy port on the captured path. 18081 is not a port of any
+// service, so the dialled port decides nothing: the chain is served the
+// loopback table's virtual hosts, and the port in Host is the port. There is
+// no port-mismatch there, and a Host that names 18081 itself is a port the
+// service does not declare. This is how a pod that is not on redirect-all,
+// which has only the mesh ports diverted, reaches a service by name.
+func TestAddressing_ProxyPortOnTheCapturedPath(t *testing.T) {
+	services := a043Fixture()
+	c := a043Cache(t, services)
+	tables := a043Tables(t, c)
+	table := tables["cap_http_18081"]
+	require.NotNil(t, table)
+	out := tables[proxy.OutboundHTTPRouteName]
+
+	for _, s := range services {
+		mesh, kube := a043Names(s, a043BareIsUnique(services, s))
+		t.Run(s.key(), func(t *testing.T) {
+			a043HostDecides(t, table, s)
+			// Never a port-mismatch: nothing was dialled that a Host could
+			// disagree with.
+			for _, p := range []uint32{0, 80, 7777, 8080, 9000, 9090, 18081} {
+				host := mesh
+				if p != 0 {
+					host = fmt.Sprintf("%s:%d", mesh, p)
+				}
+				got := a043Resolve(t, table, host)
+				assert.NotEqualf(t, proxy.RefusalPortMismatch, got.refusal, "Host %s", host)
+				// And the same answer as on the loopback listener.
+				want := a043Resolve(t, out, host)
+				assert.Equalf(t, want, got, "Host %s: the proxy port answers alike on both paths", host)
+			}
+			// Mesh names only, as on the loopback listener: a cluster.local or
+			// bare name has no virtual host here. Under redirect-all it
+			// leaves through the passthrough to what was dialled (something
+			// else may listen on 18081); it reaches no mesh cluster.
+			for _, name := range kube {
+				for _, host := range []string{name, name + ":8080", name + ":18081"} {
+					got := a043Resolve(t, table, host)
+					assert.Equalf(t, "on_demand_catch_all", got.vhost, "Host %s: %+v", host, got)
+					assert.Equalf(t, proxy.PassthroughClusterName, got.cluster, "Host %s: %+v", host, got)
+				}
+			}
+		})
+	}
+
+	// The virtual hosts are the loopback table's, one for one; only the floor
+	// differs (passthrough under redirect-all, where the loopback table
+	// answers 404).
+	names := func(rc *routev3.RouteConfiguration) []string {
+		var out []string
+		for _, vh := range rc.GetVirtualHosts() {
+			if vh.GetName() != "on_demand_catch_all" {
+				out = append(out, vh.GetName())
+			}
+		}
+		return out
+	}
+	assert.Equal(t, names(out), names(table))
+	assert.Equal(t, uint32(404), a043Resolve(t, out, "example.org:18081").status)
+	assert.Equal(t, proxy.PassthroughClusterName, a043Resolve(t, table, "example.org:18081").cluster)
+
+	// Without redirect-all the floor is 404 there too.
+	c.SetCaptureRedirectAll(false)
+	require.NoError(t, c.LoadClustersFromRegistry(context.Background(), "cluster-1", "node-1", a043Registry(services)))
+	assert.Equal(t, uint32(404), a043Resolve(t, a043Tables(t, c)["cap_http_18081"], "example.org:18081").status)
+}
+
+// a043HostPortClusters checks every route of a host-decided table (the
+// loopback table, the proxy port's) that reaches a mesh cluster: the cluster
+// is that of a port its virtual host's own authorities spell, and a port-less
+// authority is claimed only by the virtual host of port 80. Returns how many
+// routes it saw.
+func a043HostPortClusters(t *testing.T, table *routev3.RouteConfiguration, byMesh map[string]a043Service) int {
+	t.Helper()
+	routes := 0
+	for _, vh := range table.GetVirtualHosts() {
+		if vh.GetName() == "on_demand_catch_all" {
+			continue
+		}
+		mesh, _, _ := strings.Cut(vh.GetName(), "|")
+		mesh, _, _ = strings.Cut(mesh, ":")
+		s, known := byMesh[mesh]
+		require.Truef(t, known, "table %s: virtual host %q belongs to no fixture service", table.GetName(), vh.GetName())
+		for _, r := range vh.GetRoutes() {
+			ra := r.GetRoute()
+			if ra == nil {
+				continue
+			}
+			cluster := ra.GetCluster()
+			if cluster == "" {
+				cluster = quicSelectionDefault(t, ra)
+			}
+			routes++
+			for _, d := range vh.GetDomains() {
+				port := uint32(80) // a port-less authority is port 80
+				if _, p, ok := strings.Cut(d, ":"); ok {
+					n, err := strconv.Atoi(p)
+					require.NoErrorf(t, err, "table %s: virtual host %s routes from the authority %q", table.GetName(), vh.GetName(), d)
+					port = uint32(n)
+				}
+				require.Equalf(t, registryv1.PortProtocol_PORT_PROTOCOL_HTTP, s.ports[port], "table %s: %s routes the authority %q although the service has no HTTP port %d", table.GetName(), vh.GetName(), d, port)
+				assert.Equalf(t, a043Cluster(s, port), cluster, "table %s, virtual host %s, authority %q", table.GetName(), vh.GetName(), d)
+			}
+		}
+	}
+	return routes
+}
+
 // TestAddressing_NoRouteLeavesItsPort is the structural form of #1682: in the
 // table of dialled port P, every route that reaches a mesh cluster reaches
-// the cluster of port P of the service the virtual host belongs to. It walks
-// every route of every table instead of resolving chosen requests, so a route
-// nobody thought to probe is covered too.
+// the cluster of port P of the service the virtual host belongs to; in the two
+// tables where the Host decides, the cluster of the port the authority spells.
+// It walks every route of every table instead of resolving chosen requests,
+// so a route nobody thought to probe is covered too.
 func TestAddressing_NoRouteLeavesItsPort(t *testing.T) {
 	services := a043Fixture()
 	c := a043Cache(t, services)
@@ -379,11 +540,15 @@ func TestAddressing_NoRouteLeavesItsPort(t *testing.T) {
 		mesh, _ := a043Names(s, false)
 		byMesh[mesh] = s
 	}
-	routes := 0
+	routes, hostDecided := 0, 0
 	for name, table := range a043Tables(t, c) {
 		port, isPortTable := proxy.CaptureHTTPRoutePort(name)
+		if name == proxy.OutboundHTTPRouteName || (isPortTable && port == 18081) {
+			hostDecided += a043HostPortClusters(t, table, byMesh)
+			continue
+		}
 		if !isPortTable && name != proxy.CaptureHTTPOtherRouteName {
-			continue // out_http: the loopback table, held below
+			continue
 		}
 		for _, vh := range table.GetVirtualHosts() {
 			for _, r := range vh.GetRoutes() {
@@ -397,7 +562,7 @@ func TestAddressing_NoRouteLeavesItsPort(t *testing.T) {
 						re := mustRegexp(t, r.GetMatch().GetHeaders()[0].GetStringMatch().GetSafeRegex().GetRegex())
 						assert.True(t, re.MatchString(fmt.Sprintf("x.y.%s:%d", a043Mesh, port)))
 						assert.Falsef(t, re.MatchString(fmt.Sprintf("x.y.%s:%d", a043Mesh, port+1)), "table %s: an authority of another port may not name a cluster", name)
-						assert.Equal(t, port == 80 || port == 18081, re.MatchString("x.y."+a043Mesh), "table %s: the port-less name", name)
+						assert.Falsef(t, re.MatchString("x.y."+a043Mesh), "table %s: a port-less authority may not name a cluster on demand (it would be the bare name's cluster, which is no port's)", name)
 						assert.False(t, re.MatchString("x.y.svc.cluster.local"), "only a mesh authority is a cluster name")
 						continue
 					}
@@ -413,58 +578,29 @@ func TestAddressing_NoRouteLeavesItsPort(t *testing.T) {
 					cluster = quicSelectionDefault(t, ra)
 				}
 				routes++
-				want := a043Cluster(s, port)
-				if s.ports[port] != registryv1.PortProtocol_PORT_PROTOCOL_HTTP || strings.HasSuffix(vh.GetName(), "|legacy") {
-					want = a043Cluster(s, s.legacy)
-					require.Truef(t, port == 80 || port == 18081, "table %s routes %s although the service has no HTTP port %d", name, vh.GetName(), port)
-				}
-				assert.Equalf(t, want, cluster, "table %s, virtual host %s", name, vh.GetName())
+				require.Equalf(t, registryv1.PortProtocol_PORT_PROTOCOL_HTTP, s.ports[port], "table %s routes %s although the service has no HTTP port %d", name, vh.GetName(), port)
+				assert.NotContains(t, vh.GetName(), "|legacy")
+				assert.Equalf(t, a043Cluster(s, port), cluster, "table %s, virtual host %s", name, vh.GetName())
 			}
 		}
 	}
-	assert.Greater(t, routes, 15, "the walk must have seen the fixture's routes, or it proves nothing")
+	// One route per (service, HTTP port) of the fixture: ten in the per-port
+	// tables, and ten in each of the two tables where the Host decides.
+	assert.Equal(t, 10, routes, "the walk must have seen the fixture's routes, or it proves nothing")
+	assert.Equal(t, 20, hostDecided, "and those of the loopback table and of the proxy port's")
 }
 
-// TestAddressing_Loopback is legs A3, A6, A7 and A12 on the loopback listener
-// (out_http): nothing is dialled, so the port in Host is the port.
+// TestAddressing_Loopback is legs A3, A6 and A7 on the loopback listener
+// (out_http): nothing is dialled, so the port in Host is the port, and a
+// name without a port is port 80 or refused.
 func TestAddressing_Loopback(t *testing.T) {
 	services := a043Fixture()
 	c := a043Cache(t, services)
 	out := a043Tables(t, c)[proxy.OutboundHTTPRouteName]
 	for _, s := range services {
-		mesh, kube := a043Names(s, false)
-		legacyHTTP := s.ports[s.legacy] == registryv1.PortProtocol_PORT_PROTOCOL_HTTP
+		_, kube := a043Names(s, false)
 		t.Run(s.key(), func(t *testing.T) {
-			for port, class := range s.ports {
-				got := a043Resolve(t, out, fmt.Sprintf("%s:%d", mesh, port))
-				if class == registryv1.PortProtocol_PORT_PROTOCOL_HTTP {
-					// A3.
-					assert.Equalf(t, a043Cluster(s, port), got.cluster, "port %d: %+v", port, got)
-					assert.False(t, got.onDemand)
-				} else {
-					// A6.
-					assert.Equalf(t, proxy.RefusalPortNotHTTP, got.refusal, "port %d: %+v", port, got)
-					assert.Equal(t, uint32(421), got.status)
-				}
-			}
-			// A7.
-			got := a043Resolve(t, out, mesh+":7777")
-			assert.Equalf(t, proxy.RefusalPortNotDeclared, got.refusal, "%+v", got)
-			// A12: the port-less name and the mesh HTTP port are the legacy
-			// target, or refused.
-			for _, host := range []string{mesh, mesh + ":18081"} {
-				got := a043Resolve(t, out, host)
-				switch {
-				case legacyHTTP && host == mesh:
-					assert.Equal(t, mesh, got.cluster)
-				case legacyHTTP:
-					assert.Equal(t, mesh+":18081", got.cluster, "the alias cluster of the default one")
-				case len(httpPortsOf(s)) > 0:
-					assert.Equal(t, proxy.RefusalPortRequired, got.refusal)
-				default:
-					assert.Equal(t, proxy.RefusalNoHTTPPort, got.refusal)
-				}
-			}
+			a043HostDecides(t, out, s)
 			// The loopback listener answers mesh names only.
 			for _, name := range kube {
 				got := a043Resolve(t, out, name+":8080")
@@ -707,12 +843,21 @@ func TestAddressing_RulesFollowTheParentPort(t *testing.T) {
 	assert.Equal(t, map[string]string{"all": mesh}, marks(tables["cap_http_8080"], mesh+":8080"))
 	assert.Equal(t, map[string]string{"all": mesh + ":9090", "9090": mesh + ":9090"}, marks(tables["cap_http_9090"], mesh+":9090"))
 	assert.Equal(t, map[string]string{"all": mesh + ":9090", "9090": mesh + ":9090"}, marks(tables["cap_http_9090"], "multi.demo.svc.cluster.local"))
-	// The legacy spellings are the legacy target, port 8080.
-	assert.Equal(t, map[string]string{"all": mesh}, marks(tables["cap_http_18081"], mesh+":18081"))
-	// Loopback.
-	out := tables[proxy.OutboundHTTPRouteName]
-	assert.Equal(t, map[string]string{"all": mesh}, marks(out, mesh+":8080"))
-	assert.Equal(t, map[string]string{"all": mesh + ":9090", "9090": mesh + ":9090"}, marks(out, mesh+":9090"))
+	// Loopback, and the proxy port on the captured path (a dial to 18081):
+	// the port in Host is the port, and its rules are that port's.
+	for _, name := range []string{proxy.OutboundHTTPRouteName, "cap_http_18081"} {
+		table := tables[name]
+		assert.Equal(t, map[string]string{"all": mesh}, marks(table, mesh+":8080"), name)
+		assert.Equal(t, map[string]string{"all": mesh + ":9090", "9090": mesh + ":9090"}, marks(table, mesh+":9090"), name)
+		// 18081 and the port-less name are not ports of the service: no
+		// virtual host that routes claims them, so no rule applies there
+		// (until chart 2.7.0 both carried the rules of the port the pods
+		// declare).
+		for _, host := range []string{mesh + ":18081", mesh} {
+			assert.Empty(t, marks(table, host), "%s, Host %s", name, host)
+			assert.NotEmpty(t, a043Resolve(t, table, host).refusal, "%s, Host %s", name, host)
+		}
+	}
 	// Negative control: another service's virtual hosts carry none of it.
 	assert.Empty(t, marks(tables["cap_http_9090"], "eighty.demo.aether.internal:9090"))
 }
@@ -1212,8 +1357,9 @@ func TestAddressing_TablesAreKeptWhileTheirInputsAre(t *testing.T) {
 	retyped[3].legacy = 9000
 	require.NoError(t, c.LoadClustersFromRegistry(ctx, "cluster-1", "node-1", a043Registry(retyped)))
 	rebuilt("a port's class")
+	// The service now serves no HTTP port at all, and is told so.
 	got := a043Resolve(t, last, "mixed.demo.aether.internal:8080")
-	assert.Equal(t, proxy.RefusalPortNotHTTP, got.refusal)
+	assert.Equal(t, proxy.RefusalNoHTTPPort, got.refusal)
 
 	// The Services' names alone: a second namespace takes a bare name, which
 	// then names neither service. Nothing else changes (no address, no
@@ -1361,7 +1507,7 @@ func TestAddressing_EveryChainAndRouteHasItsCluster(t *testing.T) {
 			}
 		}
 	}
-	require.Greater(t, routed, 30)
+	require.Greater(t, routed, 20, "the walk must have seen the tables' routes")
 
 	// No resource name is published twice: the proxy keeps one, and which
 	// one changes from build to build.
@@ -1461,10 +1607,16 @@ func TestAddressing_ReuseFollowsTheServicesPorts(t *testing.T) {
 	snap, err := c.GetSnapshot("node-1")
 	require.NoError(t, err)
 	assert.Empty(t, duplicateDomains(snap.GetResources(resourcev3.RouteType)))
-	// The legacy spellings now name a raw-TCP port: refused on the captured
-	// path, whatever is retained.
-	got := a043Resolve(t, a043Tables(t, c)["cap_http_18081"], mesh+":18081")
-	assert.Equal(t, proxy.RefusalPortRequired, got.refusal)
+	// Nor may it keep an authority that routes: the port-less name and
+	// "<fqdn>:18081" are refused where the Host decides, whatever is
+	// retained. (Neither is a port of the service; the retained default
+	// cluster is the cluster of a port, 8080, that has its own now.)
+	for _, table := range []string{"cap_http_18081", proxy.OutboundHTTPRouteName} {
+		got := a043Resolve(t, a043Tables(t, c)[table], mesh)
+		assert.Equal(t, proxy.RefusalPortRequired, got.refusal, table)
+		got = a043Resolve(t, a043Tables(t, c)[table], mesh+":18081")
+		assert.Equal(t, proxy.RefusalPortNotDeclared, got.refusal, table)
+	}
 
 	// Past the grace the default cluster is gone.
 	c.serviceRetentionGrace = 1

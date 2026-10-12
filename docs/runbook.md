@@ -4021,7 +4021,7 @@ header `x-aether-error` says why and the body lists the service's ports:
 | `port-mismatch` | the `Host` header names a port other than the one the client connected to | routed by `Host`: answered by a port the client did not dial |
 | `port-not-declared` | the service declares no such port | a 503 after the 2 s on-demand timeout (mesh name), or the declared port's answer (Kubernetes name) |
 | `port-not-http` | the port is declared raw TCP or UDP | a 502 or 503 from an h2 cluster in front of a port that does not speak HTTP |
-| `port-required` | `:18081` or the bare name, and the port the pods declare is not an HTTP port | 502 |
+| `port-required` | the proxy port (`127.0.0.1:18081`, or a dial to `<name>:18081`) with a `Host` that has no port, for a service that does not serve HTTP on port 80 | the port the pods declare answered (or 502 when that port was raw TCP) |
 
 `no-http-port` (a service with no HTTP port at all) is unchanged.
 
@@ -4057,10 +4057,26 @@ requests with their original `Host` to a different port.
   - A `parentRef` to such a port attaches the route to **nothing**: the
     service answers as if the route did not exist, and the status says
     `Accepted=False` with `NoMatchingParent`.
-  - A Service port whose `targetPort` is a **name** cannot be checked (the
-    registry carries no port names): a `backendRef` to it keeps reaching the
-    backend's declared port, and the agent logs it. Use a numeric
-    `targetPort`.
+  - A Service port whose `targetPort` is a **name** is resolved through the
+    Service's EndpointSlices (the registry carries no port names). The agent
+    reads them on demand, for Services a route names, and re-reads them when
+    a route or a Service changes, not when the pods behind an unchanged
+    Service start resolving the name to another number. A name it cannot
+    resolve (no slice yet, or slices that disagree) is logged, and a
+    `backendRef` to it keeps reaching the backend's declared port. A numeric
+    `targetPort` has none of this. The agent's ClusterRole gains `list` and
+    `get` on `endpointslices` for it.
+  - A `backendRef` of another kind than a Service, or to a Service in another
+    namespace with no `ReferenceGrant`, is invalid in the same way: its share
+    is answered **500** (the status already said `InvalidKind` or
+    `RefNotPermitted`). Through chart 2.6 it was dropped silently: its share
+    went to the rule's other backends, and a rule left with none was routed
+    to its parent Service.
+  - A Service is a port map whether or not a route names it: `port: 80,
+    targetPort: 8080` on a Service that fronts a mesh service makes port 80 a
+    port of it, on the loopback listener too (`Host: <name>` is then the pods'
+    8080). The agent reads every Service's ports for this from the watch it
+    already keeps; no new watch, no new memory.
 
   **Before upgrading**, list the routes that name `18081` or `80` (review each
   `80` against what the Service declares):
@@ -4112,6 +4128,61 @@ the service): that first, parked request on the loopback path was delivered
 to the service's own cluster with the route's matches, filters and backends
 skipped. It is closed the same way: the service's virtual host that stands in
 before its cluster arrives carries its routes' rules.
+
+##### BREAKING: `:18081` and a name without a port no longer mean "the port the pods declare"
+
+Through chart 2.6 three spellings reached the port in
+`endpoint.aether.io/port`, whatever its number: `http://<name>:18081/`, the
+port-less `http://<name>/` (a dial to port 80), and a `Host` without a port,
+or with `:18081`, sent to `127.0.0.1:18081`. None of them does any more. A
+service is addressed on a port it declares.
+
+| What the client sends | Chart 2.6 | Chart 2.7.0 |
+|---|---|---|
+| `http://<name>:<declared port>/` | that port | that port (unchanged) |
+| `http://<name>/` (dials 80), the service declares 80 | the port in `endpoint.aether.io/port` | port 80 |
+| `http://<name>/` (dials 80), the service does not declare 80 | the port in `endpoint.aether.io/port` | `421 port-not-declared` |
+| `http://<name>:18081/` (so `Host: <name>:18081`) | the port in `endpoint.aether.io/port` | `421 port-not-declared` |
+| `127.0.0.1:18081` or `<name>:18081`, `Host: <name>:<declared port>` | that port on loopback; `421 port-mismatch` on `<name>:18081` | that port, on both |
+| `127.0.0.1:18081`, `Host: <name>` | the port in `endpoint.aether.io/port` | port 80 if the service declares it, else `421 port-required` |
+| `127.0.0.1:18081`, `Host: <name>:18081` | the port in `endpoint.aether.io/port` | `421 port-not-declared` |
+
+`18081` is the mesh's **HTTP proxy port**, not a port of any service: on the
+loopback listener and on a dial to `<name>:18081` alike, the port in `Host`
+(or in an absolute request line) is the port. See "Using the proxy port" in
+the getting-started guide. Every `421` names the service's ports in its body.
+
+**A pod that is not on redirect-all**
+(`capture.aether.io/redirect-all: "false"`): only the mesh ports are diverted
+for it, so a dial to a service's own port is not the mesh's, and
+`curl http://<name>:18081/` alone is now refused. Such a pod reaches an HTTP
+service through the proxy port: `HTTP_PROXY=http://127.0.0.1:18081` (curl
+reads the lower-case `http_proxy`), or `Host: <name>:<port>` sent to
+`127.0.0.1:18081` or to `<name>:18081`. The divert of `:18081` and `:18082`
+for such a pod is unchanged. `:18082` (raw TCP and UDP) is unchanged for
+every pod.
+
+**Before upgrading**, on 2.6.x, find the clients. The proxy's HTTP access log
+(`log_name=aether_access_logs`) has the authority of every request; the ones
+to move are answered today and name `:18081` or no port:
+
+```logsql
+log_name:aether_access_logs response_code:200 (authority:~":18081$" OR NOT authority:~":[0-9]+$")
+```
+
+(Field names are the ones in `test/harnesscontract/external-harness.yaml`,
+`proxy.access_log.http`; adapt the query to your store.) Group by source
+workload and authority, and move each client to `<name>:<declared port>`.
+The prober, the `udsecho` chart and this repository's own suites were moved
+first (prober chart 1.1.0).
+
+**One case is not closed.** The first request to a service from a node that
+holds no endpoint of it, spelled with no port or with `:18081` **on the proxy
+port**, is still delivered to the port the pods declare: the proxy fetches the
+cluster by the name the authority spells before it has the service's ports.
+Every later request is refused as above. A captured dial to port 80 does not
+have this: there the port-less name asks for port 80's cluster and nothing
+else.
 
 ##### BREAKING: a raw-TCP service is reached on its declared ports only
 

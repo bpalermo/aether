@@ -70,10 +70,12 @@ func TestNoHTTPPortVhostAnswers421(t *testing.T) {
 	}
 	require.NoError(t, c.LoadClustersFromRegistry(ctx, "cluster-1", "node-1", reg))
 
-	// The legacy virtual host of the service: what a dial to the mesh HTTP port
-	// or to port 80 reaches (the same refusal is in out_http, by the same name).
-	vh := captureVhost(t, c, "node-1", "echo-tcp.aether-test.aether.internal|legacy")
+	// The refusing virtual host of the service in the table of a dialled port
+	// (port 80 here: the URL has no port). Whatever port is dialled, HTTP to a
+	// service that serves none is answered the same way.
+	vh := captureVhost(t, c, "node-1", "echo-tcp.aether-test.aether.internal|refused")
 	require.NotNil(t, vh, "a TCP-only service in scope must still have a cap_http vhost — silence would be a 404 with no cause")
+	assert.Contains(t, vh.GetDomains(), "echo-tcp.aether-test.svc.cluster.local", "the port-less name the URL http://<svc>/ presents")
 	require.Len(t, vh.GetRoutes(), 1)
 
 	dr := vh.GetRoutes()[0].GetDirectResponse()

@@ -113,7 +113,7 @@ func TestExternalHarnessContract_AnyPortStat(t *testing.T) {
 	for name, svcs := range map[string][]CaptureTCPService{
 		"raw-TCP legacy target":                          {{ClusterName: "tcp:echo-tcp.a-namespace.aether.internal", ClusterIP: "10.96.1.50", LegacyTCPPort: 9000}},
 		"raw-TCP legacy target and another raw-TCP port": {{ClusterName: "tcp:echo-tcp.a-namespace.aether.internal", ClusterIP: "10.96.1.50", LegacyTCPPort: 9000, TCPPorts: []uint32{9000, 9100}}},
-		"mixed, HTTP legacy target":                      {{ClusterName: "tcp:mixed.a-namespace.aether.internal", ClusterIP: "10.96.1.51", HTTPPorts: []uint32{8080}, TCPPorts: []uint32{9000}, LegacyHTTP: true}},
+		"mixed, HTTP legacy target":                      {{ClusterName: "tcp:mixed.a-namespace.aether.internal", ClusterIP: "10.96.1.51", HTTPPorts: []uint32{8080}, TCPPorts: []uint32{9000}}},
 	} {
 		for _, withPassthrough := range []bool{true, false} {
 			l, err := GenerateCaptureListener(&cniv1.CNIPod{Name: "p1", NetworkNamespace: "/var/run/netns/p1"},

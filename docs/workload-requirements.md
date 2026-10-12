@@ -274,9 +274,9 @@ ambiguous and raw TCP needs a port:
 
 | Client dials | Reaches |
 |---|---|
-| `http://<svc>.<ns>.<domain>/` | the primary port, over HTTP |
-| `https://<svc>.<ns>.<domain>/` | the primary port, app-terminated TLS |
-| `<svc>.<ns>.<domain>:18081` | the primary port, over HTTP (the explicit HTTP spelling) |
+| `http://<svc>.<ns>.<domain>/` | port 80, if the service declares it as HTTP; else `421` |
+| `https://<svc>.<ns>.<domain>/` | port 443, as the service declares it |
+| `<svc>.<ns>.<domain>:18081` | the mesh's HTTP proxy port: the port in `Host` decides. Not a port of the service |
 | `<svc>.<ns>.<domain>:18082` | the primary port, as raw TCP (the explicit L4 spelling) |
 | `<svc>.<ns>.<domain>:18082/udp` | the primary port, as plaintext UDP (the same L4 spelling; needs a `UDPRoute`) |
 | `<svc>.<ns>.<domain>:<p>` | port `p`, in whatever class `p` declares |

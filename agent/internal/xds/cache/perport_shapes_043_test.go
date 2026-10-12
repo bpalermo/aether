@@ -219,34 +219,55 @@ func TestPerPort_HostileShapes_NoDuplicateDomainOrChain(t *testing.T) {
 	t.Logf("chains: %d", len(l.GetFilterChains()))
 }
 
-// TestPerPort_TLSRouteTwinTakesLegacyHTTPSpellings: a service whose HTTP is
-// reached by the legacy spellings (":18081", and port 80 of a service that
-// does not declare 80) and that is ALSO the parent of a TLSRoute.
+// TestPerPort_TLSRouteTwinLeavesTheServicesHTTPPorts: a service that serves
+// HTTP and is ALSO the parent of a TLSRoute. The TLSRoute's SNI chains get a
+// twin on every port some chain names, because the address is decided before
+// the protocol; a twin on a port that carries the service's cleartext HTTP
+// would take that HTTP (it matches the address, fails the SNI and leaves
+// through the passthrough).
 //
-// qualifyTLSChainsByPorts skips the ports the service DECLARES as HTTP, "so the
-// service's own cleartext HTTP still reaches cap_http_<P>". The two legacy
-// numbers are HTTP ports of every such service too (their tables hold its
-// legacy virtual host), but they are not in HTTPPorts, so the twins are built
-// on them: cleartext HTTP to <vip>:18081 or <vip>:80 matches the address,
-// fails the SNI and leaves through the passthrough.
-func TestPerPort_TLSRouteTwinTakesLegacyHTTPSpellings(t *testing.T) {
+// The ports that carry a service's HTTP are the ports it declares as HTTP,
+// and the proxy port (18081), where a pod sends "Host: <name>:<port>" to
+// "<name>:18081". Port 80 is one of them only for a service that declares it:
+// for any other it is not the service's port, a twin stands there, and
+// cleartext HTTP to it is no longer answered by the mesh at all (until chart
+// 2.7.0 it reached the port the pods declare).
+func TestPerPort_TLSRouteTwinLeavesTheServicesHTTPPorts(t *testing.T) {
 	services := a043Fixture()
 	c := a043Cache(t, services)
 	l0 := a043CaptureListener(t, c)
-	const vip = "10.96.1.1" // httponly: 8080 HTTP, legacy target 8080
-	// Control: without a TLSRoute all three reach an HTTP chain.
-	require.Equal(t, "cap_http_8080", shpSelectChain(l0, shpHTTP(vip, 8080)))
-	require.Equal(t, "cap_http_18081", shpSelectChain(l0, shpHTTP(vip, 18081)))
-	require.Equal(t, "cap_http_80", shpSelectChain(l0, shpHTTP(vip, 80)))
+	const (
+		vip       = "10.96.1.1" // httponly: 8080 HTTP
+		vipEighty = "10.96.1.3" // eighty: 80, 8080 and 9090 HTTP
+	)
+	// Control: without a TLSRoute every one of these reaches an HTTP chain
+	// (on port 80 of httponly, the chain whose table refuses it by name).
+	for _, v := range []string{vip, vipEighty} {
+		for _, p := range []uint32{80, 8080, 18081} {
+			require.Equal(t, proxy.CaptureHTTPRouteName(p), shpSelectChain(l0, shpHTTP(v, p)), "%s:%d", v, p)
+		}
+	}
 
 	c.SetTLSServiceRoutes(shpTLSRoutes("demo/httponly"))
 	require.NoError(t, c.generateSnapshot(context.Background()))
 	l := a043CaptureListener(t, c)
-	// The declared port is protected, as the comment says.
+	// The declared port and the proxy port are protected.
 	assert.Equal(t, "cap_http_8080", shpSelectChain(l, shpHTTP(vip, 8080)))
-	// The legacy spellings of the same service are not.
 	assert.Equal(t, "cap_http_18081", shpSelectChain(l, shpHTTP(vip, 18081)), "cleartext HTTP to <vip>:18081 of a TLSRoute parent")
-	assert.Equal(t, "cap_http_80", shpSelectChain(l, shpHTTP(vip, 80)), "cleartext HTTP to <vip>:80 of a TLSRoute parent")
+	// Port 80 is not a port of httponly: the twin stands there, and cleartext
+	// HTTP to it reaches no HTTP chain.
+	assert.NotEqual(t, "cap_http_80", shpSelectChain(l, shpHTTP(vip, 80)), "port 80 is not a port of the service, and its TLSRoute's twin claims the address there")
+	// Another service's ports are untouched by this one's TLSRoute.
+	assert.Equal(t, "cap_http_80", shpSelectChain(l, shpHTTP(vipEighty, 80)))
+
+	// A TLSRoute parent that DECLARES port 80: its HTTP there is protected
+	// like on any port it declares.
+	c.SetTLSServiceRoutes(shpTLSRoutes("demo/eighty"))
+	require.NoError(t, c.generateSnapshot(context.Background()))
+	l = a043CaptureListener(t, c)
+	for _, p := range []uint32{80, 8080, 9090, 18081} {
+		assert.Equal(t, proxy.CaptureHTTPRouteName(p), shpSelectChain(l, shpHTTP(vipEighty, p)), "eighty:%d", p)
+	}
 }
 
 // TestPerPort_RawTCPServiceIsReachedOnItsDeclaredPortsOnly: a raw-TCP-only
@@ -295,9 +316,14 @@ func TestPerPort_ChainFilterOfAServiceWithNoEndpointHere(t *testing.T) {
 	c.SetServiceChainFilters(map[string]proxy.ExtensionFilter{"demo/multi": {Name: filter, Config: cfg}})
 	require.NoError(t, c.LoadClustersFromRegistry(ctx, "cluster-1", "node-1", a043Registry(nil)))
 	tables := map[string]*routev3.RouteConfiguration{}
-	for _, r := range c.captureRouteTables([]uint32{80, 8080, 9090, 18081}) {
+	for _, r := range c.captureRouteTables([]uint32{80, 8080, 9090}) {
 		rc := r.(*routev3.RouteConfiguration)
 		tables[rc.GetName()] = rc
+	}
+	// The table of the proxy port's chain, and the loopback table whose
+	// virtual hosts it is given, are built with the snapshot.
+	for _, name := range []string{"cap_http_18081", proxy.OutboundHTTPRouteName} {
+		tables[name] = a043Tables(t, c)[name]
 	}
 	filtered := func(table, host string) (a043Answer, bool) {
 		ans := a043Resolve(t, tables[table], host)
@@ -310,14 +336,18 @@ func TestPerPort_ChainFilterOfAServiceWithNoEndpointHere(t *testing.T) {
 		return ans, false
 	}
 	const mesh = "multi.demo." + a043Mesh
-	// The legacy tables keep the service's virtual host, with the filter.
-	ans, ok := filtered("cap_http_18081", mesh+":18081")
-	assert.Truef(t, ok, "legacy table: %+v", ans)
-	// The real-port tables: the request names its cluster on demand, on the
-	// catch-all, which carries no per-filter config.
+	// Every table where the request can name its cluster on demand: the
+	// real-port tables, by the authority that spells the dialled port, and
+	// the two tables where the Host decides, by any authority of the service.
 	for _, tc := range []struct{ table, host string }{
 		{"cap_http_8080", mesh + ":8080"},
 		{"cap_http_9090", mesh + ":9090"},
+		{"cap_http_80", mesh + ":80"},
+		{"cap_http_18081", mesh + ":8080"},
+		{"cap_http_18081", mesh + ":18081"},
+		{"cap_http_18081", mesh},
+		{proxy.OutboundHTTPRouteName, mesh + ":9090"},
+		{proxy.OutboundHTTPRouteName, mesh},
 	} {
 		ans, ok := filtered(tc.table, tc.host)
 		t.Logf("%s %s -> vhost=%s cluster=%s onDemand=%v status=%d filter=%v", tc.table, tc.host, ans.vhost, ans.cluster, ans.onDemand, ans.status, ok)

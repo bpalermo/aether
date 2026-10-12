@@ -103,7 +103,6 @@ func (s PerPortService) captureInput() (proxy.CaptureTCPService, bool) {
 		ClusterName: proxy.TCPClusterName(s.key(), meshDomain),
 		ClusterIP:   s.ClusterIP,
 		HTTPPorts:   s.HTTPPorts,
-		LegacyHTTP:  s.legacyIsHTTP(),
 	}
 	for _, p := range s.TCPPorts {
 		if p == s.LegacyPort {
