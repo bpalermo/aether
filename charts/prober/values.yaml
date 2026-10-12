@@ -39,9 +39,14 @@ probe:
   meshDomain: "aether.internal"
   # Optional reachability tier: echo upstream service names. When non-empty, the
   # pod gets config.aether.io/upstreams so the agent programs those clusters.
+  # Each is "<svc>.<ns>:<port>", with a port the service declares
+  # (endpoint.aether.io/port or endpoint.aether.io/ports): the probe goes to
+  # the proxy port with Host "<svc>.<ns>.<meshDomain>:<port>". Without a port
+  # the Host is port-less, which is port 80 and nothing else.
   reachabilityTargets: []
-  # Optional mesh_dns tier: namespace-qualified FQDN authorities (host[:port],
-  # default port 18081). Unlike liveness/reachability these are RESOLVED through the
+  # Optional mesh_dns tier: namespace-qualified authorities, "<fqdn>:<port>"
+  # with a port the service declares (no port is appended: a target without
+  # one dials 80; until chart 1.1.0 the default was 18081). Unlike liveness/reachability these are RESOLVED through the
   # mesh DNS path (CNI :53 DNAT → the standalone aether-mesh-dns daemon, #578 →
   # ClusterIP) rather than being Host-overridden, so a real mesh-DNS outage becomes an alertable dns_* signal
   # (closes the blind spot behind issue #574). Only works because this pod is
@@ -55,8 +60,8 @@ probe:
   # real workload's lookups, yet organic forward traffic here is near zero, so a
   # kube-dns or upstream-failover regression would be invisible.
   meshDNSTargets:
-    - "echo.aether-test.aether.internal:18081"
-    - "echo.aether-test.svc.cluster.local:18081"
+    - "echo.aether-test.aether.internal:8080"
+    - "echo.aether-test.svc.cluster.local:8080"
 
 # OTel: push the probe SLI to the collector (host:port, insecure). Empty disables
 # telemetry (the prober still runs but emits nothing).

@@ -431,7 +431,7 @@ probe_batch() {
 			esac
 			i=$((i + 1))
 		done
-	' sh "http://echo.$DEMO_NS.$MESH_DOMAIN:18081$path" "$n" 2>/dev/null || true
+	' sh "http://echo.$DEMO_NS.$MESH_DOMAIN:$APP_PORT$path" "$n" 2>/dev/null || true
 }
 
 count_token() { printf '%s\n' "$1" | awk -v want="$2" '$1 == want { n++ } END { print n + 0 }'; }

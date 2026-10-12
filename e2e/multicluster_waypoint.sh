@@ -390,7 +390,7 @@ verify() {
 	local code=000 i
 	for i in 1 2 3 4 5 6; do
 		code="$(kubectl --context "kind-$CLUSTER_A" -n "$TEST_NS" exec deploy/client -c curl -- \
-			curl -sS -o /dev/null -w '%{http_code}' --max-time 12 "http://echo.$TEST_NS.$MESH_DOMAIN:18081/" 2>/dev/null || echo 000)"
+			curl -sS -o /dev/null -w '%{http_code}' --max-time 12 "http://echo.$TEST_NS.$MESH_DOMAIN:8080/" 2>/dev/null || echo 000)"
 		[ "$code" = "200" ] && break
 		sleep 6
 	done

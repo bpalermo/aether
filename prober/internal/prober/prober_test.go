@@ -116,7 +116,7 @@ func TestClassifyErr(t *testing.T) {
 
 func TestNewMeshDNSTargets(t *testing.T) {
 	cfg := DefaultConfig()
-	cfg.MeshDNSTargets = []string{"echo.aether-test.aether.internal:18081", "echo.aether-test.aether.internal"}
+	cfg.MeshDNSTargets = []string{"echo.aether-test.aether.internal:8080", "echo.aether-test.aether.internal"}
 	p, err := New(context.Background(), cfg, slog.New(slog.DiscardHandler), "test")
 	if err != nil {
 		t.Fatalf("New: %v", err)
@@ -130,16 +130,47 @@ func TestNewMeshDNSTargets(t *testing.T) {
 		t.Fatalf("mesh_dns target tier = %q, want %q", md.tier, tierMeshDNS)
 	}
 	// The URL must be the REAL FQDN so the transport resolves it — not the fixed egress.
-	if want := "http://echo.aether-test.aether.internal:18081/"; md.url != want {
+	if want := "http://echo.aether-test.aether.internal:8080/"; md.url != want {
 		t.Fatalf("mesh_dns url = %q, want %q", md.url, want)
 	}
 	// authority MUST be empty: probe() must not override Host, or the name would never resolve.
 	if md.authority != "" {
 		t.Fatalf("mesh_dns authority = %q, want empty (no Host override)", md.authority)
 	}
-	// A target without an explicit port gets the default appended.
-	if want := "http://echo.aether-test.aether.internal:18081/"; p.targets[2].url != want {
-		t.Fatalf("mesh_dns default-port url = %q, want %q", p.targets[2].url, want)
+	// A target without a port is dialled as written, which is port 80. No
+	// port is appended: the old default, 18081, is the proxy port, not a port
+	// of a service.
+	if want := "http://echo.aether-test.aether.internal/"; p.targets[2].url != want {
+		t.Fatalf("mesh_dns port-less url = %q, want %q", p.targets[2].url, want)
+	}
+}
+
+// TestNewReachabilityTargetsCarryTheDeclaredPort: a reachability target is
+// "<svc>.<ns>:<port>". The probe goes to the proxy port with the mesh name
+// AND the port in Host; the series keeps the service's name alone, so a
+// target that gains its port continues the series it had.
+func TestNewReachabilityTargetsCarryTheDeclaredPort(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.MeshDomain = "aether.internal"
+	cfg.ReachabilityTargets = []string{"echo.aether-test:8080", "echo.other"}
+	p, err := New(context.Background(), cfg, slog.New(slog.DiscardHandler), "test")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if len(p.targets) != 3 {
+		t.Fatalf("want 3 targets, got %d", len(p.targets))
+	}
+	for i, want := range []struct{ name, authority string }{
+		{"echo.aether-test", "echo.aether-test.aether.internal:8080"},
+		{"echo.other", "echo.other.aether.internal"},
+	} {
+		got := p.targets[i+1]
+		if got.tier != tierReachability || got.name != want.name || got.authority != want.authority {
+			t.Errorf("target %d = tier %q name %q authority %q, want reachability %q %q", i, got.tier, got.name, got.authority, want.name, want.authority)
+		}
+		if got.url != "http://"+cfg.Egress+"/" {
+			t.Errorf("target %d dials %q, want the proxy port", i, got.url)
+		}
 	}
 }
 

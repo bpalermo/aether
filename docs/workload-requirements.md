@@ -232,12 +232,13 @@ admission, and running pods fall back to TCP and stay unpromoted, counted as
 ## Calling other services
 
 With transparent capture + mesh DNS (both on by default), apps dial the
-destination by name — `http://<service>.<namespace>.<meshDomain>:18081` (mesh
-DNS) or the generated Kubernetes Service
-`<service>.<namespace>.svc.cluster.local:18081` — and the CNI-programmed
-capture listener routes it. Apps that prefer zero interception assumptions
-can instead address the outbound listener explicitly: `http://127.0.0.1:18081`
-with the mesh FQDN in the `Host` header. Either way every hop is mTLS between
+destination by name on a port it declares —
+`http://<service>.<namespace>.<meshDomain>:<port>` (mesh DNS) or the generated
+Kubernetes Service `<service>.<namespace>.svc.cluster.local:<port>` — and the
+CNI-programmed capture listener routes it. Apps that prefer zero interception
+assumptions can instead use the mesh's HTTP proxy port: `http://127.0.0.1:18081`
+with the mesh FQDN **and port** in the `Host` header, or as an HTTP proxy
+(`HTTP_PROXY`; see "Using the proxy port" in the getting-started guide). Either way every hop is mTLS between
 workload identities; the callee sees the caller's SPIFFE ID in
 `x-forwarded-client-cert`. Between proxies an HTTP request rides HTTP/3 over
 QUIC (HTTP/2 for a weighted GAMMA split or a destination behind the east/west

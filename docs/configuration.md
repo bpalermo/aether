@@ -287,11 +287,11 @@ no `ext_authz` error.
         "http": {
           "method": "GET",
           "path": "/",
-          "host": "my-service.my-namespace.aether.internal:18081",
+          "host": "my-service.my-namespace.aether.internal:8080",
           "scheme": "http",
           "protocol": "HTTP/1.1",
           "headers": {
-            ":authority": "my-service.my-namespace.aether.internal:18081",
+            ":authority": "my-service.my-namespace.aether.internal:8080",
             ":method": "GET",
             ":path": "/",
             "x-authz": "letmein"
@@ -1023,8 +1023,8 @@ is its whole flag set.
 | `--liveness-path` | `/-/-/live` | Proxy local-reply liveness route. The agent programs a `direct_response` 200 on this exact path, first in the catch-all vhost — no upstream, no app — so a failure is unambiguously the mesh's fault. |
 | `--liveness-authority` | `liveness.aether.internal` | Reserved `Host` authority for the liveness probe; must not be a real service, so the request lands on that catch-all vhost. |
 | `--mesh-domain` | `aether.internal` | Mesh authority suffix for the reachability tier. |
-| `--reachability-targets` | `[]` | Echo upstream service names for the `reachability` tier. Empty disables the tier. |
-| `--mesh-dns-targets` | `[]` | Namespace-qualified FQDN authorities (`host[:port]`, default port `18081`) for the `mesh_dns` tier. Unlike the other two tiers these are **resolved** through the mesh DNS path rather than Host-overridden, so a real mesh-DNS outage becomes an alertable `dns_*` result (#574). Probed on a no-keep-alive client, so every probe resolves and dials afresh. |
+| `--reachability-targets` | `[]` | Echo upstreams for the `reachability` tier, `<svc>.<ns>:<port>` with a port the service declares: the probe goes to the proxy port with `Host: <svc>.<ns>.<meshDomain>:<port>`. Without a port the `Host` is port-less, which is port 80. Empty disables the tier. |
+| `--mesh-dns-targets` | `[]` | Namespace-qualified authorities for the `mesh_dns` tier, `<fqdn>:<port>` with a port the service declares (no port is appended: without one the probe dials 80; until prober chart 1.1.0 the default was `18081`). Unlike the other two tiers these are **resolved** through the mesh DNS path rather than Host-overridden, so a real mesh-DNS outage becomes an alertable `dns_*` result (#574). Probed on a no-keep-alive client, so every probe resolves and dials afresh. |
 | `--rate` | `5` | Probes per second, per target. |
 | `--timeout` | `2s` | Per-probe timeout. |
 | `--max-concurrent` | `16` | Max in-flight probes per target; a tick that finds the semaphore full records `saturated` instead of probing. |
