@@ -9,6 +9,7 @@ go_library(
         "//api/aether/registry/v1:registry",
         "//common/constants",
         "//common/constants/annotations",
+        "//common/constants/mesh",
     ],
 )
 

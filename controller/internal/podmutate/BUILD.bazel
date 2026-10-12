@@ -5,6 +5,7 @@ go_library(
     srcs = [
         "identitygate.go",
         "mutator.go",
+        "reservedports.go",
         "udscarrier.go",
     ],
     importpath = "aethermesh.dev/controller/internal/podmutate",
@@ -13,8 +14,10 @@ go_library(
         "//common/constants",
         "//common/constants/annotations",
         "//common/constants/labels",
+        "//common/constants/mesh",
         "//common/log",
         "//common/udspath",
+        "//registry/endpointmeta",
         "@io_k8s_api//core/v1:core",
         "@io_k8s_sigs_controller_runtime//pkg/webhook/admission",
     ],
@@ -26,6 +29,7 @@ go_test(
     srcs = [
         "identitygate_test.go",
         "mutator_test.go",
+        "reservedports_test.go",
         "udscarrier_test.go",
     ],
     embed = [":podmutate"],

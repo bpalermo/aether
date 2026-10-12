@@ -19,6 +19,7 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -285,5 +286,97 @@ func TestPerPort_LiveColdRequestOfANameTheAgentKnowsNothingOf(t *testing.T) {
 	}
 	if after := r.hits.Load(); after != before {
 		t.Errorf("a request for a name the agent knows nothing of reached a backend (%d hits)", after-before)
+	}
+}
+
+// TestPerPort_LiveProxyPortAuthorityIsNeverDelivered: "<name>:18081" names the
+// mesh's HTTP proxy port, a port of no service, so it is never delivered. The
+// case that used to be: a name the agent knows NOTHING of (no endpoint, no
+// port on its generated Service), asked for as "<fqdn>:18081". It was offered
+// on demand like any "<fqdn>:<port>" and parked; when the service entered the
+// node's scope meanwhile, an alias cluster of that name answered, and the
+// request reached the port the pods declare.
+//
+// Here the registry starts answering 300 ms after the request is sent, which
+// is the park the old path needed. Measured: the request is refused at once
+// and is not parked at all, nothing reaches a backend then or after the
+// service is known, no cluster of that name is ever published, and the
+// service's real port is delivered once it is known (so the rig can deliver).
+func TestPerPort_LiveProxyPortAuthorityIsNeverDelivered(t *testing.T) {
+	prev := ppDeclared
+	ppDeclared = false
+	t.Cleanup(func() { ppDeclared = prev })
+	r := ppStart(t, ppChain(t))
+	port := ppFreePort(t)
+	r.mu.Lock()
+	r.proxyPort = port
+	r.mu.Unlock()
+	var subscribed sync.Map
+	r.onClusterSubscribe = func(name string) { subscribed.Store(name, true) }
+	r.publish()
+	proxyPort := fmt.Sprintf("127.0.0.1:%d", port)
+	ppAwaitListening(t, proxyPort)
+	time.Sleep(3 * time.Second)
+
+	load := func() {
+		r.reg.armed.Store(true)
+		require.NoError(t, r.c.LoadClustersFromRegistry(context.Background(), "cluster-1", ppNodeName, r.reg))
+		r.publish()
+	}
+	// A name with a filter (a stand-in virtual host) and a name with nothing.
+	hosts := []string{ppMesh + ":18081", "multi:18081", "nothing.demo.aether.internal:18081", ppMesh + ":18082"}
+
+	before := r.hits.Load()
+	entered := make(chan struct{})
+	go func() {
+		time.Sleep(300 * time.Millisecond)
+		load()
+		close(entered)
+	}()
+	for _, host := range hosts {
+		start := time.Now()
+		got := ppGetHeaders(proxyPort, host, nil)
+		took := time.Since(start)
+		t.Logf("MEASURED unknown name, Host %-36s while the service enters scope -> %s in %s", host, got, took.Round(time.Millisecond))
+		if got.status != 421 || got.reason != proxy.RefusalPortNotDeclared {
+			t.Errorf("Host %s: want 421 %s, got %s", host, proxy.RefusalPortNotDeclared, got)
+		}
+		if took > time.Second {
+			t.Errorf("Host %s: answered after %s; it must not be parked", host, took)
+		}
+	}
+	<-entered
+	time.Sleep(2 * time.Second) // let CDS and RDS land
+
+	// The service is known now. The spelling is still refused, by the
+	// service's own virtual host.
+	for _, host := range hosts {
+		got := ppGetHeaders(proxyPort, host, nil)
+		t.Logf("MEASURED known name,   Host %-36s -> %s", host, got)
+		if got.status != 421 || got.reason != proxy.RefusalPortNotDeclared {
+			t.Errorf("known, Host %s: want 421 %s, got %s", host, proxy.RefusalPortNotDeclared, got)
+		}
+	}
+	if after := r.hits.Load(); after != before {
+		t.Errorf("an authority that names the mesh's own port reached a backend (%d hits)", after-before)
+	}
+	subscribed.Range(func(k, _ any) bool {
+		if name := k.(string); strings.HasSuffix(name, ":18081") || strings.HasSuffix(name, ":18082") {
+			t.Errorf("the proxy asked for cluster %q on demand", name)
+		}
+		return true
+	})
+	snap, err := r.cp.cache.GetSnapshot(envoyNodeID)
+	require.NoError(t, err)
+	for name := range snap.GetResources(resourcev3.ClusterType) {
+		if strings.HasSuffix(name, ":18081") || strings.HasSuffix(name, ":18082") {
+			t.Errorf("cluster %q is published", name)
+		}
+	}
+	// Anti-vacuity: the same rig delivers the service's real port.
+	got := ppGetHeaders(proxyPort, ppMesh+":8080", nil)
+	t.Logf("MEASURED known name,   Host %-36s -> %s", ppMesh+":8080", got)
+	if got.status != 200 || r.hits.Load() == before {
+		t.Errorf("the real port is not delivered either, so the refusals above prove nothing: %s", got)
 	}
 }

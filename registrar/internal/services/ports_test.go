@@ -217,42 +217,48 @@ func TestGenerator_PortsDoNotLeak(t *testing.T) {
 	assert.True(t, apierrors.IsNotFound(err), "a service with no namespaced endpoint gets no Service")
 }
 
-// TestGenerator_RealPortReplacesLegacyPlaceholder: the API server rejects two
-// ports with one number and protocol, so a real port that lands on one of the
-// two mesh ports takes its place. A UDP port on the same number does not
-// collide. 80 and 443 have no placeholder: declared, they are real ports like
-// any other.
-func TestGenerator_RealPortReplacesLegacyPlaceholder(t *testing.T) {
+// TestGenerator_AMeshPortIsNeverARealPort: 18081 and 18082 are the mesh's own
+// ports and a port of no service (mesh.ReservedPort). A pod that declares one,
+// in any class, UDP included (18082 is the mesh's UDP port as well), does not
+// get it written as a real port: the Service keeps "mesh" and "mesh-tcp", and
+// the operator is told once per service. 80 and 443 have no placeholder:
+// declared, they are real ports like any other.
+//
+// Until this rule a real port of a mesh port's number REPLACED the mesh port
+// on the Service, so a service that declared 18081 lost its proxy port.
+func TestGenerator_AMeshPortIsNeverARealPort(t *testing.T) {
+	log := &warnings{}
 	g, _ := newGen(snapshotOf(catalog{
-		key("ns", "eighty"): listed(pod("ns", "10.0.0.1", 8080, classes{80: classHTTP, 8080: classHTTP})),
-		key("ns", "tls"):    listed(pod("ns", "10.0.0.2", 443, classes{443: classTCP})),
-		key("ns", "udp80"):  listed(pod("ns", "10.0.0.3", 80, classes{80: classUDP})),
-		key("ns", "all"):    listed(pod("ns", "10.0.0.4", 80, classes{80: classHTTP, 443: classTCP, 18081: classHTTP, 18082: classTCP})),
+		key("ns", "eighty"):  listed(pod("ns", "10.0.0.1", 8080, classes{80: classHTTP, 8080: classHTTP})),
+		key("ns", "tls"):     listed(pod("ns", "10.0.0.2", 443, classes{443: classTCP})),
+		key("ns", "udp80"):   listed(pod("ns", "10.0.0.3", 80, classes{80: classUDP})),
+		key("ns", "all"):     listed(pod("ns", "10.0.0.4", 80, classes{80: classHTTP, 443: classTCP, 18081: classHTTP, 18082: classTCP})),
+		key("ns", "udpmesh"): listed(pod("ns", "10.0.0.5", 18082, classes{18082: classUDP})),
+		key("ns", "only"):    listed(pod("ns", "10.0.0.6", 18081, classes{18081: classHTTP})),
 	}))
+	g.Log = slog.New(log)
 	g.reconcile(context.Background())
 
 	assert.Equal(t, withLegacy(realPort(80, classHTTP), realPort(8080, classHTTP)), portsOf(t, g, "ns", "eighty"),
 		`a pod declaring 80 as HTTP: p80-tcp with appProtocol http`)
-
 	assert.Equal(t, withLegacy(realPort(443, classTCP)), portsOf(t, g, "ns", "tls"))
-
 	assert.Equal(t, withLegacy(realPort(80, classUDP)), portsOf(t, g, "ns", "udp80"))
 
-	mesh := catalog{
-		key("ns", "udpmesh"): listed(pod("ns", "10.0.0.5", 18082, classes{18082: classUDP})),
-	}
-	gm, _ := newGen(snapshotOf(mesh))
-	gm.reconcile(context.Background())
-	assert.Equal(t, withLegacy(realPort(18082, classUDP)), portsOf(t, gm, "ns", "udpmesh"),
-		"18082/UDP and the 18082/TCP mesh port are different ports to Kubernetes")
+	assert.Equal(t, withLegacy(realPort(80, classHTTP), realPort(443, classTCP)), portsOf(t, g, "ns", "all"),
+		"the mesh ports stay; the declared 18081 and 18082 are not ports of the service")
+	assert.Equal(t, withLegacy(), portsOf(t, g, "ns", "udpmesh"), "18082 is the mesh's L4 port for UDP as well")
+	assert.Equal(t, withLegacy(), portsOf(t, g, "ns", "only"))
 
-	all := portsOf(t, g, "ns", "all")
-	assert.Equal(t, []corev1.ServicePort{
-		realPort(80, classHTTP), realPort(443, classTCP), realPort(18081, classHTTP), realPort(18082, classTCP),
-	}, all)
+	assert.ElementsMatch(t, []string{
+		"port 18081: reserved for the mesh, not a port of the service (1 declarations); port 18082: reserved for the mesh, not a port of the service (1 declarations)",
+		"port 18082: reserved for the mesh, not a port of the service (1 declarations)",
+		"port 18081: reserved for the mesh, not a port of the service (1 declarations)",
+	}, log.take(), "one line per service that declares a mesh port")
+	g.reconcile(context.Background())
+	assert.Empty(t, log.take(), "and not again while nothing changes")
 
-	// The property the replacement exists for, on every Service generated here.
-	for _, name := range []string{"eighty", "tls", "udp80", "all"} {
+	// No Service carries two ports of one number and protocol, or one name twice.
+	for _, name := range []string{"eighty", "tls", "udp80", "all", "udpmesh", "only"} {
 		type slot struct {
 			port     int32
 			protocol corev1.Protocol

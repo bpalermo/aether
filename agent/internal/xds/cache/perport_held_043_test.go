@@ -139,16 +139,17 @@ func TestServicePorts_TheRawTCPMeshPortIsNeverAnHTTPPort(t *testing.T) {
 	got := deriveServicePorts(listedEndpoints{protocol: registryv1.Service_PROTOCOL_HTTP, endpoints: []*registryv1.ServiceEndpoint{row}})
 	assert.Equal(t, []uint32{8080}, got.http, "18082 is not served as HTTP")
 	assert.False(t, got.hasHTTP(18082))
-	assert.Equal(t, []string{"18082: reserved for the mesh's raw-TCP port, not served as http"}, got.conflicts)
+	assert.Equal(t, []string{"18082: reserved for the mesh, not served (1 endpoints declare it)"}, got.conflicts)
 
-	// Declared raw TCP it is an ordinary raw-TCP port.
+	// Declared raw TCP it is not served either: the number is the mesh's.
 	row.PortProtocols[18082] = registryv1.PortProtocol_PORT_PROTOCOL_TCP
 	got = deriveServicePorts(
 		listedEndpoints{protocol: registryv1.Service_PROTOCOL_HTTP, endpoints: []*registryv1.ServiceEndpoint{row}},
 		listedEndpoints{protocol: registryv1.Service_PROTOCOL_TCP, endpoints: []*registryv1.ServiceEndpoint{row}},
 	)
-	assert.Equal(t, []uint32{18082}, got.tcp)
-	assert.Empty(t, got.conflicts)
+	assert.Empty(t, got.tcp)
+	assert.Equal(t, []uint32{8080}, got.http)
+	assert.Equal(t, []string{"18082: reserved for the mesh, not served (1 endpoints declare it)"}, got.conflicts)
 }
 
 // TestPerPort_RetainedEntryOfAPortThatStoppedBeingHTTP: a service that served

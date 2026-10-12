@@ -212,11 +212,11 @@ func TestRegistryRefreshRebuildsExactlyWhatChanged(t *testing.T) {
 	}
 	echoEDS := func(f *reuseFixture) []res {
 		fq := f.fqdn("demo/echo")
-		return []res{eds("demo/echo"), eds(fq + ":18081"), eds(fq + ":8080"), eds(f.twin())}
+		return []res{eds("demo/echo"), eds(fq + ":8080"), eds(f.twin())}
 	}
 	others := func(f *reuseFixture) []res {
 		return []res{
-			cds(f.fqdn("demo/other")), eds("demo/other"), eds(f.fqdn("demo/other") + ":18081"),
+			cds(f.fqdn("demo/other")), eds("demo/other"), eds(f.fqdn("demo/other") + ":8080"),
 			eds("demo/db"), eds("demo/dns"),
 		}
 	}
@@ -298,7 +298,7 @@ func TestRegistryRefreshRebuildsExactlyWhatChanged(t *testing.T) {
 			},
 			// The default cluster's SNI is the port; the bare membership is
 			// dialed at the mesh inbound whatever the app port, so the load
-			// assignment keeps its bytes (and the :18081 alias its SNI).
+			// assignment keeps its bytes.
 			rebuilt: func(f *reuseFixture) []res { return []res{cds(f.fqdn("demo/echo"))} },
 			reused:  others,
 		},
@@ -474,18 +474,18 @@ func TestRegistryRefreshMemoSplit(t *testing.T) {
 	s1 := refresh()
 	hits, hashed := memoSplit(s0, s1)
 	t.Logf("no-change refresh: memo=%d hashed=%d", hits, hashed)
-	assert.Greater(t, hits, 1000)
+	assert.Greater(t, hits, 800)
 	// The capture route tables are not among them: there is one per HTTP port
 	// number (proposal 043), kept between snapshots while their inputs are
 	// unchanged (captureRouteTables).
 	assert.LessOrEqual(t, hashed, 6, "only the per-snapshot builds are re-hashed")
 
 	// Moving the perturbation from svc-000 to svc-007 changes two services.
-	// Each re-hashes 8: its 3 h2 clusters (default + :18081 + :8080 aliases),
-	// its bare and 2 alias load assignments, and its QUIC twin + twin CLA.
+	// Each re-hashes 6: its 2 h2 clusters (default + the :8080 alias), its bare
+	// and alias load assignments, and its QUIC twin + twin CLA.
 	flip.Store(7)
 	s2 := refresh()
 	hits, hashed2 := memoSplit(s1, s2)
 	t.Logf("two-service refresh: memo=%d hashed=%d", hits, hashed2)
-	assert.LessOrEqual(t, hashed2-hashed, 2*8, "a refresh re-hashes only the changed services")
+	assert.LessOrEqual(t, hashed2-hashed, 2*6, "a refresh re-hashes only the changed services")
 }

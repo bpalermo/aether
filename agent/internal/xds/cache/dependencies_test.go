@@ -3,6 +3,7 @@ package cache
 import (
 	"context"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -12,6 +13,8 @@ import (
 	cniv1 "aethermesh.dev/api/aether/cni/v1"
 	registryv1 "aethermesh.dev/api/aether/registry/v1"
 	meshconst "aethermesh.dev/common/constants/mesh"
+	routev3 "github.com/envoyproxy/go-control-plane/envoy/config/route/v3"
+	resourcev3 "github.com/envoyproxy/go-control-plane/pkg/resource/v3"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -459,48 +462,106 @@ func TestLoadClustersFromRegistry_MultiPort(t *testing.T) {
 	assert.Equal(t, "ns/svc-mp", alias.service, "the alias maps back to the service key (SAN/retention)")
 	assert.Equal(t, "8080", alias.sni)
 
-	// The MESH port gets an alias too, and it is the one that matters in
-	// production: every mesh VIP Service advertises exactly ProxyOutboundPort,
-	// so ":18081" — not the application port — is the authority a client
-	// resolving through mesh DNS dials, and the name the ODCDS catch-all
-	// requests. It is not in the registry endpoints at all (those carry
-	// application ports), so it must come from the mesh constant.
-	meshAlias, hasMeshAlias := c.clusters[fmt.Sprintf("svc-mp.ns.aether.internal:%d", meshconst.ProxyOutboundPort)]
-	require.True(t, hasMeshAlias, "the mesh Service port authority must resolve to a cluster (ODCDS cold path)")
-	assert.Equal(t, fmt.Sprintf("svc-mp.ns.aether.internal:%d", meshconst.ProxyOutboundPort), meshAlias.cluster.GetEdsClusterConfig().GetServiceName(),
-		"the mesh-port alias subscribes to its own EDS name, never the bare service's (aether#1013)")
-	assert.Nil(t, meshAlias.vhost, "the cap_http route domains already own the :18081 spelling")
-	assert.Nil(t, meshAlias.loadAssignment, "the alias publishes no second load assignment")
-	assert.Equal(t, "ns/svc-mp", meshAlias.service)
+	// The mesh's HTTP proxy port gets NO cluster (proposal 043): 18081 is a
+	// port of no service, so no authority that names it can be delivered,
+	// warm, cold or parked. Through chart 2.6 it had an alias here.
+	_, hasMeshAlias := c.clusters[fmt.Sprintf("svc-mp.ns.aether.internal:%d", meshconst.ProxyOutboundPort)]
+	assert.False(t, hasMeshAlias, "a cluster is named for the proxy's port")
 }
 
-// TestLoadClustersFromRegistry_MeshPortServedAsRealPort verifies a service that
-// genuinely ADVERTISES the mesh port keeps its real, port-filtered per-port
-// cluster: the whole-service alias must never shadow it.
-func TestLoadClustersFromRegistry_MeshPortServedAsRealPort(t *testing.T) {
-	c := newTestCache("node-1")
-	c.SetMeshDomain("aether.internal")
-	declareDeps(c, "ns/svc-mp")
-	ctx := context.Background()
+// TestLoadClustersFromRegistry_AReservedPortIsNotServed: a pod that declares
+// one of the mesh's own two ports (18081, 18082) as an application port is not
+// served on it, in any class: no cluster, no virtual host, no chain, and it is
+// not the service's legacy target. The agent says so once, by service. (The
+// controller's pod webhook refuses such a pod at admission; this is a pod that
+// is running anyway.)
+func TestLoadClustersFromRegistry_AReservedPortIsNotServed(t *testing.T) {
+	h, tcp := registryv1.PortProtocol_PORT_PROTOCOL_HTTP, registryv1.PortProtocol_PORT_PROTOCOL_TCP
+	for _, reserved := range []uint32{meshconst.ProxyOutboundPort, meshconst.ProxyL4OutboundPort} {
+		for _, class := range []registryv1.PortProtocol{h, tcp} {
+			t.Run(fmt.Sprintf("%d as %s", reserved, className(class)), func(t *testing.T) {
+				c, rec, _ := newBindingTestCache(t)
+				c.SetMeshDomain("aether.internal")
+				declareDeps(c, "ns/svc-mp", "ns/only")
+				ctx := context.Background()
 
-	// ep1 serves 8080 (default) + the mesh port; ep2 only 8080.
-	ep1 := makeEndpoint("10.0.0.1", "cluster-1", "node-2", 8080)
-	ep1.Ports = []uint32{8080, meshconst.ProxyOutboundPort}
-	ep2 := makeEndpoint("10.0.0.2", "cluster-1", "node-3", 8080)
-	ep2.Ports = []uint32{8080}
-	reg := &mockRegistry{
-		listAllEndpointsFunc: func(_ context.Context, _ registryv1.Service_Protocol) (map[string][]*registryv1.ServiceEndpoint, error) {
-			return map[string][]*registryv1.ServiceEndpoint{"ns/svc-mp": {ep1, ep2}}, nil
-		},
+				// ep1 serves 8080 (HTTP) and the reserved port; ep2 only 8080.
+				ep1 := makeEndpoint("10.0.0.1", "cluster-1", "node-2", 8080)
+				ep1.Ports = []uint32{8080, reserved}
+				ep1.PortProtocols = map[uint32]registryv1.PortProtocol{8080: h, reserved: class}
+				ep2 := makeEndpoint("10.0.0.2", "cluster-1", "node-3", 8080)
+				ep2.Ports = []uint32{8080}
+				// A service whose pods declare nothing but the reserved port.
+				only := makeEndpoint("10.0.0.3", "cluster-1", "node-3", reserved)
+				only.PortProtocols = map[uint32]registryv1.PortProtocol{reserved: class}
+				reg := &mockRegistry{
+					tcpAware: true,
+					listAllEndpointsFunc: func(_ context.Context, p registryv1.Service_Protocol) (map[string][]*registryv1.ServiceEndpoint, error) {
+						out := map[string][]*registryv1.ServiceEndpoint{}
+						if p == registryv1.Service_PROTOCOL_HTTP {
+							out["ns/svc-mp"] = []*registryv1.ServiceEndpoint{ep1, ep2}
+						}
+						if (p == registryv1.Service_PROTOCOL_HTTP) == (class == h) && p != registryv1.Service_PROTOCOL_UDP {
+							out["ns/only"] = []*registryv1.ServiceEndpoint{only}
+							if class == tcp {
+								out["ns/svc-mp"] = []*registryv1.ServiceEndpoint{ep1}
+							}
+						}
+						return out, nil
+					},
+				}
+				require.NoError(t, c.LoadClustersFromRegistry(ctx, "cluster-1", "node-1", reg))
+
+				c.clusterMu.RLock()
+				defer c.clusterMu.RUnlock()
+				for name, e := range c.clusters {
+					assert.NotContainsf(t, name, fmt.Sprintf(":%d", reserved), "cluster entry %s is named for a reserved port", name)
+					if e.vhost != nil {
+						for _, d := range e.vhost.GetDomains() {
+							assert.NotContainsf(t, d, fmt.Sprintf(":%d", reserved), "virtual host %s claims a reserved port", e.vhost.GetName())
+						}
+					}
+					assert.NotEqualf(t, "ns/only", e.service, "entry %s: a service that declares only a reserved port has no cluster", name)
+				}
+				ports := c.servicePorts["ns/svc-mp"]
+				assert.Equal(t, []uint32{8080}, ports.http)
+				assert.Empty(t, ports.tcp)
+				assert.Equal(t, uint32(8080), ports.legacyPort)
+				assert.Equal(t, []string{fmt.Sprintf("%d: reserved for the mesh, not served (1 endpoints declare it)", reserved)}, ports.conflicts)
+				onlyPorts := c.servicePorts["ns/only"]
+				assert.True(t, onlyPorts.reservedOnly, "%+v", onlyPorts)
+				assert.Empty(t, onlyPorts.http)
+				assert.Empty(t, onlyPorts.tcp)
+				assert.Zero(t, onlyPorts.legacyPort)
+
+				// What a client of the reserved-only service gets: its names
+				// are refused, at once, like those of any service with no
+				// HTTP port. Not parked for a cluster that will never come.
+				c.clusterMu.RUnlock()
+				snap, err := c.GetSnapshot("node-1")
+				c.clusterMu.RLock()
+				require.NoError(t, err)
+				rc := snap.GetResources(resourcev3.RouteType)[proxy.OutboundHTTPRouteName].(*routev3.RouteConfiguration)
+				refused := map[string]string{}
+				for _, vh := range rc.GetVirtualHosts() {
+					for _, d := range vh.GetDomains() {
+						if strings.HasPrefix(d, "only.ns.aether.internal") {
+							require.Len(t, vh.GetRoutes(), 1, vh.GetName())
+							require.Equal(t, uint32(421), vh.GetRoutes()[0].GetDirectResponse().GetStatus(), "%s (%s) is not a refusal", vh.GetName(), d)
+							refused[d] = vh.GetRoutes()[0].GetResponseHeadersToAdd()[0].GetHeader().GetValue()
+						}
+					}
+				}
+				assert.Contains(t, refused, "only.ns.aether.internal", "%v", refused)
+				assert.Contains(t, refused, "only.ns.aether.internal:*", "%v", refused)
+
+				lines := rec.with("a mesh service's ports cannot all be served as its endpoints declare them: " +
+					"a port whose endpoints declare different protocols is served as the protocol most of them declare, " +
+					"and a port reserved for the mesh (18081, 18082) is not served at all")
+				assert.Len(t, lines, 2, "one line per service that declares a reserved port")
+			})
+		}
 	}
-	require.NoError(t, c.LoadClustersFromRegistry(ctx, "cluster-1", "node-1", reg))
-
-	real, ok := c.clusters[fmt.Sprintf("svc-mp.ns.aether.internal:%d", meshconst.ProxyOutboundPort)]
-	require.True(t, ok)
-	require.NotNil(t, real.loadAssignment, "the real per-port cluster keeps its own port-filtered EDS")
-	require.Len(t, real.loadAssignment.GetEndpoints(), 1, "only the pod advertising the port is a member")
-	assert.Equal(t, []string{fmt.Sprintf("svc-mp.ns.aether.internal:%d", meshconst.ProxyOutboundPort)},
-		real.vhost.GetDomains(), "the real per-port cluster keeps its vhost")
 }
 
 // TestDependencySet_IncludesGammaRouteTargets verifies a GAMMA route TARGET (an

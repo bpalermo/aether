@@ -28,6 +28,7 @@ import (
 	registryv1 "aethermesh.dev/api/aether/registry/v1"
 	"aethermesh.dev/common/constants"
 	aetherannotations "aethermesh.dev/common/constants/annotations"
+	"aethermesh.dev/common/constants/mesh"
 )
 
 // Protocol returns the mesh protocol the pod serves, from
@@ -265,5 +266,27 @@ func ProtocolsServed(portProtocols map[uint32]registryv1.PortProtocol) []registr
 		out = append(out, p)
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i] < out[j] })
+	return out
+}
+
+// ReservedPorts returns, sorted, the ports a pod's annotations declare
+// (endpoint.aether.io/port and endpoint.aether.io/ports) that are reserved for
+// the mesh (mesh.ReservedPort), in any class. Annotations that do not parse
+// declare nothing here: that is another error, reported where they are read.
+func ReservedPorts(annotations map[string]string) []uint32 {
+	primary, err := Port(annotations)
+	if err != nil {
+		return nil
+	}
+	ports, err := Ports(annotations, primary)
+	if err != nil {
+		return nil
+	}
+	var out []uint32
+	for _, p := range ports {
+		if mesh.ReservedPort(p) {
+			out = append(out, p)
+		}
+	}
 	return out
 }

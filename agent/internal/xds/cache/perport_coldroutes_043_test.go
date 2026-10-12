@@ -63,6 +63,17 @@ func TestPerPort_ColdServiceCarriesItsRoutesOnTheLoopbackTable(t *testing.T) {
 				assert.Truef(t, got.onDemand, "Host %s: a request no rule matches still names its own cluster on demand", host)
 				assert.Equalf(t, host, got.cluster, "Host %s", host)
 			}
+			// Except the mesh's own two ports, which are a port of no
+			// service: refused at once, by the stand-in for a name with a
+			// rule and by the table's floor for a name with nothing. Never
+			// parked for a cluster that can never exist.
+			for _, host := range []string{multi + ":18081", multi + ":18082", "nothing.demo." + a043Mesh + ":18081", "nothing.demo." + a043Mesh + ":18082"} {
+				got := a043Resolve(t, table, host)
+				assert.Equalf(t, uint32(421), got.status, "Host %s: %+v", host, got)
+				assert.Equalf(t, proxy.RefusalPortNotDeclared, got.refusal, "Host %s", host)
+				assert.Emptyf(t, got.cluster, "Host %s names a cluster", host)
+				assert.Falsef(t, got.onDemand, "Host %s is offered on demand", host)
+			}
 			// An authority WITHOUT a port is not: it would spell the bare
 			// cluster name, which is no port's. Nothing says whether the
 			// service has a port 80, so it is refused until something does.

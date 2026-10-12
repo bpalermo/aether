@@ -104,3 +104,19 @@ const (
 	// at the route table. Configurable via the agent's --mesh-domain flag.
 	DefaultMeshDomain = "aether.internal"
 )
+
+// ReservedPort reports whether port is one of the mesh's own two ports, which
+// no service can declare as an application port (proposal 043):
+// ProxyOutboundPort, the HTTP proxy port, and ProxyL4OutboundPort, the L4
+// port. On a captured dial both numbers select the mesh's own chains, and
+// "<name>:18081" in an authority names the proxy, so a pod's port of either
+// number could not be told from the mesh's.
+//
+// Enforced in three places: the controller's pod webhook refuses a mesh pod
+// that declares one, the registrar does not write one onto a generated
+// Service, and the node agent does not serve one. The last two cover a pod
+// that runs anyway (admitted before the rule, or with the webhook off), and
+// both say so in their logs.
+func ReservedPort(port uint32) bool {
+	return port == ProxyOutboundPort || port == ProxyL4OutboundPort
+}

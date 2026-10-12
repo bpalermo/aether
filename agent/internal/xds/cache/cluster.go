@@ -13,7 +13,6 @@ import (
 
 	"aethermesh.dev/agent/internal/xds/proxy"
 	registryv1 "aethermesh.dev/api/aether/registry/v1"
-	meshconst "aethermesh.dev/common/constants/mesh"
 	"aethermesh.dev/registry"
 	clusterv3 "github.com/envoyproxy/go-control-plane/envoy/config/cluster/v3"
 	endpointv3 "github.com/envoyproxy/go-control-plane/envoy/config/endpoint/v3"
@@ -620,8 +619,12 @@ func (c *SnapshotCache) buildHTTPServiceEntryLocked(dst map[string]clusterEntry,
 	fqdn := proxy.ServiceClusterName(serviceName, c.meshDomain)
 	defaultPort, defaultClass := in.ports.legacyPort, in.ports.legacyClass
 	// Rows that carry no port at all decide nothing; such a service keeps the
-	// default cluster it always had.
-	defaultIsHTTP := defaultClass == registryv1.PortProtocol_PORT_PROTOCOL_HTTP || defaultPort == 0
+	// default cluster it always had. Rows whose declared port is one of the
+	// mesh's own (reservedMeshPort) have no legacy target either, and are a
+	// different case: there is no port for a default cluster to be the
+	// cluster of, so there is none, and the service is its other ports.
+	defaultIsHTTP := defaultClass == registryv1.PortProtocol_PORT_PROTOCOL_HTTP ||
+		(defaultPort == 0 && !in.ports.known())
 
 	defaultCla, defaultEpMap, buckets := buildHTTPEndpointBuckets(serviceName, endpoints, in, defaultPort, defaultIsHTTP)
 
@@ -731,24 +734,25 @@ func (c *SnapshotCache) buildPortAliasesLocked(dst map[string]clusterEntry, serv
 	}
 }
 
-// aliasAuthorityPorts returns the ports needing an alias cluster: the mesh VIP
-// Service port every client dials through mesh DNS, plus the service's default
-// (application) port, minus any port that already has its own per-port cluster
-// and minus 0 (an endpoint with no port). Deterministic order — the mesh port
-// first — so two rebuilds of the same input write the same entries (map order
-// is protocol-visible, see #135).
+// aliasAuthorityPorts returns the ports needing an alias cluster: the
+// service's default (application) port, unless it already has its own per-port
+// cluster or is 0 (an endpoint with no port).
+//
+// The mesh's HTTP proxy port (18081) had an alias here until proposal 043: it
+// was the port every client dialled, and "<fqdn>:18081" meant the port the
+// pods declare. It is a port of no service now, so no cluster carries that
+// name and nothing that names it can be delivered, including a request that
+// was parked on demand for a name the node learns of meanwhile. That such a
+// request is never answered by a cluster is the point, not the wedge of #682:
+// the wedge was a name that SHOULD have resolved and never could.
 func aliasAuthorityPorts(defaultPort uint32, buckets map[uint32]*portBucket) []uint32 {
-	ports := make([]uint32, 0, 2)
-	for _, p := range [...]uint32{meshconst.ProxyOutboundPort, defaultPort} {
-		if p == 0 || slices.Contains(ports, p) {
-			continue // 0 = unset; already emitted (the default port IS the mesh port)
-		}
-		if _, real := buckets[p]; real {
-			continue // a real per-port cluster owns this name
-		}
-		ports = append(ports, p)
+	if defaultPort == 0 || reservedMeshPort(defaultPort) {
+		return nil
 	}
-	return ports
+	if _, real := buckets[defaultPort]; real {
+		return nil // a real per-port cluster owns this name
+	}
+	return []uint32{defaultPort}
 }
 
 // portBucket accumulates per-port endpoints for a service.
@@ -762,6 +766,9 @@ type portBucket struct {
 // port_protocols names. A row that carries no port (nothing since proposal
 // 005 writes one) serves "port 0", the only port such a service has.
 func listsPort(endpoint *registryv1.ServiceEndpoint, port uint32) bool {
+	if reservedMeshPort(port) {
+		return false // a port of no service (reservedMeshPort)
+	}
 	if port == endpoint.GetPort() || slices.Contains(endpoint.GetPorts(), port) {
 		return true
 	}
@@ -923,6 +930,12 @@ func (c *SnapshotCache) buildTCPClustersLocked(deps map[string]struct{}, tcpServ
 		owns := c.ownsBareCLALocked(serviceName)
 		in := in
 		in.ports = c.servicePorts[serviceName]
+		if in.ports.reservedOnly {
+			// Its pods declare one of the mesh's own ports and nothing the
+			// mesh can serve: no floor, so the legacy L4 spelling does not
+			// reach that port either.
+			continue
+		}
 		build := func(dst map[string]clusterEntry, _ map[string]struct{}) {
 			c.buildTCPServiceEntriesLocked(dst, serviceName, endpoints, owns, in)
 		}

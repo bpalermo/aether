@@ -79,7 +79,7 @@ func assertRegenerationByteIdentical(t *testing.T, c *SnapshotCache, before cach
 // the bare-service EDS name the default cluster already holds. When the alias
 // arrives in a LATER CDS update than the default cluster -- here the service's
 // default application port changes after the node already depends on it, which
-// adds a ":8080" alias beside the existing mesh-port one -- Envoy's delta-ADS
+// adds a ":8080" alias to a default cluster the proxy already holds -- Envoy's delta-ADS
 // WatchMap sends no subscribe for the shared name and the alias warms for the
 // full initial_fetch_timeout. So each alias must subscribe to its own name, and
 // the load assignment under it must ride the SAME snapshot as the alias.
@@ -93,10 +93,11 @@ func TestLatePortAliasSubscribesToItsOwnEDSResource(t *testing.T) {
 	require.NoError(t, c.SetNodeIdentity(ctx, nodeIdentity))
 	declareDeps(c, "demo/echo")
 
-	// First the service listens on the mesh port itself (one alias, :18081);
-	// later its application port is 8080, which adds the ":8080" alias.
+	// First the service's port is 9090 (one alias, :9090); later it is 8080,
+	// which adds the ":8080" alias in a later CDS update than the default
+	// cluster, whose name and EDS name do not change.
 	var appPort atomic.Uint32
-	appPort.Store(meshconst.ProxyOutboundPort)
+	appPort.Store(9090)
 	reg := &mockRegistry{
 		listAllEndpointsFunc: func(_ context.Context, _ registryv1.Service_Protocol) (map[string][]*registryv1.ServiceEndpoint, error) {
 			p := appPort.Load()
@@ -111,7 +112,7 @@ func TestLatePortAliasSubscribesToItsOwnEDSResource(t *testing.T) {
 	require.NoError(t, c.LoadClustersFromRegistry(ctx, "cluster-1", "node-1", reg))
 
 	fqdn := proxy.ServiceClusterName("demo/echo", c.meshDomain)
-	meshAlias := fmt.Sprintf("%s:%d", fqdn, meshconst.ProxyOutboundPort)
+	firstAlias := fqdn + ":9090"
 	appAlias := fqdn + ":8080"
 
 	first, err := c.GetSnapshot("node-1")
@@ -122,7 +123,7 @@ func TestLatePortAliasSubscribesToItsOwnEDSResource(t *testing.T) {
 	require.Equal(t, "demo/echo", bareEDS, "the default cluster keeps the bare-service EDS name")
 	_, hasAppAlias := first.GetResources(resourcev3.ClusterType)[appAlias]
 	require.False(t, hasAppAlias, "fixture: the :8080 alias must NOT exist yet, or nothing is 'later'")
-	assertOwnEDSWithBaseMembership(t, first, meshAlias, bareEDS)
+	assertOwnEDSWithBaseMembership(t, first, firstAlias, bareEDS)
 
 	// The later CDS update: the :8080 alias is new, and its CLA must be in the
 	// SAME snapshot, under a new EDS version.
@@ -133,7 +134,13 @@ func TestLatePortAliasSubscribesToItsOwnEDSResource(t *testing.T) {
 	assert.NotEqual(t, first.GetVersion(resourcev3.EndpointType), later.GetVersion(resourcev3.EndpointType),
 		"the snapshot introducing the alias's load assignment must carry a new EDS version")
 	assertOwnEDSWithBaseMembership(t, later, appAlias, bareEDS)
-	assertOwnEDSWithBaseMembership(t, later, meshAlias, bareEDS)
+	laterDef, ok := later.GetResources(resourcev3.ClusterType)[fqdn].(*clusterv3.Cluster)
+	require.True(t, ok)
+	require.Equal(t, bareEDS, laterDef.GetEdsClusterConfig().GetServiceName(), "fixture: the default cluster keeps the subscription the alias used to share")
+	// No cluster is named for the proxy's port, before or after.
+	for _, s := range []cachev3.ResourceSnapshot{first, later} {
+		assert.NotContains(t, s.GetResources(resourcev3.ClusterType), fmt.Sprintf("%s:%d", fqdn, meshconst.ProxyOutboundPort))
+	}
 
 	assertRegenerationByteIdentical(t, c, later)
 }
@@ -293,7 +300,7 @@ func TestNoNonDefaultClusterSharesTheBareServiceEDSName(t *testing.T) {
 			kinds["tcp-alias"] = true
 		case name == "tcp:mixed.demo.aether.internal:8080":
 			kinds["tcp-port"] = true
-		case name == fmt.Sprintf("echo.demo.aether.internal:%d", meshconst.ProxyOutboundPort):
+		case name == "echo.demo.aether.internal:8080":
 			kinds["alias"] = true
 		case name == "echo.demo.aether.internal:9090":
 			kinds["port"] = true
