@@ -2,6 +2,7 @@ package cache
 
 import (
 	"context"
+	"fmt"
 	"testing"
 
 	"aethermesh.dev/agent/internal/capture"
@@ -75,11 +76,16 @@ func TestCaptureVhosts_RouteTargetRealPort(t *testing.T) {
 			assert.NotContainsf(t, d, ":18081", "table %d", port)
 		}
 	}
-	// And a table of a port the target is not addressed on has no routing
-	// virtual host for it: 9090, and 80, which the target does not declare.
+	// On a table of a port the route does not address it on (9090, and 80),
+	// nothing is known about the target: no endpoint is held and no Service
+	// maps its ports. The name is still the target's, so it is parked for the
+	// cluster of the port that was DIALLED, never routed to the cluster of
+	// the port the route names (8080) and never left to the passthrough.
 	for _, port := range []uint32{80, 9090} {
-		_, routed := routedCluster(c, port, "echo.team-a.svc.cluster.local")
-		assert.Falsef(t, routed, "table %d routes a name on a port it is not addressed on", port)
+		got, routed := routedCluster(c, port, "echo.team-a.svc.cluster.local")
+		if assert.Truef(t, routed, "table %d: a name of the target takes the fallthrough", port) {
+			assert.Equalf(t, fmt.Sprintf("echo.team-a.aether.internal:%d", port), got, "table %d", port)
+		}
 	}
 
 	// The GAMMA rules must be present and path-ordered by specificity: the most
@@ -182,9 +188,12 @@ func TestCaptureVhosts_RouteTargetNoPort(t *testing.T) {
 	})
 	// No SetRouteTargetPorts (or empty): the parentRef names no port.
 
-	// Nothing says the name has a port 80: nothing routes there.
-	_, routed := routedCluster(c, 80, "echo.team-a.svc.cluster.local")
-	assert.False(t, routed, "no port map, no declared port: a dial to 80 is not the port the pods declare")
+	// Nothing says what the name's ports are (no endpoint held, no Service
+	// map): a dial to 80 is parked for port 80's cluster, and is NOT read as
+	// "the port the pods declare" (the cluster the bare name spells).
+	got80, routed := routedCluster(c, 80, "echo.team-a.svc.cluster.local")
+	require.True(t, routed, "a name of the target takes the fallthrough")
+	assert.Equal(t, "echo.team-a.aether.internal:80", got80, "no port map, no declared port: a dial to 80 is port 80")
 
 	// The Service maps 80 and 8080: each has the rule, in its own table.
 	c.SetServicePortMaps(map[string]map[uint32]uint32{"team-a/echo": {80: 8080, 8080: 8080}})
@@ -307,11 +316,15 @@ func TestCaptureTables_StableAcrossGAMMAChurn(t *testing.T) {
 		"echo-v2.gateway-conformance-mesh.aether.internal",
 	}
 
+	// No endpoint is held in this test, so the cluster is named by the pod
+	// port the Service maps 80 to (fetched on demand), never by the bare name.
+	portCluster := cluster + ":8080"
+
 	// With the route applied, every spelling reaches the cluster.
 	for _, a := range dialSpellings {
 		got, ok := routedCluster(c, 80, a)
 		require.Truef(t, ok, "with rules: %q must have a routing virtual host in the table of port 80", a)
-		assert.Equalf(t, cluster, got, "with rules: %q -> %s", a, cluster)
+		assert.Equalf(t, portCluster, got, "with rules: %q -> %s", a, portCluster)
 	}
 
 	// Now SIMULATE THE CHURN: the suite deletes the HTTPRoute, the gamma reconciler
@@ -324,7 +337,7 @@ func TestCaptureTables_StableAcrossGAMMAChurn(t *testing.T) {
 	for _, a := range dialSpellings {
 		got, ok := routedCluster(c, 80, a)
 		require.Truef(t, ok, "after churn: %q must keep its virtual host (no passthrough leak)", a)
-		assert.Equalf(t, cluster, got, "after churn: %q -> %s", a, cluster)
+		assert.Equalf(t, portCluster, got, "after churn: %q -> %s", a, portCluster)
 	}
 
 	// Negative control: a name that is not the service's is claimed by no
@@ -349,12 +362,14 @@ func TestCaptureTables_RouteOnlyTarget(t *testing.T) {
 	// the port map of every Service a route names).
 	c.SetServicePortMaps(map[string]map[uint32]uint32{"team-a/echo": {80: 8080}})
 
+	// Port 80 maps to the pods' 8080, and no endpoint is held: the cluster of
+	// that pod port, never the one the bare name spells.
 	cluster, ok := routedCluster(c, 80, "echo.team-a.svc.cluster.local")
 	require.True(t, ok, "route-only target must have a virtual host")
-	assert.Equal(t, "echo.team-a.aether.internal", cluster)
+	assert.Equal(t, "echo.team-a.aether.internal:8080", cluster)
 	cluster, ok = routedCluster(c, 80, "echo")
 	require.True(t, ok, "bare same-namespace dial must have a virtual host")
-	assert.Equal(t, "echo.team-a.aether.internal", cluster)
+	assert.Equal(t, "echo.team-a.aether.internal:8080", cluster)
 	// A Host that names a port other than the one dialled is refused, where
 	// the known-target regex routed any port to the default cluster (#1682).
 	_, ok = routedCluster(c, 80, "echo.team-a.svc.cluster.local:8080")

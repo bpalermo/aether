@@ -46,6 +46,13 @@ func (p servicePorts) servesHTTP() bool { return len(p.http) > 0 }
 // hasHTTP reports whether port is one of the service's HTTP ports.
 func (p servicePorts) hasHTTP(port uint32) bool { return slices.Contains(p.http, port) }
 
+// declaresNonHTTP reports whether the service declares port as raw TCP or
+// UDP: it is known to be something else than HTTP, which is more than not
+// being known as HTTP (a port no listed row declares at all).
+func (p servicePorts) declaresNonHTTP(port uint32) bool {
+	return slices.Contains(p.tcp, port) || slices.Contains(p.udp, port)
+}
+
 // classOf returns the class of one of the service's ports, UNSPECIFIED for a
 // port the service does not declare.
 func (p servicePorts) classOf(port uint32) registryv1.PortProtocol {
@@ -247,6 +254,57 @@ func classOfPort(port uint32, votes map[registryv1.PortProtocol]int) (class regi
 	return best, conflict
 }
 
+// declaredPort is one endpoint's declared port and its class.
+type declaredPort struct {
+	port  uint32
+	class registryv1.PortProtocol
+}
+
+// declaredPortVotes counts, per (declared port, class), the endpoints that
+// declare it (legacyTarget).
+//
+// One vote per endpoint, from the row's OWN declaration of its declared port,
+// whichever listing returned the row. What the declared port is does not
+// depend on which listings have caught up: a mixed pod whose HTTP row is
+// listed before its raw-TCP one is still a pod whose declared port is raw
+// TCP, and must not be taken for a service with no declared port (which gets
+// a default HTTP cluster). Whether the port is SERVED here is servedPorts'
+// question, asked by legacyTCPPort.
+//
+// Two rows of one (cluster, address) can coexist for a moment (an address
+// reused before the old row is gone). The endpoint votes once, and for the
+// same candidate whatever order the rows came in: the one that wins the
+// tie-break (class, then the lower port).
+func declaredPortVotes(listings []listedEndpoints) map[declaredPort]int {
+	better := func(a, b declaredPort) bool {
+		if classRank(a.class) != classRank(b.class) {
+			return classRank(a.class) < classRank(b.class)
+		}
+		return a.port < b.port
+	}
+	byEndpoint := map[string]declaredPort{}
+	for _, l := range listings {
+		for _, ep := range l.endpoints {
+			port := ep.GetPort()
+			class, ok := endpointPortClasses(ep, l.protocol)[port]
+			if !ok {
+				continue
+			}
+			// The same address in two clusters is two endpoints.
+			id := ep.GetClusterName() + "/" + ep.GetIp()
+			cand := declaredPort{port: port, class: class}
+			if prev, dup := byEndpoint[id]; !dup || better(cand, prev) {
+				byEndpoint[id] = cand
+			}
+		}
+	}
+	votes := map[declaredPort]int{}
+	for _, cand := range byEndpoint {
+		votes[cand]++
+	}
+	return votes
+}
+
 // legacyTarget decides a service's LEGACY TARGET from the listings it appears
 // in: the port its pods declare in endpoint.aether.io/port, with that port's
 // class (proposal 043, "The legacy spellings during Phases 1 and 2").
@@ -267,33 +325,8 @@ func classOfPort(port uint32, votes map[registryv1.PortProtocol]int) (class regi
 // draining endpoint still says what its service declares, and an answer that
 // moved with health would rebuild listeners on a probe result.
 func legacyTarget(listings ...listedEndpoints) (port uint32, class registryv1.PortProtocol) {
-	type pair struct {
-		port  uint32
-		class registryv1.PortProtocol
-	}
-	// One vote per endpoint, from the row's OWN declaration of its declared
-	// port, whichever listing returned the row. What the declared port is does
-	// not depend on which listings have caught up: a mixed pod whose HTTP row
-	// is listed before its raw-TCP one is still a pod whose declared port is
-	// raw TCP, and must not be taken for a service with no declared port
-	// (which gets a default HTTP cluster). Whether the port is SERVED here is
-	// servedPorts' question, asked by legacyTCPPort.
-	votes := map[pair]int{}
-	seen := map[string]struct{}{}
-	for _, l := range listings {
-		for _, ep := range l.endpoints {
-			port := ep.GetPort()
-			class, ok := endpointPortClasses(ep, l.protocol)[port]
-			// The same address in two clusters is two endpoints.
-			id := ep.GetClusterName() + "/" + ep.GetIp()
-			if _, dup := seen[id]; dup || !ok {
-				continue
-			}
-			seen[id] = struct{}{}
-			votes[pair{port: port, class: class}]++
-		}
-	}
-	var best pair
+	votes := declaredPortVotes(listings)
+	var best declaredPort
 	for k, n := range votes {
 		switch {
 		case best.port == 0, n > votes[best]:

@@ -209,6 +209,10 @@ type SnapshotCache struct {
 	// servicePortsGen counts content changes of servicePorts: an input
 	// generation of the capture route tables' memo. Guarded by clusterMu.
 	servicePortsGen uint64
+	// vhostRuleGen is the rule-input generation (ruleGen) the cluster
+	// entries' loopback virtual hosts were last built at
+	// (refreshEntryVhosts). Guarded by clusterMu.
+	vhostRuleGen uint64
 	// captureTables keeps the capture route tables between snapshots
 	// (captureRouteTables). Guarded by snapshotMu.
 	captureTables captureTablesMemo
@@ -456,6 +460,10 @@ type SnapshotCache struct {
 	// one rebuild, a missed bump serves a stale dependency set (the demand-
 	// scoping bug class: clusters silently missing from the snapshot).
 	depGen uint64
+	// ruleGen counts CHANGES of the rule inputs of a virtual host: the GAMMA
+	// rules (local and imported), the service-wide chain filters and the
+	// Service port maps (bumpRuleGenLocked). Guarded by depMu.
+	ruleGen uint64
 	// depSet/depSetGen/depSetTTL/depSetExpiry/depSetValid memoize
 	// dependencySetLocked: the cached set is served while depGen is unchanged,
 	// the TTL is unchanged, and no memoized observed dependency has crossed its

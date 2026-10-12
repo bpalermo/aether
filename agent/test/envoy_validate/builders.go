@@ -492,7 +492,7 @@ func buildCaptureBootstrap() (*bootstrapv3.Bootstrap, error) {
 		ClusterIP:   "10.96.1.10",
 		// A raw-TCP legacy target with no HTTP port: these fixtures exercise
 		// the TCP floor, which is emitted only for such a service (proposals
-		// 037 and 043), on its own port, on the TCP mesh port and on any port.
+		// 037 and 043), on its own port and on the TCP mesh port, and on no other port of its address.
 		LegacyTCPPort: fixtureLegacyTCPPort,
 	}
 	captureListener, err := proxy.GenerateCaptureListener(
@@ -656,7 +656,7 @@ func buildCaptureTCPRouteBootstrap() (*bootstrapv3.Bootstrap, error) {
 		ClusterIP:   L4TCPParentClusterIP,
 		// A raw-TCP legacy target with no HTTP port: these fixtures exercise
 		// the TCP floor, which is emitted only for such a service (proposals
-		// 037 and 043), on its own port, on the TCP mesh port and on any port.
+		// 037 and 043), on its own port and on the TCP mesh port, and on no other port of its address.
 		LegacyTCPPort: fixtureLegacyTCPPort,
 		TCPRouteRules: []proxy.L4ServiceRoute{{
 			Backends: []proxy.L4Backend{
@@ -730,7 +730,7 @@ func buildCaptureTLSRouteBootstrap() (*bootstrapv3.Bootstrap, error) {
 		ClusterIP:   L4TLSParentClusterIP,
 		// A raw-TCP legacy target with no HTTP port: these fixtures exercise
 		// the TCP floor, which is emitted only for such a service (proposals
-		// 037 and 043), on its own port, on the TCP mesh port and on any port.
+		// 037 and 043), on its own port and on the TCP mesh port, and on no other port of its address.
 		LegacyTCPPort: fixtureLegacyTCPPort,
 		// No TCPRouteRules on purpose: the parent keeps its plain passthrough
 		// floor chain, which is the chain a non-matching SNI is DESIGNED to

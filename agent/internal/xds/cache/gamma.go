@@ -20,6 +20,7 @@ func (c *SnapshotCache) SetServiceRoutes(routes map[string][]proxy.GammaRoute) {
 	c.depMu.Lock()
 	changed := !equalServiceRoutes(c.serviceRoutes, routes)
 	c.serviceRoutes = routes
+	c.bumpRuleGenLocked(changed)
 	c.bumpDepGenLocked()
 	c.depMu.Unlock()
 	if changed {
@@ -49,6 +50,7 @@ func (c *SnapshotCache) SetImportedServiceRoutes(routes map[string][]proxy.Gamma
 	c.depMu.Lock()
 	changed := !equalServiceRoutes(c.importedServiceRoutes, routes)
 	c.importedServiceRoutes = routes
+	c.bumpRuleGenLocked(changed)
 	c.bumpDepGenLocked()
 	c.depMu.Unlock()
 	if changed {
@@ -350,6 +352,7 @@ func (c *SnapshotCache) SetServiceChainFilters(filters map[string]proxy.Extensio
 	c.depMu.Lock()
 	changed := !equalServiceChainFilters(c.serviceChainFilters, filters)
 	c.serviceChainFilters = filters
+	c.bumpRuleGenLocked(changed)
 	c.bumpDepGenLocked()
 	c.depMu.Unlock()
 	if changed {
@@ -367,6 +370,7 @@ func (c *SnapshotCache) SetImportedServiceChainFilters(filters map[string]proxy.
 	c.depMu.Lock()
 	changed := !equalServiceChainFilters(c.importedServiceChainFilters, filters)
 	c.importedServiceChainFilters = filters
+	c.bumpRuleGenLocked(changed)
 	c.bumpDepGenLocked()
 	c.depMu.Unlock()
 	if changed {

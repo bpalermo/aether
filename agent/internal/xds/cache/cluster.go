@@ -108,7 +108,15 @@ func (c *SnapshotCache) clustersEndpointsVhostsAndPinsInto(buf []entryClass, mtl
 	quic.twinCluster = c.derived.twinCluster
 	// What the out_http virtual hosts built here carry besides a cluster,
 	// read before clusterMu like the fan-out inputs.
+	// The generation is read BEFORE the inputs: an event that lands in between
+	// leaves virtual hosts newer than their generation, and the next build
+	// rebuilds them once more, which costs one rebuild and never keeps a
+	// stale one.
+	c.depMu.RLock()
+	ruleGen := c.ruleGen
+	c.depMu.RUnlock()
 	rules := ruleInputs{routes: c.serviceRoutesSnapshot(), chainFilters: c.serviceChainFiltersSnapshot(), portMaps: c.servicePortMapsSnapshot()}
+	c.refreshEntryVhosts(ruleGen, rules)
 
 	c.clusterMu.RLock()
 	defer c.clusterMu.RUnlock()
@@ -532,6 +540,41 @@ func (c *SnapshotCache) refreshReusedVhostsLocked(names []string, serviceName st
 	}
 }
 
+// refreshEntryVhosts rebuilds the loopback virtual host of every cluster entry
+// when the rule inputs changed since they were last built (bumpRuleGenLocked),
+// so that a snapshot's loopback table and its capture tables are built from
+// the same rules, filters and port maps. It does nothing, and takes only the
+// read lock, when the generation is the one the virtual hosts already carry:
+// a snapshot is built on every pod event, and the stored virtual hosts are
+// what keeps the route table's bytes from being rebuilt and hashed again
+// (#1105, #1115).
+//
+// An entry that publishes no virtual host (an alias, a retained entry that
+// yielded its authorities, an entry whose port the service does not serve as
+// HTTP) stays without one: which entries have one is the registry refresh's
+// decision.
+func (c *SnapshotCache) refreshEntryVhosts(ruleGen uint64, rules ruleInputs) {
+	c.clusterMu.RLock()
+	current := c.vhostRuleGen == ruleGen
+	c.clusterMu.RUnlock()
+	if current {
+		return
+	}
+	c.clusterMu.Lock()
+	defer c.clusterMu.Unlock()
+	if c.vhostRuleGen == ruleGen {
+		return
+	}
+	for name, e := range c.clusters {
+		if e.vhost == nil || e.l4Floor {
+			continue
+		}
+		e.vhost = c.outboundPortVhostLocked(e.service, name, primaryPortOf(e), name == e.service, rules)
+		c.clusters[name] = e
+	}
+	c.vhostRuleGen = ruleGen
+}
+
 // buildHTTPServiceEntryLocked builds the cluster entries for one service in the
 // HTTP listing into dst: one cluster per port the service serves AS HTTP, and
 // the port aliases of the default one. Every input it reads is either in the
@@ -707,11 +750,33 @@ type portBucket struct {
 	epMap map[string]*endpointv3.LocalityLbEndpoints
 }
 
+// listsPort reports whether an endpoint row serves port at all, in any class:
+// it is the row's declared port, one of its port list, or a port its
+// port_protocols names. A row that carries no port (nothing since proposal
+// 005 writes one) serves "port 0", the only port such a service has.
+func listsPort(endpoint *registryv1.ServiceEndpoint, port uint32) bool {
+	if port == endpoint.GetPort() || slices.Contains(endpoint.GetPorts(), port) {
+		return true
+	}
+	_, named := endpoint.GetPortProtocols()[port]
+	return named
+}
+
 // servesPortAsHTTP reports whether an endpoint read from the HTTP listing serves
-// port as HTTP. A port its port_protocols does not name takes the protocol the
-// endpoint was listed under (the rule of a row written before proposal 037),
-// which here is HTTP.
+// port as HTTP: the row lists the port (listsPort), and does not declare it
+// raw TCP or UDP. A listed port its port_protocols does not name takes the
+// protocol the endpoint was listed under (the rule of a row written before
+// proposal 037), which here is HTTP.
+//
+// A pod of the service that does not list the port is NOT a member of that
+// port's cluster, whatever class the service's other pods give the port: its
+// inbound forwards to the port it declares, so a request balanced onto it
+// would be answered by another port (a rollout that moves the declared port
+// from 8080 to 9090 put the new pod in the cluster of 8080).
 func servesPortAsHTTP(endpoint *registryv1.ServiceEndpoint, port uint32) bool {
+	if !listsPort(endpoint, port) {
+		return false
+	}
 	switch endpoint.GetPortProtocols()[port] {
 	case registryv1.PortProtocol_PORT_PROTOCOL_UNSPECIFIED, registryv1.PortProtocol_PORT_PROTOCOL_HTTP:
 		return true
@@ -723,9 +788,11 @@ func servesPortAsHTTP(endpoint *registryv1.ServiceEndpoint, port uint32) bool {
 // buildHTTPEndpointBuckets builds the default CLA/epMap and per-port buckets for a
 // service's endpoints.
 //
-// A bucket holds the endpoints that serve its port AS HTTP: membership is by
-// (port, class), not by port (proposal 037 design (c)). A port an endpoint
-// declares raw TCP or UDP gets no bucket from it. defaultIsHTTP is false for a
+// A cluster holds the endpoints that serve ITS port AS HTTP: membership is by
+// (port, class) for the default cluster and for every bucket (proposal 037
+// design (c); servesPortAsHTTP). A port an endpoint declares raw TCP or UDP
+// gets no bucket from it, and an endpoint that does not list the default port
+// is not in the default cluster. defaultIsHTTP is false for a
 // service whose legacy target is not HTTP: nothing is then set aside as the
 // default, and the returned default CLA is not published.
 //
@@ -871,7 +938,16 @@ func (c *SnapshotCache) buildTCPServiceEntriesLocked(dst map[string]clusterEntry
 	if !in.ports.known() {
 		defaultPort, defaultClass = legacyTarget(listedEndpoints{protocol: registryv1.Service_PROTOCOL_TCP, endpoints: endpoints})
 	}
-	cla, epMap := buildTCPEndpoints(serviceName, endpoints, owns, in.localRegion, in.localZone, in.waypoint)
+	// The floor forwards to the legacy target and carries no SNI, so it lands
+	// on each member's default inbound chain: only the pods that serve THAT
+	// port as raw TCP are members. A pod of the service that declares another
+	// raw-TCP port (a rollout that moves the declared port) answered the
+	// floor's connections from that other port.
+	members := endpoints
+	if defaultClass == registryv1.PortProtocol_PORT_PROTOCOL_TCP && defaultPort != 0 {
+		members = tcpPortMembers(endpoints)[defaultPort]
+	}
+	cla, epMap := buildTCPEndpoints(serviceName, members, owns, in.localRegion, in.localZone, in.waypoint)
 
 	tcpName := proxy.TCPClusterName(serviceName, c.meshDomain)
 	dst[tcpName] = clusterEntry{
@@ -1235,8 +1311,36 @@ func (c *SnapshotCache) retainAbsentClustersLocked(ctx context.Context, prev map
 			c.log.InfoContext(ctx, "service absent past grace period; pruning", "service", name)
 			continue
 		}
+		entry = c.dropUnservedVhostLocked(ctx, name, entry)
 		c.clusters[name] = c.yieldClaimedDomains(ctx, claimed, name, c.yieldHeldLoadAssignment(ctx, held, name, entry))
 	}
+}
+
+// dropUnservedVhostLocked returns a retained HTTP entry without its virtual
+// host when the service is still listed and now DECLARES the entry's port as
+// raw TCP or UDP (a service that became raw-TCP-only on the same number, a
+// port that changed class). The entry is retained for the grace period, and
+// its cluster subscribes to the bare service name, whose load assignment the
+// live raw-TCP floor now holds: a virtual host kept on it delivered HTTP
+// requests to endpoints that serve that very port as raw TCP. Without it the
+// authority is refused by name (outboundRefusalVhostsLocked), as it is once
+// the entry is pruned.
+//
+// A port that no listed row declares any more is NOT such a case, and keeps
+// its virtual host: an HTTP listing that is lost while the raw-TCP one stays
+// cannot be told from a listing error, and the retention exists so that a
+// transient loss is a retriable 503 or a served request, not a refusal
+// (#1635). Caller must hold clusterMu.
+func (c *SnapshotCache) dropUnservedVhostLocked(ctx context.Context, name string, entry clusterEntry) clusterEntry {
+	if entry.vhost == nil || entry.l4Floor {
+		return entry
+	}
+	if port := primaryPortOf(entry); port != 0 && c.servicePorts[entry.service].declaresNonHTTP(port) {
+		c.log.InfoContext(ctx, "retained entry publishes no virtual host: the service now declares its port as raw TCP or UDP",
+			"cluster", name, "service", entry.service, "port", port)
+		entry.vhost = nil
+	}
+	return entry
 }
 
 // claimedVhostDomainsLocked returns the authorities the virtual hosts of the

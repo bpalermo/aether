@@ -146,23 +146,42 @@ func (r *Reconciler) SetupWithManager(mgr ctrl.Manager) error {
 
 	b := ctrl.NewControllerManagedBy(mgr).
 		For(&gatewayv1.HTTPRoute{})
+	for _, w := range r.secondaryWatches() {
+		b = b.Watches(w.object, enqueueAll, builder.WithPredicates(w.predicates...))
+	}
+	return b.Named("gamma").WithOptions(ctrlqueue.Options()).Complete(r)
+}
+
+// secondaryWatch is one kind the reconciler watches besides HTTPRoute, and
+// the predicates that filter its events.
+type secondaryWatch struct {
+	object     client.Object
+	predicates []predicate.Predicate
+}
+
+// secondaryWatches returns what the reconciler watches besides HTTPRoute,
+// each of which re-projects every route. It is a function of its own so that
+// the set can be held by a test: a kind that is listed in Reconcile and not
+// watched here is read once and never again.
+func (r *Reconciler) secondaryWatches() []secondaryWatch {
+	var out []secondaryWatch
 	if r.grpcRouteEnabled {
-		b = b.Watches(&gatewayv1.GRPCRoute{}, enqueueAll)
+		out = append(out, secondaryWatch{object: &gatewayv1.GRPCRoute{}})
 	}
 	if r.referenceGrantEnabled {
-		b = b.Watches(&gatewayv1beta1.ReferenceGrant{}, enqueueAll)
+		out = append(out, secondaryWatch{object: &gatewayv1beta1.ReferenceGrant{}})
 	}
 	if r.httpFilterEnabled {
 		// A change to a referenced HTTPFilter's opaque config must re-project the routes
 		// that reference it.
-		b = b.Watches(&configapisv1.HTTPFilter{}, enqueueAll)
+		out = append(out, secondaryWatch{object: &configapisv1.HTTPFilter{}})
 	}
-	// A route's ports are ports of a Service, resolved through the Service's
-	// port map (proposal 043): a Service whose ports change must re-project
-	// the routes that name it. Only a change of ports or of ownership counts;
-	// Services change status and annotations far more often than that.
-	b = b.Watches(&corev1.Service{}, enqueueAll, builder.WithPredicates(servicePortsChanged()))
-	return b.Named("gamma").WithOptions(ctrlqueue.Options()).Complete(r)
+	// A Service is a port map (proposal 043): a route's ports are resolved
+	// through it, and so is a port-less request to a service a Service
+	// fronts. A Service whose ports change must reach the cache. Only a
+	// change of ports or of ownership counts; Services change status and
+	// annotations far more often than that.
+	return append(out, secondaryWatch{object: &corev1.Service{}, predicates: []predicate.Predicate{servicePortsChanged()}})
 }
 
 // Reconcile re-lists every HTTPRoute and GRPCRoute, keeps those attached to a Service,
@@ -413,23 +432,23 @@ func servicePortsChanged() predicate.Predicate {
 	}
 }
 
-// servicePortMaps reads the port map of every Service the projected routes
-// name, as a parent or as a backend (proposal 043, "A Service is a port map").
+// servicePortMaps reads the port map of EVERY Service of the cluster that the
+// registrar did not generate (proposal 043, "A Service is a port map"), from
+// the informer the Service watch keeps.
 //
 // A Service the registrar generated is left out: it exposes its pods' ports
-// unchanged, and the cache derives those from the registry (it does so
-// whatever the Service carries, so an agent behind an older registrar needs
-// nothing from it). So is a Service that does not exist: the name is then
-// addressed by its pods' own ports, as before.
+// unchanged, and the cache derives those from the registry. So is a Service
+// that does not exist: the name is then addressed by its pods' own ports.
 //
 // A numeric targetPort resolves to that pod port, and an unset one to the
-// Service port (the API server's own default). A NAMED targetPort cannot be
-// resolved, because the registry carries no port names: it maps to 0, the
-// routes through it route nothing, and it is said here.
+// Service port (the API server's own default). A NAMED targetPort is resolved
+// through the Service's EndpointSlices for a Service a route names
+// (resolveNamedTargetPorts); one that cannot be resolved maps to 0, a
+// reference to it keeps the service's declared port, and it is logged.
 //
-// It also returns, for every such Service that exists (generated or not),
-// what the Service says about its real ports: the facts a route's status is
-// judged by (portstatus.go).
+// It also returns, for every Service a route names that exists (generated or
+// not), what the Service says about its real ports: the facts a route's
+// status is judged by (portstatus.go).
 func (r *Reconciler) servicePortMaps(ctx context.Context, routes map[string][]proxy.GammaRoute) (map[string]map[uint32]uint32, map[string]portFacts, error) {
 	out := map[string]map[uint32]uint32{}
 	facts := map[string]portFacts{}
