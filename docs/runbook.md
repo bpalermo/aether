@@ -4184,6 +4184,16 @@ Every later request is refused as above. A captured dial to port 80 does not
 have this: there the port-less name asks for port 80's cluster and nothing
 else.
 
+What runs on that one request: for a service that has a service-wide
+`HTTPFilter` or an `HTTPRoute`, the request is matched on the service's own
+stand-in virtual host, so the filter runs (an `ext_authz` filter authorizes
+it) and the rules whose `parentRef` names no port apply, backends included.
+A rule whose `parentRef` names a port does not apply: the request named no
+port. For a service with neither, the request takes the table's catch-all,
+which has nothing to skip. In every case it is the service's own pods that
+answer, on the port in `endpoint.aether.io/port`; it never reaches another
+service.
+
 ##### BREAKING: a raw-TCP service is reached on its declared ports only
 
 Until this chart, a service whose declared port is raw TCP and that has no
