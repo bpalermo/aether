@@ -208,19 +208,6 @@ func bootstrapManager(ctx context.Context) (ctrl.Manager, func(context.Context) 
 // from Pods.
 const backendKubernetes = "kubernetes"
 
-// legacyAnnotationRule maps --registry-backend to how the mesh-Service
-// generator derives the two frozen annotations (services.LegacyAnnotationRule):
-// each backend keeps stamping what a chart 2.6 registrar stamped on it. The
-// kubernetes backend is the one whose 2.6 listings held a pod under the class
-// of its declared port only; every write-based backend took the first listing.
-// Goes with the annotations in chart 2.9.0 (proposal 043, Phase 3).
-func legacyAnnotationRule(backend string) services.LegacyAnnotationRule {
-	if backend == backendKubernetes {
-		return services.LegacyAnnotationsByDeclaredPort
-	}
-	return services.LegacyAnnotationsByFirstListing
-}
-
 // managedPodCacheOptions scopes the manager cache's Pod informer, which the
 // kubernetes backend watches for change notifications (aether#1124), to the
 // mesh-managed pods it lists, with managedFields stripped: the registrar runs
@@ -297,12 +284,11 @@ func wireServerCore(m ctrl.Manager, reg registry.Registry) (*server.Metrics, *se
 	// VIPs, and both are on by default — a registrar without the generator
 	// silently degrades the whole capture path.
 	gen := &services.Generator{
-		Client:            m.GetClient(),
-		Snapshot:          snapshot,
-		MeshPort:          int32(meshconst.ProxyOutboundPort),
-		Interval:          cfg.SyncInterval,
-		Log:               l,
-		LegacyAnnotations: legacyAnnotationRule(cfg.RegistryBackend),
+		Client:   m.GetClient(),
+		Snapshot: snapshot,
+		MeshPort: int32(meshconst.ProxyOutboundPort),
+		Interval: cfg.SyncInterval,
+		Log:      l,
 	}
 	if err = m.Add(gen); err != nil {
 		return nil, nil, nil, nil, fmt.Errorf("failed to add mesh-Service generator: %w", err)

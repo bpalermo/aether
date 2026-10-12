@@ -4,7 +4,6 @@ import (
 	"testing"
 	"time"
 
-	"aethermesh.dev/registrar/internal/services"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -107,16 +106,4 @@ func TestRegistrarConfig_InstancesAreIndependent(t *testing.T) {
 
 	assert.Equal(t, "etcd", cfg1.RegistryBackend)
 	assert.Equal(t, "kubernetes", cfg2.RegistryBackend)
-}
-
-// TestLegacyAnnotationRule pins the wiring of --registry-backend to the mesh-
-// Service generator. The two frozen annotations are what a chart 2.6 registrar
-// stamped on the same backend, and that differs by backend: getting this
-// backwards relabels raw-TCP services as http for every 2.6 agent on the
-// kubernetes backend, which is the default one.
-func TestLegacyAnnotationRule(t *testing.T) {
-	assert.Equal(t, services.LegacyAnnotationsByDeclaredPort, legacyAnnotationRule("kubernetes"))
-	assert.Equal(t, services.LegacyAnnotationsByFirstListing, legacyAnnotationRule("etcd"))
-	assert.Equal(t, services.LegacyAnnotationsByDeclaredPort, legacyAnnotationRule(NewRegistrarConfig().RegistryBackend),
-		"the default backend")
 }

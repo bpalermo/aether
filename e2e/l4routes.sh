@@ -252,8 +252,8 @@ dump_state() {
 	kc get pods -A -o wide 2>&1 | sed 's/^/    /' >&2 || true
 	printf '\033[1;33m  -- tcproutes / tlsroutes / udproutes (spec + our RouteParentStatus) --\033[0m\n' >&2
 	kc get tcproutes,tlsroutes,udproutes -A -o yaml 2>&1 | sed 's/^/    /' >&2 || true
-	printf '\033[1;33m  -- mesh services (mesh-DNS answers their ClusterIPs; app-protocol picks the L4 path) --\033[0m\n' >&2
-	kc -n "$TEST_NS" get svc -o custom-columns=NAME:.metadata.name,CLUSTERIP:.spec.clusterIP,PROTO:.metadata.annotations.aether\\.io/app-protocol 2>&1 |
+	printf '\033[1;33m  -- mesh services (mesh-DNS answers their ClusterIPs; each port is typed by its own appProtocol) --\033[0m\n' >&2
+	kc -n "$TEST_NS" get svc -o custom-columns=NAME:.metadata.name,CLUSTERIP:.spec.clusterIP,PORTS:.spec.ports[*].name,APPPROTOCOLS:.spec.ports[*].appProtocol 2>&1 |
 		sed 's/^/    /' >&2 || true
 	# The UDP path's only voice: #874 logs every UDPRoute input the single-cluster
 	# udp_proxy throws away. If T3 is red because a backend was discarded rather

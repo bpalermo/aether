@@ -21,12 +21,21 @@ const (
 	// 3a). The registrar owns these — it lists/prunes by this label.
 	LabelMeshService = aetherLabelPrefix + "/mesh-service"
 
-	// AnnotationMeshService / AnnotationMeshPort link a generated Service to the
-	// mesh service + app port it fronts. The agent reads them to map a captured
-	// ClusterIP (original-dst) back to the registry-backed EDS cluster — endpoints
-	// stay in the registry, the Service is a pure name/VIP/identity handle.
+	// AnnotationMeshService links a generated Service to the mesh service it
+	// fronts. The agent reads it to map a captured ClusterIP (original-dst)
+	// back to the registry-backed EDS cluster — endpoints stay in the registry,
+	// the Service is a pure name/VIP/identity handle.
 	AnnotationMeshService = aetherLabelPrefix + "/service"
-	AnnotationMeshPort    = aetherLabelPrefix + "/port"
+
+	// AnnotationMeshPort ("aether.io/port") is a name the mesh no longer gives
+	// a meaning to. Through chart 2.7.0 the registrar stamped it on every
+	// generated mesh Service with the port the pods declare, for a chart 2.6
+	// agent; a service's ports are the Service's own ports now. The mesh
+	// Service generator does not write it and REMOVES it from the Services it
+	// owns (registrar/internal/services, staleServiceAnnotations), which is
+	// why the name is kept. The MCS import generator still writes it on the
+	// clusterset VIP Service, with the mesh HTTP port; nothing reads it there.
+	AnnotationMeshPort = aetherLabelPrefix + "/port"
 
 	// LabelClustersetService marks a generated, selectorless clusterset.local
 	// Service that fronts a cross-cluster mesh service as a ClusterSet VIP
@@ -56,10 +65,14 @@ const (
 	// a ServiceImport an operator or another controller authored.
 	LabelManagedServiceImport = aetherLabelPrefix + "/managed-service-import"
 
-	// AnnotationMeshAppProtocol records the application-layer protocol for a
-	// generated mesh Service (proposal 018, Phase 3a TCP floor). Values: "http"
-	// (default), "grpc", "tcp". The capture reconciler reads it to decide whether
-	// to emit a per-ClusterIP TCP-proxy filter chain (non-HTTP services) or leave
-	// the global HCM chain to handle traffic to that VIP (HTTP/gRPC services).
+	// AnnotationMeshAppProtocol ("aether.io/app-protocol") is a name the mesh
+	// no longer gives a meaning to. Through chart 2.7.0 the registrar stamped
+	// it on every generated mesh Service ("http", "tcp" or "udp": ONE protocol
+	// for the whole service), and a chart 2.6 agent read it to choose between
+	// an HTTP and a raw-TCP capture chain. A port's protocol is the
+	// ServicePort's appProtocol and the registry's port_protocols; a service
+	// has none. Nothing writes or reads the annotation; the mesh Service
+	// generator REMOVES it from the Services it owns, which is why the name is
+	// kept.
 	AnnotationMeshAppProtocol = aetherLabelPrefix + "/app-protocol"
 )

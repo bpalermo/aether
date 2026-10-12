@@ -51,15 +51,12 @@ func TestGenerator_CreatesSelectorlessMeshService(t *testing.T) {
 	svc, err := get(t, c, "aether-test", "svc-1")
 	require.NoError(t, err)
 	assert.Equal(t, "true", svc.Labels[aetherlabels.LabelMeshService])
-	assert.Equal(t, "svc-1", svc.Annotations[aetherlabels.AnnotationMeshService])
-	assert.Equal(t, "8080", svc.Annotations[aetherlabels.AnnotationMeshPort])
+	assert.Equal(t, map[string]string{aetherlabels.AnnotationMeshService: "svc-1"}, svc.Annotations)
 	assert.Empty(t, svc.Spec.Selector, "selectorless: no EndpointSlices, endpoints stay in the registry")
-	// Four legacy ports (proposal 037): the two mesh spellings plus the two
-	// scheme-default ports. The Service is selectorless and holds no endpoints,
-	// so 80/443 carry no data path — they exist so an UNCAPTURED scheme-default
-	// dial hits a kube-proxy REJECT and fails fast, instead of hanging. Beside
-	// them, the service's real port (proposal 043): the seeded row declares 8080
-	// in the HTTP listing.
+	// The two mesh ports (the HTTP proxy port and the L4 port), and the
+	// service's real port (proposal 043): the seeded row declares 8080 in the
+	// HTTP listing. No scheme-default placeholder: the pods declare neither 80
+	// nor 443.
 	byName := map[string]int32{}
 	for _, p := range svc.Spec.Ports {
 		byName[p.Name] = p.Port
@@ -68,8 +65,6 @@ func TestGenerator_CreatesSelectorlessMeshService(t *testing.T) {
 	assert.Equal(t, map[string]int32{
 		"mesh":      18081,
 		"mesh-tcp":  18082,
-		"http":      80,
-		"https":     443,
 		"p8080-tcp": 8080,
 	}, byName)
 }
@@ -77,9 +72,10 @@ func TestGenerator_CreatesSelectorlessMeshService(t *testing.T) {
 // TestGenerator_ConvergesPortsOnExistingService covers the upgrade path: a mesh
 // Service created before proposal 037 carries only the "mesh" port, and the
 // apply path used to compare ANNOTATIONS alone and return early. It would
-// therefore have kept its single port forever — the new spellings would have
+// therefore have kept its single port forever — the new ports would have
 // appeared only on a fresh install, which is the worst way to discover a
-// missing migration.
+// missing migration. The same reconcile removes the two annotations that
+// registrar stamped.
 func TestGenerator_ConvergesPortsOnExistingService(t *testing.T) {
 	pre037 := &corev1.Service{
 		ObjectMeta: metav1.ObjectMeta{
@@ -102,13 +98,14 @@ func TestGenerator_ConvergesPortsOnExistingService(t *testing.T) {
 
 	svc, err := get(t, c, "aether-test", "svc-1")
 	require.NoError(t, err)
-	require.Len(t, svc.Spec.Ports, 5, "the pre-037 Service must gain the new ports, not keep its single one")
+	require.Len(t, svc.Spec.Ports, 3, "the pre-037 Service must gain the new ports, not keep its single one")
 
-	names := make([]string, 0, 5)
+	names := make([]string, 0, 3)
 	for _, p := range svc.Spec.Ports {
 		names = append(names, p.Name)
 	}
-	assert.ElementsMatch(t, []string{"mesh", "mesh-tcp", "http", "https", "p8080-tcp"}, names)
+	assert.ElementsMatch(t, []string{"mesh", "mesh-tcp", "p8080-tcp"}, names)
+	assert.Equal(t, map[string]string{aetherlabels.AnnotationMeshService: "svc-1"}, svc.Annotations)
 }
 
 func TestGenerator_PrunesStale(t *testing.T) {
@@ -125,25 +122,39 @@ func TestGenerator_PrunesStale(t *testing.T) {
 	require.NoError(t, err, "current mesh service still has its VIP")
 }
 
-// TestGenerator_AnnotatesHTTPAppProtocol verifies that the generator writes the
-// AnnotationMeshAppProtocol annotation on created mesh Services and updates it if the
-// protocol changes. HTTP is the only protocol emitted by the current registry (all
-// services use PROTOCOL_HTTP), so this test verifies that annotation is always "http".
-func TestGenerator_AnnotatesHTTPAppProtocol(t *testing.T) {
+// realPortOf returns the one real port of a generated Service, failing the
+// test when it has none or several.
+func realPortOf(t *testing.T, svc *corev1.Service) corev1.ServicePort {
+	t.Helper()
+	var real []corev1.ServicePort
+	for _, p := range svc.Spec.Ports {
+		if p.Name != "mesh" && p.Name != "mesh-tcp" {
+			real = append(real, p)
+		}
+	}
+	require.Len(t, real, 1, "real ports of %s", svc.Name)
+	return real[0]
+}
+
+// TestGenerator_HTTPServiceSaysSoOnItsPort: what a service serves is on its
+// port, as the ServicePort's appProtocol, and nowhere else on the Service.
+func TestGenerator_HTTPServiceSaysSoOnItsPort(t *testing.T) {
 	g, c := newGen(seed("svc-1", "aether-test", 8080))
 	g.reconcile(context.Background())
 
 	svc, err := get(t, c, "aether-test", "svc-1")
 	require.NoError(t, err)
-	assert.Equal(t, AppProtocolHTTP, svc.Annotations[aetherlabels.AnnotationMeshAppProtocol],
-		"PROTOCOL_HTTP services must be annotated as http")
+	p := realPortOf(t, svc)
+	assert.Equal(t, "p8080-tcp", p.Name)
+	require.NotNil(t, p.AppProtocol)
+	assert.Equal(t, AppProtocolHTTP, *p.AppProtocol)
+	assert.NotContains(t, svc.Annotations, aetherlabels.AnnotationMeshAppProtocol)
 }
 
-// TestGenerator_UpdatesStaleAppProtocol verifies that if an existing mesh Service
-// has a stale/wrong AnnotationMeshAppProtocol, the generator corrects it on the next
-// reconcile.
-func TestGenerator_UpdatesStaleAppProtocol(t *testing.T) {
-	// Pre-existing managed Service with the wrong app-protocol annotation.
+// TestGenerator_RemovesAStaleAppProtocolAnnotation: an existing mesh Service
+// that carries aether.io/app-protocol (here a wrong one) loses it on the next
+// reconcile. It used to be corrected; nothing reads it, so it is removed.
+func TestGenerator_RemovesAStaleAppProtocolAnnotation(t *testing.T) {
 	existing := &corev1.Service{
 		ObjectMeta: metav1.ObjectMeta{
 			Name: "svc-1", Namespace: "aether-test",
@@ -151,7 +162,7 @@ func TestGenerator_UpdatesStaleAppProtocol(t *testing.T) {
 			Annotations: map[string]string{
 				aetherlabels.AnnotationMeshService:     "svc-1",
 				aetherlabels.AnnotationMeshPort:        "8080",
-				aetherlabels.AnnotationMeshAppProtocol: "tcp", // stale, should be corrected to "http"
+				aetherlabels.AnnotationMeshAppProtocol: "tcp",
 			},
 		},
 		Spec: corev1.ServiceSpec{Ports: []corev1.ServicePort{{Port: 18081}}},
@@ -161,8 +172,8 @@ func TestGenerator_UpdatesStaleAppProtocol(t *testing.T) {
 
 	svc, err := get(t, c, "aether-test", "svc-1")
 	require.NoError(t, err)
-	assert.Equal(t, AppProtocolHTTP, svc.Annotations[aetherlabels.AnnotationMeshAppProtocol],
-		"stale app-protocol annotation must be corrected on reconcile")
+	assert.Equal(t, map[string]string{aetherlabels.AnnotationMeshService: "svc-1"}, svc.Annotations)
+	assert.Equal(t, AppProtocolHTTP, *realPortOf(t, svc).AppProtocol, "the port says what the service serves")
 }
 
 // seedProtocol seeds a snapshot with a single service under the given protocol.
@@ -179,8 +190,7 @@ func seedProtocol(svc, ns string, port uint32, protocol registryv1.Service_Proto
 }
 
 // TestGenerator_EmitsTCPMeshService verifies a PROTOCOL_TCP service is projected
-// into a selectorless mesh Service annotated as "tcp" — the signal the agent's
-// capture reconciler reads to emit the per-ClusterIP TCP-proxy floor chain.
+// into a selectorless mesh Service whose port says "tcp".
 func TestGenerator_EmitsTCPMeshService(t *testing.T) {
 	g, c := newGen(seedProtocol("tcp-svc", "aether-test", 9000, registryv1.Service_PROTOCOL_TCP))
 	g.reconcile(context.Background())
@@ -188,10 +198,11 @@ func TestGenerator_EmitsTCPMeshService(t *testing.T) {
 	svc, err := get(t, c, "aether-test", "tcp-svc")
 	require.NoError(t, err)
 	assert.Equal(t, "true", svc.Labels[aetherlabels.LabelMeshService])
-	assert.Equal(t, "tcp-svc", svc.Annotations[aetherlabels.AnnotationMeshService])
-	assert.Equal(t, "9000", svc.Annotations[aetherlabels.AnnotationMeshPort])
-	assert.Equal(t, AppProtocolTCP, svc.Annotations[aetherlabels.AnnotationMeshAppProtocol],
-		"PROTOCOL_TCP services must be annotated as tcp")
+	assert.Equal(t, map[string]string{aetherlabels.AnnotationMeshService: "tcp-svc"}, svc.Annotations)
+	p := realPortOf(t, svc)
+	assert.Equal(t, "p9000-tcp", p.Name)
+	require.NotNil(t, p.AppProtocol)
+	assert.Equal(t, AppProtocolTCP, *p.AppProtocol, "a PROTOCOL_TCP service's port says tcp")
 	assert.Empty(t, svc.Spec.Selector, "selectorless: endpoints stay in the registry")
 }
 
@@ -223,13 +234,10 @@ func TestGenerator_EmitsUDPMeshService(t *testing.T) {
 	svc, err := get(t, c, "aether-test", "udp-svc")
 	require.NoError(t, err)
 	assert.Equal(t, "true", svc.Labels[aetherlabels.LabelMeshService])
-	assert.Equal(t, "udp-svc", svc.Annotations[aetherlabels.AnnotationMeshService])
-	assert.Equal(t, "9001", svc.Annotations[aetherlabels.AnnotationMeshPort])
-	assert.Equal(t, AppProtocolUDP, svc.Annotations[aetherlabels.AnnotationMeshAppProtocol],
-		"PROTOCOL_UDP services must be annotated as udp, not coerced to http")
+	assert.Equal(t, map[string]string{aetherlabels.AnnotationMeshService: "udp-svc"}, svc.Annotations)
 
-	// The four legacy ServicePorts stay TCP at the Kubernetes level: they name a
-	// spelling, and there is no "mesh-udp" one. The service's REAL port is a UDP
+	// The two mesh ServicePorts stay TCP at the Kubernetes level: they name a
+	// way in, and there is no "mesh-udp" one. The service's REAL port is a UDP
 	// ServicePort since proposal 043: the Service says what the service serves.
 	udp := 0
 	for _, p := range svc.Spec.Ports {
@@ -240,19 +248,18 @@ func TestGenerator_EmitsUDPMeshService(t *testing.T) {
 			assert.Nil(t, p.AppProtocol, "a UDP port has no appProtocol")
 			continue
 		}
-		assert.Equal(t, corev1.ProtocolTCP, p.Protocol, "legacy port %q", p.Name)
+		assert.Equal(t, corev1.ProtocolTCP, p.Protocol, "mesh port %q", p.Name)
 	}
 	assert.Equal(t, 1, udp, "the declared UDP port is on the Service once")
 }
 
-// TestProtocolAppProtocolIsTotal guards the map the generator uses to label each
-// mesh Service. A missing entry does not fail — it yields "", which apply()
-// coerces to AppProtocolHTTP — so a protocol added to the enum but not here
-// would silently label its services HTTP and route them down the HCM path.
+// TestProtocolAppProtocolIsTotal guards the map the generator names a port's
+// class with. A missing entry does not fail: it yields "", so a class added to
+// the enum but not here would give its ports an empty appProtocol.
 func TestProtocolAppProtocolIsTotal(t *testing.T) {
 	for _, p := range registry.ServedProtocols {
 		got, ok := protocolAppProtocol[p]
-		assert.True(t, ok, "%v has no app-protocol mapping; its Services would be mislabelled http", p)
-		assert.NotEmpty(t, got, "%v maps to the empty string, which apply() coerces to http", p)
+		assert.True(t, ok, "%v has no app-protocol mapping; its ports would carry an empty appProtocol", p)
+		assert.NotEmpty(t, got, "%v maps to the empty string", p)
 	}
 }

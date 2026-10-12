@@ -93,45 +93,51 @@ func randomPods(r *rand.Rand, n int) []declaredPod {
 }
 
 // TestGenerator_ServiceIsValidStableAndOrderIndependent: for random services
-// (one to five pods that may disagree about everything), under both annotation
-// rules, the desired Service passes the API server's port rules and is the same
-// whatever order the rows arrive in (the snapshot hands them over in map
-// order), and a second and third reconcile write nothing.
+// (one to five pods that may disagree about everything), the desired Service
+// passes the API server's port rules and is the same whatever order the rows
+// arrive in (the snapshot hands them over in map order), and a second and
+// third reconcile write nothing.
 func TestGenerator_ServiceIsValidStableAndOrderIndependent(t *testing.T) {
 	r := rand.New(rand.NewSource(7))
+	services := 0
 	for i := range 400 {
 		pods := randomPods(r, 1+r.Intn(5))
-		for _, rule := range []LegacyAnnotationRule{LegacyAnnotationsByFirstListing, LegacyAnnotationsByDeclaredPort} {
-			requireOrderIndependent(t, r, rule, pods)
-			if i%8 == 0 {
-				requireNoRewrite(t, rule, pods)
-			}
+		if !requireOrderIndependent(t, r, pods) {
+			continue // no pod serves a port: no Service
+		}
+		services++
+		if i%8 == 0 {
+			requireNoRewrite(t, pods)
 		}
 	}
+	require.Greater(t, services, 300, "the generator of random pods stopped producing services")
 }
 
-func requireOrderIndependent(t *testing.T, r *rand.Rand, rule LegacyAnnotationRule, pods []declaredPod) {
+// requireOrderIndependent reports whether the pods get a Service at all.
+func requireOrderIndependent(t *testing.T, r *rand.Rand, pods []declaredPod) bool {
 	t.Helper()
 	var first desiredService
+	var has bool
 	for attempt := range 12 {
 		shuffled := slices.Clone(pods)
 		r.Shuffle(len(shuffled), func(a, b int) { shuffled[a], shuffled[b] = shuffled[b], shuffled[a] })
-		d := desiredFor(t, rule, listingsEveryClass(t, shuffled))
+		d, ok := desiredFor(t, listingsEveryClass(t, shuffled))
 		if errs := apiServerPortErrors(d.ports); len(errs) > 0 {
-			t.Fatalf("rule %d: the API server would reject the Service: %v\npods: %v\nports: %v", rule, errs, pods, d.ports)
+			t.Fatalf("the API server would reject the Service: %v\npods: %v\nports: %v", errs, pods, d.ports)
 		}
 		if attempt == 0 {
-			first = d
+			first, has = d, ok
 			continue
 		}
-		require.Equal(t, first, d, "rule %d: the desired Service depends on the order of the rows\npods: %v", rule, pods)
+		require.Equal(t, has, ok, "whether the service gets a Service depends on the order of the rows\npods: %v", pods)
+		require.Equal(t, first, d, "the desired Service depends on the order of the rows\npods: %v", pods)
 	}
+	return has
 }
 
-func requireNoRewrite(t *testing.T, rule LegacyAnnotationRule, pods []declaredPod) {
+func requireNoRewrite(t *testing.T, pods []declaredPod) {
 	t.Helper()
 	g, c := newGen(snapshotOf(catalog{key("ns", "svc"): listingsEveryClass(t, pods)}))
-	g.LegacyAnnotations = rule
 	g.reconcile(context.Background())
 	svc, err := get(t, c, "ns", "svc")
 	require.NoError(t, err)
@@ -139,7 +145,7 @@ func requireNoRewrite(t *testing.T, rule LegacyAnnotationRule, pods []declaredPo
 	g.reconcile(context.Background())
 	again, err := get(t, c, "ns", "svc")
 	require.NoError(t, err)
-	require.Equal(t, svc.ResourceVersion, again.ResourceVersion, "rule %d: a converged Service was rewritten\npods: %v", rule, pods)
+	require.Equal(t, svc.ResourceVersion, again.ResourceVersion, "a converged Service was rewritten\npods: %v", pods)
 }
 
 // countingGen is a generator whose client counts the Update calls it receives.
@@ -155,49 +161,6 @@ func countingGen(t *testing.T, c catalog, objs ...client.Object) (*Generator, *i
 	g, _ := newGen(snapshotOf(c))
 	g.Client = cl
 	return g, &updates
-}
-
-// TestGenerator_EachFrozenAnnotationIsDriftOnItsOwn: a managed Service whose
-// ports are already right is updated when aether.io/app-protocol alone is
-// stale, and when aether.io/port alone is stale, once each; and a Service with
-// both annotations and the ports right is not written at all. A 2.6 agent
-// reads the first annotation to choose a chain, so one left stale is a wrong
-// chain for as long as the Service lives.
-func TestGenerator_EachFrozenAnnotationIsDriftOnItsOwn(t *testing.T) {
-	want := withLegacy(realPort(8080, classHTTP), realPort(9000, classTCP))
-	cat := catalog{key("ns", "svc"): listed(pod("ns", "10.0.0.1", 8080, classes{8080: classHTTP, 9000: classTCP}))}
-
-	tests := []struct {
-		name string
-		// stale edits the annotations of an otherwise converged Service.
-		stale       func(a map[string]string)
-		wantUpdates int
-	}{
-		{"fully converged", func(map[string]string) {}, 0},
-		{"a stale app-protocol", func(a map[string]string) { a[aetherlabels.AnnotationMeshAppProtocol] = AppProtocolTCP }, 1},
-		{"no app-protocol", func(a map[string]string) { delete(a, aetherlabels.AnnotationMeshAppProtocol) }, 1},
-		{"a stale port", func(a map[string]string) { a[aetherlabels.AnnotationMeshPort] = "9000" }, 1},
-		{"no port", func(a map[string]string) { delete(a, aetherlabels.AnnotationMeshPort) }, 1},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			existing := managed("ns", "svc", want...)
-			tt.stale(existing.Annotations)
-			g, updates := countingGen(t, cat, existing)
-
-			g.reconcile(context.Background())
-			assert.Equal(t, tt.wantUpdates, *updates, "Update calls on the first reconcile")
-
-			svc, err := get(t, g.Client, "ns", "svc")
-			require.NoError(t, err)
-			assert.Equal(t, AppProtocolHTTP, svc.Annotations[aetherlabels.AnnotationMeshAppProtocol])
-			assert.Equal(t, "8080", svc.Annotations[aetherlabels.AnnotationMeshPort])
-			assert.Equal(t, want, svc.Spec.Ports)
-
-			g.reconcile(context.Background())
-			assert.Equal(t, tt.wantUpdates, *updates, "a second reconcile writes nothing")
-		})
-	}
 }
 
 // TestGenerator_LeavesClustersetServiceAlone: the MCS import generator labels
@@ -216,7 +179,7 @@ func TestGenerator_LeavesClustersetServiceAlone(t *testing.T) {
 		},
 		Spec: corev1.ServiceSpec{Ports: []corev1.ServicePort{{Name: "mesh", Port: 18081, Protocol: corev1.ProtocolTCP}}},
 	}
-	stale := managed("ns", "gone", legacyFour...)
+	stale := managed("ns", "gone", meshTwo...)
 	g, c := newGen(snapshotOf(catalog{
 		key("ns", "web"): listed(pod("ns", "10.0.0.1", 8080, classes{8080: classHTTP})),
 	}), clusterset, stale)

@@ -4226,16 +4226,21 @@ The harness contract (`test/harnesscontract/external-harness.yaml`) is version
 
 ##### The generated Service
 
-`kubectl get svc` on a generated mesh Service now shows what the service
-serves: one port per declared port, named `p<port>-<tcp|udp>`, with
-`appProtocol` `http` or `tcp`, beside the four it always had (`mesh` 18081,
-`mesh-tcp` 18082, `http` 80, `https` 443). A declared port that is one of those
-four numbers replaces the placeholder. Nothing in the mesh reads these ports.
+`kubectl get svc` on a generated mesh Service shows what the service serves:
+one port per declared port, named `p<port>-<tcp|udp>`, with `appProtocol`
+`http` or `tcp`, and the mesh's two ports (`mesh` 18081, the HTTP proxy
+port, and `mesh-tcp` 18082). The `http` 80 and `https` 443 placeholders are
+gone: a port the pods do not declare is not a port of the service.
 
-`aether.io/app-protocol` and `aether.io/port` on the Service are **frozen**:
-the registrar stamps what a 2.6 registrar would have stamped, for 2.6 agents.
-No 2.7 component reads them. They are not deprecated by this chart (proposal
-043 deprecates them in chart 2.8.0 and removes them in 2.9.0).
+**BREAKING for anything outside the mesh that read them:**
+`aether.io/app-protocol` and `aether.io/port` are no longer written on the
+Service, and the registrar **removes** them from every generated Service on
+its first reconcile. They carried a protocol and a port for the service as a
+whole, which no longer exists: each port is typed by its own `appProtocol`.
+A chart 2.6 agent reads `aether.io/app-protocol` to choose a service's
+capture chain; behind a 2.7 registrar it finds none and treats every service
+as HTTP. That is one of the reasons this upgrade is not hitless across
+versions (see "During the roll").
 
 ##### The proxy's configuration grows
 
@@ -4256,21 +4261,35 @@ new names. The HTTP stat prefix (`capture_http`) is unchanged.
 
 ##### During the roll, and rolling back
 
-Nothing breaks across versions; the order does not matter.
+**This upgrade is not hitless, by decision**: no compatibility with chart 2.6
+components is kept. The helm upgrade replaces the registrar at once and rolls
+the agents node by node, so for the length of the agent roll the cluster is
+mixed. What each mix does (read from the code; the measured run is recorded
+with the release):
 
-- **A 2.6 agent behind a 2.7 registrar** sees the same annotations and extra
-  Service ports it does not read. On the `kubernetes` backend it also finds a
-  mixed pod in both listings, which gives it the cluster its `:9000` chain
-  lacked.
-- **A 2.7 agent behind a 2.6 registrar** needs nothing from the Service but its
-  address. On the `kubernetes` backend the mixed shapes stay as broken as on
-  2.6 until the registrar is 2.7 (it is the registrar's listing that changed).
+- **A 2.6 agent behind the 2.7 registrar** (every node not yet rolled). The
+  generated Services have lost `aether.io/app-protocol`, which a 2.6 agent
+  reads to choose a service's capture chain: it now takes every service for
+  HTTP. On those nodes a service whose declared port is **raw TCP** has no
+  raw-TCP chain for new connections (its declared port and `:18082` stop
+  working from clients on that node) until the node's agent is 2.7. HTTP
+  services are not affected by this.
+- **A 2.7 agent behind a 2.6 registrar** (only if the registrar is held back).
+  The agent needs nothing from the Service but its address. On the
+  `kubernetes` backend the mixed shapes stay as broken as on 2.6 until the
+  registrar is 2.7.
+- **A client on a 2.7 node** is held to the new addressing from the moment its
+  node's agent is 2.7, whatever version the destination's node runs: the
+  refusals are decided by the source proxy.
 - **A 2.7 source and a 2.6 destination, or the reverse:** the hop between
-  proxies is unchanged. A 2.7 destination also accepts its declared raw-TCP
-  port by name (an `in_tcp_<pod>_<port>` chain where it had an HTTP one that
-  could not work); no source sends that yet.
-- **Rollback** to 2.6.x: the 2.6 registrar removes the extra Service ports on
-  its next reconcile.
+  proxies is unchanged.
+- **Rollback** to 2.6.x: the 2.6 registrar stamps the annotations and the
+  placeholder ports back on its next reconcile, and the old spellings work
+  again node by node as the agents roll back.
+
+Do it in a maintenance window, clients moved first (see the two BREAKING
+sections above and "Prober chart 1.1.0"), and expect raw-TCP services to be
+unreachable from not-yet-rolled nodes for the duration of the agent roll.
 
 #### Prober chart 1.1.0: targets name a declared port (proposal 043)
 

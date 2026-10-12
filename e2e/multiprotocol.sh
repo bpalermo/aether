@@ -74,9 +74,9 @@
 #                     (etcd only: it reads registry keys)
 #   M7  the Service   the generated Service of mp-mixed has its REAL ports
 #                     (8080 appProtocol http named p8080-tcp, 9000 appProtocol
-#                     tcp named p9000-tcp) beside the four legacy ports (18081,
-#                     18082, 80, 443), and aether.io/app-protocol=http, the
-#                     value the 2.6 registrar stamped
+#                     tcp named p9000-tcp) and the two mesh ports (18081,
+#                     18082); no port 80 or 443 it does not declare, and
+#                     neither aether.io/app-protocol nor aether.io/port
 #
 # The mirror shape, mp-tcpfirst (#1672):
 #
@@ -455,7 +455,7 @@ dump_state() {
 	printf '\033[1;33m  -- the workloads'"'"' declarations (endpoint.aether.io/port, /protocol, /ports) and capture mode --\033[0m\n' >&2
 	kc -n "$TEST_NS" get pods -o custom-columns=NAME:.metadata.name,PORT:.metadata.annotations.endpoint\\.aether\\.io/port,PROTOCOL:.metadata.annotations.endpoint\\.aether\\.io/protocol,PORTS:.metadata.annotations.endpoint\\.aether\\.io/ports,REDIRECT-ALL:.metadata.annotations.capture\\.aether\\.io/redirect-all 2>&1 |
 		sed 's/^/    /' >&2 || true
-	printf '\033[1;33m  -- mesh services (frozen classification) --\033[0m\n' >&2
+	printf '\033[1;33m  -- mesh services (the two annotations must be <none>) --\033[0m\n' >&2
 	kc -n "$TEST_NS" get svc -o custom-columns=NAME:.metadata.name,CLUSTERIP:.spec.clusterIP,PROTO:.metadata.annotations.aether\\.io/app-protocol,PORT:.metadata.annotations.aether\\.io/port 2>&1 |
 		sed 's/^/    /' >&2 || true
 	printf '\033[1;33m  -- mesh services: every port as <service> <port>/<name>/<appProtocol> --\033[0m\n' >&2
@@ -1348,24 +1348,39 @@ leg_M6() {
 	expect_registered mp-httponly "PROTOCOL_HTTP " "its TCP listener is not declared"
 }
 
-# M7 — the generated mesh Service: the real ports with their class, beside the
-# four legacy ports, and the annotation frozen at what the 2.6 registrar
-# stamped (no 2.7 component reads it; 2.6 agents do).
+# M7 — the generated mesh Service is what the service serves: its REAL ports,
+# each with its class, and the mesh's two ports (the proxy port and the raw-TCP
+# one). Nothing else: no "http" 80 or "https" 443 placeholder (a port 80 the
+# pods do not declare is not a port of the service), and neither of the two
+# annotations a registrar wrote through chart 2.7.0 for 2.6 agents
+# (aether.io/app-protocol, aether.io/port).
 leg_M7() {
-	log "M7 the generated mesh Service of mp-mixed: real ports beside the legacy four"
-	local proto ports p
+	log "M7 the generated mesh Service of mp-mixed: its real ports and the two mesh ports, no placeholder, no service-level protocol"
+	local ports p key value
 	ports="$(svc_ports mp-mixed)"
 	expect_svc_port mp-mixed "$ports" "$HTTP_PORT" "p$HTTP_PORT-tcp" http
 	expect_svc_port mp-mixed "$ports" "$TCP_PORT" "p$TCP_PORT-tcp" tcp
-	for p in "$MESH_HTTP_PORT" "$MESH_TCP_PORT" 80 443; do
+	for p in "$MESH_HTTP_PORT" "$MESH_TCP_PORT"; do
 		expect_svc_port mp-mixed "$ports" "$p" "" ""
 	done
-	proto="$(kc -n "$TEST_NS" get svc mp-mixed -o jsonpath='{.metadata.annotations.aether\.io/app-protocol}' 2>/dev/null || true)"
-	if [ "$proto" != "http" ]; then
-		fail "the mesh Service mp-mixed carries aether.io/app-protocol='${proto:-<unset>}', want 'http'" "the annotation is frozen at its 2.6 value while 2.6 agents may still read it"
-	else
-		passed "Service mp-mixed: aether.io/app-protocol=http"
-	fi
+	for p in 80 443; do
+		if printf '%s\n' "$ports" | awk -F/ -v p="$p" '$1 == p { found = 1 } END { exit !found }'; then
+			fail "the generated Service mp-mixed has a port $p, which its pods do not declare (ports: $(printf '%s' "$ports" | tr '\n' ' '))" \
+				"the placeholder ports were removed in chart 2.7.0: a generated Service has the ports its pods declare"
+		else
+			passed "Service mp-mixed: no port $p"
+		fi
+	done
+	# mp-eighty DECLARES 80: there it is a real port, named and typed.
+	expect_svc_port mp-eighty "$(svc_ports mp-eighty)" "$LOW_PORT" "p$LOW_PORT-tcp" http
+	for key in app-protocol port; do
+		value="$(kc -n "$TEST_NS" get svc mp-mixed -o jsonpath="{.metadata.annotations.aether\\.io/$key}" 2>/dev/null || true)"
+		if [ -n "$value" ]; then
+			fail "the mesh Service mp-mixed carries aether.io/$key='$value'" "nothing reads a service-level protocol or port any more; the registrar removes the annotation from a Service that has it"
+		else
+			passed "Service mp-mixed: no aether.io/$key"
+		fi
+	done
 }
 
 # --- the mirror shape: a raw-TCP declared port with an HTTP port (#1672) ------

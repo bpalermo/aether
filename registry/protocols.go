@@ -30,9 +30,9 @@ import (
 //
 // The order is HTTP, TCP, UDP and is load-bearing for the mesh Service
 // generator: a service is routinely in several listings (a pod is listed under
-// every protocol it serves a port of), and the generator's two frozen
-// annotations and its tie order for one port number declared with two classes
-// are both defined in this order. Append new values; do not reorder.
+// every protocol it serves a port of), and the generator's tie order for one
+// port number declared with two classes is defined in this order. Append new
+// values; do not reorder.
 var ServedProtocols = []registryv1.Service_Protocol{
 	registryv1.Service_PROTOCOL_HTTP,
 	registryv1.Service_PROTOCOL_TCP,

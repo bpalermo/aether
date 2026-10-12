@@ -92,12 +92,13 @@ func realPort(port int32, class registryv1.PortProtocol) corev1.ServicePort {
 
 func itoa(p int32) string { return strconv.Itoa(int(p)) }
 
-var legacyFour = []corev1.ServicePort{
-	legacyPort("mesh", 18081), legacyPort("mesh-tcp", 18082), legacyPort("http", 80), legacyPort("https", 443),
-}
+// meshTwo is the fixed part of every generated Service: the HTTP proxy port
+// and the L4 port.
+var meshTwo = []corev1.ServicePort{legacyPort("mesh", 18081), legacyPort("mesh-tcp", 18082)}
 
+// withLegacy is the two mesh ports followed by the given real ports.
 func withLegacy(real ...corev1.ServicePort) []corev1.ServicePort {
-	return append(append([]corev1.ServicePort{}, legacyFour...), real...)
+	return append(append([]corev1.ServicePort{}, meshTwo...), real...)
 }
 
 func portsOf(t *testing.T, g *Generator, ns, name string) []corev1.ServicePort {
@@ -109,7 +110,7 @@ func portsOf(t *testing.T, g *Generator, ns, name string) []corev1.ServicePort {
 
 // TestGenerator_ServiceCarriesRealPorts: the generated Service has one port per
 // port the service's pods declare, each with its own transport and class,
-// beside the four legacy ports and in a fixed order (proposal 043, Phase 1).
+// beside the two mesh ports and in a fixed order (proposal 043).
 func TestGenerator_ServiceCarriesRealPorts(t *testing.T) {
 	g, _ := newGen(snapshotOf(catalog{
 		key("ns", "mixed"): listed(pod("ns", "10.0.0.1", 8080, classes{8080: classHTTP, 9000: classTCP, 5353: classUDP})),
@@ -171,7 +172,7 @@ func TestGenerator_PortsAreTheUnionAndLeaveWithTheirLastEndpoint(t *testing.T) {
 	// The old pod leaves: nothing changes, the new pod declares all three.
 	snap.Replace(catalog{key("ns", "web"): listed(newPod)})
 	g.reconcile(context.Background())
-	require.Len(t, portsOf(t, g, "ns", "web"), 7)
+	require.Len(t, portsOf(t, g, "ns", "web"), 5)
 
 	// Rolled back: the last pod declaring 9000 and 9090 is gone, and so are
 	// the ports. 8080 stays.
@@ -212,18 +213,15 @@ func TestGenerator_PortsDoNotLeak(t *testing.T) {
 		"a row without a namespace contributes no port")
 	assert.Equal(t, withLegacy(realPort(8080, classHTTP)), portsOf(t, g, "team-a", "odd"))
 
-	edge, err := get(t, g.Client, "team-a", "edge")
-	require.NoError(t, err)
-	assert.Equal(t, "8080", edge.Annotations[aetherlabels.AnnotationMeshPort],
-		"nor does it decide the frozen port annotation")
-
-	_, err = get(t, g.Client, "team-a", "ghost")
+	_, err := get(t, g.Client, "team-a", "ghost")
 	assert.True(t, apierrors.IsNotFound(err), "a service with no namespaced endpoint gets no Service")
 }
 
 // TestGenerator_RealPortReplacesLegacyPlaceholder: the API server rejects two
-// ports with one number and protocol, so a real port that lands on a legacy
-// placeholder takes its place. A UDP port on the same number does not collide.
+// ports with one number and protocol, so a real port that lands on one of the
+// two mesh ports takes its place. A UDP port on the same number does not
+// collide. 80 and 443 have no placeholder: declared, they are real ports like
+// any other.
 func TestGenerator_RealPortReplacesLegacyPlaceholder(t *testing.T) {
 	g, _ := newGen(snapshotOf(catalog{
 		key("ns", "eighty"): listed(pod("ns", "10.0.0.1", 8080, classes{80: classHTTP, 8080: classHTTP})),
@@ -233,18 +231,20 @@ func TestGenerator_RealPortReplacesLegacyPlaceholder(t *testing.T) {
 	}))
 	g.reconcile(context.Background())
 
-	assert.Equal(t, []corev1.ServicePort{
-		legacyPort("mesh", 18081), legacyPort("mesh-tcp", 18082), legacyPort("https", 443),
-		realPort(80, classHTTP), realPort(8080, classHTTP),
-	}, portsOf(t, g, "ns", "eighty"), `a pod declaring 80 as HTTP: p80-tcp with appProtocol http, and no "http" placeholder`)
+	assert.Equal(t, withLegacy(realPort(80, classHTTP), realPort(8080, classHTTP)), portsOf(t, g, "ns", "eighty"),
+		`a pod declaring 80 as HTTP: p80-tcp with appProtocol http`)
 
-	assert.Equal(t, []corev1.ServicePort{
-		legacyPort("mesh", 18081), legacyPort("mesh-tcp", 18082), legacyPort("http", 80),
-		realPort(443, classTCP),
-	}, portsOf(t, g, "ns", "tls"))
+	assert.Equal(t, withLegacy(realPort(443, classTCP)), portsOf(t, g, "ns", "tls"))
 
-	assert.Equal(t, withLegacy(realPort(80, classUDP)), portsOf(t, g, "ns", "udp80"),
-		"80/UDP and the 80/TCP placeholder are different ports to Kubernetes")
+	assert.Equal(t, withLegacy(realPort(80, classUDP)), portsOf(t, g, "ns", "udp80"))
+
+	mesh := catalog{
+		key("ns", "udpmesh"): listed(pod("ns", "10.0.0.5", 18082, classes{18082: classUDP})),
+	}
+	gm, _ := newGen(snapshotOf(mesh))
+	gm.reconcile(context.Background())
+	assert.Equal(t, withLegacy(realPort(18082, classUDP)), portsOf(t, gm, "ns", "udpmesh"),
+		"18082/UDP and the 18082/TCP mesh port are different ports to Kubernetes")
 
 	all := portsOf(t, g, "ns", "all")
 	assert.Equal(t, []corev1.ServicePort{
@@ -421,18 +421,13 @@ func TestGenerator_PortClassConflictWarnsOncePerState(t *testing.T) {
 	assert.Equal(t, []string{"port 9000: http=1 tcp=2, serving tcp"}, log.take())
 }
 
-// managed is a Service the generator already owns, with the given ports and
-// the frozen annotations of an HTTP service on 8080.
+// managed is a Service the generator already owns, with the given ports.
 func managed(ns, name string, ports ...corev1.ServicePort) *corev1.Service {
 	return &corev1.Service{
 		ObjectMeta: metav1.ObjectMeta{
 			Name: name, Namespace: ns,
-			Labels: map[string]string{aetherlabels.LabelMeshService: "true"},
-			Annotations: map[string]string{
-				aetherlabels.AnnotationMeshService:     name,
-				aetherlabels.AnnotationMeshPort:        "8080",
-				aetherlabels.AnnotationMeshAppProtocol: AppProtocolHTTP,
-			},
+			Labels:      map[string]string{aetherlabels.LabelMeshService: "true"},
+			Annotations: map[string]string{aetherlabels.AnnotationMeshService: name},
 		},
 		Spec: corev1.ServiceSpec{Type: corev1.ServiceTypeClusterIP, Ports: ports},
 	}
@@ -453,13 +448,17 @@ func TestGenerator_ConvergesTargetPortAndAppProtocol(t *testing.T) {
 		name  string
 		ports []corev1.ServicePort
 	}{
-		{"a raw-TCP port marked http", mutate(func(p []corev1.ServicePort) { p[5].AppProtocol = new("http") })},
-		{"an HTTP port marked tcp", mutate(func(p []corev1.ServicePort) { p[4].AppProtocol = new("tcp") })},
-		{"a real port with no appProtocol", mutate(func(p []corev1.ServicePort) { p[4].AppProtocol = nil })},
-		{"a legacy port with an appProtocol", mutate(func(p []corev1.ServicePort) { p[0].AppProtocol = new("http") })},
-		{"a real port with another targetPort", mutate(func(p []corev1.ServicePort) { p[5].TargetPort = intstr.FromInt32(9001) })},
-		{"a real port with a named targetPort", mutate(func(p []corev1.ServicePort) { p[5].TargetPort = intstr.FromString("9000") })},
-		{"a legacy port with another targetPort", mutate(func(p []corev1.ServicePort) { p[2].TargetPort = intstr.FromInt32(8080) })},
+		// want is mesh, mesh-tcp, p8080-tcp (http), p9000-tcp (tcp).
+		{"a raw-TCP port marked http", mutate(func(p []corev1.ServicePort) { p[3].AppProtocol = new("http") })},
+		{"an HTTP port marked tcp", mutate(func(p []corev1.ServicePort) { p[2].AppProtocol = new("tcp") })},
+		{"a real port with no appProtocol", mutate(func(p []corev1.ServicePort) { p[2].AppProtocol = nil })},
+		{"a mesh port with an appProtocol", mutate(func(p []corev1.ServicePort) { p[0].AppProtocol = new("http") })},
+		{"a real port with another targetPort", mutate(func(p []corev1.ServicePort) { p[3].TargetPort = intstr.FromInt32(9001) })},
+		{"a real port with a named targetPort", mutate(func(p []corev1.ServicePort) { p[3].TargetPort = intstr.FromString("9000") })},
+		{"a mesh port with another targetPort", mutate(func(p []corev1.ServicePort) { p[1].TargetPort = intstr.FromInt32(8080) })},
+		// A Service a chart 2.7.0 registrar wrote: the two scheme-default
+		// placeholders are drift now, and go.
+		{"the scheme-default placeholders of an older registrar", append(mutate(func([]corev1.ServicePort) {}), legacyPort("http", 80), legacyPort("https", 443))},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -477,7 +476,7 @@ func TestGenerator_ConvergesTargetPortAndAppProtocol(t *testing.T) {
 // would write every Service on every reconcile.
 func TestGenerator_ConvergedServiceIsNotRewritten(t *testing.T) {
 	want := withLegacy(realPort(8080, classHTTP), realPort(9000, classTCP))
-	shuffled := []corev1.ServicePort{want[5], want[0], want[4], want[3], want[1], want[2]}
+	shuffled := []corev1.ServicePort{want[3], want[0], want[2], want[1]}
 
 	g, c := newGen(snapshotOf(catalog{
 		key("ns", "svc"): listed(pod("ns", "10.0.0.1", 8080, classes{8080: classHTTP, 9000: classTCP})),
@@ -506,139 +505,33 @@ func TestGenerator_ConvergedServiceIsNotRewritten(t *testing.T) {
 	assert.NotEqual(t, before.ResourceVersion, after.ResourceVersion)
 }
 
-// TestGenerator_FrozenAnnotations: aether.io/app-protocol and aether.io/port
-// are what a chart 2.6 registrar stamped on the same backend, because only a
-// 2.6 agent reads them (proposal 043, Phase 1).
-//
-// On a write-based backend that is the first listing the service is in. On the
-// kubernetes backend the 2.6 listings held a pod under the class of its
-// declared port only, so it is that class. The two differ exactly for a pod
-// whose declared port is not HTTP and which also serves an HTTP port.
-func TestGenerator_FrozenAnnotations(t *testing.T) {
-	old := func(ip string, port uint32) *registryv1.ServiceEndpoint {
-		return &registryv1.ServiceEndpoint{
-			Ip: ip, ClusterName: "c", Port: port,
-			KubernetesMetadata: &registryv1.ServiceEndpoint_KubernetesMetadata{Namespace: "ns"},
-		}
-	}
-	httpPod := pod("ns", "10.0.0.1", 8080, classes{8080: classHTTP})
-	tcpFirst := pod("ns", "10.0.0.2", 9000, classes{9000: classTCP, 8080: classHTTP})
-
-	tests := []struct {
-		name     string
-		listings map[registryv1.Service_Protocol][]*registryv1.ServiceEndpoint
-		// want per rule: app-protocol, port.
-		firstListing [2]string
-		declaredPort [2]string
-	}{
-		{
-			name:         "HTTP only",
-			listings:     listed(httpPod),
-			firstListing: [2]string{"http", "8080"},
-			declaredPort: [2]string{"http", "8080"},
-		},
-		{
-			name:         "raw TCP only",
-			listings:     listed(pod("ns", "10.0.0.1", 5432, classes{5432: classTCP})),
-			firstListing: [2]string{"tcp", "5432"},
-			declaredPort: [2]string{"tcp", "5432"},
-		},
-		{
-			name:         "UDP only",
-			listings:     listed(pod("ns", "10.0.0.1", 5353, classes{5353: classUDP})),
-			firstListing: [2]string{"udp", "5353"},
-			declaredPort: [2]string{"udp", "5353"},
-		},
-		{
-			name:         "HTTP declared port with a raw-TCP port",
-			listings:     listed(pod("ns", "10.0.0.1", 8080, classes{8080: classHTTP, 9000: classTCP})),
-			firstListing: [2]string{"http", "8080"},
-			declaredPort: [2]string{"http", "8080"},
-		},
-		{
-			// The case the rule exists for.
-			name:         "raw-TCP declared port with an HTTP port",
-			listings:     listed(tcpFirst),
-			firstListing: [2]string{"http", "9000"},
-			declaredPort: [2]string{"tcp", "9000"},
-		},
-		{
-			name:         "UDP declared port with a raw-TCP port",
-			listings:     listed(pod("ns", "10.0.0.1", 5353, classes{5353: classUDP, 9000: classTCP})),
-			firstListing: [2]string{"tcp", "5353"},
-			declaredPort: [2]string{"udp", "5353"},
-		},
-		{
-			// A 2.6 kubernetes HTTP listing held only the HTTP-declared pod,
-			// so its port is the one stamped, wherever the mixed pod sorts.
-			// On a write-based backend "the first endpoint" of a listing is
-			// the one with the lowest (cluster, address), whatever order the
-			// snapshot hands the rows over in: it does so in map order, and
-			// the annotation must not move with it.
-			name: "pods that disagree",
-			listings: map[registryv1.Service_Protocol][]*registryv1.ServiceEndpoint{
-				listHTTP: {tcpFirst, httpPod},
-				listTCP:  {tcpFirst},
-			},
-			firstListing: [2]string{"http", "8080"},
-			declaredPort: [2]string{"http", "8080"},
-		},
-		{
-			name:         "a row without port_protocols has the class of its listing",
-			listings:     map[registryv1.Service_Protocol][]*registryv1.ServiceEndpoint{listTCP: {old("10.0.0.1", 6379)}},
-			firstListing: [2]string{"tcp", "6379"},
-			declaredPort: [2]string{"tcp", "6379"},
-		},
-		{
-			// A partial view: the pod is seen in the HTTP listing and not yet
-			// in the TCP one (the kubernetes backend is listed one protocol at
-			// a time). The declared-port rule still answers with the class of
-			// the declared port, which the row itself names. See
-			// TestGenerator_DeclaredPortRuleOnAPartialListing.
-			name: "a declared port of a class the row is not listed under",
-			listings: map[registryv1.Service_Protocol][]*registryv1.ServiceEndpoint{
-				listHTTP: {pod("ns", "10.0.0.1", 9000, classes{9000: classTCP, 8080: classHTTP})},
-			},
-			firstListing: [2]string{"http", "9000"},
-			declaredPort: [2]string{"tcp", "9000"},
-		},
-	}
-	for _, tt := range tests {
-		for rule, want := range map[LegacyAnnotationRule][2]string{
-			LegacyAnnotationsByFirstListing: tt.firstListing,
-			LegacyAnnotationsByDeclaredPort: tt.declaredPort,
-		} {
-			name := tt.name + "/first listing"
-			if rule == LegacyAnnotationsByDeclaredPort {
-				name = tt.name + "/declared port"
-			}
-			t.Run(name, func(t *testing.T) {
-				g, c := newGen(snapshotOf(catalog{key("ns", "svc"): tt.listings}))
-				g.LegacyAnnotations = rule
-				g.reconcile(context.Background())
-
-				svc, err := get(t, c, "ns", "svc")
-				require.NoError(t, err)
-				assert.Equal(t, want[0], svc.Annotations[aetherlabels.AnnotationMeshAppProtocol])
-				assert.Equal(t, want[1], svc.Annotations[aetherlabels.AnnotationMeshPort])
-				assert.Equal(t, "svc", svc.Annotations[aetherlabels.AnnotationMeshService])
-			})
-		}
-	}
+// TestGenerator_DeclaredPortDoesNotTypeTheOtherPorts: no port of a service
+// types another. A raw-TCP declared port beside an HTTP port keeps both
+// classes on the ports, each on its own.
+func TestGenerator_DeclaredPortDoesNotTypeTheOtherPorts(t *testing.T) {
+	g, _ := newGen(snapshotOf(catalog{
+		key("ns", "svc"): listed(pod("ns", "10.0.0.2", 9000, classes{9000: classTCP, 8080: classHTTP})),
+	}))
+	g.reconcile(context.Background())
+	assert.Equal(t, withLegacy(realPort(8080, classHTTP), realPort(9000, classTCP)), portsOf(t, g, "ns", "svc"))
 }
 
-// TestGenerator_FrozenAnnotationDoesNotTypeThePorts: the annotation is one
-// value per Service and is not where a port's class comes from. A raw-TCP
-// declared port beside an HTTP port keeps both classes on the ports whichever
-// way the annotation is frozen.
-func TestGenerator_FrozenAnnotationDoesNotTypeThePorts(t *testing.T) {
-	for _, rule := range []LegacyAnnotationRule{LegacyAnnotationsByFirstListing, LegacyAnnotationsByDeclaredPort} {
-		g, _ := newGen(snapshotOf(catalog{
-			key("ns", "svc"): listed(pod("ns", "10.0.0.2", 9000, classes{9000: classTCP, 8080: classHTTP})),
-		}))
-		g.LegacyAnnotations = rule
+// TestGenerator_PartialListingStillGetsItsPorts: the listings a reconcile sees
+// can be partial (the kubernetes backend is listed one protocol at a time, and
+// a registration lands one protocol at a time). A pod seen in ONE listing
+// still says every port it declares, each with its class, because the row
+// itself carries them: the Service does not wait for the other listing, and
+// does not take the class of the listing the row happened to be read from.
+func TestGenerator_PartialListingStillGetsItsPorts(t *testing.T) {
+	row := pod("ns", "10.0.0.1", 9000, classes{9000: classTCP, 8080: classHTTP})
+	for name, listings := range map[string]map[registryv1.Service_Protocol][]*registryv1.ServiceEndpoint{
+		"the HTTP listing alone": {listHTTP: {row}},
+		"the TCP listing alone":  {listTCP: {row}},
+		"both":                   {listHTTP: {row}, listTCP: {row}},
+	} {
+		g, _ := newGen(snapshotOf(catalog{key("ns", "svc"): listings}))
 		g.reconcile(context.Background())
-		assert.Equal(t, withLegacy(realPort(8080, classHTTP), realPort(9000, classTCP)), portsOf(t, g, "ns", "svc"), "rule %d", rule)
+		assert.Equal(t, withLegacy(realPort(8080, classHTTP), realPort(9000, classTCP)), portsOf(t, g, "ns", "svc"), name)
 	}
 }
 
@@ -655,7 +548,6 @@ func TestGenerator_ManagedServiceWithoutAnnotations(t *testing.T) {
 
 	svc, err := get(t, c, "ns", "svc")
 	require.NoError(t, err)
-	assert.Equal(t, "8080", svc.Annotations[aetherlabels.AnnotationMeshPort])
-	assert.Equal(t, AppProtocolHTTP, svc.Annotations[aetherlabels.AnnotationMeshAppProtocol])
+	assert.Equal(t, map[string]string{aetherlabels.AnnotationMeshService: "svc"}, svc.Annotations)
 	assert.Equal(t, withLegacy(realPort(8080, classHTTP)), svc.Spec.Ports)
 }
