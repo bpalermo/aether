@@ -92,7 +92,7 @@ func rtpMark(v string) *proxy.GammaHeaderMutation {
 
 // An HTTPRoute whose parentRef names port 80 or 18081 of a GENERATED Service
 // that does not declare it: neither is a port of the service (until chart
-// 2.7.0 both meant "the port the pods declare"). The rule attaches to NOTHING,
+// 3.0.0 both meant "the port the pods declare"). The rule attaches to NOTHING,
 // on either path, and the service answers as if the route did not exist. A
 // parentRef that names a real port still lands on it (the control).
 func TestPerPort_ParentRefThatIsNotAPortAttachesNowhere(t *testing.T) {
@@ -156,7 +156,7 @@ func TestPerPort_ImportedRuleTakesEveryPort(t *testing.T) {
 
 // A backendRef that names no HTTP port of its Service is INVALID: the request
 // is answered 500 (the Gateway API's answer for an invalid backendRef), on
-// both paths, and is never delivered to another port. Until chart 2.7.0 the
+// both paths, and is never delivered to another port. Until chart 3.0.0 the
 // mesh HTTP port and an undeclared 80 meant "the port the pods declare", and
 // an unresolvable port fell back to the backend's default cluster: a request
 // was answered by a port the route never named. A NAMED targetPort is the one

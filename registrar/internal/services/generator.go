@@ -402,7 +402,7 @@ func (g *Generator) pruneServices(ctx context.Context, managed corev1.ServiceLis
 // Both are TCP at the Kubernetes level and carry no appProtocol: they name a
 // way in, not a port of the service.
 //
-// Until chart 2.7.0 there were two more, "http" (80) and "https" (443), so
+// Until chart 3.0.0 there were two more, "http" (80) and "https" (443), so
 // that a scheme-default dial had a Service port to land on. They are gone: a
 // port the pods declare is on the Service as a real port, 80 and 443
 // included, and a port they do not declare is not a port of the service.
@@ -457,7 +457,7 @@ const (
 )
 
 // staleServiceAnnotations are the two annotations the generator stamped on a
-// mesh Service through chart 2.7.0: one protocol and one port for the whole
+// mesh Service through chart 2.6: one protocol and one port for the whole
 // service, read by a chart 2.6 agent to choose a capture chain. Nothing reads
 // them any more (a port's protocol is on the ServicePort and in the registry),
 // so the generator no longer writes them and removes them from the Services it

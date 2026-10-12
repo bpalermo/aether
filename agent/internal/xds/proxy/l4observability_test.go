@@ -119,7 +119,7 @@ func TestCaptureL4ChainsCarryTheL4AccessLog(t *testing.T) {
 			case strings.HasSuffix(name, "_9000"):
 				kinds["legacy"] = true
 			}
-			assert.NotContains(t, fc.GetName(), "anyport", "the any-port chain was removed in chart 2.7.0")
+			assert.NotContains(t, fc.GetName(), "anyport", "the any-port chain was removed in chart 3.0.0")
 			require.Len(t, tc.GetAccessLog(), 1, "chain %s: no L4 access log", fc.GetName())
 			var cfg otelaccesslogv3.OpenTelemetryAccessLogConfig
 			require.NoError(t, proto.Unmarshal(tc.GetAccessLog()[0].GetTypedConfig().GetValue(), &cfg))

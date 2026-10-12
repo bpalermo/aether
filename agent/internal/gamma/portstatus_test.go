@@ -57,7 +57,7 @@ func plainService(name string, ports ...corev1.ServicePort) *corev1.Service {
 //     BackendNotFound; to a port that is not HTTP: UnsupportedProtocol.
 //
 // The mesh HTTP port (18081) and an undeclared 80 of a generated Service are
-// placeholders, not ports: until chart 2.7.0 a route that named one was read
+// placeholders, not ports: until chart 3.0.0 a route that named one was read
 // as "the port the pods declare", and its status said nothing.
 func TestRouteStatus_PortsAreRealPorts(t *testing.T) {
 	multi := func() *corev1.Service {

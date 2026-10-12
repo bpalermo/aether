@@ -340,7 +340,7 @@ func addressOnlyChains(chains []*listenerv3.FilterChain) (names []string) {
 // matched a service's address on every port nothing else named. On a service
 // with an HTTP port it would have outranked the HTTP chains for the address
 // (the address is decided before the protocol) and forwarded HTTP to the
-// raw-TCP port as bytes, so such a service never had one. Since chart 2.7.0
+// raw-TCP port as bytes, so such a service never had one. Since chart 3.0.0
 // NO service has one: a raw-TCP legacy target is reached on its own port and
 // on :18082, and on nothing else. The rule, over every shape of service: no
 // chain claims an address without naming a destination port, unless it names
@@ -430,7 +430,7 @@ func TestCaptureChains_NoAnyPortChainForAServiceWithHTTP(t *testing.T) {
 // HTTP port number of the mesh, and a connection to a named port is matched
 // only among the chains naming it. While a pure-TCP service had an any-port
 // chain, that chain needed a twin on each of those numbers. The chain is gone
-// (chart 2.7.0) and so are the twins: on an HTTP port number of the mesh that
+// (chart 3.0.0) and so are the twins: on an HTTP port number of the mesh that
 // the service does not declare, NO chain claims its address. A client that
 // dials one gets what the address gives it there, which is nothing.
 func TestCaptureChains_NoChainOnAnHTTPPortNumberTheServiceDoesNotDeclare(t *testing.T) {
@@ -487,7 +487,7 @@ func TestCaptureChains_NoChainOnAnHTTPPortNumberTheServiceDoesNotDeclare(t *test
 // has no server name, and leaves through the listener's default instead of
 // reaching cap_http_<P>. So: no twin on a declared HTTP port, and none on
 // 18081 for a service with any HTTP port. Port 80 is a port like any other: a
-// twin stands there unless the service declares it as HTTP (until chart 2.7.0
+// twin stands there unless the service declares it as HTTP (until chart 3.0.0
 // 18081 and 80 both carried the HTTP of "the port the pods declare"). A
 // service with no HTTP port has no HTTP on 18081 either, and its twins there
 // are what keeps its TLSRoute working on that number.

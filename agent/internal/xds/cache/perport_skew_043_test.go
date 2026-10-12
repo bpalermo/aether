@@ -45,11 +45,11 @@ func kubernetes26Registry(services []a043Service) *mockRegistry {
 	}
 }
 
-// TestPerPort_Skew_27AgentBehind26KubernetesRegistrar reports what a 2.7 agent
+// TestPerPort_Skew_30AgentBehind26KubernetesRegistrar reports what a 3.0 agent
 // builds for the two mixed shapes when the registrar is still 2.6 on the
 // kubernetes backend: every raw-TCP chain and every route, and whether the
 // cluster behind it exists and has an endpoint.
-func TestPerPort_Skew_27AgentBehind26KubernetesRegistrar(t *testing.T) {
+func TestPerPort_Skew_30AgentBehind26KubernetesRegistrar(t *testing.T) {
 	ctx := context.Background()
 	services := a043Fixture()
 	c := newTestCache("node-1")

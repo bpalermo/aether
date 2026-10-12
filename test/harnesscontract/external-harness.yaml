@@ -314,7 +314,7 @@ access_logs:
 #
 # None since version 4. Until version 3 the one entry here was the stat prefix
 # of the any-port chain of a capture listener (`cap_tcp_anyport_<cluster>`).
-# The chain was removed in chart 2.7.0: a raw-TCP service is reached on the
+# The chain was removed in chart 3.0.0: a raw-TCP service is reached on the
 # ports it declares and on the TCP mesh port, and on no other port of its
 # address, so there is nothing left to count.
 envoy_stats: []

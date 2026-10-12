@@ -28,7 +28,7 @@ const (
 	AnnotationMeshService = aetherLabelPrefix + "/service"
 
 	// AnnotationMeshPort ("aether.io/port") is a name the mesh no longer gives
-	// a meaning to. Through chart 2.7.0 the registrar stamped it on every
+	// a meaning to. Through chart 2.6 the registrar stamped it on every
 	// generated mesh Service with the port the pods declare, for a chart 2.6
 	// agent; a service's ports are the Service's own ports now. The mesh
 	// Service generator does not write it and REMOVES it from the Services it
@@ -66,7 +66,7 @@ const (
 	LabelManagedServiceImport = aetherLabelPrefix + "/managed-service-import"
 
 	// AnnotationMeshAppProtocol ("aether.io/app-protocol") is a name the mesh
-	// no longer gives a meaning to. Through chart 2.7.0 the registrar stamped
+	// no longer gives a meaning to. Through chart 2.6 the registrar stamped
 	// it on every generated mesh Service ("http", "tcp" or "udp": ONE protocol
 	// for the whole service), and a chart 2.6 agent read it to choose between
 	// an HTTP and a raw-TCP capture chain. A port's protocol is the

@@ -114,7 +114,7 @@ func TestGenerateCaptureListener_HTTPPrimaryGetsNoPortlessChain(t *testing.T) {
 }
 
 // TestGenerateCaptureListener_TCPPrimaryKeepsPortlessChain: the other side of
-// the same gate, as it stands since chart 2.7.0. A TCP-primary service used to
+// the same gate, as it stands since chart 3.0.0. A TCP-primary service used to
 // keep a portless floor chain, on which any port of its VIP reached the floor.
 // It has none now: it is reached on its own port and on :18082, and a
 // connection to any other port of its VIP matches no chain of the service.
@@ -150,7 +150,7 @@ func TestGenerateCaptureListener_TCPPrimaryKeepsPortlessChain(t *testing.T) {
 // (cap_tcp_anyport_<cluster>), so its counter could tell "someone relies on
 // the deprecated behaviour" from "someone used a supported spelling".
 //
-// The chain was removed in chart 2.7.0. What the test holds now is the other
+// The chain was removed in chart 3.0.0. What the test holds now is the other
 // half of the same sentence: the two spellings that survive are each counted
 // under their own chain's name, and no tcp_proxy of the listener counts under
 // the any-port prefix, so a dashboard or a harness that still reads it reads

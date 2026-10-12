@@ -139,7 +139,7 @@ type rulePlace struct {
 //
 // A parentRef that names any other number attaches its rule to NOTHING. That
 // includes the mesh HTTP port (18081) and a port 80 the pods do not declare:
-// neither is a port of the service, and until chart 2.7.0 both were read as
+// neither is a port of the service, and until chart 3.0.0 both were read as
 // "the port the pods declare". The GAMMA reconciler reports such a parentRef
 // in the route's status (Accepted=False, NoMatchingParent).
 //
@@ -207,7 +207,7 @@ func httpClusterForPort(svc, meshDomain string, ports servicePorts, port uint32)
 //     projector named, as before, and the reconciler says so;
 //   - anything else names no HTTP port of the backend: a port the Service
 //     does not have (the mesh HTTP port 18081 and an undeclared 80 are two
-//     such numbers; until chart 2.7.0 they meant "the port the pods
+//     such numbers; until chart 3.0.0 they meant "the port the pods
 //     declare"), or one that is not HTTP. The backend is INVALID: its share
 //     of the rule is answered 500, as the Gateway API specifies, never
 //     delivered to another port. The reconciler reports it in the route's
@@ -386,7 +386,7 @@ func servicePortsOf(portMaps map[string]map[uint32]uint32, svc string, pod uint3
 // the one behind the Service's port 80 (through a user Service's port map, or
 // 80 itself for a generated Service), when the service serves it as HTTP. ok
 // is false when the service has no HTTP port 80: a port-less authority is
-// then refused, never read as another port. (Until chart 2.7.0 it meant "the
+// then refused, never read as another port. (Until chart 3.0.0 it meant "the
 // port the pods declare".)
 func portlessPodPort(portMaps map[string]map[uint32]uint32, svc string, ports servicePorts) (uint32, bool) {
 	pod, ok := podPort(portMaps, svc, 80)

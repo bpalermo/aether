@@ -272,7 +272,7 @@ func (g *ImportGenerator) applyClustersetService(ctx context.Context, d *desired
 			return ""
 		}
 		// The one thing converged on an existing one: aether.io/port, which a
-		// registrar through chart 2.7 stamped here. It said "the port the pods
+		// registrar through chart 2.6 stamped here. It said "the port the pods
 		// declare" about a whole service; nothing reads it, the generated mesh
 		// Services have dropped it, and a stale one would outlive every reader.
 		if _, stale := existing.Annotations[aetherlabels.AnnotationMeshPort]; stale {

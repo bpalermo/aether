@@ -879,7 +879,7 @@ func TestAddressing_RulesFollowTheParentPort(t *testing.T) {
 		assert.Equal(t, map[string]string{"all": mesh + ":9090", "9090": mesh + ":9090"}, marks(table, mesh+":9090"), name)
 		// 18081 and the port-less name are not ports of the service: no
 		// virtual host that routes claims them, so no rule applies there
-		// (until chart 2.7.0 both carried the rules of the port the pods
+		// (until chart 3.0.0 both carried the rules of the port the pods
 		// declare).
 		for _, host := range []string{mesh + ":18081", mesh} {
 			assert.Empty(t, marks(table, host), "%s, Host %s", name, host)

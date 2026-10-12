@@ -101,7 +101,7 @@ func TestGenerateCaptureListener_WithTCPServices(t *testing.T) {
 	// Each service whose legacy target is raw TCP yields TWO chains
 	// (proposals 037 and 043): the well-known :18082 spelling and its own
 	// port. There is no third: the any-port chain (cap_tcp_anyport_<cluster>)
-	// was removed in chart 2.7.0. Plus cap_http_other and the scoped-mode
+	// was removed in chart 3.0.0. Plus cap_http_other and the scoped-mode
 	// blackhole.
 	names := map[string]bool{}
 	for _, fc := range l.GetFilterChains() {

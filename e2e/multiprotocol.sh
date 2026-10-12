@@ -122,14 +122,14 @@
 #                  answers
 #   A12 both       NO spelling means "the port the pods declare" (see leg_A12);
 #                  what follows is what the three spellings meant until chart
-#                  2.7.0: :18081, the
+#                  3.0.0: :18081, the
 #                  port-less URL, the port-less svc.cluster.local URL, and on
 #                  loopback a port-less Host and Host <mesh name>:18081 reach
 #                  the port the pods declare in endpoint.aether.io/port when
 #                  it is HTTP; for mp-tcpfirst they are refused, 421
 #                  port-required, and :18082 reaches its raw TCP (X4, X1)
 #
-# A raw-TCP service is reached on the ports it declares (chart 2.7.0 removes
+# A raw-TCP service is reached on the ports it declares (chart 3.0.0 removes
 # the chain that sent ANY port of such a service to its declared port):
 #
 #   R1  routes     an HTTPRoute on mp-httponly whose backendRef names a port
@@ -1378,7 +1378,7 @@ leg_M1() {
 	name="$(mesh_name mp-mixed)"
 	log "M1 the proxy port is not a port of the service: http://$name:$MESH_HTTP_PORT/ (Host says :$MESH_HTTP_PORT) is refused by name"
 	expect "captured http://$name:$MESH_HTTP_PORT/" "HTTP421:port-not-declared" 240 "$PROBES" \
-		"'$(marker mp-mixed "$HTTP_PORT")' is :$MESH_HTTP_PORT read as 'the port the pods declare', which it meant until chart 2.7.0" \
+		"'$(marker mp-mixed "$HTTP_PORT")' is :$MESH_HTTP_PORT read as 'the port the pods declare', which it meant until chart 3.0.0" \
 		http_tokens client "http://$name:$MESH_HTTP_PORT/" ""
 }
 
@@ -1387,7 +1387,7 @@ leg_M2() {
 	name="$(mesh_name mp-mixed)"
 	log "M2 http, portless: http://$name/ dials port 80, which mp-mixed does not declare: refused by name"
 	expect "captured http://$name/" "HTTP421:port-not-declared" 90 "$PROBES" \
-		"'$(marker mp-mixed "$HTTP_PORT")' is a port-less URL read as 'the port the pods declare', which it meant until chart 2.7.0" \
+		"'$(marker mp-mixed "$HTTP_PORT")' is a port-less URL read as 'the port the pods declare', which it meant until chart 3.0.0" \
 		http_tokens client "http://$name/" ""
 }
 
@@ -1437,7 +1437,7 @@ leg_M6() {
 # each with its class, and the mesh's two ports (the proxy port and the raw-TCP
 # one). Nothing else: no "http" 80 or "https" 443 placeholder (a port 80 the
 # pods do not declare is not a port of the service), and neither of the two
-# annotations a registrar wrote through chart 2.7.0 for 2.6 agents
+# annotations a registrar wrote through chart 2.6 for its agents
 # (aether.io/app-protocol, aether.io/port).
 leg_M7() {
 	log "M7 the generated mesh Service of mp-mixed: its real ports and the two mesh ports, no placeholder, no service-level protocol"
@@ -1451,7 +1451,7 @@ leg_M7() {
 	for p in 80 443; do
 		if printf '%s\n' "$ports" | awk -F/ -v p="$p" '$1 == p { found = 1 } END { exit !found }'; then
 			fail "the generated Service mp-mixed has a port $p, which its pods do not declare (ports: $(printf '%s' "$ports" | tr '\n' ' '))" \
-				"the placeholder ports were removed in chart 2.7.0: a generated Service has the ports its pods declare"
+				"the placeholder ports were removed in chart 3.0.0: a generated Service has the ports its pods declare"
 		else
 			passed "Service mp-mixed: no port $p"
 		fi
@@ -1791,7 +1791,7 @@ leg_A11() {
 		"'HTTP/1.1' is mp-nine's HTTP server answering raw bytes that were forwarded to it; '$(tcp_marker mp-mixed)' is another service's TCP port"
 }
 
-# A12 — no spelling means "the port the pods declare". Until chart 2.7.0 three
+# A12 — no spelling means "the port the pods declare". Until chart 3.0.0 three
 # did: <name>:18081, the port-less URL (a dial to 80), and a port-less or
 # :18081 Host on the loopback listener.
 #
@@ -1807,7 +1807,7 @@ leg_A12() {
 	for w in "${WORKLOADS[@]}"; do
 		[ "$w" != "mp-tcpfirst" ] || continue
 		name="$(mesh_name "$w")"
-		meaning="'$(marker "$w" "$(wl_legacy_port "$w")")' is the spelling read as the port $w's pods declare (:$(wl_legacy_port "$w")), which it meant until chart 2.7.0"
+		meaning="'$(marker "$w" "$(wl_legacy_port "$w")")' is the spelling read as the port $w's pods declare (:$(wl_legacy_port "$w")), which it meant until chart 3.0.0"
 		portless80="HTTP421:port-not-declared"
 		portlessLoop="HTTP421:port-required"
 		if [ "$w" = "mp-eighty" ]; then
@@ -1828,7 +1828,7 @@ leg_A12() {
 # --- a route's ports are real ports ---------------------------------------------
 #
 # A parentRef and a backendRef name a REAL port of a Service. One that does not
-# is not given another meaning (until chart 2.7.0, 18081 and an undeclared 80
+# is not given another meaning (until chart 3.0.0, 18081 and an undeclared 80
 # meant "the port the pods declare", and any other wrong port fell back to the
 # backend's declared port): the data plane refuses, and the route's status says
 # why, under aether's own controller name.
@@ -2208,7 +2208,7 @@ leg_W1() {
 }
 
 # W2 — every other port of the service's address reaches no application. Until
-# chart 2.7.0 a chain with no port sent them all to the declared port
+# chart 3.0.0 a chain with no port sent them all to the declared port
 # (onlytcp answered on every one of these). The four ports are the
 # cases that differ in the data plane: a port no service declares, two port
 # numbers other services declare as HTTP (each has an HTTP chain of its own),
@@ -2320,7 +2320,7 @@ leg_P3() {
 #   b. an explicit Host "<name>:<port>" to the loopback listener, two ports;
 #   c. the same Host to "<name>:$MESH_HTTP_PORT", which IS diverted for it;
 #   d. and "curl http://<name>:$MESH_HTTP_PORT/" alone, whose Host says
-#      :$MESH_HTTP_PORT, is refused by name: until chart 2.7.0 that was how
+#      :$MESH_HTTP_PORT, is refused by name: until chart 3.0.0 that was how
 #      such a pod reached a service.
 #
 # What a dial to the service's own port gets from such a pod is recorded, not
@@ -2340,7 +2340,7 @@ leg_S1() {
 			http_tokens client-nocapture "http://$name:$MESH_HTTP_PORT/" "$name:$p"
 	done
 	expect "client-nocapture, http://$name:$MESH_HTTP_PORT/ and nothing else" "HTTP421:port-not-declared" "$A_TIMEOUT" "$A_PROBES" \
-		"'$(marker mp-multi "$(wl_legacy_port mp-multi)")' is :$MESH_HTTP_PORT read as 'the port the pods declare', which it meant until chart 2.7.0" \
+		"'$(marker mp-multi "$(wl_legacy_port mp-multi)")' is :$MESH_HTTP_PORT read as 'the port the pods declare', which it meant until chart 3.0.0" \
 		http_tokens client-nocapture "http://$name:$MESH_HTTP_PORT/" ""
 	hist="$(http_tokens client-nocapture "http://$name:$HTTP_PORT/" "" 3 | sort | uniq -c | awk '{printf "%s=%s ", $2, $1}')"
 	note "S1-OBSERVED client-nocapture, a dial to the service's own port, http://$name:$HTTP_PORT/ (not captured): $hist"
