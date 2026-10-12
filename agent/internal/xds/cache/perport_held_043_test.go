@@ -154,10 +154,11 @@ func TestServicePorts_TheRawTCPMeshPortIsNeverAnHTTPPort(t *testing.T) {
 
 // TestPerPort_RetainedEntryOfAPortThatStoppedBeingHTTP: a service that served
 // HTTP on 8080 becomes raw-TCP-only on the same number. Its HTTP default
-// entry is retained for the grace period, and its cluster resolves through
-// the bare service name, which the live raw-TCP floor now publishes. The
-// retained entry must not keep a virtual host: an HTTP request to the
-// service would be delivered to the raw-TCP endpoints.
+// entry is not retained: its cluster would resolve through the bare service
+// name, which the live raw-TCP floor now publishes, and an HTTP request to
+// the service would be delivered to the raw-TCP endpoints. (It used to be
+// retained without its virtual host; the rows are evidence of a replacement,
+// retentionEvidence, and nothing of the port is kept.)
 func TestPerPort_RetainedEntryOfAPortThatStoppedBeingHTTP(t *testing.T) {
 	ctx := context.Background()
 	pods := []rtpPod{{svc: "demo/x", ip: "10.0.8.1", legacy: 8080, ports: map[uint32]registryv1.PortProtocol{8080: rtpH}}}
@@ -171,11 +172,9 @@ func TestPerPort_RetainedEntryOfAPortThatStoppedBeingHTTP(t *testing.T) {
 	pods[0].ports = map[uint32]registryv1.PortProtocol{8080: rtpTCP}
 	require.NoError(t, c.LoadClustersFromRegistry(ctx, "cluster-1", "node-1", rtpRegistry(pods)))
 	c.clusterMu.RLock()
-	retained, ok := c.clusters["demo/x"]
+	_, ok := c.clusters["demo/x"]
 	c.clusterMu.RUnlock()
-	require.True(t, ok, "the HTTP default entry is retained for the grace period, or the test shows nothing")
-	require.False(t, retained.absentSince.IsZero())
-	assert.Nil(t, retained.vhost, "the retained entry keeps a virtual host for a port the service now serves as raw TCP")
+	assert.False(t, ok, "the HTTP default entry is kept for a port the service now serves as raw TCP")
 	for _, table := range []string{proxy.OutboundHTTPRouteName, "cap_http_8080"} {
 		rc := a043Tables(t, c)[table]
 		if rc == nil {

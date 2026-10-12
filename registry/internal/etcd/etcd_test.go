@@ -13,6 +13,7 @@ import (
 
 	registryv1 "aethermesh.dev/api/aether/registry/v1"
 	"aethermesh.dev/registry"
+	"aethermesh.dev/registry/endpointmeta"
 	"aethermesh.dev/registry/etcdtest"
 	"aethermesh.dev/registry/internal/etcd"
 	"aethermesh.dev/registry/registrytest"
@@ -151,7 +152,7 @@ func TestEtcdRegistry_RegisterEndpoint(t *testing.T) {
 		Health: registryv1.ServiceEndpoint_HEALTH_UNHEALTHY,
 	}
 
-	err := registry.RegisterEndpoint(ctx, "frontend", registryv1.Service_PROTOCOL_HTTP, ep)
+	err := registry.RegisterEndpoint(ctx, "frontend", registryv1.Service_PROTOCOL_HTTP, registrytest.Typed(ep, registryv1.Service_PROTOCOL_HTTP))
 	assert.NoError(t, err)
 
 	endpoints, err := registry.ListEndpoints(ctx, "frontend", registryv1.Service_PROTOCOL_HTTP)
@@ -186,7 +187,7 @@ func TestEtcdRegistry_RegisterMultipleEndpoints(t *testing.T) {
 	}
 
 	for _, ep := range endpoints {
-		err := registry.RegisterEndpoint(ctx, "api-service", registryv1.Service_PROTOCOL_HTTP, ep)
+		err := registry.RegisterEndpoint(ctx, "api-service", registryv1.Service_PROTOCOL_HTTP, registrytest.Typed(ep, registryv1.Service_PROTOCOL_HTTP))
 		require.NoError(t, err)
 	}
 
@@ -217,7 +218,7 @@ func TestEtcdRegistry_UnregisterEndpoint(t *testing.T) {
 	}
 
 	for _, ep := range endpoints {
-		err := registry.RegisterEndpoint(ctx, "backend", registryv1.Service_PROTOCOL_HTTP, ep)
+		err := registry.RegisterEndpoint(ctx, "backend", registryv1.Service_PROTOCOL_HTTP, registrytest.Typed(ep, registryv1.Service_PROTOCOL_HTTP))
 		require.NoError(t, err)
 	}
 
@@ -245,7 +246,7 @@ func TestEtcdRegistry_UnregisterEndpoints(t *testing.T) {
 	}
 
 	for _, ep := range endpoints {
-		err := registry.RegisterEndpoint(ctx, "workers", registryv1.Service_PROTOCOL_HTTP, ep)
+		err := registry.RegisterEndpoint(ctx, "workers", registryv1.Service_PROTOCOL_HTTP, registrytest.Typed(ep, registryv1.Service_PROTOCOL_HTTP))
 		require.NoError(t, err)
 	}
 
@@ -308,7 +309,7 @@ func TestEtcdRegistry_ListAllEndpoints(t *testing.T) {
 
 	for service, endpoints := range services {
 		for _, ep := range endpoints {
-			err := registry.RegisterEndpoint(ctx, service, registryv1.Service_PROTOCOL_HTTP, ep)
+			err := registry.RegisterEndpoint(ctx, service, registryv1.Service_PROTOCOL_HTTP, registrytest.Typed(ep, registryv1.Service_PROTOCOL_HTTP))
 			require.NoError(t, err)
 		}
 	}
@@ -349,7 +350,7 @@ func TestEtcdRegistry_OverwriteEndpoint(t *testing.T) {
 		Port:        8080,
 		Weight:      100,
 	}
-	err := registry.RegisterEndpoint(ctx, "service", registryv1.Service_PROTOCOL_HTTP, ep1)
+	err := registry.RegisterEndpoint(ctx, "service", registryv1.Service_PROTOCOL_HTTP, registrytest.Typed(ep1, registryv1.Service_PROTOCOL_HTTP))
 	require.NoError(t, err)
 
 	ep2 := &registryv1.ServiceEndpoint{
@@ -358,7 +359,7 @@ func TestEtcdRegistry_OverwriteEndpoint(t *testing.T) {
 		Port:        9090,
 		Weight:      200,
 	}
-	err = registry.RegisterEndpoint(ctx, "service", registryv1.Service_PROTOCOL_HTTP, ep2)
+	err = registry.RegisterEndpoint(ctx, "service", registryv1.Service_PROTOCOL_HTTP, registrytest.Typed(ep2, registryv1.Service_PROTOCOL_HTTP))
 	require.NoError(t, err)
 
 	endpoints, err := registry.ListEndpoints(ctx, "service", registryv1.Service_PROTOCOL_HTTP)
@@ -393,7 +394,7 @@ func TestEtcdRegistry_CustomKeyPrefix(t *testing.T) {
 		Weight:      100,
 	}
 
-	err := registry.RegisterEndpoint(ctx, "test-service", registryv1.Service_PROTOCOL_HTTP, ep)
+	err := registry.RegisterEndpoint(ctx, "test-service", registryv1.Service_PROTOCOL_HTTP, registrytest.Typed(ep, registryv1.Service_PROTOCOL_HTTP))
 	require.NoError(t, err)
 
 	endpoints, err := registry.ListEndpoints(ctx, "test-service", registryv1.Service_PROTOCOL_HTTP)
@@ -465,7 +466,7 @@ func TestEtcdRegistry_CloseRacesWatchLoop(t *testing.T) {
 					}
 					// Stop on the first failure: once Close wins the race the
 					// client is shut and every further write just spams the log.
-					if registry.RegisterEndpoint(writeCtx, "ns/race-svc", registryv1.Service_PROTOCOL_HTTP, ep) != nil {
+					if registry.RegisterEndpoint(writeCtx, "ns/race-svc", registryv1.Service_PROTOCOL_HTTP, registrytest.Typed(ep, registryv1.Service_PROTOCOL_HTTP)) != nil {
 						return
 					}
 				}
@@ -531,7 +532,7 @@ func TestEtcdRegistry_WatchSignalsChanges(t *testing.T) {
 	}
 
 	ep := &registryv1.ServiceEndpoint{Ip: "10.0.9.9", ClusterName: "c", Port: 8080}
-	require.NoError(t, registry.RegisterEndpoint(ctx, "watch-svc", registryv1.Service_PROTOCOL_HTTP, ep))
+	require.NoError(t, registry.RegisterEndpoint(ctx, "watch-svc", registryv1.Service_PROTOCOL_HTTP, registrytest.Typed(ep, registryv1.Service_PROTOCOL_HTTP)))
 
 	select {
 	case <-notifier.Changes():
@@ -584,9 +585,9 @@ func TestEtcdRegistry_ListEndpointsCrossOrigin(t *testing.T) {
 	// neither write clobbers the other despite the shared IP.
 	const ip = "10.244.0.5"
 	require.NoError(t, regA.RegisterEndpoint(ctx, "svc", registryv1.Service_PROTOCOL_HTTP,
-		&registryv1.ServiceEndpoint{Ip: ip, ClusterName: "cluster-a", Port: 8080}))
+		registrytest.Typed(&registryv1.ServiceEndpoint{Ip: ip, ClusterName: "cluster-a", Port: 8080}, registryv1.Service_PROTOCOL_HTTP)))
 	require.NoError(t, regB.RegisterEndpoint(ctx, "svc", registryv1.Service_PROTOCOL_HTTP,
-		&registryv1.ServiceEndpoint{Ip: ip, ClusterName: "cluster-b", Port: 8080}))
+		registrytest.Typed(&registryv1.ServiceEndpoint{Ip: ip, ClusterName: "cluster-b", Port: 8080}, registryv1.Service_PROTOCOL_HTTP)))
 
 	// ListEndpoints ranges every origin and returns the union (from either reader).
 	eps, err := regA.ListEndpoints(ctx, "svc", registryv1.Service_PROTOCOL_HTTP)
@@ -700,9 +701,9 @@ func TestEtcdRegistry_ListAllEndpointsRevisioned(t *testing.T) {
 	var _ registry.RevisionedLister = reg
 
 	require.NoError(t, reg.RegisterEndpoint(ctx, "ns/web", registryv1.Service_PROTOCOL_HTTP,
-		&registryv1.ServiceEndpoint{Ip: "10.0.1.1", Port: 8080}))
+		registrytest.Typed(&registryv1.ServiceEndpoint{Ip: "10.0.1.1", Port: 8080}, registryv1.Service_PROTOCOL_HTTP)))
 	require.NoError(t, reg.RegisterEndpoint(ctx, "ns/db", registryv1.Service_PROTOCOL_TCP,
-		&registryv1.ServiceEndpoint{Ip: "10.0.2.1", Port: 5432}))
+		registrytest.Typed(&registryv1.ServiceEndpoint{Ip: "10.0.2.1", Port: 5432}, registryv1.Service_PROTOCOL_TCP)))
 
 	protocols := []registryv1.Service_Protocol{registryv1.Service_PROTOCOL_HTTP, registryv1.Service_PROTOCOL_TCP}
 	state, rev1, err := reg.ListAllEndpointsRevisioned(ctx, protocols)
@@ -718,7 +719,7 @@ func TestEtcdRegistry_ListAllEndpointsRevisioned(t *testing.T) {
 	assert.GreaterOrEqual(t, reg.StoreRevision(), rev1)
 
 	require.NoError(t, reg.RegisterEndpoint(ctx, "ns/web", registryv1.Service_PROTOCOL_HTTP,
-		&registryv1.ServiceEndpoint{Ip: "10.0.1.2", Port: 8080}))
+		registrytest.Typed(&registryv1.ServiceEndpoint{Ip: "10.0.1.2", Port: 8080}, registryv1.Service_PROTOCOL_HTTP)))
 	_, rev2, err := reg.ListAllEndpointsRevisioned(ctx, protocols)
 	require.NoError(t, err)
 	assert.Greater(t, rev2, rev1, "a write moves the revision")
@@ -776,14 +777,28 @@ func TestEtcdRegistry_PerPortProtocolContract(t *testing.T) {
 			Ip: "10.0.3.1", ClusterName: "cluster-1", Port: 5353, Ports: []uint32{5353},
 			PortProtocols: map[uint32]registryv1.PortProtocol{5353: classUDP},
 		}},
-		// A row from before port_protocols existed: exempt from "serves a port
-		// of its listing", and still one row.
-		{"ns/old", registryv1.Service_PROTOCOL_TCP, &registryv1.ServiceEndpoint{
-			Ip: "10.0.4.1", ClusterName: "cluster-1", Port: 5432,
-		}},
 	}
 	for _, w := range writes {
 		require.NoError(t, reg.RegisterEndpoint(ctx, w.service, w.protocol, w.endpoint))
+	}
+	// port_protocols is required (proposal 043): a row without it, or one
+	// that lists a port its map does not name, is not written. (Such a row
+	// used to be stored, and was exempt from the contract below.)
+	for _, untyped := range []*registryv1.ServiceEndpoint{
+		{Ip: "10.0.4.1", ClusterName: "cluster-1", Port: 5432},
+		{Ip: "10.0.4.2", ClusterName: "cluster-1", Port: 5432, PortProtocols: map[uint32]registryv1.PortProtocol{}},
+		{Ip: "10.0.4.3", ClusterName: "cluster-1", Port: 5432, Ports: []uint32{5432, 5433}, PortProtocols: map[uint32]registryv1.PortProtocol{5432: classTCP}},
+		{Ip: "10.0.4.4", ClusterName: "cluster-1", Port: 5432, PortProtocols: map[uint32]registryv1.PortProtocol{5432: registryv1.PortProtocol_PORT_PROTOCOL_UNSPECIFIED}},
+	} {
+		for _, protocol := range registry.ServedProtocols {
+			err := reg.RegisterEndpoint(ctx, "ns/old", protocol, untyped)
+			require.ErrorIs(t, err, endpointmeta.ErrRowNotTyped, "row %s under %s", untyped.GetIp(), protocol)
+		}
+	}
+	for _, protocol := range registry.ServedProtocols {
+		rows, err := reg.ListEndpoints(ctx, "ns/old", protocol)
+		require.NoError(t, err)
+		require.Empty(t, rows, "a refused row was stored")
 	}
 
 	listings := map[registryv1.Service_Protocol]map[string][]*registryv1.ServiceEndpoint{}

@@ -6,6 +6,8 @@ import (
 	"log/slog"
 	"testing"
 
+	"aethermesh.dev/registry/registrytest"
+
 	"aethermesh.dev/agent/internal/xds/cache"
 	"aethermesh.dev/agent/storage"
 	cniv1 "aethermesh.dev/api/aether/cni/v1"
@@ -44,7 +46,12 @@ func (m *mockRegistry) ListEndpoints(_ context.Context, _ string, _ registryv1.S
 
 func (m *mockRegistry) ListAllEndpoints(ctx context.Context, protocol registryv1.Service_Protocol) (map[string][]*registryv1.ServiceEndpoint, error) {
 	if m.listAllEndpointsFunc != nil {
-		return m.listAllEndpointsFunc(ctx, protocol)
+		eps, err := m.listAllEndpointsFunc(ctx, protocol)
+		// The fixtures' rows carry a port and no port_protocols: typed here
+		// with the class of the listing they are served from (a fixture's
+		// shorthand, registrytest.Typed; the product reads no class off a
+		// listing).
+		return registrytest.TypedListing(eps, protocol), err
 	}
 	return map[string][]*registryv1.ServiceEndpoint{}, nil
 }

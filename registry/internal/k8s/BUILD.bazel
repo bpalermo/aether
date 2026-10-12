@@ -34,6 +34,7 @@ go_test(
         "//common/constants",
         "//common/constants/annotations",
         "//common/constants/labels",
+        "//registry",
         "//registry/endpointmeta",
         "//registry/registrytest",
         "@com_github_stretchr_testify//assert",

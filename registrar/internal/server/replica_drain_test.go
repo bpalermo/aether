@@ -6,6 +6,8 @@ import (
 	"testing"
 	"time"
 
+	"aethermesh.dev/registry/registrytest"
+
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -118,7 +120,7 @@ func TestPeerReplicaLearnsADrainWithoutWaitingForThePoll(t *testing.T) {
 	informer.Update(before, after)
 	_, err := a.srv.RegisterEndpoint(ctx, &registrarv1.RegisterEndpointRequest{
 		ServiceName: service, Protocol: registryv1.Service_PROTOCOL_HTTP,
-		Endpoint: &registryv1.ServiceEndpoint{Ip: ip, Health: registryv1.ServiceEndpoint_HEALTH_DRAINING},
+		Endpoint: registrytest.Typed(&registryv1.ServiceEndpoint{Ip: ip, Health: registryv1.ServiceEndpoint_HEALTH_DRAINING}, registryv1.Service_PROTOCOL_HTTP),
 	})
 	require.NoError(t, err)
 
@@ -218,7 +220,7 @@ func TestPeerReplicaListsPhaseTwoUnhealthyWhenItIsDue(t *testing.T) {
 	time.Sleep(time.Until(requested.Add(2 * time.Second)))
 	_, err := srvA.RegisterEndpoint(ctx, &registrarv1.RegisterEndpointRequest{
 		ServiceName: service, Protocol: registryv1.Service_PROTOCOL_HTTP,
-		Endpoint: &registryv1.ServiceEndpoint{Ip: ip, Health: registryv1.ServiceEndpoint_HEALTH_UNHEALTHY},
+		Endpoint: registrytest.Typed(&registryv1.ServiceEndpoint{Ip: ip, Health: registryv1.ServiceEndpoint_HEALTH_UNHEALTHY}, registryv1.Service_PROTOCOL_HTTP),
 	})
 	require.NoError(t, err)
 

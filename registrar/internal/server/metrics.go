@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 
+	"aethermesh.dev/registry/endpointmeta"
+
 	registrarv1 "aethermesh.dev/api/aether/registrar/v1"
 	"aethermesh.dev/common/snapshotversion"
 	"aethermesh.dev/registry"
@@ -70,6 +72,11 @@ type Metrics struct {
 	wbDrops         metric.Int64Counter
 	wbShields       metric.Int64Counter
 	watchStarts     metric.Int64Counter
+	// rowsRefused counts registrations refused because the row does not say
+	// the protocol of each of its ports; rowsUntyped is the number of stored
+	// rows the last sync filtered for the same reason. Both by reason.
+	rowsRefused metric.Int64Counter
+	rowsUntyped metric.Int64Gauge
 }
 
 // syncDurationBuckets are the explicit boundaries, in SECONDS, for
@@ -111,6 +118,14 @@ func NewMetrics(meter metric.Meter) (*Metrics, error) {
 	if m.syncEvents, err = meter.Int64Counter("aether.registrar.sync.events",
 		metric.WithDescription("Endpoint change events detected by the sync loop, by event type")); err != nil {
 		return nil, fmt.Errorf("sync events: %w", err)
+	}
+	if m.rowsRefused, err = meter.Int64Counter("aether.registrar.rows.refused",
+		metric.WithDescription("Registrations refused because the row does not say the protocol of each of its ports (port_protocols is required), by reason")); err != nil {
+		return nil, fmt.Errorf("rows refused: %w", err)
+	}
+	if m.rowsUntyped, err = meter.Int64Gauge("aether.registrar.rows.untyped",
+		metric.WithDescription("Stored registry rows the last sync filtered because they do not say the protocol of each of their ports, by reason. Not served by anything")); err != nil {
+		return nil, fmt.Errorf("rows untyped: %w", err)
 	}
 	if m.filteredSubs, err = meter.Int64Gauge("aether.registrar.watch.filtered_subscribers",
 		metric.WithDescription("Watch streams carrying a service filter (demand-scoped agents)")); err != nil {
@@ -236,6 +251,27 @@ func (m *Metrics) syncCompleted(ctx context.Context, seconds float64, state Stat
 	m.snapshotVersion.Record(ctx, int64(state.Generation))
 	for eventType, n := range eventsByType {
 		m.syncEvents.Add(ctx, int64(n), metric.WithAttributes(attrEventType.String(eventType)))
+	}
+}
+
+// rowRefused counts one registration refused for reason
+// (endpointmeta.RowProblem).
+func (m *Metrics) rowRefused(ctx context.Context, reason string) {
+	if m == nil {
+		return
+	}
+	m.rowsRefused.Add(ctx, 1, metric.WithAttributes(attribute.String("reason", reason)))
+}
+
+// rowsFiltered records how many stored rows the sync just filtered, by reason.
+// Both reasons are always recorded, so that a reason that went to zero reads
+// zero and not its last value.
+func (m *Metrics) rowsFiltered(ctx context.Context, byReason map[string]int64) {
+	if m == nil {
+		return
+	}
+	for _, reason := range []string{endpointmeta.RowNoPortProtocols, endpointmeta.RowPortNotTyped} {
+		m.rowsUntyped.Record(ctx, byReason[reason], metric.WithAttributes(attribute.String("reason", reason)))
 	}
 }
 

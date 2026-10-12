@@ -27,6 +27,7 @@ func seed(svc, ns string, port uint32) *server.Snapshot {
 		serviceref.New(ns, svc).Key(): {registryv1.Service_PROTOCOL_HTTP: {{
 			Ip:                 "10.0.0.1",
 			Port:               port,
+			PortProtocols:      map[uint32]registryv1.PortProtocol{port: registryv1.PortProtocol_PORT_PROTOCOL_HTTP},
 			KubernetesMetadata: &registryv1.ServiceEndpoint_KubernetesMetadata{Namespace: ns},
 		}}},
 	})
@@ -183,6 +184,7 @@ func seedProtocol(svc, ns string, port uint32, protocol registryv1.Service_Proto
 		serviceref.New(ns, svc).Key(): {protocol: {{
 			Ip:                 "10.0.0.1",
 			Port:               port,
+			PortProtocols:      map[uint32]registryv1.PortProtocol{port: registryv1.PortProtocol(protocol)},
 			KubernetesMetadata: &registryv1.ServiceEndpoint_KubernetesMetadata{Namespace: ns},
 		}}},
 	})

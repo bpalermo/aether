@@ -5,6 +5,8 @@ import (
 	"log/slog"
 	"testing"
 
+	"aethermesh.dev/registry/registrytest"
+
 	registryv1 "aethermesh.dev/api/aether/registry/v1"
 	"aethermesh.dev/registry"
 	"github.com/stretchr/testify/assert"
@@ -56,7 +58,11 @@ func (m *mockRegistry) ListAllEndpoints(ctx context.Context, protocol registryv1
 		if protocol != registryv1.Service_PROTOCOL_HTTP && !m.tcpAware {
 			return map[string][]*registryv1.ServiceEndpoint{}, nil
 		}
-		return eps, nil
+		// The fixtures' rows carry a port and no port_protocols: typed here
+		// with the class of the listing they are served from (a fixture's
+		// shorthand, registrytest.Typed; the product reads no class off a
+		// listing).
+		return registrytest.TypedListing(eps, protocol), nil
 	}
 	return map[string][]*registryv1.ServiceEndpoint{}, nil
 }

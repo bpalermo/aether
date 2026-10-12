@@ -20,6 +20,7 @@
 package endpointmeta
 
 import (
+	"errors"
 	"fmt"
 	"sort"
 	"strconv"
@@ -289,4 +290,62 @@ func ReservedPorts(annotations map[string]string) []uint32 {
 		}
 	}
 	return out
+}
+
+// Why a registry row is not served (RowProblem). The values are metric
+// attributes and log fields.
+const (
+	// RowNoPortProtocols: the row carries no port_protocols at all. A writer
+	// from before proposal 037 wrote such rows; none has since.
+	RowNoPortProtocols = "no_port_protocols"
+	// RowPortNotTyped: the row lists a port (port, ports) that its
+	// port_protocols does not name, or names with no class.
+	RowPortNotTyped = "port_not_typed"
+)
+
+// ErrRowNotTyped is returned by every write of a row RowProblem refuses.
+var ErrRowNotTyped = errors.New("registry row does not say the protocol of each of its ports (port_protocols is required)")
+
+// RowProblem returns why a registry row cannot be served, or "" when it can.
+//
+// port_protocols is REQUIRED (proposal 043): it is the one statement of what
+// speaks on each port of an endpoint. A row without it used to take the class
+// of the listing it was read from, for every port; that fallback is gone. A
+// class that is guessed is how a port gets served over the wrong protocol,
+// and the guess had three readers that had to agree. Such a row is refused
+// where it is written (ErrRowNotTyped), filtered by the registrar where it is
+// already stored, and contributes nothing in an agent that receives it
+// anyway, each of them saying so.
+//
+// A typed row names every port it lists, each with a class.
+func RowProblem(ep *registryv1.ServiceEndpoint) string {
+	classes := ep.GetPortProtocols()
+	if len(classes) == 0 {
+		return RowNoPortProtocols
+	}
+	typed := func(port uint32) bool {
+		return classes[port] != registryv1.PortProtocol_PORT_PROTOCOL_UNSPECIFIED
+	}
+	for port := range classes {
+		if !typed(port) {
+			return RowPortNotTyped
+		}
+	}
+	if port := ep.GetPort(); port != 0 && !typed(port) {
+		return RowPortNotTyped
+	}
+	for _, port := range ep.GetPorts() {
+		if !typed(port) {
+			return RowPortNotTyped
+		}
+	}
+	return ""
+}
+
+// CheckRow is RowProblem as an error for a write path.
+func CheckRow(ep *registryv1.ServiceEndpoint) error {
+	if problem := RowProblem(ep); problem != "" {
+		return fmt.Errorf("%w: %s (endpoint %s)", ErrRowNotTyped, problem, ep.GetIp())
+	}
+	return nil
 }

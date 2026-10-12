@@ -155,6 +155,12 @@
 #   V1  reserved   18081 and 18082 are the mesh's: Host <a name nothing
 #                  serves>:18081 -> 421 port-not-declared at once, on both
 #                  paths; a pod that declares one is denied at admission
+#   T1  replaced   mp-move serves HTTP on 8080, then is redeployed serving
+#                  raw TCP on 9000 only. Host mp-move:8080 on loopback is
+#                  refused (421 port-not-declared) within T1_WINDOW of the
+#                  rollout, well inside the 90 s a vanished service's
+#                  cluster and virtual host are kept for; raw TCP to :9000
+#                  answers. Runs last: it changes a workload
 #   W1  captured   mp-tcponly: raw TCP to <mesh name>:9000 and to :18082
 #                  -> onlytcp
 #   W2  captured   mp-tcponly: raw TCP to :7777 (a port it listens on and does
@@ -280,6 +286,15 @@ SHORT_MARKER_A="shorta"
 SHORT_MARKER_B="shortb"
 # A Service of the same name in the third namespace that is NOT a mesh service.
 SHORT_MARKER_PLAIN="shortplain"
+# Leg T1: a service whose declared port moves from HTTP 8080 to raw TCP 9000.
+# T1_WINDOW is how long after the rollout the old port may still be routed. It
+# must stay well under the agent's 90 s retention grace: a request that is
+# still routed past it is the grace applied to a service the registry says has
+# changed shape.
+MOVE_NAME="mp-move"
+MOVE_MARKER_HTTP="move8080"
+MOVE_MARKER_TCP="movetcp"
+T1_WINDOW=60
 MESH_DOMAIN="aether.internal"
 TRUST_DOMAIN="aether.internal"
 # The application ports of the workloads, a port nobody declares, and the two
@@ -317,7 +332,7 @@ AGENT_GROUP=(agent mesh-dns proxy-supervisor cni-install uds-csi)
 REGISTRAR_GROUP=(registrar controller)
 # Red-run aids (see "A RED RUN" in the header). CI sets none of them.
 ALL_LEGS=(M0 M1 M2 M3 M4 M5 M6 M7 X1 X2 X3 X4 X5 X6 A1 A2 A3 A4 A5 A6 A7 A8 A9 A10 A11 A12
-	W1 W2 W3 P1 P2 P3 P4 P5 R1 R2 R3 S1 N1 N2 N3 V1)
+	W1 W2 W3 P1 P2 P3 P4 P5 R1 R2 R3 S1 N1 N2 N3 V1 T1)
 MP_LEGS="${MP_LEGS:-${ALL_LEGS[*]}}"
 MP_KEEP_GOING="${MP_KEEP_GOING:-0}"
 MP_TIMEOUT="${MP_TIMEOUT:-}"
@@ -879,7 +894,8 @@ deploy_workloads() {
 	for w in "${WORKLOADS[@]}" "$TCP_ONLY"; do
 		upstreams+="${upstreams:+,}$w.$TEST_NS"
 	done
-	upstreams+=",$SHORT_NAME.$TEST_NS"
+	upstreams+=",$SHORT_NAME.$TEST_NS,$MOVE_NAME.$TEST_NS"
+	deploy_workload "$MOVE_NAME" "$HTTP_PORT" http "$HTTP_PORT" "http:$HTTP_PORT:$MOVE_MARKER_HTTP" "tcp:$TCP_PORT:$MOVE_MARKER_TCP"
 	deploy_client client "$upstreams"
 	deploy_client client-nocapture "$upstreams" false
 
@@ -895,7 +911,7 @@ deploy_workloads() {
 	deploy_plain_service "$TEST_NS3" "$SHORT_NAME" "$HTTP_PORT" "$SHORT_MARKER_PLAIN"
 
 	local d
-	for d in "${WORKLOADS[@]}" "$TCP_ONLY" "${CLIENTS[@]}" "$SHORT_NAME"; do
+	for d in "${WORKLOADS[@]}" "$TCP_ONLY" "${CLIENTS[@]}" "$SHORT_NAME" "$MOVE_NAME"; do
 		kc -n "$TEST_NS" rollout status "deploy/$d" --timeout=180s >/dev/null ||
 			die "workload '$d' never became Ready"
 	done
@@ -2123,6 +2139,37 @@ leg_V1() {
 	else
 		fail "the same pod declaring $HTTP_PORT is refused: $out" "the denial above is then not about the port"
 	fi
+}
+
+# --- a port that stops being HTTP is refused at once ----------------------------
+
+# T1 — the retention grace is for a service that VANISHED, not for one that
+# changed shape. mp-move serves HTTP on $HTTP_PORT; it is redeployed with the
+# same two listeners and other annotations: raw TCP on $TCP_PORT, nothing on
+# $HTTP_PORT. From then on the registry holds rows of the service that do not
+# declare $HTTP_PORT, which is evidence, and the node proxy must answer that
+# port by it at once. Before this rule the HTTP cluster and its virtual host
+# on the loopback listener were kept for the 90 s grace, and their endpoints
+# were the remaining pods on their raw-TCP port.
+#
+# Loopback, because that is the table the retained virtual host was in; the
+# captured table of a port number is built from the declared ports alone.
+leg_T1() {
+	local name
+	name="$(mesh_name "$MOVE_NAME")"
+	log "T1 a declared port that stops being HTTP is refused at once: $MOVE_NAME moves from HTTP :$HTTP_PORT to raw TCP :$TCP_PORT"
+	loopback "$MOVE_MARKER_HTTP" "$name:$HTTP_PORT" "control: the service is not served on its HTTP port before the move"
+
+	deploy_workload "$MOVE_NAME" "$TCP_PORT" tcp "$TCP_PORT" "http:$HTTP_PORT:$MOVE_MARKER_HTTP" "tcp:$TCP_PORT:$MOVE_MARKER_TCP"
+	kc -n "$TEST_NS" rollout status "deploy/$MOVE_NAME" --timeout=180s >/dev/null ||
+		die "T1: $MOVE_NAME never finished its rollout"
+
+	expect "loopback, Host $name:$HTTP_PORT within ${T1_WINDOW}s of the move" "HTTP421:port-not-declared" "$T1_WINDOW" "$A_PROBES" \
+		"HTTP502/503 or $MOVE_MARKER_HTTP for that long is the retained HTTP cluster and virtual host of a port the service's own rows no longer declare" \
+		http_tokens client-nocapture "$LOOPBACK_URL" "$name:$HTTP_PORT"
+	expect "raw TCP to $name:$TCP_PORT" "$MOVE_MARKER_TCP" 90 "$A_PROBES" \
+		"NOREPLY means the port the service now declares has no chain or no tcp: cluster" \
+		tcp_tokens "$name:$TCP_PORT" line
 }
 
 # reserved_pod PORT — a mesh pod that declares PORT, for an admission dry run.

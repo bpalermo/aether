@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"log/slog"
 
+	"aethermesh.dev/registry/endpointmeta"
+
 	registrarv1 "aethermesh.dev/api/aether/registrar/v1"
 	"aethermesh.dev/common/grpcserver"
 	commonlog "aethermesh.dev/common/log"
@@ -106,6 +108,17 @@ func NewRegistrarServer(
 // and failures fail the RPC.
 func (s *RegistrarServer) RegisterEndpoint(ctx context.Context, req *registrarv1.RegisterEndpointRequest) (*registrarv1.RegisterEndpointResponse, error) {
 	s.log.DebugContext(ctx, "RegisterEndpoint", "service", req.GetServiceName(), "ip", req.GetEndpoint().GetIp())
+
+	// A row that does not say the protocol of each of its ports is refused at
+	// the API, on every backend (proposal 043: port_protocols is required).
+	// Before the write-behind queue: an intent that will never be stored
+	// must not be broadcast either.
+	if problem := endpointmeta.RowProblem(req.GetEndpoint()); problem != "" {
+		s.metrics.rowRefused(ctx, problem)
+		s.log.WarnContext(ctx, "refused a registration: the row does not say the protocol of each of its ports (port_protocols is required)",
+			"service", req.GetServiceName(), "cluster", req.GetEndpoint().GetClusterName(), "ip", req.GetEndpoint().GetIp(), "reason", problem)
+		return nil, status.Errorf(codes.InvalidArgument, "%v: %s", endpointmeta.ErrRowNotTyped, problem)
+	}
 
 	if s.writeBehind != nil {
 		s.writeBehind.EnqueueRegister(req.GetServiceName(), req.GetProtocol(), req.GetEndpoint())

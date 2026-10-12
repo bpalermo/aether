@@ -13,6 +13,8 @@ import (
 	"strings"
 	"testing"
 
+	"aethermesh.dev/registry/endpointmeta"
+
 	registryv1 "aethermesh.dev/api/aether/registry/v1"
 	"aethermesh.dev/common/serviceref"
 )
@@ -119,6 +121,12 @@ func compareRowIdentity(a, b rowIdentity) int {
 // row, and records the listing it was seen in for rule 3.
 func requirePerPortRow(t testing.TB, seen map[rowIdentity]*rowSighting, protocol registryv1.Service_Protocol, key string, ep *registryv1.ServiceEndpoint) {
 	t.Helper()
+	if problem := endpointmeta.RowProblem(ep); problem != "" {
+		t.Errorf("service %q endpoint %s is listed with a row that does not say the protocol of each of its ports (%s; port=%d ports=%v port_protocols=%v): port_protocols is required, and a backend must neither store nor derive such a row",
+			key, ep.GetIp(), problem, ep.GetPort(), ep.GetPorts(), ep.GetPortProtocols())
+		// Nothing else can be said of a row that does not say what it serves.
+		return
+	}
 	if !servesClass(ep, protocol) {
 		t.Errorf("service %q endpoint %s is listed under %v but advertises no %v port (port_protocols=%v)",
 			key, ep.GetIp(), protocol, protocol, ep.GetPortProtocols())
@@ -171,12 +179,9 @@ func requireListedUnderEveryClass(t testing.TB, listings map[registryv1.Service_
 }
 
 // servesClass reports whether ep advertises a port of the class protocol
-// names. An empty port_protocols is a row from before the field existed and
-// serves whatever listing it is in.
+// names. A row with no port_protocols advertises none: the field is required,
+// and no backend may list such a row (requirePerPortRow says so first).
 func servesClass(ep *registryv1.ServiceEndpoint, protocol registryv1.Service_Protocol) bool {
-	if len(ep.GetPortProtocols()) == 0 {
-		return true
-	}
 	for _, class := range ep.GetPortProtocols() {
 		// The two enums are numerically identical (endpointmeta pins it).
 		if registryv1.Service_Protocol(class) == protocol {

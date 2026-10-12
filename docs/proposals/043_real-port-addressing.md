@@ -830,6 +830,62 @@ where they met another feature:
 - *One limit*: a service known by name only whose route has a backendRef (the
   mixed-version window with a chart 2.6 registrar). See the runbook.
 
+**2026-10-12: `port_protocols` is required.** A registry row that does not
+name every port it lists, each with a protocol, is not served: no endpoint, no
+port, no class, on any path. The fallback this replaces ("a row without the
+field, and a port its map does not name, take the protocol of the listing the
+row was read from") had three readers that had to agree (the agent's port
+derivation, its HTTP membership test, the registrar's Service generator) and
+existed for rows written before proposal 037; no writer since chart `0.93.2`
+produces one.
+
+- *Where it is enforced.* One definition (`endpointmeta.RowProblem`). A write
+  is refused at the registrar's `RegisterEndpoint`, whatever the backend, and
+  by the etcd backend and the registrar client themselves. A row already in
+  etcd is **filtered at the registrar** when it lists the store (chosen over
+  listing it and leaving every reader to refuse it: the snapshot the agents
+  watch and the Service generator are both fed from that one read). An agent
+  drops one it is handed anyway, in the one place every refresh reads the
+  registry through. Each of the three says so once per row and counts it by
+  reason.
+- *The kubernetes backend* stores nothing and derives each row from the pod's
+  annotations with the parser the agent registers with, which names every
+  port; a test walks the annotation shapes and holds that.
+- *Other clusters.* A peer's row without the field, in a shared or mirrored
+  etcd, is not served by a cluster of this release; the peer is unaffected.
+
+**2026-10-12: a retained HTTP virtual host is kept against a removal and
+replaced at once against a replacement.** The grace of #1635 (the cluster and
+virtual host of a service whose HTTP rows left the registry stay, empty, for
+90 s) is for a loss with nothing saying what the service is now. With positive
+evidence of the service's shape that no longer declares the port as HTTP, the
+entry and its virtual host go in the same refresh and the port is answered by
+what the evidence says, same number or another. No HTTP request is delivered
+to an endpoint whose row does not declare that port as HTTP, grace or not.
+
+- *The evidence*, in order: the rows the refresh lists of the service under any
+  protocol (they are typed, by the ruling above); with no row, the real ports
+  of its generated Service when it declares any. A Service whose last endpoint
+  left declares none and is no evidence.
+- *What this changed in #1635's own tests.* The cases with no evidence (every
+  listing of the service gone) are as they were. "The HTTP listing goes and
+  the raw-TCP or UDP one stays" is a replacement by this ruling's definition:
+  the rows that stay do not declare the HTTP port. Kept for the grace, the HTTP
+  cluster resolved its endpoints through the bare service name, which the live
+  floor publishes, so requests reached the remaining pods on a port they do not
+  serve as HTTP; those tests pinned exactly that as "the port alias and the
+  QUIC twin carry the live endpoints". They now expect the entry gone and keep
+  their assertions on the one load assignment per name.
+- *The state that cannot be told apart.* A registry that returns no HTTP row
+  for a service while returning its rows under another protocol is read as the
+  truth. Were it a fault of the registry, the port is refused until the rows
+  are back. A listing that errors abandons the refresh and changes nothing.
+- *The Service as evidence can be older than the entry.* It is derived from
+  the registry by the registrar and read by the agent on another path; an
+  agent that has seen a newer registry state than the Service reflects can
+  replace an entry on the Service's older word, until the Service catches up.
+  Not measured; the window is the registrar's reconcile lag.
+
 ## Phases
 
 Chart versions follow the compatibility window (`AGENTS.md`, *Compatibility

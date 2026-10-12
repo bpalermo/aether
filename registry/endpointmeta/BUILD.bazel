@@ -19,6 +19,7 @@ go_test(
     srcs = [
         "portprotocol_test.go",
         "portprotocols_test.go",
+        "rowproblem_test.go",
     ],
     embed = [":endpointmeta"],
     deps = [

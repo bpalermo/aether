@@ -8,6 +8,8 @@ import (
 	"testing"
 	"time"
 
+	"aethermesh.dev/registry/registrytest"
+
 	registrarv1 "aethermesh.dev/api/aether/registrar/v1"
 	registryv1 "aethermesh.dev/api/aether/registry/v1"
 	"aethermesh.dev/registry"
@@ -53,7 +55,7 @@ func newGateTestServer(t *testing.T) *RegistrarServer {
 		Type:        registrarv1.WatchEndpointsResponse_EVENT_TYPE_ENDPOINT_ADDED,
 		ServiceName: "svc-a",
 		Protocol:    registryv1.Service_PROTOCOL_HTTP,
-		Endpoint:    &registryv1.ServiceEndpoint{Ip: "10.0.0.1"},
+		Endpoint:    registrytest.Typed(&registryv1.ServiceEndpoint{Ip: "10.0.0.1"}, registryv1.Service_PROTOCOL_HTTP),
 	}})
 	return NewRegistrarServer(nil, snap, NewBroadcaster(slog.New(slog.DiscardHandler), nil), "127.0.0.1:0", slog.New(slog.DiscardHandler), nil)
 }
@@ -141,7 +143,7 @@ func TestRegisterEndpointSnapshotFirst(t *testing.T) {
 	_, err := s.RegisterEndpoint(context.Background(), &registrarv1.RegisterEndpointRequest{
 		ServiceName: "svc-new",
 		Protocol:    registryv1.Service_PROTOCOL_HTTP,
-		Endpoint:    &registryv1.ServiceEndpoint{Ip: "10.0.0.9"},
+		Endpoint:    registrytest.Typed(&registryv1.ServiceEndpoint{Ip: "10.0.0.9"}, registryv1.Service_PROTOCOL_HTTP),
 	})
 	require.NoError(t, err, "external-registry failure must not fail the RPC")
 
@@ -161,13 +163,13 @@ func TestWatchEndpointsFilteredSnapshot(t *testing.T) {
 			Type:        registrarv1.WatchEndpointsResponse_EVENT_TYPE_ENDPOINT_ADDED,
 			ServiceName: "svc-a",
 			Protocol:    registryv1.Service_PROTOCOL_HTTP,
-			Endpoint:    &registryv1.ServiceEndpoint{Ip: "10.0.0.1"},
+			Endpoint:    registrytest.Typed(&registryv1.ServiceEndpoint{Ip: "10.0.0.1"}, registryv1.Service_PROTOCOL_HTTP),
 		},
 		{
 			Type:        registrarv1.WatchEndpointsResponse_EVENT_TYPE_ENDPOINT_ADDED,
 			ServiceName: "svc-b",
 			Protocol:    registryv1.Service_PROTOCOL_HTTP,
-			Endpoint:    &registryv1.ServiceEndpoint{Ip: "10.0.0.2"},
+			Endpoint:    registrytest.Typed(&registryv1.ServiceEndpoint{Ip: "10.0.0.2"}, registryv1.Service_PROTOCOL_HTTP),
 		},
 	})
 	s := NewRegistrarServer(nil, snap, NewBroadcaster(slog.New(slog.DiscardHandler), nil), "127.0.0.1:0", slog.New(slog.DiscardHandler), nil)

@@ -397,6 +397,10 @@ func TestDuplicateResourceNames(t *testing.T) {
 // Now the retained entry publishes no load assignment under a name a live
 // entry publishes: the check is silent and what is published is the live one,
 // on every build. bare_cla_owner_1635_test.go pins the rule and its siblings.
+//
+// Since proposal 043 this input does not even retain the HTTP entry: the TCP
+// rows that stay say the service's port is raw TCP, which replaces the entry
+// at once (retentionEvidence). The check stays silent either way.
 func TestRetainedHTTPEntryBesideALiveTCPEntryIsNotADuplicate(t *testing.T) {
 	f := newReuseFixture(t)
 	rec := &recorder{}
@@ -420,7 +424,7 @@ func TestRetainedHTTPEntryBesideALiveTCPEntryIsNotADuplicate(t *testing.T) {
 		cla, ok := s.GetResources(resourcev3.EndpointType)["demo/db"].(*endpointv3.ClusterLoadAssignment)
 		require.True(t, ok)
 		require.Equal(t, 2, lbEndpoints(cla), "the live TCP listing's two endpoints, on every build")
-		require.Contains(t, s.GetResources(resourcev3.ClusterType), f.fqdn("demo/db"), "the h2 cluster is retained")
+		require.NotContains(t, s.GetResources(resourcev3.ClusterType), f.fqdn("demo/db"), "the h2 cluster of a port the rows declare raw TCP is replaced, not retained")
 	}
 
 	assert.Empty(t, rec.with(duplicateNamesMsg), "one load assignment per name: nothing to report")

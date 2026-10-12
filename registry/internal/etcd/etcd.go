@@ -22,6 +22,8 @@ import (
 	"sync/atomic"
 	"time"
 
+	"aethermesh.dev/registry/endpointmeta"
+
 	clientv3 "go.etcd.io/etcd/client/v3"
 	"google.golang.org/protobuf/proto"
 
@@ -250,6 +252,11 @@ func (r *EtcdRegistry) watchLoop(ctx context.Context, done chan<- struct{}) {
 // using protobuf and stored at:
 // <ownPrefix>/services/<serviceName>/protocols/<protocol>/endpoints/<ip>
 func (r *EtcdRegistry) RegisterEndpoint(ctx context.Context, serviceName string, protocol registryv1.Service_Protocol, endpoint *registryv1.ServiceEndpoint) error {
+	// A row that does not say the protocol of each of its ports is not
+	// written (proposal 043: port_protocols is required).
+	if err := endpointmeta.CheckRow(endpoint); err != nil {
+		return err
+	}
 	ip := endpoint.GetIp()
 	r.log.DebugContext(
 		ctx,

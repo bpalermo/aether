@@ -11,6 +11,8 @@ import (
 	"fmt"
 	"sync"
 
+	"aethermesh.dev/registry/endpointmeta"
+
 	"aethermesh.dev/common/udspath"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/metric"
@@ -175,6 +177,11 @@ type Metrics struct {
 	upstreamsDeclared metric.Int64Gauge
 	// upstreamsObserved is the number of live ODCDS-observed dependencies.
 	upstreamsObserved metric.Int64Gauge
+	// registryRowsRefused counts registry rows the agent did not serve
+	// because they do not say the protocol of each of their ports
+	// (port_protocols is required, proposal 043), by reason. Counted once per
+	// row for as long as it is listed, not once per refresh.
+	registryRowsRefused metric.Int64Counter
 	// upstreamsMiss counts ODCDS requests for services outside the node
 	// dependency set — each is an undeclared upstream that should be
 	// promoted to a config.aether.io/upstreams annotation.
@@ -389,6 +396,10 @@ func (m *Metrics) registerActivityInstruments(meter metric.Meter) error {
 		metric.WithDescription("Live ODCDS-observed dependencies in the node dependency set")); err != nil {
 		return fmt.Errorf("upstreams observed: %w", err)
 	}
+	if m.registryRowsRefused, err = meter.Int64Counter("aether.agent.registry.rows_refused",
+		metric.WithDescription("Registry rows not served because they do not say the protocol of each of their ports (port_protocols is required), by reason; once per row")); err != nil {
+		return fmt.Errorf("registry rows refused: %w", err)
+	}
 	if m.upstreamsMiss, err = meter.Int64Counter("aether.agent.upstreams.miss",
 		metric.WithDescription("ODCDS requests for services outside the node dependency set (undeclared upstreams; promote to annotations)")); err != nil {
 		return fmt.Errorf("upstreams miss: %w", err)
@@ -526,6 +537,10 @@ func (m *Metrics) seedAnomalyCounters() {
 	}
 	m.udpRouteUnsupported.Add(ctx, 0)
 	m.udpNoHealthyBackend.Add(ctx, 0)
+	// One series per reason: "no row was refused" is a zero, not an absence.
+	for _, reason := range []string{endpointmeta.RowNoPortProtocols, endpointmeta.RowPortNotTyped} {
+		m.registryRowsRefused.Add(ctx, 0, metric.WithAttributes(attribute.String("reason", reason)))
+	}
 	m.versionMemoMismatch.Add(ctx, 0)
 	m.duplicateResourceNames.Add(ctx, 0)
 	// One series per reason, so a grader can ask for reason="not_csi" and get
@@ -699,6 +714,15 @@ func (m *Metrics) SnapshotShape(ctx context.Context, clusters, declared, observe
 	m.clusters.Record(ctx, int64(clusters))
 	m.upstreamsDeclared.Record(ctx, int64(declared))
 	m.upstreamsObserved.Record(ctx, int64(observed))
+}
+
+// RegistryRowRefused counts one registry row that is not served, by reason
+// (endpointmeta.RowProblem). The row's identity is logged, not a label.
+func (m *Metrics) RegistryRowRefused(ctx context.Context, reason string) {
+	if m == nil {
+		return
+	}
+	m.registryRowsRefused.Add(ctx, 1, metric.WithAttributes(attribute.String("reason", reason)))
 }
 
 // UpstreamMiss counts one ODCDS miss. The service name is deliberately NOT a

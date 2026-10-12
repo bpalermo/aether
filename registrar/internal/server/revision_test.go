@@ -69,7 +69,7 @@ func clean(rev int64, st State) string {
 }
 
 func ep(ip string) *registryv1.ServiceEndpoint {
-	return &registryv1.ServiceEndpoint{Ip: ip, Port: 8080}
+	return &registryv1.ServiceEndpoint{Ip: ip, Port: 8080, PortProtocols: map[uint32]registryv1.PortProtocol{8080: registryv1.PortProtocol_PORT_PROTOCOL_HTTP}}
 }
 
 func newRevisionedSyncer(reg registry.Registry) (*Syncer, *Snapshot) {

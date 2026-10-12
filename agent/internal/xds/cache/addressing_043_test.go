@@ -1072,22 +1072,35 @@ func TestServicePorts_Derivation(t *testing.T) {
 		assert.Empty(t, got.http)
 	})
 
-	t.Run("a row written before proposal 037 takes its listing's class", func(t *testing.T) {
-		got := deriveServicePorts(lst(sTCP, ep("10.0.0.1", 9000, nil)))
-		assert.Equal(t, []uint32{9000}, got.tcp)
-		assert.Equal(t, uint32(9000), got.legacyTCPPort())
-		got = deriveServicePorts(lst(sUDP, ep("10.0.0.1", 5353, nil)))
-		assert.Equal(t, []uint32{5353}, got.udp)
-		got = deriveServicePorts(lst(registryv1.Service_PROTOCOL_UNSPECIFIED, ep("10.0.0.1", 8080, nil, 8080, 9090)))
-		assert.Equal(t, []uint32{8080, 9090}, got.http)
-		assert.Equal(t, uint32(8080), got.legacyHTTPPort())
+	// port_protocols is required. A row without it used to take the class
+	// of the listing it was read from ("written before proposal 037"); it
+	// now declares nothing, on any listing.
+	t.Run("a row without port_protocols declares nothing, whatever its listing", func(t *testing.T) {
+		for _, c := range []struct {
+			p   registryv1.Service_Protocol
+			row *registryv1.ServiceEndpoint
+		}{
+			{sTCP, ep("10.0.0.1", 9000, nil)},
+			{sUDP, ep("10.0.0.1", 5353, nil)},
+			{sHTTP, ep("10.0.0.1", 8080, nil, 8080, 9090)},
+			{registryv1.Service_PROTOCOL_UNSPECIFIED, ep("10.0.0.1", 8080, nil, 8080, 9090)},
+		} {
+			got := deriveServicePorts(lst(c.p, c.row))
+			assert.Emptyf(t, got.http, "%s listing: an untyped row took the class of its listing", c.p)
+			assert.Emptyf(t, got.tcp, "%s listing: an untyped row took the class of its listing", c.p)
+			assert.Emptyf(t, got.udp, "%s listing: an untyped row took the class of its listing", c.p)
+			assert.Zero(t, got.legacyHTTPPort())
+			assert.Zero(t, got.legacyTCPPort())
+		}
 	})
 
-	t.Run("a port the map does not name takes the listing's class; an unusable port is dropped", func(t *testing.T) {
+	t.Run("a port the map does not name is no port of the row; an unusable port is dropped", func(t *testing.T) {
 		row := ep("10.0.0.1", 9000, map[uint32]registryv1.PortProtocol{8080: h, 70000: h, 0: h}, 9000, 8080)
 		got := deriveServicePorts(lst(sTCP, row))
 		assert.Empty(t, got.http, "8080 is named http, and no HTTP listing holds the pod")
-		assert.Equal(t, []uint32{9000}, got.tcp, "9000 is not named: the listing's class; 0 and 70000 are no ports")
+		assert.Empty(t, got.tcp, "9000 is not named: it has no class, and the listing lends it none")
+		got = deriveServicePorts(lst(sHTTP, row))
+		assert.Equal(t, []uint32{8080}, got.http, "0 and 70000 are no ports")
 	})
 
 	t.Run("a class conflict: most endpoints win, in any order", func(t *testing.T) {
@@ -1130,7 +1143,7 @@ func TestServicePorts_Derivation(t *testing.T) {
 			assert.Equal(t, uint32(8080), port, "tied: http first")
 			assert.Equal(t, h, class)
 		}
-		lo, hi := ep("10.0.0.5", 8080, nil), ep("10.0.0.6", 9090, nil)
+		lo, hi := ep("10.0.0.5", 8080, map[uint32]registryv1.PortProtocol{8080: h}), ep("10.0.0.6", 9090, map[uint32]registryv1.PortProtocol{9090: h})
 		for _, order := range [][]*registryv1.ServiceEndpoint{{lo, hi}, {hi, lo}} {
 			port, _ := legacyTarget(lst(sHTTP, order...))
 			assert.Equal(t, uint32(8080), port, "tied on class: the lower port")

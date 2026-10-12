@@ -4371,6 +4371,118 @@ port".
 The harness contract (`test/harnesscontract/external-harness.yaml`) is version
 4: its `envoy_stats` list is empty, the entry for this counter is removed.
 
+##### BREAKING: a registry row must say the protocol of each of its ports
+
+`port_protocols` on a registry endpoint is **required**. A row is served only
+when it names every port it lists (`port`, `ports`), each with a protocol. A
+row that does not is not served by anything: no endpoint, no port, no class,
+on the HTTP path, the raw-TCP and UDP floors, the QUIC twins, the edge and the
+waypoint alike. Through the previous chart such a row took the protocol of the
+registry key it was stored under, for every port; nothing reads a protocol off
+a key or a listing any more.
+
+**Who writes such a row.** No node agent since chart `0.93.2` (the release
+that added the field): the agent and the `kubernetes` backend build a row from
+one parser, which names the declared port and every port of
+`endpoint.aether.io/ports`. A row without the field was written by an agent
+older than that and never rewritten, or by something other than aether writing
+to the registrar API or to etcd.
+
+**What happens to one, and where it shows:**
+
+| Where | What happens | How it shows |
+|---|---|---|
+| A write (`RegisterEndpoint`, every backend) | refused, `INVALID_ARGUMENT`; nothing stored, nothing sent to agents | registrar WARN `refused a registration: the row does not say the protocol of each of its ports` with `service`, `cluster`, `ip`, `reason`; counter `aether_registrar_rows_refused_total{reason}` |
+| Already in etcd (before the upgrade, or written there by a peer cluster's older registrar) | **filtered by the registrar**: it stays in etcd and is in no listing the agents watch or the Service generator reads | registrar WARN `a stored registry row is not served` once per row (not once per sync), INFO `no stored registry row is without port_protocols any more` when the last is gone; gauge `aether_registrar_rows_untyped{reason}` (0 = none) |
+| Handed to an agent anyway (a registrar of the previous chart during the roll) | dropped by the agent before anything is built from it | agent WARN `a registry row is not served` once per row; counter `aether_agent_registry_rows_refused_total{reason}` |
+
+`reason` is `no_port_protocols` (the row carries none) or `port_not_typed` (it
+lists a port its map does not name, or names with no protocol).
+
+The `kubernetes` backend stores nothing and derives every row from a pod's
+annotations at each listing, so it cannot hold such a row. A pod whose
+annotations do not parse is in no listing there, as before (WARN `pod has an
+invalid protocol or ports annotation`).
+
+**Before upgrading, count them.**
+
+- `kubernetes` backend: nothing to count (see above).
+- `etcd` backend: the values are binary protobuf, so the check decodes each
+  one and looks for field 12 (`port_protocols`). With `etcdctl` pointed at the
+  registry's etcd and `protoc` on the path:
+
+  ```bash
+  PREFIX=/aether/v1/regions        # the registry's root in etcd
+  etcdctl get --prefix "$PREFIX" --keys-only | grep '/endpoints/' |
+    while read -r key; do
+      etcdctl get "$key" --print-value-only </dev/null | head -c -1 |
+        protoc --decode_raw | grep -q '^12 {' || echo "$key"
+    done | tee untyped-rows.txt | wc -l
+  ```
+
+  It prints the number of rows that carry no `port_protocols` and leaves their
+  keys in `untyped-rows.txt`
+  (`.../clusters/<cluster>/ns/<ns>/services/<svc>/protocols/<PROTOCOL>/endpoints/<ip>`:
+  the cluster, the service and the pod IP are in the key). The prefix covers
+  every region and cluster that shares the etcd, so rows mirrored from a peer
+  are counted too. Expect `0`. (Checked against an etcd holding two rows with
+  the field and two without: it printed `2` and the two keys. It finds the
+  `no_port_protocols` rows; a row with an incomplete map is not found by it,
+  and no aether writer has produced one.)
+
+For each key it lists: if the pod exists, its node runs an agent older than
+`0.93.2`, or the pod was registered by one. Upgrade that node's agent first or
+restart the pod, and the row is rewritten. If no pod has that IP, the row is a
+leftover; it was never going to be served after the upgrade, and deleting the
+key is safe. After the upgrade, `aether_registrar_rows_untyped` is the same
+count, kept current.
+
+**Several clusters on one etcd, or a mirror.** A registrar of this chart
+filters what a peer wrote, whatever chart the peer runs; the peer is not told.
+A peer on a chart from `0.93.2` on writes rows with the field and sees no
+difference. A peer older than that keeps writing rows that this cluster does
+not serve: its services are missing here (the gauge above counts them) while
+they still work in the peer's own cluster and in clusters that have not
+upgraded. This cluster's rows always carry the field, so nothing changes for a
+peer that reads them.
+
+##### A port that stops being HTTP is refused at once; a service that vanishes keeps its grace
+
+When every HTTP endpoint of a service leaves the registry, the node keeps the
+service's cluster and virtual host, empty, for 90 s: a request is a retriable
+503, not a refusal, while a single-replica pod restarts (#1635). That is kept,
+for the case it exists for: **nothing says what the service is now**.
+
+It is no longer kept against evidence. If the node holds endpoints of the
+service that do not declare the port as HTTP (the service now serves another
+port, or that number as raw TCP or UDP), or holds none and its generated
+Service declares ports that do not include it as HTTP, the cluster and virtual
+host of that port go in the same refresh, and a request to it is answered
+`421` with `x-aether-error: port-not-declared` or `port-not-http`, like any
+port the service does not serve. The ports the evidence declares are routed in
+the same refresh. Before, such a request was sent for up to 90 s to the pods
+the service still had, on a port they do not serve as HTTP.
+
+What an operator can see change:
+
+- A service whose pods are not all alike (one pod serves HTTP on 8080, another
+  only raw TCP on 9000): while the HTTP pod restarts, `:8080` answers `421
+  port-not-declared` instead of 503. The registry says the service has no HTTP
+  port at that moment, and the node believes it. Clients that retry 503 and
+  not 421 see errors for the length of the restart. Give such a service two
+  replicas of each shape, or split it into two services.
+- A rollout that moves a port number (8080 to 9090): the old number is refused
+  as soon as the last pod declaring it is gone, not 90 s later.
+- The agent logs `HTTP cluster/vhost not retained: the service no longer
+  declares its port as HTTP` with `service`, `port` and `evidence`
+  (`listed endpoints` or `generated Service`).
+
+One state cannot be told apart and is treated as a replacement: the registry
+returns no HTTP row for a service while it still returns rows of the same
+service under another protocol. If that were a fault of the registry and not
+the truth, the HTTP port is refused until the next listing has the rows back.
+A listing that fails outright changes nothing (the refresh is abandoned).
+
 ##### The generated Service
 
 `kubectl get svc` on a generated mesh Service shows what the service serves:
@@ -4435,6 +4547,14 @@ side and this release on the other, both registry backends
 - **A client on a 2.7 node** is held to the new addressing from the moment its
   node's agent is 2.7, whatever version the destination's node runs: the
   refusals are decided by the source proxy.
+- **Registry rows across the mix.** Every 2.x agent writes rows with
+  `port_protocols`, so a not-yet-rolled agent's registrations are accepted by
+  the new registrar, and a rolled agent behind a held-back registrar serves
+  them. Only a row without the field is affected, in either mix: the new
+  registrar refuses or filters it, and a rolled agent drops one that an old
+  registrar still hands it (see "a registry row must say the protocol of each
+  of its ports"). Read from the code and unit-tested per component; no mixed
+  cluster was built with such a row in it.
 - **A 2.7 source and a 2.6 destination, or the reverse:** the hop between
   proxies is unchanged (not measured separately: both cells above mix
   versions only between agents and registrar, on one node).

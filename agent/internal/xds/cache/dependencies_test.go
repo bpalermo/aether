@@ -7,6 +7,8 @@ import (
 	"testing"
 	"time"
 
+	"aethermesh.dev/registry/registrytest"
+
 	"aethermesh.dev/agent/internal/xds/proxy"
 
 	xdsconst "aethermesh.dev/agent/internal/xds/xdsconst"
@@ -361,7 +363,7 @@ type catalogListerRegistry struct {
 func (c *catalogListerRegistry) HasService(name string) bool { return c.known[name] }
 func (c *catalogListerRegistry) ListEndpoints(_ context.Context, svc string, _ registryv1.Service_Protocol) ([]*registryv1.ServiceEndpoint, error) {
 	c.rpcCalls = append(c.rpcCalls, svc)
-	return c.perService[svc], nil
+	return registrytest.TypedRows(c.perService[svc], registryv1.Service_PROTOCOL_HTTP), nil
 }
 
 // TestLoadClustersFromRegistry_RPCFillsColdDependency verifies the first

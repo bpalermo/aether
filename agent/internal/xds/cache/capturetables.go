@@ -313,9 +313,8 @@ func (c *SnapshotCache) portsMap(in ruleInputs) map[string]servicePorts {
 // path, and not routed to the minority.
 func (c *SnapshotCache) outboundPortVhostLocked(svc, entryName string, port uint32, isDefault bool, in ruleInputs) *routev3.VirtualHost {
 	ports := c.portsMap(in)[svc]
-	// (A retained default entry whose port the service now declares raw TCP
-	// or UDP loses its virtual host in the retention step:
-	// dropUnservedVhostLocked.)
+	// (A retained entry whose port the service no longer declares as HTTP is
+	// not retained at all: retentionEvidence.)
 	if !isDefault && ports.known() && !ports.hasHTTP(port) {
 		return nil
 	}

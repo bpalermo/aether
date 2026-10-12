@@ -243,27 +243,19 @@ func (v portVotes) add(port uint32, class registryv1.Service_Protocol, voter str
 	v[port][class][voter] = struct{}{}
 }
 
-// declaredPorts returns what one row declares, port number -> class, when it
-// was read from listing.
-func declaredPorts(ep *registryv1.ServiceEndpoint, listing registryv1.Service_Protocol) map[uint32]registryv1.Service_Protocol {
+// declaredPorts returns what one row declares, port number -> class: what its
+// port_protocols says. A row with none, or a port it names with no class,
+// declares nothing (port_protocols is required; the registrar's sync filters
+// such rows before they reach here, and this is the same rule). The listing
+// the row was read from decides nothing: it used to be the class of a row
+// written before the field existed.
+func declaredPorts(ep *registryv1.ServiceEndpoint, _ registryv1.Service_Protocol) map[uint32]registryv1.Service_Protocol {
 	out := map[uint32]registryv1.Service_Protocol{}
-	if len(ep.GetPortProtocols()) > 0 {
-		for port, class := range ep.GetPortProtocols() {
-			out[port] = listing
-			if class != registryv1.PortProtocol_PORT_PROTOCOL_UNSPECIFIED {
-				// The two enums are numerically identical (endpointmeta pins it).
-				out[port] = registryv1.Service_Protocol(class)
-			}
+	for port, class := range ep.GetPortProtocols() {
+		if class != registryv1.PortProtocol_PORT_PROTOCOL_UNSPECIFIED {
+			// The two enums are numerically identical (endpointmeta pins it).
+			out[port] = registryv1.Service_Protocol(class)
 		}
-		return out
-	}
-	// A row from before port_protocols existed: its served set, or its one
-	// port, with the class of the listing.
-	if len(ep.GetPorts()) == 0 {
-		out[ep.GetPort()] = listing
-	}
-	for _, port := range ep.GetPorts() {
-		out[port] = listing
 	}
 	return out
 }
