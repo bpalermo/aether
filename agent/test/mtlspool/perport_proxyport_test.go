@@ -149,6 +149,22 @@ func TestPerPort_ParkedRequestOnTheProxyPortRunsTheChainFilter(t *testing.T) {
 	if first.status == 200 && !first.filter {
 		t.Errorf("the parked request was delivered to the backend (200) WITHOUT the service's chain filter: %s", first)
 	}
+	// Nor without its HTTPRoute's rule: the request resumes on a route of the
+	// service's own virtual host, the one the rule put there.
+	if !second.rule {
+		t.Errorf("control: the SECOND request did not carry the route rule's header either (%s)", second)
+	}
+	if first.status == 200 && !first.rule {
+		t.Errorf("the parked request was delivered to the backend (200) with the service's HTTPRoute rule SKIPPED: %s", first)
+	}
+	// A rule whose backendRef names no port of its Service answers 500 and
+	// reaches no backend, with the cluster held.
+	before := r.hits.Load()
+	invalid := ppGetPath(addr, host, ppInvalidPath)
+	t.Logf("a rule with an invalid backendRef                      -> %s", invalid)
+	if invalid.status != 500 || r.hits.Load() != before {
+		t.Errorf("an invalid backendRef: want 500 and no backend hit, got %s (%d hits)", invalid, r.hits.Load()-before)
+	}
 }
 
 // TestPerPort_ProxyPortAbsoluteForm measures, on the pinned proxy, what the

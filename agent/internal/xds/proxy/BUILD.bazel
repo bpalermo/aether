@@ -131,6 +131,7 @@ go_test(
         "inboundtcp_test.go",
         "ingress_quic_test.go",
         "ingress_test.go",
+        "invalidbackend_test.go",
         "l4observability_test.go",
         "l4route_test.go",
         "l4route_udp_matcher_test.go",
@@ -244,6 +245,7 @@ go_test(
         "outcome_test.go",
         "capture_perport_043_test.go",
         "route_perport_043_test.go",
+        "invalidbackend_test.go",
     ],
     deps = [
         "//agent/internal/xds/config",

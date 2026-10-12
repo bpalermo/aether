@@ -2,7 +2,10 @@ load("@rules_go//go:def.bzl", "go_library", "go_test")
 
 go_library(
     name = "gamma",
-    srcs = ["reconciler.go"],
+    srcs = [
+        "portstatus.go",
+        "reconciler.go",
+    ],
     importpath = "aethermesh.dev/agent/internal/gamma",
     visibility = ["//agent:__subpackages__"],
     deps = [
@@ -40,7 +43,9 @@ go_test(
     size = "small",
     srcs = [
         "ports_043_test.go",
+        "portstatus_test.go",
         "reconciler_test.go",
+        "stalestatus_test.go",
     ],
     embed = [":gamma"],
     deps = [

@@ -90,30 +90,46 @@ func rtpMark(v string) *proxy.GammaHeaderMutation {
 	return &proxy.GammaHeaderMutation{AddResponse: []proxy.GammaHeaderKV{{Name: "x-rv", Value: v}}}
 }
 
-// An HTTPRoute whose parentRef names port 80 (or 18081) of a GENERATED
-// Service: both are ports that Service has (the legacy ones), they lead to the
-// legacy target, and a backendRef naming them is resolved to the default
-// cluster. A parentRef naming them attaches the rule to nothing.
-func TestPerPort_ParentRefLegacyServicePort(t *testing.T) {
+// An HTTPRoute whose parentRef names port 80 or 18081 of a GENERATED Service
+// that does not declare it: neither is a port of the service (until chart
+// 2.7.0 both meant "the port the pods declare"). The rule attaches to NOTHING,
+// on either path, and the service answers as if the route did not exist. A
+// parentRef that names a real port still lands on it (the control).
+func TestPerPort_ParentRefThatIsNotAPortAttachesNowhere(t *testing.T) {
 	ctx := context.Background()
 	services := a043Fixture()
 	c := a043Cache(t, services)
 	c.SetServiceRoutes(map[string][]proxy.GammaRoute{
 		"demo/httponly": {{ParentPort: 80, Matches: []proxy.GammaMatch{{Prefix: "/"}}, HeaderMutation: rtpMark("p80")}},
-		"demo/multi":    {{ParentPort: 18081, Matches: []proxy.GammaMatch{{Prefix: "/"}}, HeaderMutation: rtpMark("p18081")}},
+		"demo/multi": {
+			{ParentPort: 18081, Matches: []proxy.GammaMatch{{Prefix: "/"}}, HeaderMutation: rtpMark("p18081")},
+			{ParentPort: 9090, Matches: []proxy.GammaMatch{{Prefix: "/"}}, HeaderMutation: rtpMark("p9090")},
+		},
+		// eighty DECLARES port 80: there it is a real port.
+		"demo/eighty": {{ParentPort: 80, Matches: []proxy.GammaMatch{{Prefix: "/"}}, HeaderMutation: rtpMark("e80")}},
 	})
-	c.SetRouteTargetPorts(map[string][]uint32{"demo/httponly": {80}, "demo/multi": {18081}})
+	c.SetRouteTargetPorts(map[string][]uint32{"demo/httponly": {80}, "demo/multi": {18081, 9090}, "demo/eighty": {80}})
 	require.NoError(t, c.LoadClustersFromRegistry(ctx, "cluster-1", "node-1", a043Registry(services)))
 	tables := a043Tables(t, c)
 
-	// The client dials http://httponly.demo/ (port 80 of the generated Service).
-	assert.Equal(t, []string{"p80"}, rtpMarks(t, tables["cap_http_80"], "httponly.demo"), "captured, dial :80, port-less Host")
-	assert.Equal(t, []string{"p80"}, rtpMarks(t, tables["cap_http_80"], "httponly.demo.svc.cluster.local:80"), "captured, dial :80, Host :80")
-	// Loopback, the port-less mesh name (what main attached every rule to).
-	assert.Equal(t, []string{"p80"}, rtpMarks(t, tables[proxy.OutboundHTTPRouteName], "httponly.demo.aether.internal"), "loopback, port-less")
-	// 18081.
-	assert.Equal(t, []string{"p18081"}, rtpMarks(t, tables["cap_http_18081"], "multi.demo.aether.internal:18081"), "captured, dial :18081")
-	assert.Equal(t, []string{"p18081"}, rtpMarks(t, tables[proxy.OutboundHTTPRouteName], "multi.demo.aether.internal"), "loopback, port-less")
+	for _, tc := range []struct{ table, host string }{
+		{"cap_http_80", "httponly.demo"},
+		{"cap_http_80", "httponly.demo.svc.cluster.local:80"},
+		{"cap_http_8080", "httponly.demo.aether.internal:8080"},
+		{proxy.OutboundHTTPRouteName, "httponly.demo.aether.internal"},
+		{proxy.OutboundHTTPRouteName, "httponly.demo.aether.internal:8080"},
+		{"cap_http_18081", "multi.demo.aether.internal:18081"},
+		{"cap_http_8080", "multi.demo.aether.internal:8080"},
+		{proxy.OutboundHTTPRouteName, "multi.demo.aether.internal"},
+		{proxy.OutboundHTTPRouteName, "multi.demo.aether.internal:8080"},
+	} {
+		assert.Emptyf(t, rtpMarks(t, tables[tc.table], tc.host), "%s, Host %s: a rule whose parentRef names no port of the service applied", tc.table, tc.host)
+	}
+	// The controls: a real port.
+	assert.Equal(t, []string{"p9090"}, rtpMarks(t, tables["cap_http_9090"], "multi.demo.aether.internal:9090"))
+	assert.Equal(t, []string{"p9090"}, rtpMarks(t, tables[proxy.OutboundHTTPRouteName], "multi.demo.aether.internal:9090"))
+	assert.Equal(t, []string{"e80"}, rtpMarks(t, tables["cap_http_80"], "eighty.demo.aether.internal"))
+	assert.Equal(t, []string{"e80"}, rtpMarks(t, tables[proxy.OutboundHTTPRouteName], "eighty.demo.aether.internal:80"))
 }
 
 // A rule imported from a peer cluster (026) carries neither port. It now
@@ -138,36 +154,117 @@ func TestPerPort_ImportedRuleTakesEveryPort(t *testing.T) {
 	}
 }
 
-// A backendRef port of a USER Service that cannot be resolved to a pod port
-// (the Service has no such port, or its targetPort is a name) keeps the
-// cluster the route had before backendRef ports were read, the backend's
-// default one. It was rendered as "<fqdn>:<SERVICE port>", which is the
-// cluster of another port whenever the pods declare that number as HTTP: the
-// request was then answered by a port the route never named.
-func TestPerPort_UnresolvableBackendPortNeverNamesAnotherPort(t *testing.T) {
+// A backendRef that names no HTTP port of its Service is INVALID: the request
+// is answered 500 (the Gateway API's answer for an invalid backendRef), on
+// both paths, and is never delivered to another port. Until chart 2.7.0 the
+// mesh HTTP port and an undeclared 80 meant "the port the pods declare", and
+// an unresolvable port fell back to the backend's default cluster: a request
+// was answered by a port the route never named. A NAMED targetPort is the one
+// case that cannot be refuted (the registry carries no port names) and keeps
+// the backend's default cluster.
+func TestPerPort_InvalidBackendRefAnswers500(t *testing.T) {
 	ctx := context.Background()
 	services := a043Fixture()
+	const multi = "multi.demo.aether.internal"
 	for name, tc := range map[string]struct {
-		portMap map[uint32]uint32
-		port    uint32
+		backendSvc string
+		portMap    map[uint32]uint32
+		port       uint32
+		want       uint32 // 500, or 0: routed to wantCluster
+		cluster    string
 	}{
-		// Service multi: port 9090 -> targetPort "admin" (a name).
-		"named targetPort": {map[uint32]uint32{9090: 0}, 9090},
-		// Service multi: only port 80 -> 9090. The route names 8080, which
-		// the Service does not have (and the pods do).
-		"no such Service port": {map[uint32]uint32{80: 9090}, 8080},
-		// The mesh HTTP port of a user Service that has no such port.
-		"18081 of a user Service": {map[uint32]uint32{80: 9090}, 18081},
+		"generated Service: a declared HTTP port (control)": {"demo/multi", nil, 9090, 0, multi + ":9090"},
+		"generated Service: an undeclared port":             {"demo/multi", nil, 7777, 500, ""},
+		"generated Service: the mesh HTTP port":             {"demo/multi", nil, 18081, 500, ""},
+		"generated Service: an undeclared 80":               {"demo/multi", nil, 80, 500, ""},
+		"generated Service: a raw-TCP port":                 {"demo/mixed", nil, 9000, 500, ""},
+		"user Service: a port that maps to an HTTP port":    {"demo/multi", map[uint32]uint32{80: 9090}, 80, 0, multi + ":9090"},
+		"user Service: no such port, though pods serve it":  {"demo/multi", map[uint32]uint32{80: 9090}, 8080, 500, ""},
+		"user Service: 18081":                               {"demo/multi", map[uint32]uint32{80: 9090}, 18081, 500, ""},
+		"user Service: a targetPort the pods do not serve":  {"demo/multi", map[uint32]uint32{443: 8443}, 443, 500, ""},
+		"user Service: a named targetPort":                  {"demo/multi", map[uint32]uint32{9090: 0}, 9090, 0, multi},
 	} {
 		t.Run(name, func(t *testing.T) {
 			c := a043Cache(t, services)
-			c.SetServicePortMaps(map[string]map[uint32]uint32{"demo/multi": tc.portMap})
+			if tc.portMap != nil {
+				c.SetServicePortMaps(map[string]map[uint32]uint32{tc.backendSvc: tc.portMap})
+			}
 			c.SetServiceRoutes(map[string][]proxy.GammaRoute{
-				"demo/httponly": {{Backends: []proxy.GammaBackend{{Service: "demo/multi", Cluster: "multi.demo.aether.internal", Port: tc.port, Weight: 1}}}},
+				"demo/httponly": {{Backends: []proxy.GammaBackend{{Service: tc.backendSvc, Cluster: proxy.ServiceClusterName(tc.backendSvc, a043Mesh), Port: tc.port, Weight: 1}}}},
 			})
 			require.NoError(t, c.LoadClustersFromRegistry(ctx, "cluster-1", "node-1", a043Registry(services)))
-			got := a043Resolve(t, a043Tables(t, c)["cap_http_8080"], "httponly.demo.aether.internal:8080")
-			assert.Equal(t, "multi.demo.aether.internal", got.cluster, "the projected cluster, not the cluster of whatever pod port has the Service port's number")
+			tables := a043Tables(t, c)
+			for _, at := range []struct{ table, host string }{
+				{"cap_http_8080", "httponly.demo.aether.internal:8080"},
+				{proxy.OutboundHTTPRouteName, "httponly.demo.aether.internal:8080"},
+				{proxy.OutboundHTTPRouteName, "httponly.demo.aether.internal"},
+			} {
+				got := a043Resolve(t, tables[at.table], at.host)
+				assert.Equalf(t, tc.want, got.status, "%s, Host %s: %+v", at.table, at.host, got)
+				if tc.want == 0 {
+					assert.Equalf(t, tc.cluster, got.cluster, "%s, Host %s", at.table, at.host)
+				} else {
+					assert.Emptyf(t, got.cluster, "%s, Host %s: an invalid backendRef was routed", at.table, at.host)
+				}
+			}
+		})
+	}
+}
+
+// TestPerPort_InvalidBackendRefIsWeighted: a rule with one valid and one
+// invalid backendRef answers 500 for the invalid one's share of the weight and
+// sends the rest to the valid backend alone. With weight 0 the invalid one
+// takes nothing.
+func TestPerPort_InvalidBackendRefIsWeighted(t *testing.T) {
+	ctx := context.Background()
+	services := a043Fixture()
+	const multi = "multi.demo.aether.internal"
+	for _, tc := range []struct {
+		name           string
+		valid, invalid uint32
+		wantPPM        uint32 // of 1_000_000 requests answered 500; 0 = no 500 route
+	}{
+		{"one in four", 3, 1, 250_000},
+		{"nine in ten", 1, 9, 900_000},
+		{"an invalid backendRef of weight 0 takes nothing", 1, 0, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := a043Cache(t, services)
+			c.SetServiceRoutes(map[string][]proxy.GammaRoute{"demo/httponly": {{Backends: []proxy.GammaBackend{
+				{Service: "demo/multi", Cluster: multi, Port: 9090, Weight: tc.valid},
+				{Service: "demo/multi", Cluster: multi, Port: 7777, Weight: tc.invalid},
+			}}}})
+			require.NoError(t, c.LoadClustersFromRegistry(ctx, "cluster-1", "node-1", a043Registry(services)))
+			for _, table := range []string{"cap_http_8080", proxy.OutboundHTTPRouteName} {
+				vh := findVHost(a043Tables(t, c)[table].GetVirtualHosts(), "httponly.demo.aether.internal:8080")
+				require.NotNil(t, vh, table)
+				var refused, routed []*routev3.Route
+				for _, r := range vh.GetRoutes() {
+					switch {
+					case r.GetDirectResponse().GetStatus() == 500:
+						refused = append(refused, r)
+					case r.GetRoute() != nil:
+						routed = append(routed, r)
+					}
+				}
+				if tc.wantPPM == 0 {
+					assert.Empty(t, refused, table)
+				} else if assert.Len(t, refused, 1, table) {
+					frac := refused[0].GetMatch().GetRuntimeFraction().GetDefaultValue()
+					assert.Equal(t, tc.wantPPM, frac.GetNumerator(), table)
+					assert.Equal(t, "MILLION", frac.GetDenominator().String(), table)
+					assert.Same(t, vh.GetRoutes()[0], refused[0], "the 500 stands before the rule's own route")
+				}
+				// The rule's own route names the valid backend alone, and no
+				// route of the virtual host names a cluster of the invalid port.
+				require.NotEmpty(t, routed, table)
+				assert.Equal(t, multi+":9090", routed[0].GetRoute().GetCluster(), table)
+				for _, r := range routed {
+					for _, wc := range r.GetRoute().GetWeightedClusters().GetClusters() {
+						assert.NotContains(t, wc.GetName(), "7777", table)
+					}
+				}
+			}
 		})
 	}
 }

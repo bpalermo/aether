@@ -127,6 +127,7 @@ go_test(
         "odcds_test.go",
         "outbound_mtls_test.go",
         "outboundroute_test.go",
+        "perport_coldroutes_043_test.go",
         "perport_filters_043_test.go",
         "perport_routes_043_test.go",
         "perport_shapes_043_test.go",

@@ -18,6 +18,7 @@ import (
 	routev3 "github.com/envoyproxy/go-control-plane/envoy/config/route/v3"
 	previoushostsv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/retry/host/previous_hosts/v3"
 	matcherv3 "github.com/envoyproxy/go-control-plane/envoy/type/matcher/v3"
+	typev3 "github.com/envoyproxy/go-control-plane/envoy/type/v3"
 	"google.golang.org/protobuf/types/known/anypb"
 	"google.golang.org/protobuf/types/known/durationpb"
 	"google.golang.org/protobuf/types/known/wrapperspb"
@@ -245,20 +246,14 @@ func buildOnDemandCatchAllVirtualHost(onDemandAuthorityRegex string, passthrough
 // service's virtual host; a request the catch-all parked resumes on the
 // catch-all's route and was delivered with that filter skipped. The caller
 // applies the filter to what this returns.
-func BuildOnDemandServiceVirtualHost(name string, domains []string) *routev3.VirtualHost {
-	return &routev3.VirtualHost{
-		Name:    name,
-		Domains: domains,
-		Routes: []*routev3.Route{stripOutcomeHeader(&routev3.Route{
-			Match: &routev3.RouteMatch{PathSpecifier: &routev3.RouteMatch_Prefix{Prefix: "/"}},
-			Action: &routev3.Route_Route{
-				Route: &routev3.RouteAction{
-					ClusterSpecifier: &routev3.RouteAction_ClusterHeader{ClusterHeader: onDemandClusterHeader},
-					RetryPolicy:      outboundRetryPolicy(),
-				},
-			},
-		})},
-	}
+//
+// rules are the service's route rules that apply to these authorities. Their
+// routes come first, as on the service's real virtual host, so a request that
+// was parked is matched, filtered and sent to the rule's backends exactly as
+// one that arrives later; a rule with no backendRef routes to the cluster the
+// authority names.
+func BuildOnDemandServiceVirtualHost(name string, domains []string, rules []GammaRoute) *routev3.VirtualHost {
+	return buildRuleVirtualHost(name, "", domains, rules)
 }
 
 // BuildCaptureCatchAllVirtualHost builds the "*" virtual host of ONE capture
@@ -469,6 +464,12 @@ type GammaBackend struct {
 	Cluster string
 	Weight  uint32
 	Port    uint32
+	// Invalid marks a backendRef that names no HTTP port of its Service (the
+	// Service has no such port, or the port is not HTTP). Its share of the
+	// rule's traffic is answered 500, as the Gateway API specifies for an
+	// invalid backendRef; it is never delivered to another port. Set by the
+	// snapshot cache when it resolves the backend's port, not by a projector.
+	Invalid bool
 }
 
 // GammaHeaderMutation describes the header modifications carried by one
@@ -549,12 +550,11 @@ func buildRuleVirtualHost(vhostName, name string, domains []string, rules []Gamm
 	for _, s := range scored {
 		routes = append(routes, s.route)
 	}
+	fallback := &routev3.RouteAction{RetryPolicy: outboundRetryPolicy()}
+	setServiceCluster(fallback, name)
 	routes = append(routes, stripOutcomeHeader(&routev3.Route{
-		Match: &routev3.RouteMatch{PathSpecifier: &routev3.RouteMatch_Prefix{Prefix: "/"}},
-		Action: &routev3.Route_Route{Route: &routev3.RouteAction{
-			ClusterSpecifier: &routev3.RouteAction_Cluster{Cluster: name},
-			RetryPolicy:      outboundRetryPolicy(),
-		}},
+		Match:  &routev3.RouteMatch{PathSpecifier: &routev3.RouteMatch_Prefix{Prefix: "/"}},
+		Action: &routev3.Route_Route{Route: fallback},
 	}))
 	return &routev3.VirtualHost{Name: vhostName, Domains: domains, Routes: routes}
 }
@@ -573,30 +573,133 @@ func buildScoredRoutes(name string, rules []GammaRoute) []scoredRoute {
 		if len(matches) == 0 {
 			matches = []GammaMatch{{Prefix: "/"}}
 		}
-		reqAdd, respAdd, reqRemove, respRemove := headerMutationFields(rule.HeaderMutation)
+		// Once per rule: every match of the rule shares its backends.
+		refusal := invalidBackendRefusal(&rule)
 		for _, m := range matches {
-			r := &routev3.Route{
-				Match:                   gammaRouteMatch(m),
-				RequestHeadersToAdd:     reqAdd,
-				RequestHeadersToRemove:  reqRemove,
-				ResponseHeadersToAdd:    respAdd,
-				ResponseHeadersToRemove: respRemove,
-				TypedPerFilterConfig:    extensionPerFilterConfig(rule.ExtensionFilters),
+			key := gammaMatchSpecificity(m)
+			if refused := refusal.route(m); refused != nil {
+				scored = append(scored, scoredRoute{route: refused, key: key})
 			}
-			if rule.Redirect != nil {
-				r.Action = gammaRedirectAction(rule.Redirect)
-			} else {
-				r.Action = gammaRouteAction(name, rule, m.Prefix)
-				// Slices of their own: respRemove and reqRemove are shared
-				// by every match of the rule.
-				r.ResponseHeadersToRemove = slices.Clone(respRemove)
-				r.RequestHeadersToRemove = slices.Clone(reqRemove)
-				stripOutcomeHeader(r)
+			if !refusal.all {
+				scored = append(scored, scoredRoute{route: gammaRuleRoute(name, rule, m), key: key})
 			}
-			scored = append(scored, scoredRoute{route: r, key: gammaMatchSpecificity(m)})
 		}
 	}
 	return scored
+}
+
+// backendRefusal is what a rule's invalid backendRefs take of it: nothing
+// (the zero value), a share of its requests, or all of them.
+type backendRefusal struct {
+	share *corev3.RuntimeFractionalPercent
+	all   bool
+}
+
+// invalidBackendRefusal decides the refusal of a rule and leaves the rule with
+// its valid backends only. A redirect rule sends nothing to a backend and is
+// never refused.
+func invalidBackendRefusal(rule *GammaRoute) backendRefusal {
+	if rule.Redirect != nil {
+		return backendRefusal{}
+	}
+	valid, share := splitInvalidBackends(rule.Backends)
+	// No valid backendRef at all, whatever the weights: the rule has nowhere
+	// to send a request, and its parent's own cluster is not what it names.
+	all := len(rule.Backends) > 0 && len(valid) == 0
+	rule.Backends = valid
+	return backendRefusal{share: share, all: all}
+}
+
+// route returns the 500 route of one match of the rule, nil when the rule
+// refuses nothing. It stands before the rule's own route with the same match
+// (the sort is stable) and takes the invalid backendRefs' share of the
+// requests, or every request.
+func (b backendRefusal) route(m GammaMatch) *routev3.Route {
+	if !b.all && b.share == nil {
+		return nil
+	}
+	refused := &routev3.Route{Match: gammaRouteMatch(m), Action: invalidBackendResponse()}
+	if !b.all {
+		refused.Match.RuntimeFraction = b.share
+	}
+	return refused
+}
+
+// gammaRuleRoute builds the route of one match of a rule: its redirect, or
+// the route to its backends (or, with none, to the service's own cluster).
+func gammaRuleRoute(name string, rule GammaRoute, m GammaMatch) *routev3.Route {
+	reqAdd, respAdd, reqRemove, respRemove := headerMutationFields(rule.HeaderMutation)
+	r := &routev3.Route{
+		Match:                   gammaRouteMatch(m),
+		RequestHeadersToAdd:     reqAdd,
+		RequestHeadersToRemove:  reqRemove,
+		ResponseHeadersToAdd:    respAdd,
+		ResponseHeadersToRemove: respRemove,
+		TypedPerFilterConfig:    extensionPerFilterConfig(rule.ExtensionFilters),
+	}
+	if rule.Redirect != nil {
+		r.Action = gammaRedirectAction(rule.Redirect)
+		return r
+	}
+	r.Action = gammaRouteAction(name, rule, m.Prefix)
+	// Slices of their own: stripOutcomeHeader appends, and the mutation's
+	// slices may be shared with the rule.
+	r.ResponseHeadersToRemove = slices.Clone(respRemove)
+	r.RequestHeadersToRemove = slices.Clone(reqRemove)
+	return stripOutcomeHeader(r)
+}
+
+// InvalidBackendBody is the body of the 500 an invalid backendRef answers.
+const InvalidBackendBody = "aether: the route's backendRef names no HTTP port of its Service (see the route's ResolvedRefs condition)\n"
+
+// invalidBackendResponse is the answer of an invalid backendRef: 500, as the
+// Gateway API specifies, with a body that says where to look.
+func invalidBackendResponse() *routev3.Route_DirectResponse {
+	return &routev3.Route_DirectResponse{DirectResponse: &routev3.DirectResponseAction{
+		Status: 500,
+		Body:   &corev3.DataSource{Specifier: &corev3.DataSource_InlineString{InlineString: InvalidBackendBody}},
+	}}
+}
+
+// splitInvalidBackends separates a rule's backends into the valid ones and
+// the share of the rule's weight the invalid ones hold, as the fraction of
+// requests that are answered 500. share is nil when no backend is invalid, or
+// when the invalid ones hold no weight (a backendRef with weight 0 receives
+// nothing, valid or not).
+func splitInvalidBackends(backends []GammaBackend) (valid []GammaBackend, share *corev3.RuntimeFractionalPercent) {
+	var invalid, total uint64
+	for _, b := range backends {
+		total += uint64(b.Weight)
+		if b.Invalid {
+			invalid += uint64(b.Weight)
+		}
+	}
+	if invalid == 0 {
+		for _, b := range backends {
+			if b.Invalid {
+				// Weight 0 and invalid: dropped, nothing is sent to it.
+				return slices.DeleteFunc(slices.Clone(backends), func(b GammaBackend) bool { return b.Invalid }), nil
+			}
+		}
+		return backends, nil
+	}
+	valid = slices.DeleteFunc(slices.Clone(backends), func(b GammaBackend) bool { return b.Invalid })
+	return valid, &corev3.RuntimeFractionalPercent{DefaultValue: &typev3.FractionalPercent{
+		Numerator:   uint32(invalid * 1_000_000 / total),
+		Denominator: typev3.FractionalPercent_MILLION,
+	}}
+}
+
+// setServiceCluster points a route action at a service's own cluster: the
+// named one, or, for a virtual host that knows only the service's authorities
+// (BuildOnDemandServiceVirtualHost), the cluster the request's authority
+// names.
+func setServiceCluster(ra *routev3.RouteAction, cluster string) {
+	if cluster == "" {
+		ra.ClusterSpecifier = &routev3.RouteAction_ClusterHeader{ClusterHeader: onDemandClusterHeader}
+		return
+	}
+	ra.ClusterSpecifier = &routev3.RouteAction_Cluster{Cluster: cluster}
 }
 
 // headerMutationFields converts a GammaHeaderMutation into the four Envoy route-level
@@ -726,7 +829,7 @@ func gammaRouteAction(serviceCluster string, rule GammaRoute, matchPrefix string
 	}
 	switch len(rule.Backends) {
 	case 0:
-		ra.ClusterSpecifier = &routev3.RouteAction_Cluster{Cluster: serviceCluster}
+		setServiceCluster(ra, serviceCluster)
 	case 1:
 		ra.ClusterSpecifier = &routev3.RouteAction_Cluster{Cluster: rule.Backends[0].Cluster}
 	default:
