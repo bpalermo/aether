@@ -551,7 +551,11 @@ jobs:
   # dialled port decides on every name of the service, a port-less Host means
   # the dialled port, a route without a parentRef port is on every port, and a
   # mismatched, non-HTTP or undeclared port is refused at once with a 421 that
-  # names why; the legacy spellings are unchanged. Harness:
+  # names why; the legacy spellings are unchanged. A seventh workload is raw
+  # TCP only: legs W1..W3 hold it to its declared ports (no other port of its
+  # address reaches an application; HTTP to it is refused by name). Legs
+  # P1..P5 use 18081 as an HTTP proxy (`curl --proxy`), where Host decides the
+  # port (P5 only records what a CONNECT gets). Harness:
   # e2e/multiprotocol.sh (its header has the red half, MP_MIXED_PORTS=8080,
   # which is not run here, and how to run every leg of a red run).
   multiprotocol:
