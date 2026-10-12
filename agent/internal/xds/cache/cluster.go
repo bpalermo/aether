@@ -115,11 +115,12 @@ func (c *SnapshotCache) clustersEndpointsVhostsAndPinsInto(buf []entryClass, mtl
 	c.depMu.RLock()
 	ruleGen := c.ruleGen
 	c.depMu.RUnlock()
-	rules := ruleInputs{routes: c.serviceRoutesSnapshot(), chainFilters: c.serviceChainFiltersSnapshot(), portMaps: c.servicePortMapsSnapshot()}
+	rules := ruleInputs{routes: c.serviceRoutesSnapshot(), chainFilters: c.serviceChainFiltersSnapshot(), portMaps: c.servicePortMapsSnapshot(), declared: c.declaredByService()}
 	c.refreshEntryVhosts(ruleGen, rules)
 
 	c.clusterMu.RLock()
 	defer c.clusterMu.RUnlock()
+	rules.ports = effectivePorts(c.servicePorts, rules.declared)
 
 	clusters := make([]types.Resource, 0, len(c.clusters))
 	clas := make([]types.Resource, 0, len(c.clusters))
@@ -159,6 +160,12 @@ func (c *SnapshotCache) clustersEndpointsVhostsAndPinsInto(buf []entryClass, mtl
 	// And the services with a service-wide HTTP filter that have no cluster
 	// here yet: their own virtual host on the on-demand route.
 	vhosts = append(vhosts, c.outboundColdVhostsLocked(rules)...)
+	// The services this node holds no cluster of whose generated Service says
+	// what their ports are: routed and refused by those ports, like a
+	// service it knows.
+	vhosts = append(vhosts, c.outboundDeclaredVhostsLocked(rules)...)
+	// The short names, last: they answer as the full names above do.
+	vhosts = append(vhosts, proxy.ShortNameVirtualHosts(vhosts, c.meshDomain)...)
 	c.noteQUICFanout(quicClusters, len(quic.pairs), len(quic.identities), len(quic.awaitingCert))
 	sortResourcesByName(clusters)
 	sortResourcesByName(clas)

@@ -326,6 +326,7 @@ func (c *SnapshotCache) SetCaptureTCPServices(services []capture.CaptureTCPServi
 				serviceName: s.ServiceName,
 				clusterIP:   s.ClusterIP,
 				ports:       c.captureDerived[s.ServiceName],
+				declared:    servicePorts{http: slices.Clone(s.DeclaredHTTP), tcp: slices.Clone(s.DeclaredOther)},
 			})
 		}
 	}
@@ -876,7 +877,7 @@ func equalTCPEntries(a, b []captureTCPEntry) bool {
 	}
 	for _, e := range b {
 		prev, ok := ma[e.serviceName]
-		if !ok || prev.clusterIP != e.clusterIP {
+		if !ok || prev.clusterIP != e.clusterIP || !prev.declared.equal(e.declared) {
 			return false
 		}
 		// The derived ports are part of the identity: a change to them
@@ -1171,4 +1172,45 @@ func (c *SnapshotCache) tcpPortClustersLocked(
 		out = append(out, pc)
 	}
 	return out, clas
+}
+
+// declaredByService returns what the generated Services say their real ports
+// are, per service (captureTCPEntry.declared). The map is built per call; the
+// slices in it are shared and read-only.
+func (c *SnapshotCache) declaredByService() map[string]servicePorts {
+	c.captureMu.RLock()
+	defer c.captureMu.RUnlock()
+	out := make(map[string]servicePorts, len(c.captureTCPServices))
+	for _, e := range c.captureTCPServices {
+		if e.declared.known() {
+			out[e.serviceName] = e.declared
+		}
+	}
+	return out
+}
+
+// effectivePorts returns, per service, the ports the tables are built from:
+// what the registry endpoints say (all), and for a service this node holds no
+// endpoint of, what its generated Service declares (declared).
+//
+// That second half is what makes a COLD request strict: the node routes and
+// refuses it by the service's declared ports, exactly as it will once it
+// holds an endpoint, instead of fetching whatever cluster the authority
+// spells. A cold service's ports carry no legacy target, so its HTTP ports all
+// route to their own "<fqdn>:<port>" cluster, which the on-demand filter
+// fetches; the bare cluster name is never named for it.
+func effectivePorts(all, declared map[string]servicePorts) map[string]servicePorts {
+	if len(declared) == 0 {
+		return all
+	}
+	out := make(map[string]servicePorts, len(all)+len(declared))
+	for svc, p := range declared {
+		out[svc] = p
+	}
+	for svc, p := range all {
+		if p.known() {
+			out[svc] = p
+		}
+	}
+	return out
 }

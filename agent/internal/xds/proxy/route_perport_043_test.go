@@ -157,22 +157,40 @@ func TestCaptureCatchAll_Shape(t *testing.T) {
 	}
 }
 
-// TestOutboundCatchAll_StillAcceptsAnyPort: on the loopback (out_http) table
-// nothing is dialled, so the Host header is the only address there is and a
-// mesh authority with any port, or none, may name its cluster. Only the
-// capture tables were narrowed.
-func TestOutboundCatchAll_StillAcceptsAnyPort(t *testing.T) {
+// TestOutboundCatchAll_NamesAClusterOnlyFromAnAuthorityWithAPort: on the
+// loopback (out_http) table nothing is dialled, so the Host header is the only
+// address there is and a mesh authority with ANY port may name its cluster,
+// "<fqdn>:<port>", which is a port's cluster. A mesh authority WITHOUT a port
+// names nothing: it would spell the bare cluster name, which is no port's (a
+// name without a port is port 80, and a service the node knows has a virtual
+// host that says so). It falls through like a name that is no mesh name.
+func TestOutboundCatchAll_NamesAClusterOnlyFromAnAuthorityWithAPort(t *testing.T) {
 	rc := BuildOutboundRouteConfiguration(nil, "aether.internal")
 	require.Len(t, rc.GetVirtualHosts(), 1)
 	vh := rc.GetVirtualHosts()[0]
-	for _, authority := range []string{"svc.ns.aether.internal", "svc.ns.aether.internal:8080", "svc.ns.aether.internal:9090"} {
+	for _, authority := range []string{"svc.ns.aether.internal:8080", "svc.ns.aether.internal:9090", "svc.ns.aether.internal:80"} {
 		got, _ := resolveCatchAll(vh, authority, "/")
 		assert.Equal(t, authority, got)
 	}
-	_, status := resolveCatchAll(vh, "example.com", "/")
+	got, status := resolveCatchAll(vh, "svc.ns.aether.internal", "/")
+	assert.Empty(t, got, "a port-less mesh authority names no cluster")
+	assert.Equal(t, uint32(404), status)
+	_, status = resolveCatchAll(vh, "example.com", "/")
 	assert.Equal(t, uint32(404), status, "the outbound table never passes through")
 	_, status = resolveCatchAll(vh, "svc.ns.svc.cluster.local:8080", "/")
 	assert.Equal(t, uint32(404), status, "and names no cluster for a Kubernetes name")
+
+	// The proxy port's capture table has the same floor, with or without
+	// passthrough: a port-less mesh authority names no cluster there either.
+	for _, passthrough := range []bool{false, true} {
+		rc := BuildProxyPortCaptureRouteConfiguration("cap_http_18081", nil, "aether.internal", passthrough)
+		require.Len(t, rc.GetVirtualHosts(), 1)
+		vh := rc.GetVirtualHosts()[0]
+		got, _ := resolveCatchAll(vh, "svc.ns.aether.internal:8080", "/")
+		assert.Equal(t, "svc.ns.aether.internal:8080", got)
+		got, _ = resolveCatchAll(vh, "svc.ns.aether.internal", "/")
+		assert.NotEqual(t, "svc.ns.aether.internal", got, "passthrough=%v: a port-less mesh authority names the bare cluster", passthrough)
+	}
 }
 
 // TestBuildRefusalVirtualHost: a refusal is a direct 421 with the reason in

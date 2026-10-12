@@ -36,7 +36,11 @@ func TestPerPort_ColdServiceCarriesItsRoutesOnTheLoopbackTable(t *testing.T) {
 			c.SetCaptureEnabled(true)
 			c.SetCaptureRedirectAll(true)
 			require.NoError(t, c.SetNodeIdentity(ctx, nodeIdentity))
-			a043Project(c, a043Fixture())
+			// The Services are known by name only: nothing says what multi's
+			// ports are. (With its ports known from its generated Service it
+			// is not a stand-in case at all: it is routed and refused by them,
+			// TestStrictCold_*.)
+			a043ProjectNamesOnly(c, a043Fixture())
 			if portMap != nil {
 				c.SetServicePortMaps(map[string]map[uint32]uint32{"demo/multi": portMap})
 			}
@@ -51,25 +55,22 @@ func TestPerPort_ColdServiceCarriesItsRoutesOnTheLoopbackTable(t *testing.T) {
 			require.NoError(t, c.LoadClustersFromRegistry(ctx, "cluster-1", "node-1", a043Registry(nil)))
 			table := a043Tables(t, c)[proxy.OutboundHTTPRouteName]
 
-			for _, host := range []string{multi, multi + ":8080", multi + ":9090", multi + ":7777", multi + ":18081"} {
+			// An authority WITH a port is offered on demand: the cluster asked
+			// for is the one the authority spells, which is a port's cluster.
+			for _, host := range []string{multi + ":8080", multi + ":9090", multi + ":7777"} {
 				got := a043Resolve(t, table, host)
 				assert.NotEqualf(t, "on_demand_catch_all", got.vhost, "Host %s takes the catch-all: its route's rules are skipped", host)
 				assert.Truef(t, got.onDemand, "Host %s: a request no rule matches still names its own cluster on demand", host)
+				assert.Equalf(t, host, got.cluster, "Host %s", host)
 			}
-			// The two spellings that name no port of the service (port-less,
-			// and the proxy's own :18081) are the known remainder while the
-			// node holds no endpoint: the request is fetched a cluster by the
-			// name its authority spells, which is the declared port's. What
-			// is held here is that it does so on the service's OWN virtual
-			// host: the port-less rules apply (and the chain filter,
-			// TestPerPort_ServiceFiltersOnEveryVirtualHost); a rule whose
-			// parentRef names a port does not, since no port was named.
-			for _, host := range []string{multi, multi + ":18081"} {
-				got := a043Resolve(t, table, host)
-				assert.Equal(t, multi+"|cold", got.vhost, host)
-				assert.Equal(t, host, got.cluster, "%s: the cluster is the one the authority spells", host)
-			}
-			assert.Equal(t, []string{"all"}, rtpMarks(t, table, multi), "port-less authority")
+			// An authority WITHOUT a port is not: it would spell the bare
+			// cluster name, which is no port's. Nothing says whether the
+			// service has a port 80, so it is refused until something does.
+			got := a043Resolve(t, table, multi)
+			assert.Equal(t, uint32(421), got.status, "%+v", got)
+			assert.Equal(t, proxy.RefusalPortRequired, got.refusal)
+			assert.Empty(t, got.cluster)
+			assert.Empty(t, rtpMarks(t, table, multi), "the port-less authority is refused: no rule rides on it")
 			assert.Equal(t, []string{"all"}, rtpMarks(t, table, multi+":*"), "any other port")
 			assert.Equal(t, []string{"all", "one"}, rtpMarks(t, table, multi+":9090"), "the pod port the rule's parentRef resolves to")
 

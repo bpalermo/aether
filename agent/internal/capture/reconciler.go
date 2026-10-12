@@ -9,6 +9,8 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"regexp"
+	"slices"
 
 	"aethermesh.dev/common/serviceref"
 
@@ -40,6 +42,38 @@ type CaptureTCPService struct {
 	// matches on (original-dst recovered via SO_ORIGINAL_DST). Must be a valid
 	// non-None IP address (headless/unallocated Services are skipped).
 	ClusterIP string
+	// DeclaredHTTP and DeclaredOther are the REAL ports the generated Service
+	// carries (its "p<port>-tcp" / "p<port>-udp" ports): the HTTP ones, and
+	// the raw-TCP and UDP ones. The registrar derives them from the registry,
+	// so they are what the registry will say; the agent has them from its
+	// Service watch before, and whether or not, it holds an endpoint of the
+	// service. The cache uses them for exactly that case: a service it holds
+	// no endpoint of is routed and refused by its declared ports, like one it
+	// knows, instead of by whatever the request's authority spells.
+	DeclaredHTTP  []uint32
+	DeclaredOther []uint32
+}
+
+// realPortName matches the name the registrar gives a real port of a generated
+// mesh Service. Its fixed ports (mesh, mesh-tcp) are not ports of the service.
+var realPortName = regexp.MustCompile(`^p[0-9]+-(tcp|udp)$`)
+
+// declaredPorts reads a generated Service's real ports, sorted.
+func declaredPorts(s *corev1.Service) (http, other []uint32) {
+	for _, sp := range s.Spec.Ports {
+		if !realPortName.MatchString(sp.Name) || sp.Port <= 0 {
+			continue
+		}
+		tcp := sp.Protocol == "" || sp.Protocol == corev1.ProtocolTCP
+		if tcp && sp.AppProtocol != nil && *sp.AppProtocol == "http" {
+			http = append(http, uint32(sp.Port))
+		} else {
+			other = append(other, uint32(sp.Port))
+		}
+	}
+	slices.Sort(http)
+	slices.Sort(other)
+	return slices.Compact(http), slices.Compact(other)
 }
 
 // AuthoritySink receives the projections from the generated mesh Services:
@@ -129,15 +163,17 @@ func (r *Reconciler) Reconcile(ctx context.Context, _ reconcile.Request) (reconc
 		// design (d)): any of them can serve raw-TCP ports, which need chains
 		// on its address.
 		//
-		// Nothing but the name and the address is read from the Service
-		// (proposal 043, Phase 1). What its ports are and what speaks on each
-		// is derived by the cache from the registry endpoints it holds, per
-		// port. The aether.io/app-protocol and aether.io/port annotations are
+		// The name, the address and the real ports are read from the
+		// Service. What its ports are and what speaks on each is derived by
+		// the cache from the registry endpoints it holds, per port; the
+		// Service's own ports stand in while the node holds none
+		// (CaptureTCPService.DeclaredHTTP). The aether.io/app-protocol and aether.io/port annotations are
 		// NOT read: they said one thing about the whole service, and #878 and
 		// #1672 are what happened when that one thing was wrong. The registrar
 		// no longer writes them, and removes them from the Services it owns.
 		if ip != "" && ip != corev1.ClusterIPNone {
-			tcpServices = append(tcpServices, CaptureTCPService{ServiceName: svc, ClusterIP: ip})
+			http, other := declaredPorts(s)
+			tcpServices = append(tcpServices, CaptureTCPService{ServiceName: svc, ClusterIP: ip, DeclaredHTTP: http, DeclaredOther: other})
 		}
 	}
 

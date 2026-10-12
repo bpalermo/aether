@@ -38,11 +38,12 @@ func TestBuildDefaultOutboundHTTPFilterChain(t *testing.T) {
 
 			require.NotNil(t, fc)
 			assert.Equal(t, tt.expectedChainName, fc.GetName())
-			// Outbound has 3 filters: the two source set_filter_state entries
+			// Outbound has 4 filters: the two source set_filter_state entries
 			// (netns, then the cert-mapper SPIFFE ID — #842; the
-			// aether.source.spiffe_id copy was retired in #1165) +
+			// aether.source.spiffe_id copy was retired in #1165), the caller's
+			// namespace (a short name in Host resolves in it) +
 			// http_connection_manager.
-			assert.Len(t, fc.GetFilters(), 3, "netns + cert-mapper identity (#842) + HCM")
+			assert.Len(t, fc.GetFilters(), 4, "netns + cert-mapper identity (#842) + caller namespace + HCM")
 			assert.Nil(t, fc.GetTransportSocket(), "outbound filter chain should not have TLS transport socket")
 		})
 	}
@@ -170,10 +171,10 @@ func TestOutboundChainRDSIdenticalAcrossPods(t *testing.T) {
 	var want []byte
 	for _, pod := range pods {
 		fc := buildDefaultOutboundHTTPFilterChain(pod, "spiffe://aether.internal/ns/"+pod.GetNamespace()+"/sa/"+pod.GetServiceAccount(), "aether.internal", true, nil)
-		require.Len(t, fc.GetFilters(), 3)
+		require.Len(t, fc.GetFilters(), 4)
 
 		hcm := &http_connection_managerv3.HttpConnectionManager{}
-		require.NoError(t, fc.GetFilters()[2].GetTypedConfig().UnmarshalTo(hcm))
+		require.NoError(t, fc.GetFilters()[3].GetTypedConfig().UnmarshalTo(hcm))
 
 		rds := hcm.GetRds()
 		require.NotNil(t, rds)

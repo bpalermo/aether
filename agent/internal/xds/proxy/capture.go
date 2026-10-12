@@ -505,12 +505,14 @@ func buildCaptureHTTPFilterChain(cniPod *cniv1.CNIPod, sourceSpiffeID, meshDomai
 		},
 	}
 
+	// The caller's namespace, for a short name in Host (shortname.go).
+	networkFilters := BuildSourceFilterStates(sourceSpiffeID)
+	if ns := cniPod.GetNamespace(); ns != "" {
+		networkFilters = append(networkFilters, BuildCallerNamespaceFilterState(ns))
+	}
 	fc := &listenerv3.FilterChain{
-		Name: name,
-		Filters: append(
-			BuildSourceFilterStates(sourceSpiffeID),
-			buildHTTPConnectionManagerFilter(hcm),
-		),
+		Name:    name,
+		Filters: append(networkFilters, buildHTTPConnectionManagerFilter(hcm)),
 	}
 	match := &listenerv3.FilterChainMatch{}
 	if port != 0 {

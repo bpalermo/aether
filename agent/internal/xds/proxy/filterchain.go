@@ -63,6 +63,11 @@ func buildDefaultOutboundHTTPFilterChain(cniPod *cniv1.CNIPod, sourceSpiffeID, m
 	}
 
 	networkFilters := BuildSourceFilterStates(sourceSpiffeID)
+	// The caller's namespace, for a short name in Host (shortname.go). Only a
+	// pod with a namespace gets it: a chain without it refuses short names.
+	if ns := cniPod.GetNamespace(); ns != "" {
+		networkFilters = append(networkFilters, BuildCallerNamespaceFilterState(ns))
+	}
 	networkFilters = append(networkFilters, buildHTTPConnectionManagerFilter(hcm))
 
 	return &listenerv3.FilterChain{

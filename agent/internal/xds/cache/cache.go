@@ -57,6 +57,11 @@ type captureTCPEntry struct {
 	// and endpoint churn does not look like a change -- see equalTCPEntries
 	// and Risk 4.
 	ports servicePorts
+	// declared is what the generated SERVICE says its real ports are
+	// (capture.CaptureTCPService.DeclaredHTTP/DeclaredOther): the stand-in for
+	// ports while this node holds no endpoint of the service. It carries no
+	// legacy target and no conflicts.
+	declared servicePorts
 }
 
 // SnapshotCache wraps go-control-plane's SnapshotCache and manages Envoy

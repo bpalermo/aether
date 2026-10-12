@@ -115,11 +115,35 @@ func a043Cache(t *testing.T, services []a043Service) *SnapshotCache {
 // a043Project feeds what the mesh-Service reconciler projects: the name and
 // the address of every generated Service, and nothing else.
 func a043Project(c *SnapshotCache, services []a043Service) {
+	a043ProjectWith(c, services, true)
+}
+
+// a043ProjectNamesOnly projects the Services without their real ports: a
+// generated Service the agent has seen before the registrar wrote its ports,
+// or one written by a registrar that did not write them. Of such a service
+// the node knows nothing until it holds an endpoint.
+func a043ProjectNamesOnly(c *SnapshotCache, services []a043Service) {
+	a043ProjectWith(c, services, false)
+}
+
+func a043ProjectWith(c *SnapshotCache, services []a043Service, withPorts bool) {
 	authorities := map[string]string{}
 	var vips []capture.CaptureTCPService
 	for _, s := range services {
 		authorities[s.key()] = fmt.Sprintf("%s.%s.svc.cluster.local", s.name, s.ns)
-		vips = append(vips, capture.CaptureTCPService{ServiceName: s.key(), ClusterIP: s.vip})
+		svc := capture.CaptureTCPService{ServiceName: s.key(), ClusterIP: s.vip}
+		for port, class := range s.ports {
+			switch {
+			case !withPorts:
+			case class == registryv1.PortProtocol_PORT_PROTOCOL_HTTP:
+				svc.DeclaredHTTP = append(svc.DeclaredHTTP, port)
+			default:
+				svc.DeclaredOther = append(svc.DeclaredOther, port)
+			}
+		}
+		slices.Sort(svc.DeclaredHTTP)
+		slices.Sort(svc.DeclaredOther)
+		vips = append(vips, svc)
 	}
 	c.SetCaptureAuthorities(authorities)
 	c.SetCaptureTCPServices(vips)
@@ -190,7 +214,7 @@ func a043Resolve(t *testing.T, table *routev3.RouteConfiguration, host string) a
 		vh = exact
 	}
 	require.NotNil(t, vh, "table %s has no catch-all", table.GetName())
-	for _, r := range vh.GetRoutes() {
+	for _, r := range vhostRoutes(t, vh) {
 		if p := r.GetMatch().GetPath(); p != "" && p != "/" {
 			continue
 		}
@@ -433,7 +457,9 @@ func TestAddressing_ProxyPortOnTheCapturedPath(t *testing.T) {
 	out := tables[proxy.OutboundHTTPRouteName]
 
 	for _, s := range services {
-		mesh, kube := a043Names(s, a043BareIsUnique(services, s))
+		// The short name is not one of these: it has a virtual host of its
+		// own on this table too (TestShortName_AnswersAsTheFullName).
+		mesh, kube := a043Names(s, false)
 		t.Run(s.key(), func(t *testing.T) {
 			a043HostDecides(t, table, s)
 			// Never a port-mismatch: nothing was dialled that a Host could
@@ -494,7 +520,9 @@ func a043HostPortClusters(t *testing.T, table *routev3.RouteConfiguration, byMes
 	t.Helper()
 	routes := 0
 	for _, vh := range table.GetVirtualHosts() {
-		if vh.GetName() == "on_demand_catch_all" {
+		if vh.GetName() == "on_demand_catch_all" || vh.GetMatcher() != nil {
+			// A short name's virtual host holds copies of the routes walked
+			// here, per namespace (TestShortName_AnswersAsTheFullName).
 			continue
 		}
 		mesh, _, _ := strings.Cut(vh.GetName(), "|")
@@ -1365,10 +1393,12 @@ func TestAddressing_TablesAreKeptWhileTheirInputsAre(t *testing.T) {
 	got := a043Resolve(t, last, "mixed.demo.aether.internal:8080")
 	assert.Equal(t, proxy.RefusalNoHTTPPort, got.refusal)
 
-	// The Services' names alone: a second namespace takes a bare name, which
-	// then names neither service. Nothing else changes (no address, no
+	// The Services' names alone: a second namespace takes a short name, which
+	// then has an arm for each. Nothing else changes (no address, no
 	// dependency), so only the authorities' generation says so.
-	require.NotNil(t, findVHost(last.GetVirtualHosts(), "eighty"))
+	short := findVHost(last.GetVirtualHosts(), "eighty")
+	require.NotNil(t, short)
+	require.Equal(t, []string{"demo"}, matcherNamespaces(short))
 	c.captureMu.RLock()
 	authorities := maps.Clone(c.captureAuthorities)
 	c.captureMu.RUnlock()
@@ -1376,7 +1406,9 @@ func TestAddressing_TablesAreKeptWhileTheirInputsAre(t *testing.T) {
 	c.SetCaptureAuthorities(authorities)
 	require.NoError(t, c.generateSnapshot(ctx))
 	rebuilt("a mesh Service name")
-	assert.Nil(t, findVHost(last.GetVirtualHosts(), "eighty"), "a bare name two namespaces share is nobody's")
+	short = findVHost(last.GetVirtualHosts(), "eighty")
+	require.NotNil(t, short, "a short name two namespaces share stays a name: each caller gets its own namespace's")
+	assert.Contains(t, matcherNamespaces(short), "demo", "the first namespace's callers are not affected by the second")
 
 	// The set of tables asked for is part of what was built.
 	names := func(rs []types.Resource) []string {

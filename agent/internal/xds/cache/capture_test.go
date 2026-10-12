@@ -146,19 +146,23 @@ func TestCaptureVhosts_SABackedRouteTargetShortNames(t *testing.T) {
 
 	vhosts := captureTable(c, 80)
 
-	// The client dials the bare short name (same-namespace) with no port -> :authority
-	// "echo-v2". With a single owner the bare spelling must be emitted, AND the
-	// real-port spelling for clients that present "echo-v2:80".
-	require.NotNil(t, findVHost(vhosts, "echo-v2"),
-		"SA-backed route target must host-match its bare short name; got vhosts=%v", domainsOf(vhosts))
+	// The client dials the short name (same namespace) with no port -> :authority
+	// "echo-v2", or presents "echo-v2:80". Both are claimed by the short
+	// name's own virtual hosts, which answer a caller of the service's
+	// namespace with the service's routes.
+	for _, short := range []string{"echo-v2", "echo-v2:80"} {
+		sv := findVHost(vhosts, short)
+		require.NotNilf(t, sv, "SA-backed route target must host-match its short name %q; got vhosts=%v", short, domainsOf(vhosts))
+		require.NotNil(t, sv.GetMatcher(), "the short name resolves in the caller's namespace")
+		assert.Equal(t, []string{"gateway-conformance-mesh"}, matcherNamespaces(sv))
+	}
 
 	vh := findVHost(vhosts, "echo-v2.gateway-conformance-mesh.svc.cluster.local")
 	require.NotNil(t, vh)
 	domains := vh.GetDomains()
-	assert.Contains(t, domains, "echo-v2")
+	assert.NotContains(t, domains, "echo-v2", "the short name is not a name of the service's own virtual host")
 	assert.Contains(t, domains, "echo-v2.gateway-conformance-mesh")
 	assert.Contains(t, domains, "echo-v2.gateway-conformance-mesh.svc")
-	assert.Contains(t, domains, "echo-v2:80")
 	assert.Contains(t, domains, "echo-v2.gateway-conformance-mesh.svc.cluster.local:80")
 
 	// The GAMMA rule (header mutation) must be projected onto the vhost — the route
@@ -216,6 +220,18 @@ func TestCaptureVhosts_RouteTargetNoPort(t *testing.T) {
 // refusal.
 func routedCluster(c *SnapshotCache, port uint32, authority string) (string, bool) {
 	vh := findVHost(captureTable(c, port), authority)
+	if vh != nil && vh.GetMatcher() != nil {
+		// A short name: the arm of the namespace the test calls from.
+		var list routev3.RouteList
+		on := vh.GetMatcher().GetOnNoMatch()
+		if arm, ok := vh.GetMatcher().GetMatcherTree().GetExactMatchMap().GetMap()[testCallerNamespace]; ok {
+			on = arm
+		}
+		if on.GetAction().GetTypedConfig().UnmarshalTo(&list) != nil {
+			return "", false
+		}
+		vh = &routev3.VirtualHost{Routes: list.GetRoutes()}
+	}
 	if vh == nil || len(vh.GetRoutes()) == 0 {
 		return "", false
 	}
@@ -305,6 +321,8 @@ func TestCaptureTables_StableAcrossGAMMAChurn(t *testing.T) {
 		svc: {{Backends: []proxy.GammaBackend{{Service: svc, Cluster: cluster, Weight: 1}}}},
 	})
 
+	// The suite's client runs in the Services' namespace.
+	callingFrom(t, "gateway-conformance-mesh")
 	// What a client that dials port 80 can present as its authority.
 	dialSpellings := []string{
 		"echo-v2",
@@ -367,6 +385,7 @@ func TestCaptureTables_RouteOnlyTarget(t *testing.T) {
 	cluster, ok := routedCluster(c, 80, "echo.team-a.svc.cluster.local")
 	require.True(t, ok, "route-only target must have a virtual host")
 	assert.Equal(t, "echo.team-a.aether.internal:8080", cluster)
+	callingFrom(t, "team-a")
 	cluster, ok = routedCluster(c, 80, "echo")
 	require.True(t, ok, "bare same-namespace dial must have a virtual host")
 	assert.Equal(t, "echo.team-a.aether.internal:8080", cluster)
@@ -486,9 +505,12 @@ func TestCaptureVhosts_RouteTargetGAMMAFeatures(t *testing.T) {
 	// The route target must host-match the bare same-namespace dial "echo" (the
 	// authority the conformance client presents) — else the request falls to the
 	// redirect-all passthrough (kube-proxy bypass) and no GAMMA feature applies.
-	vh := findVHost(vhosts, "echo")
+	require.NotNil(t, findVHost(vhosts, "echo:80"), "real Service port spelling (M2) must host-match too")
+	// Every feature below is read THROUGH the short name, as a client in the
+	// Service's namespace: the short name answers with the service's routes.
+	callingFrom(t, "gateway-conformance-mesh")
+	vh := asCalled(t, findVHost(vhosts, "echo"))
 	require.NotNil(t, vh, "route target must carry the bare 'echo' domain; got %v", domainsOf(vhosts))
-	assert.Contains(t, vh.GetDomains(), "echo:80", "real Service port spelling (M2) must host-match too")
 
 	// 1. Header modification: the /set route carries request + response header maps.
 	setRoute := routeForPrefix(vh, "/set")

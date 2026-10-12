@@ -196,8 +196,8 @@ func TestRouteTargetDomainsMemo_EquivalentToInline(t *testing.T) {
 		namesOf(c, "team-a/echo"), "a bare name two namespaces share is nobody's name")
 	assert.Equal(t, []string{"echo.team-b.svc.cluster.local", proxy.ServiceClusterName("team-b/echo", c.meshDomain), "echo.team-b", "echo.team-b.svc"},
 		namesOf(c, "team-b/echo"), "a route-only target derives its cluster.local name from the key")
-	assert.Equal(t, []string{"solo.team-c.svc.cluster.local", proxy.ServiceClusterName("team-c/solo", c.meshDomain), "solo.team-c", "solo.team-c.svc", "solo"},
-		namesOf(c, "team-c/solo"), "a unique bare name is a name of the service")
+	assert.Equal(t, []string{"solo.team-c.svc.cluster.local", proxy.ServiceClusterName("team-c/solo", c.meshDomain), "solo.team-c", "solo.team-c.svc"},
+		namesOf(c, "team-c/solo"), "a short name is never a name of the service's own, unique or not: it resolves in the caller's namespace")
 
 	// The ports fold into every spelling, in the table of each port, and
 	// nowhere else; port 0 names no table.

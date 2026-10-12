@@ -4031,12 +4031,9 @@ requests with their original `Host` to a different port.
 
 ##### What else a client can notice
 
-- **A bare service name that two namespaces share** (`http://<svc>/` where
-  `<svc>` exists in two namespaces) is no longer answered by the mesh. The
-  node proxy's tables are shared by every pod of the node and cannot tell
-  which namespace was meant; it used to pick one, and half the time the wrong
-  one. The request is passed to the cluster's own routing, which refuses it.
-  Use `<svc>.<ns>`.
+- **A name without a namespace** (`http://<svc>/`, `Host: <svc>:8080`) is the
+  service of that name in the caller's own namespace, and nothing else. See
+  "BREAKING: a name without a namespace is the caller's namespace's" below.
 - **A port-less URL to a service that declares port 80** (`http://<svc>.<ns>/`
   from a captured pod, which is a dial to port 80) is answered by port 80,
   like a dial to any declared port. It used to be answered by the port in
@@ -4129,36 +4126,64 @@ to the service's own cluster with the route's matches, filters and backends
 skipped. It is closed the same way: the service's virtual host that stands in
 before its cluster arrives carries its routes' rules.
 
+##### BREAKING: a name without a namespace is the caller's namespace's
+
+A `Host` with no namespace (`echo`, `echo:8080`) means the service of that
+name **in the namespace of the pod that sent the request**, as the cluster's
+DNS search path does. Never a service in another namespace, whether or not
+the name is unique in the cluster.
+
+| Request | Through chart 2.6 | Now |
+|---|---|---|
+| `Host: echo:8080`, the caller's namespace has a mesh service `echo` | `echo` if exactly one namespace had one; refused otherwise since 2.7 | the caller's namespace's `echo` |
+| the same, and another namespace gains an `echo` | every caller of the short name lost it | nothing changes for the existing callers |
+| `Host: echo:8080`, the caller's namespace has no `echo`, another has | that other namespace's `echo` | `421 name-not-in-namespace` |
+
+- `<svc>.<ns>` and every longer form are unchanged.
+- The per-port rules apply to the short name exactly as to the full name: a
+  name without a port is port 80 only if the service declares it; an
+  undeclared port, a port that is not HTTP and a `Host` that disagrees with
+  the dialled port are refused with the same reasons.
+- It holds on both paths: a captured dial, and the proxy port (loopback, and a
+  pod that is not on redirect-all).
+- A service-wide `HTTPFilter` and the rules of an `HTTPRoute` parented to the
+  service apply to a short-name request exactly as to the full name.
+- What the caller's namespace is cannot be chosen by the client: it is the
+  namespace of the pod the connection came from, set by the node proxy on that
+  pod's listeners, not a request header.
+
+**Who is affected:** a workload that calls a service in ANOTHER namespace by
+its short name alone. It worked while that name existed in one namespace only.
+Address it as `<svc>.<ns>`. To find such calls on 2.6.x, look in the HTTP
+access log for an authority with no dot whose destination namespace differs
+from the source's.
+
 ##### While a node holds no endpoint of a service
 
-A node learns a service's ports from the registry. Before it has (the agent
-just started and the registry was unreachable, or the service was never
-called from this node), a request for the service is **parked** while the
-proxy fetches the cluster, on a virtual host of the service's own that
-carries its service-wide filter and its routes' rules. What such a request
-can and cannot do, as built:
+A request is delivered only where it would be once the node holds an endpoint
+of the service, and refused as it would be then. The node does not wait for
+an endpoint to know a service's ports: it reads them from the generated mesh
+Service (`p<port>-tcp`, `appProtocol`), which the registrar derives from the
+registry and the agent watches.
 
-- **A captured dial to a port number some service is known to serve as
-  HTTP**: every name of the service is claimed for that port, with the port
-  and without one, and the cluster asked for is that port's. A `Host` naming
-  another port is refused `421 port-mismatch`, as for a known service.
-- **A captured dial to a port number no service is known to serve as HTTP**
-  (always the case for every port on a node that knows nothing yet): only the
-  mesh name **with a port** is claimed, and the cluster asked for is the one
-  the `Host` names, because that table does not know which port was dialled.
-  A `Host` whose port differs from the dialled one is therefore routed by the
-  `Host`. A Kubernetes name (`<svc>.<ns>.svc.cluster.local`), and any name
-  without a port, are passed through to the address that was dialled, a
-  selectorless Service, and fail at once.
-- **The proxy port**: mesh names only; a Kubernetes name is passed through
-  (redirect-all) or answers 404.
-- A route's `backendRef` to a service the node does not know asks for the
-  cluster of the port the route names, never the backend's declared port.
+| What the node knows of the service | A request for it |
+|---|---|
+| an endpoint (the registry) | routed or refused by the ports its pods declare |
+| no endpoint, the generated Service's ports | the same routes and the same `421` reasons, at once; a declared port's request is parked while its cluster is fetched |
+| no endpoint, a user Service that owns the name (its port map) | Service ports route to their pod port's cluster, fetched on demand; a port the Service does not have is refused. Whether a port is HTTP is not known yet, so a raw-TCP port is not refused as `port-not-http` until an endpoint is held |
+| nothing but its name (a generated Service without ports, or only a route or a filter names it) | with a port: parked while a cluster of that name and port is fetched, and answered `503` after 2 s if none arrives. Without a port: refused at once (`421 port-required` when a filter or a route gives it a virtual host, `404` otherwise; on a captured dial, passed through to the address dialled) |
 
-All of it ends when the node has the service's ports: from then on a wrong
-port is refused by name. These cold cases are scheduled to be made strict
-(a cold request is delivered only where a warm one would be) in the next
-step of the release.
+- A name without a port never asks for a cluster by the bare service name: it
+  is port 80, or it is refused.
+- The parked request runs the service's service-wide filter and its routes'
+  rules, as any later request does.
+
+**One case is not closed.** For a name the node knows nothing of, the
+authority `<fqdn>:18081` is offered on demand like any `<fqdn>:<port>`, and a
+cluster of that name still exists as an alias of the cluster of the port the
+pods declare. If the service enters the node's scope while that request is
+parked, it is delivered to the declared port; every later request is refused
+(`port-not-declared`). Removing the alias cluster is the remaining step.
 
 ##### BREAKING: `:18081` and a name without a port no longer mean "the port the pods declare"
 
@@ -4207,23 +4232,9 @@ workload and authority, and move each client to `<name>:<declared port>`.
 The prober, the `udsecho` chart and this repository's own suites were moved
 first (prober chart 1.1.0).
 
-**One case is not closed.** The first request to a service from a node that
-holds no endpoint of it, spelled with no port or with `:18081` **on the proxy
-port**, is still delivered to the port the pods declare: the proxy fetches the
-cluster by the name the authority spells before it has the service's ports.
-Every later request is refused as above. A captured dial to port 80 does not
-have this: there the port-less name asks for port 80's cluster and nothing
-else.
-
-What runs on that one request: for a service that has a service-wide
-`HTTPFilter` or an `HTTPRoute`, the request is matched on the service's own
-stand-in virtual host, so the filter runs (an `ext_authz` filter authorizes
-it) and the rules whose `parentRef` names no port apply, backends included.
-A rule whose `parentRef` names a port does not apply: the request named no
-port. For a service with neither, the request takes the table's catch-all,
-which has nothing to skip. In every case it is the service's own pods that
-answer, on the port in `endpoint.aether.io/port`; it never reaches another
-service.
+What a first request gets from a node that holds no endpoint of the service
+yet is in "While a node holds no endpoint of a service", above: it is
+refused like any later one.
 
 ##### BREAKING: a raw-TCP service is reached on its declared ports only
 

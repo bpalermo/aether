@@ -25,6 +25,7 @@ go_test(
         "lds_reconnect_test.go",
         "outcome_1641_cases_test.go",
         "perport_accept_test.go",
+        "perport_callerns_test.go",
         "perport_live_test.go",
         "perport_proxyport_test.go",
         "perport_second_test.go",

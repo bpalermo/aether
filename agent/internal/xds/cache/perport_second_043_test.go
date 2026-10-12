@@ -230,7 +230,7 @@ func spResolve(t *testing.T, table *routev3.RouteConfiguration, host string) spO
 	require.NotNilf(t, vh, "table %s has no catch-all", table.GetName())
 	_, filtered := vh.GetTypedPerFilterConfig()[spFilter]
 	out := spOutcome{vhost: vh.GetName(), filtered: filtered}
-	routes := vh.GetRoutes()
+	routes := vhostRoutes(t, vh)
 	for i, r := range routes {
 		m := r.GetMatch()
 		if p := m.GetPath(); p != "" && p != "/" {
@@ -254,6 +254,11 @@ func spResolve(t *testing.T, table *routev3.RouteConfiguration, host string) spO
 			continue
 		}
 		out.rule = i != len(routes)-1
+		// Inside a short name's virtual host the service's filter rides on
+		// the route (the virtual host is shared by several namespaces).
+		if _, onRoute := r.GetTypedPerFilterConfig()[spFilter]; onRoute {
+			out.filtered = true
+		}
 		if dr := r.GetDirectResponse(); dr != nil {
 			out.kind = "notfound"
 			for _, h := range r.GetResponseHeadersToAdd() {
@@ -361,8 +366,7 @@ func TestPerPort_ColdService_EveryNameOnARealPortTable(t *testing.T) {
 		// The proxy port: mesh names only, and the port in Host is the port.
 		{"cap_http_18081", mesh + ":8080"},
 		{"cap_http_18081", mesh},
-		// A port no service is known to declare as HTTP: the mesh authority
-		// names its own cluster.
+		// A port no service is known to declare as HTTP.
 		{"cap_http_other", mesh + ":7777"},
 	} {
 		got := spResolve(t, tables[tc.table], tc.host)
@@ -378,24 +382,61 @@ func TestPerPort_ColdService_EveryNameOnARealPortTable(t *testing.T) {
 		got := spResolve(t, tables["cap_http_9090"], host)
 		assert.Equalf(t, mesh+":9090", got.cluster, "cap_http_9090, Host %s: %s", host, got)
 	}
-	got := spResolve(t, tables["cap_http_80"], mesh)
-	assert.Equal(t, mesh+":80", got.cluster, "cap_http_80, port-less: port 80's cluster")
-
-	// What is NOT served, and why. Two places still take the fallthrough for
-	// a name the node knows no port of; both are stated here so that a change
-	// to either is a decision.
-	//   - cap_http_other and a Kubernetes name (or any name without a port):
-	//     that table does not know which port was dialled, so it cannot name
-	//     a cluster for anything but an authority that spells one.
-	//   - the proxy port and a Kubernetes name: it serves mesh names only.
-	for _, tc := range []struct{ table, host string }{
-		{"cap_http_other", "multi.demo.svc.cluster.local:7777"},
-		{"cap_http_other", mesh},
-		{"cap_http_18081", "multi.demo.svc.cluster.local:18081"},
+	// COLD AND WARM DO NOT DIFFER. The node holds no endpoint of multi, and
+	// knows its ports from its generated Service (8080 and 9090, HTTP). So
+	// what it does not declare is refused by name, exactly as once an
+	// endpoint is held, on every table: nothing is left to the authority the
+	// client typed, and nothing falls to the passthrough.
+	for _, tc := range []struct{ table, host, reason string }{
+		// A dial to port 80, which multi does not declare.
+		{"cap_http_80", mesh, proxy.RefusalPortNotDeclared},
+		{"cap_http_80", "multi.demo.svc.cluster.local", proxy.RefusalPortNotDeclared},
+		// A dial to a port no service is known to serve as HTTP. Before the
+		// Service's ports were read, the mesh name with a port was routed by
+		// the port in Host (a Host that disagreed with the dialled port
+		// decided), and every other name was passed through.
+		{"cap_http_other", mesh + ":7777", proxy.RefusalPortNotDeclared},
+		{"cap_http_other", mesh + ":8080", proxy.RefusalPortNotDeclared},
+		{"cap_http_other", "multi.demo.svc.cluster.local:7777", proxy.RefusalPortNotDeclared},
+		{"cap_http_other", mesh, proxy.RefusalPortNotDeclared},
+		// The proxy port: a name without a port is port 80, which multi does
+		// not declare; 18081 is a port it does not declare, like 7777.
+		{"cap_http_18081", mesh, proxy.RefusalPortRequired},
+		{"cap_http_18081", mesh + ":18081", proxy.RefusalPortNotDeclared},
+		{"cap_http_18081", mesh + ":7777", proxy.RefusalPortNotDeclared},
 	} {
 		got := spResolve(t, tables[tc.table], tc.host)
-		assert.Equalf(t, "passthrough", got.kind, "%s, Host %s: %s", tc.table, tc.host, got)
+		assert.Equalf(t, "refuse", got.kind, "%s, Host %s: %s", tc.table, tc.host, got)
+		assert.Equalf(t, tc.reason, got.reason, "%s, Host %s: %s", tc.table, tc.host, got)
 	}
+	// And what it declares is asked for by its port's cluster, never by the
+	// name the authority spells and never by the bare cluster name.
+	for _, tc := range []struct{ table, host, cluster string }{
+		{"cap_http_18081", mesh + ":8080", mesh + ":8080"},
+		{"cap_http_18081", mesh + ":9090", mesh + ":9090"},
+		{"cap_http_8080", "multi.demo.svc.cluster.local", mesh + ":8080"},
+	} {
+		got := spResolve(t, tables[tc.table], tc.host)
+		assert.Equalf(t, "cluster", got.kind, "%s, Host %s: %s", tc.table, tc.host, got)
+		assert.Equalf(t, tc.cluster, got.cluster, "%s, Host %s", tc.table, tc.host)
+		assert.Truef(t, got.filtered, "%s, Host %s", tc.table, tc.host)
+	}
+	// A service that DOES declare 80, cold as well: a name without a port is
+	// its port 80, on both paths.
+	const eighty = "eighty.demo." + a043Mesh
+	for _, tc := range []struct{ table, host string }{
+		{"cap_http_18081", eighty},
+		{"cap_http_80", eighty},
+		{"cap_http_80", "eighty.demo.svc.cluster.local"},
+	} {
+		got := spResolve(t, tables[tc.table], tc.host)
+		assert.Equalf(t, "cluster", got.kind, "%s, Host %s: %s", tc.table, tc.host, got)
+		assert.Equalf(t, eighty+":80", got.cluster, "%s, Host %s", tc.table, tc.host)
+	}
+	// The proxy port serves mesh names only: a Kubernetes name there is not
+	// the mesh's, cold or warm.
+	got := spResolve(t, tables["cap_http_18081"], "multi.demo.svc.cluster.local:18081")
+	assert.Equal(t, "passthrough", got.kind, got.String())
 }
 
 // 2. A service with a service-wide filter and endpoints, whose generated
@@ -1075,6 +1116,41 @@ func TestPerPort_Walk(t *testing.T) {
 					for _, n := range names {
 						for _, suffix := range []string{"", ":80", ":8080", ":9090", ":9000", ":7000", ":18081", ":7777"} {
 							got := spResolve(t, table, n+suffix)
+							// S: the SHORT name. From the service's own
+							// namespace it answers exactly as the full mesh
+							// name does, in every table and for every
+							// suffix; from a namespace that has no service of
+							// the name it reaches nothing.
+							if n == mesh {
+								prevNS := testCallerNamespace
+								testCallerNamespace = ns
+								short := spResolve(t, table, name+suffix)
+								testCallerNamespace = "a-namespace-with-no-services"
+								foreign := spResolve(t, table, name+suffix)
+								testCallerNamespace = prevNS
+								same := short.kind == got.kind && short.reason == got.reason && short.filtered == got.filtered && short.rule == got.rule
+								if got.kind == "cluster" {
+									same = same && short.cluster == got.cluster
+								}
+								// One difference is by design: a full name the
+								// table has no virtual host for falls to the
+								// catch-all (the mesh does not know it), while
+								// the short name, when another namespace's
+								// service gives it a virtual host, is REFUSED
+								// for this caller. A short name never falls
+								// through from its own virtual host.
+								if got.vhost == "on_demand_catch_all" && short.kind == "refuse" && short.reason == proxy.RefusalNameNotInNamespace {
+									same = true
+								}
+								if !same {
+									note("S: a short name does not answer as the full name of the caller's namespace",
+										fmt.Sprintf("%s: table %s, Host %s -> %s; Host %s -> %s\nafter:\n  %s", where, tname, name+suffix, short, n+suffix, got, strings.Join(trail, "\n  ")))
+								}
+								if foreign.kind == "cluster" || foreign.kind == "ondemand" {
+									note("S: a short name is delivered for a caller whose namespace has no service of that name",
+										fmt.Sprintf("%s: table %s, Host %s -> %s\nafter:\n  %s", where, tname, name+suffix, foreign, strings.Join(trail, "\n  ")))
+								}
+							}
 							// A route delivers when the cluster it names has an
 							// endpoint in this snapshot (a retained entry's is
 							// empty), or does not exist yet and is named on
