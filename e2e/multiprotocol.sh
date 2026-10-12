@@ -2075,7 +2075,7 @@ spec:
   serviceAccountName: default
   containers:
     - name: app
-      image: registry.k8s.io/pause:3.10
+      image: ${IMAGE_REGISTRY}/l4echo:latest
 EOF
 }
 
