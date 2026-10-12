@@ -89,6 +89,9 @@ go_library(
 go_test(
     name = "cache_test",
     size = "medium",
+    # Under the race detector the suite takes most of a medium test's five
+    # minutes on a CI runner; the resources it needs are still a medium's.
+    timeout = "long",
     srcs = [
         "ackedpins_test.go",
         "ackpublished_test.go",
