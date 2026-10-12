@@ -25,13 +25,12 @@ import (
 //	pp-mixed     8080 HTTP, 9000 raw TCP         the mixed shape
 //	pp-tcpfirst  9000 raw TCP (declared), 8080 HTTP   the other mixed shape (#1672)
 //	pp-nine      9000 HTTP                       HTTP on a number two others declare raw TCP
-//	pp-tcponly   6379 raw TCP                    a raw-TCP legacy target with the any-port chain
+//	pp-tcponly   6379 raw TCP                    a raw-TCP legacy target: its own port and :18082, nothing else
 //
 // What a real Envoy has to accept here and nowhere else: an HTTP chain and
 // several "/32 + destination_port" chains on one port number; a route table
-// whose virtual hosts claim "<name>:*" beside "<name>" and "<name>:<port>"; an
-// any-port chain with a twin on every HTTP port number; per-table catch-all
-// regexes.
+// whose virtual hosts claim "<name>:*" beside "<name>" and "<name>:<port>";
+// per-table catch-all regexes.
 
 // PerPortService is one service of the per-port fixture.
 type PerPortService struct {
@@ -104,11 +103,11 @@ func (s PerPortService) captureInput() (proxy.CaptureTCPService, bool) {
 		ClusterName: proxy.TCPClusterName(s.key(), meshDomain),
 		ClusterIP:   s.ClusterIP,
 		HTTPPorts:   s.HTTPPorts,
+		LegacyHTTP:  s.legacyIsHTTP(),
 	}
 	for _, p := range s.TCPPorts {
 		if p == s.LegacyPort {
 			in.LegacyTCPPort = p
-			in.AnyPort = len(s.HTTPPorts) == 0
 			continue
 		}
 		in.TCPPorts = append(in.TCPPorts, p)
@@ -145,7 +144,7 @@ func (s PerPortService) tableVhosts(port uint32, legacyTable bool) []*routev3.Vi
 	}
 	exact := fmt.Sprintf(":%d", port)
 	routable := s.hasHTTP(port)
-	shadowed := routable && port == 80 && s.LegacyPort != 80
+	shadowed := false
 	rest := withSuffix(names, "", exact)
 	var vhosts []*routev3.VirtualHost
 	if routable {

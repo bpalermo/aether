@@ -90,7 +90,7 @@ func TestSourceIdentityStampedOnEveryMeshOriginatingChain(t *testing.T) {
 	id := SourceIdentityForPod(pod, testTrustDomain)
 	require.Equal(t, testSourceIdentity, id)
 
-	svc := CaptureTCPService{ClusterName: "tcp:svc-a." + testTrustDomain, ClusterIP: "10.96.1.10", LegacyTCPPort: 9000, AnyPort: true}
+	svc := CaptureTCPService{ClusterName: "tcp:svc-a." + testTrustDomain, ClusterIP: "10.96.1.10", LegacyTCPPort: 9000}
 	rules := []L4ServiceRoute{{Backends: []L4Backend{{Service: "svc-a", Cluster: "tcp:svc-a." + testTrustDomain, Weight: 1}}}}
 	tlsRules := []L4ServiceRoute{{SNIHostnames: []string{"a.example.com"}, Backends: rules[0].Backends}}
 

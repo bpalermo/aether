@@ -193,11 +193,11 @@ func TestCaptureChains_NoDuplicateMatch(t *testing.T) {
 		ports []uint32
 	}{
 		"legacy target IS the TCP mesh port": {
-			svcs:  []CaptureTCPService{{ClusterName: "tcp:a.t.aether.internal", ClusterIP: "10.96.0.1", LegacyTCPPort: meshconst.ProxyL4OutboundPort, AnyPort: true, TCPPorts: []uint32{meshconst.ProxyL4OutboundPort}}},
+			svcs:  []CaptureTCPService{{ClusterName: "tcp:a.t.aether.internal", ClusterIP: "10.96.0.1", LegacyTCPPort: meshconst.ProxyL4OutboundPort, TCPPorts: []uint32{meshconst.ProxyL4OutboundPort}}},
 			ports: []uint32{80, 18081},
 		},
 		"legacy port repeated in TCPPorts": {
-			svcs:  []CaptureTCPService{{ClusterName: "tcp:a.t.aether.internal", ClusterIP: "10.96.0.1", LegacyTCPPort: 9000, AnyPort: true, TCPPorts: []uint32{9000, 9001}}},
+			svcs:  []CaptureTCPService{{ClusterName: "tcp:a.t.aether.internal", ClusterIP: "10.96.0.1", LegacyTCPPort: 9000, TCPPorts: []uint32{9000, 9001}}},
 			ports: []uint32{80, 18081},
 		},
 		"one number, HTTP for one service and raw TCP for another": {
@@ -207,9 +207,9 @@ func TestCaptureChains_NoDuplicateMatch(t *testing.T) {
 			},
 			ports: []uint32{80, 8080, 9000, 18081},
 		},
-		"any-port service whose port is another service's HTTP number": {
+		"raw-TCP service whose port is another service's HTTP number": {
 			svcs: []CaptureTCPService{
-				{ClusterName: "tcp:raw.t.aether.internal", ClusterIP: "10.96.0.1", LegacyTCPPort: 8080, AnyPort: true},
+				{ClusterName: "tcp:raw.t.aether.internal", ClusterIP: "10.96.0.1", LegacyTCPPort: 8080},
 				{ClusterName: "tcp:web.t.aether.internal", ClusterIP: "10.96.0.2", HTTPPorts: []uint32{8080}, TCPPorts: []uint32{9000}},
 			},
 			ports: []uint32{80, 8080, 18081},
@@ -217,7 +217,7 @@ func TestCaptureChains_NoDuplicateMatch(t *testing.T) {
 		"TLSRoute on a mixed service and on a pure-TCP one": {
 			svcs: []CaptureTCPService{
 				{ClusterName: "tcp:mixed.t.aether.internal", ClusterIP: "10.96.0.1", HTTPPorts: []uint32{8080}, TCPPorts: []uint32{9000}, TLSRouteRules: tls},
-				{ClusterName: "tcp:raw.t.aether.internal", ClusterIP: "10.96.0.2", LegacyTCPPort: 9000, AnyPort: true, TLSRouteRules: tls},
+				{ClusterName: "tcp:raw.t.aether.internal", ClusterIP: "10.96.0.2", LegacyTCPPort: 9000, TLSRouteRules: tls},
 			},
 			ports: []uint32{0, 80, 8080, 8080, 18081, meshconst.ProxyL4OutboundPort},
 		},
@@ -322,86 +322,244 @@ func TestCaptureChains_LegacyTCPTarget(t *testing.T) {
 	assert.Empty(t, duplicateMatches(l.GetFilterChains()))
 }
 
+// addressOnlyChains returns the names of the chains that claim an address on
+// EVERY port: a prefix match, no destination port, and no server name. That
+// is the shape of the any-port chain. An SNI chain has it too, but for its
+// server names only, and is not counted.
+func addressOnlyChains(chains []*listenerv3.FilterChain) (names []string) {
+	for _, fc := range chains {
+		m := fc.GetFilterChainMatch()
+		if len(m.GetPrefixRanges()) > 0 && m.GetDestinationPort() == nil && len(m.GetServerNames()) == 0 {
+			names = append(names, fc.GetName())
+		}
+	}
+	return names
+}
+
 // TestCaptureChains_NoAnyPortChainForAServiceWithHTTP: the any-port chain
-// matches the service's address on every port nothing else names. On a
-// service with an HTTP port it would outrank the HTTP chains for the address
-// (the address is decided before the protocol) and forward HTTP to the
-// raw-TCP port as bytes. AnyPort false must mean NO chain without a
-// destination port on that address.
+// matched a service's address on every port nothing else named. On a service
+// with an HTTP port it would have outranked the HTTP chains for the address
+// (the address is decided before the protocol) and forwarded HTTP to the
+// raw-TCP port as bytes, so such a service never had one. Since chart 2.7.0
+// NO service has one: a raw-TCP legacy target is reached on its own port and
+// on :18082, and on nothing else. The rule, over every shape of service: no
+// chain claims an address without naming a destination port, unless it names
+// a server (a TLSRoute chain).
 func TestCaptureChains_NoAnyPortChainForAServiceWithHTTP(t *testing.T) {
 	const cluster = "tcp:first.t.aether.internal"
-	portless := func(l *listenerv3.Listener) (n int) {
-		for _, fc := range l.GetFilterChains() {
-			m := fc.GetFilterChainMatch()
-			if len(m.GetPrefixRanges()) > 0 && m.GetDestinationPort() == nil {
-				n++
+	tls := []L4ServiceRoute{{
+		SNIHostnames: []string{"a.example.com"},
+		Backends:     []L4Backend{{Service: "t/x", Cluster: "tcp:x.t.aether.internal", Weight: 1}},
+	}}
+	weighted := []L4ServiceRoute{{Backends: []L4Backend{
+		{Service: "t/x", Cluster: "tcp:x.t.aether.internal", Weight: 1},
+		{Service: "t/y", Cluster: "tcp:y.t.aether.internal", Weight: 1},
+	}}}
+	httpPorts := []uint32{80, 8080, 18081}
+	for name, tt := range map[string]struct {
+		svc CaptureTCPService
+		// the destination ports of the chains that claim the address
+		// without a server name
+		ports []uint32
+	}{
+		"raw-TCP legacy target, with an HTTP port": {
+			svc:   CaptureTCPService{ClusterName: cluster, ClusterIP: "10.96.0.1", HTTPPorts: []uint32{8080}, LegacyTCPPort: 9000},
+			ports: []uint32{9000, 18082},
+		},
+		"raw-TCP legacy target, no HTTP port": {
+			svc:   CaptureTCPService{ClusterName: cluster, ClusterIP: "10.96.0.1", LegacyTCPPort: 9000},
+			ports: []uint32{9000, 18082},
+		},
+		"raw-TCP legacy target and a second raw-TCP port": {
+			svc:   CaptureTCPService{ClusterName: cluster, ClusterIP: "10.96.0.1", LegacyTCPPort: 9000, TCPPorts: []uint32{9000, 9100}},
+			ports: []uint32{9000, 9100, 18082},
+		},
+		"raw-TCP legacy target on an HTTP port number of the mesh": {
+			svc:   CaptureTCPService{ClusterName: cluster, ClusterIP: "10.96.0.1", LegacyTCPPort: 8080},
+			ports: []uint32{8080, 18082},
+		},
+		"raw-TCP legacy target behind a weighted TCPRoute": {
+			svc:   CaptureTCPService{ClusterName: cluster, ClusterIP: "10.96.0.1", LegacyTCPPort: 9000, TCPRouteRules: weighted},
+			ports: []uint32{9000, 18082},
+		},
+		"raw-TCP legacy target with a TLSRoute": {
+			svc:   CaptureTCPService{ClusterName: cluster, ClusterIP: "10.96.0.1", LegacyTCPPort: 9000, TLSRouteRules: tls},
+			ports: []uint32{9000, 18082},
+		},
+		"HTTP legacy target, one raw-TCP port": {
+			svc:   CaptureTCPService{ClusterName: cluster, ClusterIP: "10.96.0.1", HTTPPorts: []uint32{8080}, TCPPorts: []uint32{9000}, LegacyHTTP: true},
+			ports: []uint32{9000},
+		},
+		"HTTP only": {
+			svc: CaptureTCPService{ClusterName: cluster, ClusterIP: "10.96.0.1", HTTPPorts: []uint32{8080}, LegacyHTTP: true},
+		},
+	} {
+		for _, withPassthrough := range []bool{true, false} {
+			l := perPortListener(t, []CaptureTCPService{tt.svc}, httpPorts, withPassthrough)
+			assert.Empty(t, addressOnlyChains(l.GetFilterChains()), "%s: a chain claims the address on every port", name)
+			var ports []uint32
+			for _, fc := range l.GetFilterChains() {
+				assert.NotContains(t, fc.GetName(), "anyport", name)
+				tc := chainTCPProxy(fc)
+				if tc != nil {
+					assert.NotContains(t, tc.GetStatPrefix(), "anyport", name)
+				}
+				m := fc.GetFilterChainMatch()
+				if len(m.GetPrefixRanges()) == 0 || len(m.GetServerNames()) > 0 {
+					continue
+				}
+				ports = append(ports, m.GetDestinationPort().GetValue())
 			}
-		}
-		return n
-	}
-	without := perPortListener(t, []CaptureTCPService{{ClusterName: cluster, ClusterIP: "10.96.0.1", HTTPPorts: []uint32{8080}, LegacyTCPPort: 9000}}, []uint32{80, 8080, 18081}, true)
-	assert.Zero(t, portless(without))
-	for _, fc := range without.GetFilterChains() {
-		assert.NotContains(t, fc.GetName(), "anyport")
-		if tc := chainTCPProxy(fc); tc != nil {
-			assert.NotContains(t, tc.GetStatPrefix(), "anyport")
-		}
-		// and no chain claims the address on an HTTP port number
-		if m := fc.GetFilterChainMatch(); len(m.GetPrefixRanges()) > 0 {
-			assert.NotContains(t, []uint32{80, 8080, 18081}, m.GetDestinationPort().GetValue(), "chain %s", fc.GetName())
+			assert.ElementsMatch(t, tt.ports, ports, "%s (passthrough %v): the ports the service's address is claimed on", name, withPassthrough)
+			assert.Empty(t, duplicateMatches(l.GetFilterChains()), name)
 		}
 	}
-	// Negative control: with AnyPort the portless chain is there.
-	with := perPortListener(t, []CaptureTCPService{{ClusterName: cluster, ClusterIP: "10.96.0.1", LegacyTCPPort: 9000, AnyPort: true}}, []uint32{80, 8080, 18081}, true)
-	assert.Equal(t, 1, portless(with))
+
+	// Negative control: the helper does see a chain of that shape. The
+	// unqualified floor chain, before it is given its ports, is one.
+	floor := BuildCaptureTCPRouteFilterChain(CaptureTCPService{ClusterName: cluster, ClusterIP: "10.96.0.1", LegacyTCPPort: 9000}, nil, perPortSource)
+	require.NotNil(t, floor)
+	assert.Len(t, addressOnlyChains([]*listenerv3.FilterChain{floor}), 1)
+	// ... and does not take an SNI chain for one.
+	sni := BuildCaptureTLSRouteFilterChains(CaptureTCPService{ClusterName: cluster, ClusterIP: "10.96.0.1", LegacyTCPPort: 9000}, tls, perPortSource)
+	require.NotEmpty(t, sni)
+	assert.Empty(t, addressOnlyChains(sni))
 }
 
 // TestCaptureChains_AnyPortTwinsOnHTTPPortNumbers: the listener names every
 // HTTP port number of the mesh, and a connection to a named port is matched
-// only among the chains naming it. A pure-TCP service's any-port chain
-// therefore needs a twin on each of those numbers, or a client that dials
-// :8080 of it stops being served the day another service declares 8080 as
-// HTTP. The twins share the any-port stat prefix (the counter its removal is
-// gated on must see every port) and stay off the ports the service claims.
+// only among the chains naming it. While a pure-TCP service had an any-port
+// chain, that chain needed a twin on each of those numbers. The chain is gone
+// (chart 2.7.0) and so are the twins: on an HTTP port number of the mesh that
+// the service does not declare, NO chain claims its address. A client that
+// dials one gets what the address gives it there, which is nothing.
 func TestCaptureChains_AnyPortTwinsOnHTTPPortNumbers(t *testing.T) {
 	const cluster = "tcp:raw.t.aether.internal"
-	const prefix = "cap_tcp_anyport_" + cluster
 	httpPorts := []uint32{80, 8080, 9000, 9100, 18081}
 	l := perPortListener(t, []CaptureTCPService{
-		{ClusterName: cluster, ClusterIP: "10.96.0.1", LegacyTCPPort: 9000, AnyPort: true, TCPPorts: []uint32{9100}},
+		{ClusterName: cluster, ClusterIP: "10.96.0.1", LegacyTCPPort: 9000, TCPPorts: []uint32{9100}},
 	}, httpPorts, true)
 
-	twinPorts := map[uint32]string{}
+	claimed := map[uint32]string{} // destination port -> the chain claiming the address there
 	for _, fc := range l.GetFilterChains() {
-		tc := chainTCPProxy(fc)
-		if tc == nil || tc.GetStatPrefix() != prefix {
+		m := fc.GetFilterChainMatch()
+		if len(m.GetPrefixRanges()) == 0 {
 			continue
 		}
-		require.Len(t, fc.GetFilterChainMatch().GetPrefixRanges(), 1, fc.GetName())
-		assert.Equal(t, "10.96.0.1", fc.GetFilterChainMatch().GetPrefixRanges()[0].GetAddressPrefix())
-		assert.Equal(t, cluster, tc.GetCluster(), "every any-port spelling reaches the legacy target's floor cluster")
-		twinPorts[fc.GetFilterChainMatch().GetDestinationPort().GetValue()] = fc.GetName()
+		assert.Equal(t, "10.96.0.1", m.GetPrefixRanges()[0].GetAddressPrefix())
+		tc := chainTCPProxy(fc)
+		require.NotNil(t, tc, fc.GetName())
+		assert.Equal(t, fc.GetName(), tc.GetStatPrefix(), "every chain counts under its own name")
+		claimed[m.GetDestinationPort().GetValue()] = fc.GetName()
 	}
 	assert.Equal(t, map[uint32]string{
-		0:     prefix,
-		80:    prefix + "_p80",
-		8080:  prefix + "_p8080",
-		18081: prefix + "_p18081",
-	}, twinPorts, "a twin on every HTTP port number the service does not claim; none on 9000 (legacy), 9100 (its own raw-TCP port) or 18082")
-	// The ports it claims are served by their own chains, under their own names.
+		9000:  "cap_tcp_" + cluster + "_9000",
+		9100:  "cap_tcp_" + cluster + "_9100",
+		18082: "cap_tcp_" + cluster + "_18082",
+	}, claimed, "the legacy target's own port, the other raw-TCP port and the TCP mesh port; nothing on 80, 8080 or 18081, and nothing without a port (key 0)")
+	// The ports it claims are served by their own chains, to their own clusters.
 	assert.Equal(t, cluster, chainTCPProxy(chainByName(l.GetFilterChains(), "cap_tcp_"+cluster+"_9000")).GetCluster())
+	assert.Equal(t, cluster, chainTCPProxy(chainByName(l.GetFilterChains(), "cap_tcp_"+cluster+"_18082")).GetCluster())
 	assert.Equal(t, cluster+":9100", chainTCPProxy(chainByName(l.GetFilterChains(), "cap_tcp_"+cluster+"_9100")).GetCluster())
 	assert.Empty(t, duplicateMatches(l.GetFilterChains()))
 
-	// Negative control: no HTTP port numbers, no twins.
-	bare := perPortListener(t, []CaptureTCPService{{ClusterName: cluster, ClusterIP: "10.96.0.1", LegacyTCPPort: 9000, AnyPort: true}}, nil, true)
-	n := 0
+	// The same service with no HTTP port number on the listener at all: the
+	// same three chains. What the mesh declares elsewhere changes nothing
+	// about where a raw-TCP service is reached.
+	bare := perPortListener(t, []CaptureTCPService{
+		{ClusterName: cluster, ClusterIP: "10.96.0.1", LegacyTCPPort: 9000, TCPPorts: []uint32{9100}},
+	}, nil, true)
+	var names []string
 	for _, fc := range bare.GetFilterChains() {
-		if tc := chainTCPProxy(fc); tc != nil && tc.GetStatPrefix() == prefix {
-			n++
+		if len(fc.GetFilterChainMatch().GetPrefixRanges()) > 0 {
+			names = append(names, fc.GetName())
 		}
 	}
-	assert.Equal(t, 1, n)
+	assert.ElementsMatch(t, []string{claimed[9000], claimed[9100], claimed[18082]}, names)
+}
+
+// TestCaptureChains_TLSTwinsAndTheLegacyHTTPNumbers: the TLS twin rule for the
+// two legacy HTTP numbers. A service whose legacy target is HTTP is served
+// its cleartext HTTP on the mesh HTTP port (18081) and on 80 as well as on
+// its declared HTTP ports. A twin of its SNI chain on one of those numbers
+// claims the service's address there; the address is decided before the
+// protocol, so a cleartext request matches the address, has no server name,
+// and leaves through the listener's default instead of reaching cap_http_<P>.
+// So: no twin on 18081, on 80, or on a declared HTTP port. A service whose
+// legacy target is raw TCP serves no HTTP on 18081 or 80, and its twins there
+// are what keeps its TLSRoute working on those numbers.
+func TestCaptureChains_TLSTwinsAndTheLegacyHTTPNumbers(t *testing.T) {
+	const sni = "a.example.com"
+	rules := []L4ServiceRoute{{
+		SNIHostnames: []string{sni},
+		Backends:     []L4Backend{{Service: "t/x", Cluster: "tcp:x.t.aether.internal", Weight: 1}},
+	}}
+	// Another service, so that 5432 and 18082 are named ports too.
+	other := CaptureTCPService{ClusterName: "tcp:raw.t.aether.internal", ClusterIP: "10.96.0.2", LegacyTCPPort: 5432}
+	httpPorts := []uint32{80, 8080, 9090, 18081}
+
+	for name, tt := range map[string]struct {
+		svc  CaptureTCPService
+		want []uint32 // destination ports of the SNI chains; 0 is the unqualified one
+	}{
+		"HTTP legacy target": {
+			svc: CaptureTCPService{
+				ClusterName: "tcp:web.t.aether.internal", ClusterIP: "10.96.0.1",
+				HTTPPorts: []uint32{8080}, TCPPorts: []uint32{9000}, LegacyHTTP: true, TLSRouteRules: rules,
+			},
+			// not 8080 (declared HTTP), not 80, not 18081
+			want: []uint32{0, 5432, 9000, 9090, 18082},
+		},
+		"HTTP legacy target, HTTP only": {
+			svc: CaptureTCPService{
+				ClusterName: "tcp:web.t.aether.internal", ClusterIP: "10.96.0.1",
+				HTTPPorts: []uint32{8080, 9090}, LegacyHTTP: true, TLSRouteRules: rules,
+			},
+			want: []uint32{0, 5432, 18082},
+		},
+		"raw-TCP legacy target": {
+			svc: CaptureTCPService{
+				ClusterName: "tcp:db.t.aether.internal", ClusterIP: "10.96.0.1",
+				LegacyTCPPort: 9000, TLSRouteRules: rules,
+			},
+			want: []uint32{0, 80, 5432, 8080, 9000, 9090, 18081, 18082},
+		},
+		"raw-TCP legacy target, with an HTTP port of its own": {
+			svc: CaptureTCPService{
+				ClusterName: "tcp:db.t.aether.internal", ClusterIP: "10.96.0.1",
+				HTTPPorts: []uint32{8080}, LegacyTCPPort: 9000, TLSRouteRules: rules,
+			},
+			// 8080 is its own HTTP; 80 and 18081 are not its legacy numbers
+			want: []uint32{0, 80, 5432, 9000, 9090, 18081, 18082},
+		},
+	} {
+		l := perPortListener(t, []CaptureTCPService{tt.svc, other}, httpPorts, true)
+		var got []uint32
+		for _, fc := range l.GetFilterChains() {
+			m := fc.GetFilterChainMatch()
+			if !slices.Contains(m.GetServerNames(), sni) {
+				continue
+			}
+			require.Len(t, m.GetPrefixRanges(), 1, name)
+			assert.Equal(t, "10.96.0.1", m.GetPrefixRanges()[0].GetAddressPrefix(), name)
+			got = append(got, m.GetDestinationPort().GetValue())
+		}
+		assert.ElementsMatch(t, tt.want, got, name)
+		assert.Empty(t, duplicateMatches(l.GetFilterChains()), name)
+
+		// What the rule is for: on a port that carries the service's HTTP, no
+		// chain at all claims the service's address, so the request falls to
+		// the HTTP chain of the port.
+		for _, fc := range l.GetFilterChains() {
+			m := fc.GetFilterChainMatch()
+			if len(m.GetPrefixRanges()) == 0 || m.GetPrefixRanges()[0].GetAddressPrefix() != "10.96.0.1" {
+				continue
+			}
+			p := m.GetDestinationPort().GetValue()
+			carriesHTTP := slices.Contains(tt.svc.HTTPPorts, p) || (tt.svc.LegacyHTTP && (p == 80 || p == meshconst.ProxyOutboundPort))
+			assert.False(t, carriesHTTP, "%s: chain %s claims the address on port %d, which carries the service's HTTP", name, fc.GetName(), p)
+		}
+	}
 }
 
 // TestCaptureChains_TLSTwinsOnNamedPortsButNotTheServicesOwnHTTP: an SNI chain
@@ -421,7 +579,7 @@ func TestCaptureChains_TLSTwinsOnNamedPortsButNotTheServicesOwnHTTP(t *testing.T
 			Backends:     []L4Backend{{Service: "t/x", Cluster: "tcp:x.t.aether.internal", Weight: 1}},
 		}},
 	}
-	other := CaptureTCPService{ClusterName: "tcp:raw.t.aether.internal", ClusterIP: "10.96.0.2", LegacyTCPPort: 5432, AnyPort: true}
+	other := CaptureTCPService{ClusterName: "tcp:raw.t.aether.internal", ClusterIP: "10.96.0.2", LegacyTCPPort: 5432}
 	l := perPortListener(t, []CaptureTCPService{svc, other}, []uint32{80, 8080, 9090, 18081}, true)
 
 	got := map[uint32]bool{}

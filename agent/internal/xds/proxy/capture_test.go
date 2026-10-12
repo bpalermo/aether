@@ -92,30 +92,32 @@ func TestGenerateCaptureListener_RequiresNetns(t *testing.T) {
 func TestGenerateCaptureListener_WithTCPServices(t *testing.T) {
 	pod := &cniv1.CNIPod{Name: "p1", Namespace: "default", NetworkNamespace: "/var/run/netns/p1"}
 	tcpSvcs := []CaptureTCPService{
-		{ClusterName: "tcp:svc-a.aether.internal", ClusterIP: "10.96.1.10", LegacyTCPPort: 9000, AnyPort: true},
-		{ClusterName: "tcp:svc-b.aether.internal", ClusterIP: "10.96.1.20", LegacyTCPPort: 9000, AnyPort: true},
+		{ClusterName: "tcp:svc-a.aether.internal", ClusterIP: "10.96.1.10", LegacyTCPPort: 9000},
+		{ClusterName: "tcp:svc-b.aether.internal", ClusterIP: "10.96.1.20", LegacyTCPPort: 9000},
 	}
 	l, err := GenerateCaptureListener(pod, "spiffe://aether.internal/ns/default/sa/test", 15001, "aether.internal", false, tcpSvcs, nil, false, nil)
 	require.NoError(t, err)
 
-	// Each service whose legacy target is raw TCP, and which declares no
-	// HTTP port, yields THREE chains (proposals 037 and 043): the well-known
-	// :18082 spelling, its own port, and the portless any-port chain whose
-	// own stat prefix is what its removal is gated on. Plus cap_http_other
-	// and the scoped-mode blackhole.
+	// Each service whose legacy target is raw TCP yields TWO chains
+	// (proposals 037 and 043): the well-known :18082 spelling and its own
+	// port. There is no third: the any-port chain (cap_tcp_anyport_<cluster>)
+	// was removed in chart 2.7.0. Plus cap_http_other and the scoped-mode
+	// blackhole.
 	names := map[string]bool{}
 	for _, fc := range l.GetFilterChains() {
 		names[fc.GetName()] = true
 	}
 	assert.True(t, names["cap_tcp_tcp:svc-a.aether.internal_18082"], "the :18082 spelling")
 	assert.True(t, names["cap_tcp_tcp:svc-a.aether.internal_9000"], "the legacy target's own port")
-	assert.True(t, names["cap_tcp_anyport_tcp:svc-a.aether.internal"], "the any-port shim, counted separately")
+	for name := range names {
+		assert.NotContains(t, name, "anyport", "the any-port chain is gone: a raw-TCP service is reached on its own port and on :18082 only")
+	}
 	assert.True(t, names["cap_tcp_blackhole"])
 	// The HTTP chain is named after its route table since proposal 043; it
 	// was capture_<pod> while there was one of it.
 	assert.True(t, names[CaptureHTTPOtherRouteName])
 	assert.False(t, names["capture_default_p1"])
-	require.Len(t, l.GetFilterChains(), 8, "3 per TCP service + cap_http_other + blackhole")
+	require.Len(t, l.GetFilterChains(), 6, "2 per TCP service + cap_http_other + blackhole")
 
 	// Collect chains by match type.
 	var tcpChains []*listenerv3.FilterChain
@@ -127,8 +129,12 @@ func TestGenerateCaptureListener_WithTCPServices(t *testing.T) {
 			hcmChain = fc
 		}
 	}
-	// Six: the :18082 spelling, the port and the any-port shim, per service.
-	require.Len(t, tcpChains, 6)
+	// Four: the :18082 spelling and the port, per service. Every one of them
+	// names a destination port.
+	require.Len(t, tcpChains, 4)
+	for _, fc := range tcpChains {
+		assert.Contains(t, []uint32{9000, 18082}, fc.GetFilterChainMatch().GetDestinationPort().GetValue(), "chain %s", fc.GetName())
+	}
 	require.NotNil(t, hcmChain)
 
 	// TCP chains: keyed by /32 prefix_range, single tcp_proxy filter.
@@ -153,18 +159,18 @@ func TestGenerateCaptureListener_WithTCPServices(t *testing.T) {
 func TestGenerateCaptureListener_InvalidTCPService(t *testing.T) {
 	pod := &cniv1.CNIPod{Name: "p1", NetworkNamespace: "/var/run/netns/p1"}
 	tcpSvcs := []CaptureTCPService{
-		{ClusterName: "tcp:svc-a.aether.internal", ClusterIP: "", LegacyTCPPort: 9000, AnyPort: true, TCPPorts: []uint32{9100}},           // missing IP
-		{ClusterName: "", ClusterIP: "10.96.1.10", LegacyTCPPort: 9000, AnyPort: true, TCPPorts: []uint32{9100}},                          // missing name
-		{ClusterName: "tcp:svc-b.aether.internal", ClusterIP: "not-an-ip", LegacyTCPPort: 9000, AnyPort: true, TCPPorts: []uint32{9100}},  // bad IP
-		{ClusterName: "tcp:svc-c.aether.internal", ClusterIP: "10.96.1.30", LegacyTCPPort: 9000, AnyPort: true, TCPPorts: []uint32{9100}}, // valid
+		{ClusterName: "tcp:svc-a.aether.internal", ClusterIP: "", LegacyTCPPort: 9000, TCPPorts: []uint32{9100}},           // missing IP
+		{ClusterName: "", ClusterIP: "10.96.1.10", LegacyTCPPort: 9000, TCPPorts: []uint32{9100}},                          // missing name
+		{ClusterName: "tcp:svc-b.aether.internal", ClusterIP: "not-an-ip", LegacyTCPPort: 9000, TCPPorts: []uint32{9100}},  // bad IP
+		{ClusterName: "tcp:svc-c.aether.internal", ClusterIP: "10.96.1.30", LegacyTCPPort: 9000, TCPPorts: []uint32{9100}}, // valid
 	}
 	l, err := GenerateCaptureListener(pod, "spiffe://aether.internal/ns/default/sa/test", 15001, "aether.internal", false, tcpSvcs, nil, false, nil)
 	require.NoError(t, err)
 
 	// Only the valid service produces chains: its per-port chain, its :18082
-	// spelling, its own port and the any-port shim, plus cap_http_other and
-	// the scoped-mode blackhole.
-	require.Len(t, l.GetFilterChains(), 6)
+	// spelling and its own port, plus cap_http_other and the scoped-mode
+	// blackhole.
+	require.Len(t, l.GetFilterChains(), 5)
 	for _, fc := range l.GetFilterChains() {
 		for _, pr := range fc.GetFilterChainMatch().GetPrefixRanges() {
 			assert.Equal(t, "10.96.1.30", pr.GetAddressPrefix(), "chain %s", fc.GetName())
@@ -215,16 +221,15 @@ func TestGenerateCaptureListener_WithPassthrough(t *testing.T) {
 func TestGenerateCaptureListener_WithPassthroughAndTCPServices(t *testing.T) {
 	pod := &cniv1.CNIPod{Name: "p1", NetworkNamespace: "/var/run/netns/p1"}
 	tcpSvcs := []CaptureTCPService{
-		{ClusterName: "tcp:svc-a.aether.internal", ClusterIP: "10.96.1.10", LegacyTCPPort: 9000, AnyPort: true},
+		{ClusterName: "tcp:svc-a.aether.internal", ClusterIP: "10.96.1.10", LegacyTCPPort: 9000},
 	}
 	l, err := GenerateCaptureListener(pod, "spiffe://aether.internal/ns/default/sa/test", 15001, "aether.internal", false, tcpSvcs, nil, true, nil)
 	require.NoError(t, err)
 
-	// Named chains: the service's :18082 spelling, its own port, its any-port
-	// shim, and cap_http_other. No blackhole here — redirect-all uses
-	// passthrough -> kube-proxy REJECT, which is already attributable
-	// (proposal 037).
-	require.Len(t, l.GetFilterChains(), 4)
+	// Named chains: the service's :18082 spelling, its own port, and
+	// cap_http_other. No blackhole here — redirect-all uses passthrough ->
+	// kube-proxy REJECT, which is already attributable (proposal 037).
+	require.Len(t, l.GetFilterChains(), 3)
 	// DefaultFilterChain carries the passthrough.
 	require.NotNil(t, l.GetDefaultFilterChain())
 	assert.Equal(t, "cap_passthrough", l.GetDefaultFilterChain().GetName())

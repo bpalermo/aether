@@ -57,7 +57,6 @@ func TestTLSRouteChainsSurvivePortQualifiedFloor(t *testing.T) {
 		ClusterName:   "tls-svc.aether-test.aether.internal",
 		ClusterIP:     clusterIP,
 		LegacyTCPPort: primary,
-		AnyPort:       true,
 		TLSRouteRules: []L4ServiceRoute{{
 			SNIHostnames: []string{sni},
 			Backends:     []L4Backend{{Service: "aether-test/tls-svc", Cluster: "tcp:tls-svc.aether-test.aether.internal", Weight: 1}},
@@ -99,7 +98,7 @@ func TestTLSRouteChainsSurvivePortQualifiedFloor(t *testing.T) {
 // silently reopens #911 on that port.
 func TestClaimedTCPPortsCoversBothProducers(t *testing.T) {
 	t.Run("tcp-primary: mesh port and primary are claimed", func(t *testing.T) {
-		got := claimedTCPPorts(CaptureTCPService{LegacyTCPPort: 9000, AnyPort: true})
+		got := claimedTCPPorts(CaptureTCPService{LegacyTCPPort: 9000})
 		assert.ElementsMatch(t, []uint32{meshconst.ProxyL4OutboundPort, 9000}, got)
 	})
 
@@ -113,7 +112,6 @@ func TestClaimedTCPPortsCoversBothProducers(t *testing.T) {
 	t.Run("no duplicate when a declared TCP port collides with the mesh port", func(t *testing.T) {
 		got := claimedTCPPorts(CaptureTCPService{
 			LegacyTCPPort: meshconst.ProxyL4OutboundPort,
-			AnyPort:       true,
 			TCPPorts:      []uint32{meshconst.ProxyL4OutboundPort},
 		})
 		assert.Equal(t, []uint32{meshconst.ProxyL4OutboundPort}, got,

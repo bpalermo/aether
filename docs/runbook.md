@@ -191,7 +191,7 @@ chooses. They are written down in
 [`test/harnesscontract/external-harness.yaml`](../test/harnesscontract/external-harness.yaml):
 the agent's pin metrics with their labels and the closed `reason` set, the
 prober's `aether_probe_requests_total` with its `tier` and `result` sets, the
-fields of the `AETHER_PROBE_FAIL` lines, the any-port stat prefix, the
+fields of the `AETHER_PROBE_FAIL` lines, the
 annotations, labels and ports a workload manifest names, and the chart objects
 a harness addresses (workload names and namespaces, pod labels, container
 names, rolling-update strategies).
@@ -4037,10 +4037,46 @@ requests with their original `Host` to a different port.
   which namespace was meant; it used to pick one, and half the time the wrong
   one. The request is passed to the cluster's own routing, which refuses it.
   Use `<svc>.<ns>`.
+- **A port-less URL to a service that declares port 80** (`http://<svc>.<ns>/`
+  from a captured pod, which is a dial to port 80) is answered by port 80,
+  like a dial to any declared port. It used to be answered by the port in
+  `endpoint.aether.io/port`. A service that does not declare 80 is unchanged.
+  Only a service whose pods declare both 80 and another declared port can
+  see a different answer; address the other port by its number.
 - **A `backendRef` whose port is not an HTTP port of the backend** routes to
   nothing (503), where it used to reach the backend's declared port. `18081`,
   and `80` for a backend that does not declare it, keep meaning the declared
   port.
+
+##### BREAKING: a raw-TCP service is reached on its declared ports only
+
+Until this chart, a service whose declared port is raw TCP and that has no
+HTTP port answered on **any** port of its address: a connection to a port
+nothing declared was delivered to the declared port (the any-port chain,
+`cap_tcp_anyport_<cluster>`). That chain is gone, without a deprecation
+release. The service is reached on the ports it declares and on `:18082`. A
+connection to any other port of its address is not the service's: it leaves
+through the passthrough to the address that was dialled, which has no such
+port, and is not answered.
+
+**Before upgrading**, on 2.6.x, find the clients that depend on it. The proxy
+counts every connection the chain took:
+
+```promql
+sum by (__name__) (increase({__name__=~"envoy_tcp_cap_tcp_anyport_.*_downstream_cx_total"}[7d])) > 0
+```
+
+A non-zero series names the service (the cluster is part of the metric name,
+every character outside `[a-zA-Z0-9_]` flattened to `_`); its L4
+access log lines (`filter_chain_name` starting `cap_tcp_anyport_`) name the
+source pod and the port it dialled. Move each client to a declared port or to
+`:18082`. The counter undercounts in one case: it does not move for a port
+number another service declares as raw TCP. After the upgrade the series does
+not exist; an absent series no longer means "no client used an undeclared
+port".
+
+The harness contract (`test/harnesscontract/external-harness.yaml`) is version
+4: its `envoy_stats` list is empty, the entry for this counter is removed.
 
 ##### The generated Service
 
@@ -4065,8 +4101,8 @@ NUMBERS (always including 80 and 18081), not the number of services. For 200
 services on three HTTP port numbers, 20 raw-TCP ports and 50 pods on a node:
 26 chains per pod listener (the passthrough default included) where there were
 22, 5 HTTP connection managers per pod where there was 1, 6 route tables per
-node where there were 2. A service whose only ports are raw TCP costs more
-than it did: its any-port chain has a copy on every HTTP port number.
+node where there were 2. A service whose only ports are raw TCP costs two
+chains per pod listener (its declared port and `:18082`), where it had three.
 
 A dashboard, an alert or a query that names the route table `cap_http` or the
 filter chain `capture_<pod>` (the access log's `filter_chain_name`) needs the
@@ -8812,7 +8848,7 @@ connections of the same chains must come back. Each line is the whole join:
 | field | answers |
 |---|---|
 | `node_name` (resource attribute), `pod_name`, `pod_namespace`, `source_netns`, `source_spiffe_id` | **source**: which pod dialled, from which netns, presenting which identity |
-| `filter_chain_name` | which capture chain took it: `cap_tcp_*` (floor, per-port, any-port shim), `cap_tls_*` (TLSRoute SNI), `cap_tcp_blackhole` |
+| `filter_chain_name` | which capture chain took it: `cap_tcp_*` (floor, per-port), `cap_tls_*` (TLSRoute SNI), `cap_tcp_blackhole` |
 | `downstream_local_address` | what the client **dialled** (the restored VIP:port) |
 | `upstream_cluster` | which L4 cluster was chosen, as its **stat key** (`tcp_<ns>/<svc>[_<port>]`, the `aether_cluster` the tick landed on): Envoy's `%UPSTREAM_CLUSTER%` renders the cluster's `alt_stat_name`, not its config name `tcp:<fqdn>[:<port>]` |
 | `upstream_host` | the **intended destination** endpoint, `<pod IP>:18008` → pod → node as in step 2 above |
@@ -8885,7 +8921,7 @@ Move it to the `tcp_` key.
 **The L4 access log.** Every `tcp_proxy` chain on a capture listener carries an OTel
 access logger on the stream **`log_name=aether_l4_access_logs`**, next to the HTTP stream
 `aether_access_logs`. That covers the TCP floor and its port spellings, per-port chains,
-TCPRoute-weighted chains, the any-port shim, TLSRoute SNI chains and the scoped-mode
+TCPRoute-weighted chains, TLSRoute SNI chains and the scoped-mode
 `cap_tcp_blackhole`.
 
 - **Same switch, same sink.** It is on exactly when the HTTP log is (MeshConfig

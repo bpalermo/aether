@@ -94,16 +94,63 @@ func podPort(portMaps map[string]map[uint32]uint32, svc string, servicePort uint
 	return pod, pod != 0
 }
 
-// ruleAppliesToPodPort reports whether a rule of svc applies to requests for
-// the pod port: a rule whose parentRef names no port applies to every port of
-// the Service, one that names a port to that port only (proposal 043, "The
-// model", 6).
-func ruleAppliesToPodPort(rule proxy.GammaRoute, portMaps map[string]map[uint32]uint32, svc string, pod uint32) bool {
-	if rule.ParentPort == 0 {
+// rulePlace is where a virtual host that carries rules stands: the service it
+// belongs to, the SERVICE port it answers for (0 on the loopback table, which
+// is keyed by pod ports, and for a legacy virtual host) and the pod port its
+// requests reach (0 when that is not known: a name this node holds no
+// endpoint of, or a Service port whose targetPort is a name).
+type rulePlace struct {
+	svc         string
+	servicePort uint32
+	pod         uint32
+}
+
+// ruleApplies reports whether a rule of a service applies at a place (proposal
+// 043, "The model", 6): a rule whose parentRef names no port applies on every
+// port of the Service, one that names a port on that port only.
+//
+// The parentRef's port is a port of the SERVICE:
+//
+//   - the Service port the table answers for, whatever its targetPort is (a
+//     named targetPort cannot be resolved to a pod port, and the rule still
+//     belongs to the port it names);
+//   - a user Service's port, through its port map;
+//   - a generated Service's port, which is the pod's. Its two legacy numbers
+//     are ports of it too and lead to the legacy target: the mesh HTTP port
+//     always, and 80 unless the pods declare 80 themselves. A parentRef that
+//     names one of them attached its rule to nothing, where a backendRef that
+//     names one resolves to the default cluster.
+//
+// A rule IMPORTED from a peer cluster (proposal 026) carries no port at all:
+// the projection has no field for one yet. It was authored for some port of
+// the service and nothing here can tell which, so it stays where it applied
+// before the tables were per port, on the legacy target's virtual hosts, and
+// is never spread over the service's other ports.
+func ruleApplies(rule proxy.GammaRoute, portMaps map[string]map[uint32]uint32, ports servicePorts, at rulePlace) bool {
+	legacy := ports.legacyHTTPPort()
+	onLegacyTarget := at.pod == 0 || at.pod == legacy
+	if rule.Imported {
+		return onLegacyTarget
+	}
+	if rule.ParentPort == 0 || (at.servicePort != 0 && rule.ParentPort == at.servicePort) {
 		return true
 	}
-	resolved, ok := podPort(portMaps, svc, rule.ParentPort)
-	return ok && resolved == pod
+	if at.pod == 0 {
+		// A legacy virtual host of a name with no known port: every local
+		// rule, as before the tables were per port.
+		return at.servicePort == 0
+	}
+	if _, mapped := portMaps[at.svc]; mapped {
+		resolved, ok := podPort(portMaps, at.svc, rule.ParentPort)
+		return ok && resolved == at.pod
+	}
+	if rule.ParentPort == at.pod {
+		return true
+	}
+	if rule.ParentPort == meshconst.ProxyOutboundPort || (rule.ParentPort == 80 && !ports.hasHTTP(80)) {
+		return at.pod == legacy
+	}
+	return false
 }
 
 // httpClusterForPort returns the cluster that serves pod port port of svc as
@@ -116,10 +163,9 @@ func httpClusterForPort(svc, meshDomain string, ports servicePorts, port uint32)
 	return proxy.PortClusterName(svc, meshDomain, port)
 }
 
-// resolveRules returns rules for the virtual host of pod port pod of svc: the
-// ones that apply to the port (all of them when pod is 0, the legacy virtual
-// host of a service this node knows no port of), with every backendRef port
-// resolved to the cluster of that port.
+// resolveRules returns the rules of a service for the virtual host at a place
+// (ruleApplies), with every backendRef port resolved to the cluster of that
+// port.
 //
 // A backendRef names a port of the backend SERVICE (proposal 043, "The model",
 // 6). Until this change the port was not read at all and every backend was the
@@ -137,14 +183,14 @@ func httpClusterForPort(svc, meshDomain string, ports servicePorts, port uint32)
 //     where it used to be delivered to a port nobody asked for.
 //
 // The input is shared and read-only; a rule whose backends change is copied.
-func resolveRules(in ruleInputs, all map[string]servicePorts, meshDomain, svc string, pod uint32) []proxy.GammaRoute {
-	rules := in.routes[svc]
+func resolveRules(in ruleInputs, all map[string]servicePorts, meshDomain string, at rulePlace) []proxy.GammaRoute {
+	rules := in.routes[at.svc]
 	if len(rules) == 0 {
 		return nil
 	}
 	out := make([]proxy.GammaRoute, 0, len(rules))
 	for _, rule := range rules {
-		if pod != 0 && !ruleAppliesToPodPort(rule, in.portMaps, svc, pod) {
+		if !ruleApplies(rule, in.portMaps, all[at.svc], at) {
 			continue
 		}
 		rule.Backends = resolveBackends(rule.Backends, in.portMaps, all, meshDomain)
@@ -179,8 +225,12 @@ func backendCluster(b proxy.GammaBackend, portMaps map[string]map[uint32]uint32,
 	pod, ok := podPort(portMaps, b.Service, b.Port)
 	if !ok {
 		// A user Service whose targetPort is a name, or that has no such
-		// port: reported by the reconciler; nothing to resolve to.
-		return proxy.PortClusterName(b.Service, meshDomain, b.Port)
+		// port. The port cannot be resolved to a pod port, so the backend
+		// keeps the cluster it had before backendRef ports were read: the
+		// projected one. (Rendering "<fqdn>:<Service port>" here named a
+		// cluster of ANOTHER port whenever the pods declare that number.)
+		// The reconciler reports a named targetPort.
+		return b.Cluster
 	}
 	if ports.hasHTTP(pod) {
 		return httpClusterForPort(b.Service, meshDomain, ports, pod)
@@ -202,8 +252,18 @@ func backendCluster(b proxy.GammaBackend, portMaps map[string]map[uint32]uint32,
 // (proposal 043, decision 5). Before this change a per-port virtual host
 // carried no rules at all: a route with a port-less parentRef applied to the
 // port-less authority and to none of the service's ports.
+//
+// A per-port entry whose port the service does NOT serve as HTTP gets no
+// virtual host: when pods disagree about a port's class the minority that
+// declares it HTTP still has its cluster (both endpoint sets exist), and the
+// service's one answer for the port is the other class. The authority is then
+// claimed by the refusal (outboundRefusalVhostsLocked), as on the captured
+// path, and not routed to the minority.
 func (c *SnapshotCache) outboundPortVhostLocked(svc, entryName string, port uint32, isDefault bool, in ruleInputs) *routev3.VirtualHost {
-	rules := resolveRules(in, c.servicePorts, c.meshDomain, svc, port)
+	if ports := c.servicePorts[svc]; !isDefault && ports.known() && !ports.hasHTTP(port) {
+		return nil
+	}
+	rules := resolveRules(in, c.servicePorts, c.meshDomain, rulePlace{svc: svc, pod: port})
 	var vh *routev3.VirtualHost
 	if isDefault {
 		fqdn := proxy.ServiceClusterName(svc, c.meshDomain)
@@ -240,7 +300,7 @@ func refusalBody(fqdn, what string, ports servicePorts) string {
 // The mesh HTTP port of a service whose legacy target IS HTTP keeps its
 // cluster: an explicit virtual host, because the port-not-declared wildcard
 // would otherwise claim it.
-func (c *SnapshotCache) outboundRefusalVhostsLocked() []*routev3.VirtualHost {
+func (c *SnapshotCache) outboundRefusalVhostsLocked(in ruleInputs) []*routev3.VirtualHost {
 	if c.edge || len(c.servicePorts) == 0 {
 		return nil
 	}
@@ -253,7 +313,7 @@ func (c *SnapshotCache) outboundRefusalVhostsLocked() []*routev3.VirtualHost {
 	out := make([]*routev3.VirtualHost, 0, 2*len(c.servicePorts))
 	for svc, ports := range c.servicePorts {
 		if _, ok := routed[svc]; ok {
-			out = c.appendOutboundRefusalsLocked(out, svc, ports)
+			out = c.appendOutboundRefusalsLocked(out, svc, ports, in)
 		}
 	}
 	return c.dropClaimedDomainsLocked(out)
@@ -263,10 +323,13 @@ func (c *SnapshotCache) outboundRefusalVhostsLocked() []*routev3.VirtualHost {
 // domain a cluster entry's own virtual host already claims, and every virtual
 // host left with none. Caller must hold clusterMu.
 //
-// The two are built from one answer (reuseInputs.ports) and do not overlap.
-// This is the guard for the day they do: a domain claimed twice makes the
-// proxy reject the WHOLE route table, which is every pod's loopback path on
-// the node, where a missing refusal is one slow error. The entry wins.
+// The two are built from one answer (servicePorts): an entry whose port the
+// service does not serve as HTTP publishes no virtual host
+// (outboundPortVhostLocked), so they are not expected to overlap. This is the
+// guard for a case nobody thought of: a domain claimed twice makes the proxy
+// reject the WHOLE route table, which is every pod's loopback path on the
+// node, where a missing refusal is one slow error. The entry wins. It runs on
+// every snapshot build, so it says so at DEBUG.
 func (c *SnapshotCache) dropClaimedDomainsLocked(refusals []*routev3.VirtualHost) []*routev3.VirtualHost {
 	claimed := make(map[string]struct{}, 2*len(c.clusters))
 	for _, entry := range c.clusters {
@@ -279,7 +342,7 @@ func (c *SnapshotCache) dropClaimedDomainsLocked(refusals []*routev3.VirtualHost
 		kept := vh.Domains[:0]
 		for _, d := range vh.GetDomains() {
 			if _, taken := claimed[d]; taken {
-				c.log.Warn("a refusing virtual host and a cluster's virtual host claim the same authority; keeping the cluster's", "authority", d, "refusal", vh.GetName())
+				c.log.Debug("a refusing virtual host and a cluster's virtual host claim the same authority; keeping the cluster's", "authority", d, "refusal", vh.GetName())
 				continue
 			}
 			kept = append(kept, d)
@@ -293,7 +356,7 @@ func (c *SnapshotCache) dropClaimedDomainsLocked(refusals []*routev3.VirtualHost
 
 // appendOutboundRefusalsLocked appends ONE service's refusing out_http
 // virtual hosts (outboundRefusalVhostsLocked). Caller must hold clusterMu.
-func (c *SnapshotCache) appendOutboundRefusalsLocked(out []*routev3.VirtualHost, svc string, ports servicePorts) []*routev3.VirtualHost {
+func (c *SnapshotCache) appendOutboundRefusalsLocked(out []*routev3.VirtualHost, svc string, ports servicePorts, in ruleInputs) []*routev3.VirtualHost {
 	fqdn := proxy.ServiceClusterName(svc, c.meshDomain)
 	if fqdn == "" {
 		return out
@@ -305,8 +368,11 @@ func (c *SnapshotCache) appendOutboundRefusalsLocked(out []*routev3.VirtualHost,
 		// that name exists whenever the default one does, unless the
 		// service declares 18081 itself.
 		if _, ok := c.clusters[meshPort]; ok && !ports.hasHTTP(meshconst.ProxyOutboundPort) {
-			vh := proxy.BuildOutboundClusterVirtualHost(meshPort, []string{meshPort})
-			vh.Name = fqdn + "|legacy"
+			// It is a virtual host of the service like any other: the rules of
+			// the legacy target and the service's HTTP filters apply on it.
+			vh := proxy.BuildServiceVirtualHost(fqdn+"|legacy", meshPort, []string{meshPort},
+				resolveRules(in, c.servicePorts, c.meshDomain, rulePlace{svc: svc, pod: ports.legacyHTTPPort()}))
+			applyChainFilter(vh, in.chainFilters, svc)
 			out = append(out, vh)
 		}
 	case ports.servesHTTP():
@@ -476,10 +542,11 @@ func (n meshName) httpServicePorts() []uint32 {
 	case n.mapped:
 		out := make([]uint32, 0, len(n.portMap))
 		for sp, pod := range n.portMap {
-			// A named targetPort (pod 0) cannot be resolved and routes
-			// nothing; a port of a service this node knows the classes of
-			// counts only when its pod port is HTTP.
-			if pod == 0 || (n.ports.known() && !n.ports.hasHTTP(pod)) {
+			// A port of a service this node knows the classes of counts only
+			// when its pod port is HTTP. A named targetPort (pod 0) cannot be
+			// resolved; the port still has its table, where the parent's
+			// rules are (appendNameVhosts).
+			if pod != 0 && n.ports.known() && !n.ports.hasHTTP(pod) {
 				continue
 			}
 			out = append(out, sp)
@@ -754,8 +821,12 @@ type captureTablesKey struct {
 // built from. Guarded by snapshotMu (generateSnapshot is the only caller on
 // the serving path).
 type captureTablesMemo struct {
-	valid  bool
-	key    captureTablesKey
+	valid bool
+	key   captureTablesKey
+	// deps is the dependency set whose identity key.deps is. Held, so that the
+	// address cannot be given to another map while the memo still compares
+	// against it.
+	deps   map[string]struct{}
 	arms   map[string]map[string]string
 	tables []types.Resource
 }
@@ -808,7 +879,7 @@ func (c *SnapshotCache) captureRouteTables(ports []uint32) []types.Resource {
 		c.captureTableVhosts(in, 0),
 		proxy.BuildCaptureCatchAllVirtualHost(c.meshDomain, 0, false, c.captureRedirectAll),
 	))
-	c.captureTables = captureTablesMemo{valid: true, key: key, arms: arms, tables: out}
+	c.captureTables = captureTablesMemo{valid: true, key: key, deps: deps, arms: arms, tables: out}
 	return out
 }
 
@@ -847,31 +918,33 @@ func (c *SnapshotCache) appendNameVhosts(vhosts []*routev3.VirtualHost, in captu
 
 	exact := fmt.Sprintf(":%d", d)
 	pod, declared := n.servicePortFor(d)
-	routable := declared && pod != 0 && (!n.ports.known() || n.ports.hasHTTP(pod))
-	// Decision 11: a service that declares port 80 while its legacy target is
-	// another port keeps the legacy meaning of a PORT-LESS request to port 80
-	// through chart 2.8. "<name>:80" spelled out is port 80.
-	shadowed := routable && d == 80 && !n.mapped && n.ports.known() && n.ports.legacyPort != 80
-	// What is left for the legacy virtual host: everything when the port is
-	// not routable, the port-less names when it is shadowed.
-	legacyDomains := domains(n.names, "", exact)
-
-	if routable {
-		doms := legacyDomains
-		if shadowed {
-			doms, legacyDomains = domains(n.names, exact), domains(n.names, "")
-		}
-		vhosts = append(vhosts, c.portVhost(in, n, d, pod, doms))
-	}
+	// A Service port routes when its pod port is HTTP, or is not known to be
+	// anything else: a name this node holds no endpoint of, and a user
+	// Service's port whose targetPort is a NAME (pod 0). The registry carries
+	// no port names, so that port cannot be told from a raw-TCP one; it is
+	// routed to the service's default cluster with the parent's rules, as it
+	// was before the tables were per port, and reported by the reconciler.
+	named := declared && pod == 0 && n.mapped
+	routable := declared && (named || (pod != 0 && (!n.ports.known() || n.ports.hasHTTP(pod))))
+	own := domains(n.names, "", exact)
 
 	switch {
-	case isLegacyHTTPPort(d) && (!routable || shadowed):
-		vhosts = c.appendLegacyVhost(vhosts, in, n, legacyDomains)
-	case routable || !informed:
+	case routable:
+		// A port-less Host means the port that was dialled, port 80 included.
+		vhosts = append(vhosts, c.portVhost(in, n, d, pod, own))
+	case isLegacyHTTPPort(d):
+		vhosts = c.appendLegacyVhost(vhosts, in, n, own)
+	case !informed:
+		// A name this node holds no endpoint of, on a port nothing says it
+		// has. Its mesh authority may still name the port's cluster on
+		// demand (the cold path), and it does so from a virtual host of its
+		// OWN, so that the service's HTTP filters and rules are in force when
+		// the cluster arrives; the catch-all carries neither.
+		vhosts = append(vhosts, c.coldVhost(in, n, d))
 	case declared:
-		refuse("refused", proxy.RefusalPortNotHTTP, "does not serve HTTP on the port that was dialled", legacyDomains)
+		refuse("refused", proxy.RefusalPortNotHTTP, "does not serve HTTP on the port that was dialled", own)
 	default:
-		refuse("refused", proxy.RefusalPortNotDeclared, "does not declare the port that was dialled", legacyDomains)
+		refuse("refused", proxy.RefusalPortNotDeclared, "does not declare the port that was dialled", own)
 	}
 
 	// A Host that names a port other than the one dialled. The dialled port
@@ -882,16 +955,28 @@ func (c *SnapshotCache) appendNameVhosts(vhosts []*routev3.VirtualHost, in captu
 	return vhosts
 }
 
+// coldVhost is the virtual host of a name this node knows no port of, in the
+// table of a dialled port d that is not a legacy one: the mesh authority that
+// spells d, routed to the cluster of that name ("<fqdn>:d"), which the
+// on-demand filter fetches. It carries the service's HTTP filters and the
+// rules that apply on d.
+func (c *SnapshotCache) coldVhost(in captureTableInputs, n meshName, d uint32) *routev3.VirtualHost {
+	vh := proxy.BuildServiceVirtualHost(n.mesh+"|"+strconv.Itoa(int(d)), proxy.PortClusterName(n.svc, c.meshDomain, d),
+		[]string{fmt.Sprintf("%s:%d", n.mesh, d)}, resolveRules(in.rules, in.all, c.meshDomain, rulePlace{svc: n.svc, servicePort: d}))
+	applyChainFilter(vh, in.rules.chainFilters, n.svc)
+	return vh
+}
+
 // portVhost builds the virtual host that ROUTES the name in the table of
 // dialled Service port d, whose pod port is pod: to that port's cluster, with
 // the rules that apply to the port, the service's chain filter and, on the
 // default cluster's routes, the per-source HTTP/3 selection.
 func (c *SnapshotCache) portVhost(in captureTableInputs, n meshName, d, pod uint32, doms []string) *routev3.VirtualHost {
 	cluster := n.mesh
-	if n.ports.known() {
+	if n.ports.known() && pod != 0 {
 		cluster = httpClusterForPort(n.svc, c.meshDomain, n.ports, pod)
 	}
-	vh := proxy.BuildServiceVirtualHost(n.mesh+"|"+strconv.Itoa(int(d)), cluster, doms, resolveRules(in.rules, in.all, c.meshDomain, n.svc, pod))
+	vh := proxy.BuildServiceVirtualHost(n.mesh+"|"+strconv.Itoa(int(d)), cluster, doms, resolveRules(in.rules, in.all, c.meshDomain, rulePlace{svc: n.svc, servicePort: d, pod: pod}))
 	applyChainFilter(vh, in.rules.chainFilters, n.svc)
 	// The per-source HTTP/3 selection applies to the default cluster's
 	// routes, here exactly as on out_http.
@@ -913,7 +998,7 @@ func (c *SnapshotCache) appendLegacyVhost(vhosts []*routev3.VirtualHost, in capt
 		// The default cluster: the legacy target's, or, for a name this node
 		// holds no endpoint of, the cluster the cold path fetches by that
 		// name.
-		vh := proxy.BuildServiceVirtualHost(name, n.mesh, doms, resolveRules(in.rules, in.all, c.meshDomain, n.svc, n.ports.legacyHTTPPort()))
+		vh := proxy.BuildServiceVirtualHost(name, n.mesh, doms, resolveRules(in.rules, in.all, c.meshDomain, rulePlace{svc: n.svc, pod: n.ports.legacyHTTPPort()}))
 		applyChainFilter(vh, in.rules.chainFilters, n.svc)
 		if len(n.arms) > 0 {
 			proxy.ApplyQUICClusterSelection(vh, n.mesh, n.arms)

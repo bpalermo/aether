@@ -1,7 +1,6 @@
 package proxy
 
 import (
-	"regexp"
 	"slices"
 	"strings"
 	"testing"
@@ -17,7 +16,7 @@ import (
 // these to //agent/internal/xds/proxy:proxy_test.
 func ownsContractEntries(t *testing.T, c *harnesscontract.Contract) {
 	t.Helper()
-	c.Owns(t, "//agent/internal/xds/proxy:proxy_test", "envoy.capture.anyport_downstream_cx", "proxy.access_log.http")
+	c.Owns(t, "//agent/internal/xds/proxy:proxy_test", "proxy.access_log.http")
 }
 
 // TestExternalHarnessContract_AccessLog holds the HTTP access log to the
@@ -93,59 +92,55 @@ func diffStrings(want, got []string) (onlyWant, onlyGot []string) {
 	return onlyWant, onlyGot
 }
 
-// TestExternalHarnessContract_AnyPortStat holds the any-port shim's stat
-// prefix to the external-harness contract
-// (test/harnesscontract/external-harness.yaml). A harness outside this
-// repository reads tcp.<prefix><cluster>.downstream_cx_total by pattern, and a
-// counter Envoy never incremented has no series at all: after a rename its
-// query would read "no data", which is exactly what a legitimate zero looks
-// like. The prefix is taken from a capture listener the real generator built.
+// TestExternalHarnessContract_AnyPortStat held the any-port shim's stat prefix
+// to the external-harness contract until version 3. Version 4 removed the
+// entry together with the chain (chart 2.7.0), and what the test holds now is
+// the removal: the contract has no Envoy stat entry, and no chain of a capture
+// listener the real generator built counts under the prefix a version-3
+// harness reads. A harness reading it sees no series, and the contract's
+// version history says that this is what "removed" looks like; were the
+// prefix to come back without an entry, the same harness would read a counter
+// nobody promised.
 func TestExternalHarnessContract_AnyPortStat(t *testing.T) {
 	c := harnesscontract.MustLoad(t)
 	ownsContractEntries(t, c)
-	entry := c.EnvoyStat(t, "envoy.capture.anyport_downstream_cx")
-
-	const cluster = "tcp:echo-tcp.a-namespace.aether.internal"
-	l, err := GenerateCaptureListener(&cniv1.CNIPod{Name: "p1", NetworkNamespace: "/var/run/netns/p1"},
-		"spiffe://aether.internal/ns/default/sa/test", 15001, "aether.internal", false,
-		[]CaptureTCPService{{ClusterName: cluster, ClusterIP: "10.96.1.50", LegacyTCPPort: 9000, AnyPort: true}}, nil, true, nil)
-	if err != nil {
-		t.Fatalf("GenerateCaptureListener: %v", err)
+	if len(c.EnvoyStats) != 0 {
+		harnesscontract.Errorf(t, "%s has %d envoy_stats entries; this package holds none of them to the code. An Envoy stat a harness may read needs a test that takes its prefix from a generated listener.",
+			harnesscontract.File, len(c.EnvoyStats))
 	}
-	var portless []string // the stat prefixes of the chains with no destination_port
-	for _, fc := range l.GetFilterChains() {
-		if fc.GetFilterChainMatch().GetDestinationPort().GetValue() != 0 {
-			continue
-		}
-		for _, f := range fc.GetFilters() {
-			tc := &tcp_proxyv3.TcpProxy{}
-			if f.GetTypedConfig() != nil && f.GetTypedConfig().UnmarshalTo(tc) == nil {
-				portless = append(portless, tc.GetStatPrefix())
+
+	const removedPrefix = "cap_tcp_anyport_"
+	for name, svcs := range map[string][]CaptureTCPService{
+		"raw-TCP legacy target":                          {{ClusterName: "tcp:echo-tcp.a-namespace.aether.internal", ClusterIP: "10.96.1.50", LegacyTCPPort: 9000}},
+		"raw-TCP legacy target and another raw-TCP port": {{ClusterName: "tcp:echo-tcp.a-namespace.aether.internal", ClusterIP: "10.96.1.50", LegacyTCPPort: 9000, TCPPorts: []uint32{9000, 9100}}},
+		"mixed, HTTP legacy target":                      {{ClusterName: "tcp:mixed.a-namespace.aether.internal", ClusterIP: "10.96.1.51", HTTPPorts: []uint32{8080}, TCPPorts: []uint32{9000}, LegacyHTTP: true}},
+	} {
+		for _, withPassthrough := range []bool{true, false} {
+			l, err := GenerateCaptureListener(&cniv1.CNIPod{Name: "p1", NetworkNamespace: "/var/run/netns/p1"},
+				"spiffe://aether.internal/ns/default/sa/test", 15001, "aether.internal", false,
+				svcs, []uint32{80, 8080, 18081}, withPassthrough, nil)
+			if err != nil {
+				t.Fatalf("GenerateCaptureListener(%s): %v", name, err)
+			}
+			tcpProxies := 0
+			for _, fc := range l.GetFilterChains() {
+				if strings.Contains(fc.GetName(), removedPrefix) {
+					harnesscontract.Errorf(t, "%s (version 4) says the any-port chain is gone; the capture listener of %q has the chain %q.", harnesscontract.File, name, fc.GetName())
+				}
+				for _, f := range fc.GetFilters() {
+					tc := &tcp_proxyv3.TcpProxy{}
+					if f.GetTypedConfig() == nil || f.GetTypedConfig().UnmarshalTo(tc) != nil {
+						continue
+					}
+					tcpProxies++
+					if strings.Contains(tc.GetStatPrefix(), removedPrefix) {
+						harnesscontract.Errorf(t, "%s (version 4) says no chain counts under %q; the chain %q of %q has the stat prefix %q.", harnesscontract.File, removedPrefix, fc.GetName(), name, tc.GetStatPrefix())
+					}
+				}
+			}
+			if tcpProxies == 0 {
+				t.Fatalf("the capture listener of %q has no tcp_proxy chain: the check above looked at nothing", name)
 			}
 		}
-	}
-	want := entry.StatPrefix + cluster
-	found := false
-	for _, p := range portless {
-		found = found || p == want
-	}
-	if !found {
-		harnesscontract.Errorf(t, "%s says the any-port chain of a TCP-primary service counts under the stat prefix %q + the cluster name (%q); the portless chains of the generated capture listener have %q.",
-			harnesscontract.File, entry.StatPrefix, want, portless)
-	}
-
-	// The rest of the entry is what Envoy and a metrics pipeline make of the
-	// prefix. Not something this repository can run, but the three spellings
-	// in the entry must at least agree with one another.
-	if wantStat := "tcp." + entry.StatPrefix + "<cluster>.downstream_cx_total"; entry.Stat != wantStat {
-		harnesscontract.Errorf(t, "%s: the stat of %s is %q, and its stat_prefix makes it %q.", harnesscontract.File, entry.ID, entry.Stat, wantStat)
-	}
-	flat := "envoy_" + regexp.MustCompile(`[^a-zA-Z0-9_]`).ReplaceAllString("tcp."+want+".downstream_cx_total", "_")
-	pattern, err := regexp.Compile("^(?:" + entry.StoredNamePattern + ")$")
-	if err != nil {
-		t.Fatalf("%s: stored_name_pattern of %s is not a regular expression: %v", harnesscontract.File, entry.ID, err)
-	}
-	if !pattern.MatchString(flat) || !strings.Contains(entry.StoredNamePattern, strings.TrimSuffix(entry.StatPrefix, "_")) {
-		harnesscontract.Errorf(t, "%s: stored_name_pattern %q of %s does not match %q, the flattened name of the stat for cluster %q.", harnesscontract.File, entry.StoredNamePattern, entry.ID, flat, cluster)
 	}
 }

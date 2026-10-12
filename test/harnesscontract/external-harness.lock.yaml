@@ -13,7 +13,7 @@
 # bump the test asked for, skipped, and on a pull request
 # scripts/check-harness-contract-bump.sh compares this file with the one at the
 # base and fails all the same. README.md, "The rule".
-version: 3
+version: 4
 promises:
   "agent.identity_cluster_unpinned component": "50cd9bfba937d729"
   "agent.identity_cluster_unpinned labels": "24ef360621b205d9"
@@ -129,9 +129,6 @@ promises:
   "chart.udsecho.policy_path pod_labels app": "833202de4edb7693"
   "chart.udsecho.policy_path render": "b3d6bd0515da4032"
   "csi.driver value": "3df1e7e9b993e0c9"
-  "envoy.capture.anyport_downstream_cx stat": "f0705276312cf80a"
-  "envoy.capture.anyport_downstream_cx stat_prefix": "94df627845463d74"
-  "envoy.capture.anyport_downstream_cx stored_name_pattern": "7c0956407acd3fe4"
   "mesh.default_domain value": "8697dd09087fbc70"
   "object.annotation.harness_contract_version value": "41c107fe494bb13d"
   "pod.annotation.capture_exclude_outbound_ports value": "fa0eb1106411784c"

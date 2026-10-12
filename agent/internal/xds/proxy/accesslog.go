@@ -270,7 +270,7 @@ func buildL4AccessLog(podName, podNamespace string) []*accesslogv3.AccessLog {
 			kv("source_netns", "%FILTER_STATE(aether.network.network_namespace:PLAIN)%"),
 			kv("source_spiffe_id", "%FILTER_STATE("+SourceIdentityCertMapperFilterStateKey+":PLAIN)%"),
 			// Which capture chain took the connection: cap_tcp_* (floor, per-port,
-			// TCPRoute-weighted, the any-port shim), cap_tls_* (a TLSRoute SNI
+			// TCPRoute-weighted), cap_tls_* (a TLSRoute SNI
 			// chain) or cap_tcp_blackhole. The chain kind the stat key cannot
 			// carry, since TLS chains report under their backends' tcp: keys.
 			kv("filter_chain_name", "%FILTER_CHAIN_NAME%"),

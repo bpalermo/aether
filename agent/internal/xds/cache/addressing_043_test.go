@@ -302,13 +302,10 @@ func TestAddressing_CapturedDialledPortDecides(t *testing.T) {
 					// Host means the dialled port.
 					for _, host := range []string{name, fmt.Sprintf("%s:%d", name, d)} {
 						got := a043Resolve(t, table, host)
-						portless := host == name
 						switch {
-						case isHTTP && d == 80 && s.legacy != 80 && portless:
-							// Decision 11: a port-less request to a declared
-							// port 80 keeps its legacy meaning.
-							assert.Equal(t, a043Cluster(s, s.legacy), got.cluster, "decision 11")
 						case isHTTP:
+							// Port 80 included: a port-less Host on a dial to
+							// a declared port 80 is port 80, like any port.
 							assert.Equalf(t, a043Cluster(s, d), got.cluster, "Host %q on dialled port %d must reach port %d and no other (%+v)", host, d, d, got)
 							assert.False(t, got.onDemand, "a known service is routed by its own virtual host")
 						case d == 18081 || d == 80:
@@ -536,8 +533,8 @@ func chainNames(l *listenerv3.Listener) []string {
 
 // TestAddressing_ListenerChains holds the capture listener's chain set against
 // the fixture: an HTTP chain per HTTP port number, a raw-TCP chain per
-// (service, raw-TCP port), the legacy chains of a raw-TCP legacy target, and
-// the any-port chain only for a service with no HTTP port.
+// (service, raw-TCP port), the two legacy chains of a raw-TCP legacy target,
+// and no chain that takes "any other port" of an address.
 func TestAddressing_ListenerChains(t *testing.T) {
 	services := a043Fixture()
 	c := a043Cache(t, services)
@@ -551,16 +548,14 @@ func TestAddressing_ListenerChains(t *testing.T) {
 		// tcpfirst: a raw-TCP legacy target on its own port and on :18082.
 		"cap_tcp_tcp:tcpfirst.demo.aether.internal_9000",
 		"cap_tcp_tcp:tcpfirst.demo.aether.internal_18082",
-		// tcponly: the same, and the any-port chain.
+		// tcponly: the same, and nothing else.
 		"cap_tcp_tcp:tcponly.demo.aether.internal_9000",
 		"cap_tcp_tcp:tcponly.demo.aether.internal_18082",
-		"cap_tcp_anyport_tcp:tcponly.demo.aether.internal",
 	} {
 		assert.Contains(t, names, want)
 	}
 	for _, name := range names {
-		assert.NotContains(t, name, "cap_tcp_anyport_tcp:tcpfirst", "no any-port chain for a service that declares an HTTP port")
-		assert.NotContains(t, name, "cap_tcp_anyport_tcp:mixed")
+		assert.NotContains(t, name, "anyport", "no service has an any-port chain: a raw-TCP service is reached on the ports it declares")
 		assert.NotContains(t, name, "cap_tcp_tcp:mixed.demo.aether.internal_18082", "the TCP mesh port names nothing on a service whose legacy target is HTTP")
 		assert.NotContains(t, name, "cap_tcp_tcp:nine", "a port declared HTTP gets no raw-TCP chain, whatever another service declares for the number")
 	}
@@ -748,8 +743,8 @@ func TestAddressing_BackendRefPort(t *testing.T) {
 		{"the legacy spelling of a service whose legacy target is raw TCP names nothing", proxy.GammaBackend{Service: "demo/tcpfirst", Cluster: tcpfirst, Port: 18081}, nil, tcpfirst + ":18081"},
 		{"a service this node knows no port of keeps the projected cluster", proxy.GammaBackend{Service: "demo/cold", Cluster: "cold.demo.aether.internal", Port: 9090}, nil, "cold.demo.aether.internal"},
 		{"a user Service: its port resolves through targetPort", proxy.GammaBackend{Service: "demo/multi", Cluster: multi, Port: 80}, userMap, multi + ":9090"},
-		{"a user Service: a named targetPort resolves to nothing", proxy.GammaBackend{Service: "demo/multi", Cluster: multi, Port: 81}, userMap, multi + ":81"},
-		{"a user Service: a port it does not have resolves to nothing", proxy.GammaBackend{Service: "demo/multi", Cluster: multi, Port: 8080}, userMap, multi + ":8080"},
+		{"a user Service: a named targetPort cannot be resolved and keeps the projected cluster", proxy.GammaBackend{Service: "demo/multi", Cluster: multi, Port: 81}, userMap, multi},
+		{"a user Service: a port it does not have keeps the projected cluster, never the pods' port of that number", proxy.GammaBackend{Service: "demo/multi", Cluster: multi, Port: 8080}, userMap, multi},
 		{"a user Service: a targetPort the pods do not declare", proxy.GammaBackend{Service: "demo/multi", Cluster: multi, Port: 443}, userMap, multi + ":8443"},
 	}
 	for _, tc := range cases {
@@ -760,7 +755,7 @@ func TestAddressing_BackendRefPort(t *testing.T) {
 
 	// resolveRules never writes into the shared rules.
 	shared := map[string][]proxy.GammaRoute{"demo/httponly": {{Backends: []proxy.GammaBackend{{Service: "demo/multi", Cluster: multi, Port: 9090, Weight: 1}}}}}
-	got := resolveRules(ruleInputs{routes: shared}, all, a043Mesh, "demo/httponly", 8080)
+	got := resolveRules(ruleInputs{routes: shared}, all, a043Mesh, rulePlace{svc: "demo/httponly", pod: 8080})
 	require.Len(t, got, 1)
 	assert.Equal(t, multi+":9090", got[0].Backends[0].Cluster)
 	assert.Equal(t, multi, shared["demo/httponly"][0].Backends[0].Cluster, "the shared rule was mutated")
@@ -806,7 +801,7 @@ func TestAddressing_UserServicePortMap(t *testing.T) {
 	for _, p := range []uint32{80, 3000, 8080} {
 		require.Contains(t, tables, proxy.CaptureHTTPRouteName(p))
 	}
-	assert.NotContains(t, tables, "cap_http_9", "a named targetPort routes nothing")
+	assert.Contains(t, tables, "cap_http_9", "a Service port with a named targetPort still has its table")
 
 	// http://echo/ dials 80: the route's backend is echo-v1's SERVICE port 80,
 	// which is pod port 8080, its default cluster.
@@ -859,7 +854,6 @@ func TestServicePorts_Derivation(t *testing.T) {
 		for _, listings := range [][]listedEndpoints{
 			{lst(sHTTP, a), lst(sTCP, a)},
 			{lst(sTCP, a), lst(sHTTP, a)},
-			{lst(sHTTP, a)},
 		} {
 			got := deriveServicePorts(listings...)
 			assert.Equal(t, []uint32{8080}, got.http)
@@ -869,6 +863,29 @@ func TestServicePorts_Derivation(t *testing.T) {
 			assert.Empty(t, got.conflicts, "one pod in two listings is not a disagreement")
 			assert.Equal(t, "8080 (http), 9000 (tcp)", got.describe())
 		}
+	})
+
+	t.Run("a port is served only where its class's listing holds the pod", func(t *testing.T) {
+		// A registrar of chart 2.6 on the kubernetes backend lists a mixed
+		// pod under its pod-level protocol alone. The raw-TCP port has no
+		// cluster then (the cluster entries are built per listing), so it is
+		// not a port of the service on this node: no chain, no route.
+		a := ep("10.0.0.1", 9000, map[uint32]registryv1.PortProtocol{9000: tcp, 8080: h}, 8080, 9000)
+		got := deriveServicePorts(lst(sHTTP, a))
+		assert.Equal(t, []uint32{8080}, got.http)
+		assert.Empty(t, got.tcp)
+		assert.Zero(t, got.legacyTCPPort(), "the declared port's class has no listing here")
+		// The row still says what the declared port IS. A listing that has
+		// not caught up (the pod's HTTP row is written before its raw-TCP
+		// one) must not make the service look like one with no declared
+		// port: that built a default HTTP cluster on the raw-TCP port, which
+		// then held the port-less authority and answered it 502.
+		assert.Equal(t, uint32(9000), got.legacyPort)
+		assert.Equal(t, tcp, got.legacyClass)
+		assert.Zero(t, got.legacyHTTPPort())
+		got = deriveServicePorts(lst(sTCP, a))
+		assert.Equal(t, []uint32{9000}, got.tcp)
+		assert.Empty(t, got.http)
 	})
 
 	t.Run("a row written before proposal 037 takes its listing's class", func(t *testing.T) {
@@ -883,9 +900,10 @@ func TestServicePorts_Derivation(t *testing.T) {
 	})
 
 	t.Run("a port the map does not name takes the listing's class; an unusable port is dropped", func(t *testing.T) {
-		got := deriveServicePorts(lst(sTCP, ep("10.0.0.1", 9000, map[uint32]registryv1.PortProtocol{8080: h, 70000: h, 0: h}, 9000, 8080)))
-		assert.Equal(t, []uint32{8080}, got.http)
-		assert.Equal(t, []uint32{9000}, got.tcp)
+		row := ep("10.0.0.1", 9000, map[uint32]registryv1.PortProtocol{8080: h, 70000: h, 0: h}, 9000, 8080)
+		got := deriveServicePorts(lst(sTCP, row))
+		assert.Empty(t, got.http, "8080 is named http, and no HTTP listing holds the pod")
+		assert.Equal(t, []uint32{9000}, got.tcp, "9000 is not named: the listing's class; 0 and 70000 are no ports")
 	})
 
 	t.Run("a class conflict: most endpoints win, in any order", func(t *testing.T) {
@@ -908,7 +926,7 @@ func TestServicePorts_Derivation(t *testing.T) {
 			assert.Equal(t, []uint32{8080, 9000}, deriveServicePorts(lst(sHTTP, order...)).http)
 		}
 		for _, order := range [][]*registryv1.ServiceEndpoint{{a, u}, {u, a}} {
-			got := deriveServicePorts(lst(sHTTP, order...))
+			got := deriveServicePorts(lst(sHTTP, order...), lst(sTCP, a), lst(sUDP, u))
 			assert.Equal(t, []uint32{9000}, got.tcp)
 			assert.Empty(t, got.udp)
 		}
@@ -1039,8 +1057,7 @@ func TestAddressing_RoutePortsReachTheListener(t *testing.T) {
 //
 // Two shapes of the 20 pairs are measured, because they do not cost the same:
 // a raw-TCP port beside an HTTP legacy target is one chain; a raw-TCP LEGACY
-// target with no HTTP port is the chain on its own port, the one on the TCP
-// mesh port, and the any-port chain with a twin on every HTTP port number.
+// target is the chain on its own port and the one on the TCP mesh port.
 func TestAddressing_ScaleWorkedExample(t *testing.T) {
 	h, tcp := registryv1.PortProtocol_PORT_PROTOCOL_HTTP, registryv1.PortProtocol_PORT_PROTOCOL_TCP
 	build := func(tcpOnly bool) (*SnapshotCache, []a043Service) {
@@ -1085,8 +1102,8 @@ func TestAddressing_ScaleWorkedExample(t *testing.T) {
 	}{
 		// 4 HTTP port numbers (80, 8080, 9090 and the legacy 18081) + other + 20.
 		{"20 raw-TCP ports beside an HTTP legacy target", false, 4 + 1 + 20},
-		// Per raw-TCP-only service: its port, :18082, any-port, 4 twins.
-		{"20 raw-TCP legacy targets with no HTTP port", true, 4 + 1 + 20*(2+1+4)},
+		// Per raw-TCP-only service: its port and :18082.
+		{"20 raw-TCP legacy targets with no HTTP port", true, 4 + 1 + 20*2},
 	} {
 		t.Run(shape.name, func(t *testing.T) {
 			c, _ := build(shape.tcpOnly)
@@ -1313,7 +1330,7 @@ func TestAddressing_EveryChainAndRouteHasItsCluster(t *testing.T) {
 			assert.Containsf(t, endpoints, eds, "chain %s: cluster %s subscribes to %q, which nothing publishes", fc.GetName(), name, eds)
 		}
 	}
-	require.Greater(t, tcpChains, 8)
+	require.Greater(t, tcpChains, 6)
 	assert.Contains(t, chainNames(l), "cap_tcp_tcp:split.demo.aether.internal_8080")
 	assert.Contains(t, chainNames(l), "cap_tcp_tcp:split.demo.aether.internal_9000")
 

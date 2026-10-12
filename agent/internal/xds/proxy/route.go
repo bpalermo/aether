@@ -331,7 +331,14 @@ type GammaRoute struct {
 	// port only. It is the PARENT SERVICE's port: for a Service the registrar
 	// generated that is the pod's port, for a user Service it is resolved
 	// through the Service's port map before the rule is placed.
-	ParentPort     uint32
+	ParentPort uint32
+	// Imported marks a rule that came from a peer cluster's projection
+	// (proposal 026) and not from a route of this cluster. Such a rule carries
+	// no parent port and no backend ports (the projection has no field for
+	// them yet), so it is kept on the virtual hosts of the service's legacy
+	// target and never spread over the service's other ports. Set by the
+	// cache when it takes the imported rules in.
+	Imported       bool
 	Matches        []GammaMatch
 	Backends       []GammaBackend
 	Timeout        *durationpb.Duration

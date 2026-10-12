@@ -2,6 +2,7 @@ package cache
 
 import (
 	"context"
+	"slices"
 
 	"aethermesh.dev/agent/internal/xds/proxy"
 	cniv1 "aethermesh.dev/api/aether/cni/v1"
@@ -35,6 +36,16 @@ func (c *SnapshotCache) SetServiceRoutes(routes map[string][]proxy.GammaRoute) {
 // read time — a LOCAL HTTPRoute for the same service wins (a cluster's own config is
 // authoritative for itself). Signals a scoped-snapshot rebuild on change.
 func (c *SnapshotCache) SetImportedServiceRoutes(routes map[string][]proxy.GammaRoute) {
+	// Marked here, on a copy: the caller's rules are not this cache's to write.
+	marked := make(map[string][]proxy.GammaRoute, len(routes))
+	for svc, rules := range routes {
+		rules = slices.Clone(rules)
+		for i := range rules {
+			rules[i].Imported = true
+		}
+		marked[svc] = rules
+	}
+	routes = marked
 	c.depMu.Lock()
 	changed := !equalServiceRoutes(c.importedServiceRoutes, routes)
 	c.importedServiceRoutes = routes
@@ -204,7 +215,7 @@ func equalServiceRoutes(a, b map[string][]proxy.GammaRoute) bool {
 }
 
 func equalGammaRoute(a, b proxy.GammaRoute) bool {
-	if len(a.Matches) != len(b.Matches) || len(a.Backends) != len(b.Backends) || a.ParentPort != b.ParentPort {
+	if len(a.Matches) != len(b.Matches) || len(a.Backends) != len(b.Backends) || a.ParentPort != b.ParentPort || a.Imported != b.Imported {
 		return false
 	}
 	if timeoutNanos(a) != timeoutNanos(b) {

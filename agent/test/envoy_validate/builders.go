@@ -494,7 +494,6 @@ func buildCaptureBootstrap() (*bootstrapv3.Bootstrap, error) {
 		// the TCP floor, which is emitted only for such a service (proposals
 		// 037 and 043), on its own port, on the TCP mesh port and on any port.
 		LegacyTCPPort: fixtureLegacyTCPPort,
-		AnyPort:       true,
 	}
 	captureListener, err := proxy.GenerateCaptureListener(
 		pod,
@@ -659,7 +658,6 @@ func buildCaptureTCPRouteBootstrap() (*bootstrapv3.Bootstrap, error) {
 		// the TCP floor, which is emitted only for such a service (proposals
 		// 037 and 043), on its own port, on the TCP mesh port and on any port.
 		LegacyTCPPort: fixtureLegacyTCPPort,
-		AnyPort:       true,
 		TCPRouteRules: []proxy.L4ServiceRoute{{
 			Backends: []proxy.L4Backend{
 				{Service: l4TCPBackendA, Cluster: L4TCPBackendClusterA(), Weight: L4TCPWeightA},
@@ -734,7 +732,6 @@ func buildCaptureTLSRouteBootstrap() (*bootstrapv3.Bootstrap, error) {
 		// the TCP floor, which is emitted only for such a service (proposals
 		// 037 and 043), on its own port, on the TCP mesh port and on any port.
 		LegacyTCPPort: fixtureLegacyTCPPort,
-		AnyPort:       true,
 		// No TCPRouteRules on purpose: the parent keeps its plain passthrough
 		// floor chain, which is the chain a non-matching SNI is DESIGNED to
 		// reach. Adding a TCPRoute here would hide that half of the shape.

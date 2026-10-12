@@ -22,7 +22,7 @@ import (
 func TestBuildCaptureTCPPortFilterChain(t *testing.T) {
 	svc := CaptureTCPService{
 		ClusterName: "tcp:mixed.aether-test.aether.internal",
-		ClusterIP:   "10.96.0.60", LegacyTCPPort: 9000, AnyPort: true,
+		ClusterIP:   "10.96.0.60", LegacyTCPPort: 9000,
 	}
 
 	fc := buildCaptureTCPPortFilterChain(svc, 9000, "spiffe://example.org/ns/default/sa/client")
@@ -46,7 +46,7 @@ func TestBuildCaptureTCPPortFilterChain(t *testing.T) {
 }
 
 func TestBuildCaptureTCPPortFilterChain_Rejects(t *testing.T) {
-	good := CaptureTCPService{ClusterName: "tcp:svc.ns.aether.internal", ClusterIP: "10.96.0.60", LegacyTCPPort: 9000, AnyPort: true}
+	good := CaptureTCPService{ClusterName: "tcp:svc.ns.aether.internal", ClusterIP: "10.96.0.60", LegacyTCPPort: 9000}
 	tests := []struct {
 		name string
 		svc  CaptureTCPService
@@ -54,7 +54,7 @@ func TestBuildCaptureTCPPortFilterChain_Rejects(t *testing.T) {
 	}{
 		{name: "no ClusterIP", svc: CaptureTCPService{ClusterName: good.ClusterName}, port: 9000},
 		{name: "no ClusterName", svc: CaptureTCPService{ClusterIP: good.ClusterIP}, port: 9000},
-		{name: "unparseable ClusterIP", svc: CaptureTCPService{ClusterName: good.ClusterName, ClusterIP: "not-an-ip", LegacyTCPPort: 9000, AnyPort: true}, port: 9000},
+		{name: "unparseable ClusterIP", svc: CaptureTCPService{ClusterName: good.ClusterName, ClusterIP: "not-an-ip", LegacyTCPPort: 9000}, port: 9000},
 		{name: "port zero", svc: good, port: 0},
 		{name: "port out of range", svc: good, port: 70000},
 	}
@@ -114,49 +114,54 @@ func TestGenerateCaptureListener_HTTPPrimaryGetsNoPortlessChain(t *testing.T) {
 }
 
 // TestGenerateCaptureListener_TCPPrimaryKeepsPortlessChain: the other side of
-// the same gate. A TCP-primary service keeps the portless floor, which is what
-// makes any port to its VIP reach the floor — today's behaviour, unchanged.
+// the same gate, as it stands since chart 2.7.0. A TCP-primary service used to
+// keep a portless floor chain, on which any port of its VIP reached the floor.
+// It has none now: it is reached on its own port and on :18082, and a
+// connection to any other port of its VIP matches no chain of the service.
+// (The name is kept so the history of the test is one line of `git log`.)
 func TestGenerateCaptureListener_TCPPrimaryKeepsPortlessChain(t *testing.T) {
 	pod := &cniv1.CNIPod{Name: "p1", NetworkNamespace: "/var/run/netns/p1"}
 
 	svcs := []CaptureTCPService{{
 		ClusterName:   "tcp:echo-tcp.aether-test.aether.internal",
 		ClusterIP:     "10.96.1.40",
-		LegacyTCPPort: 9000, AnyPort: true,
+		LegacyTCPPort: 9000,
 	}}
 
 	l, err := GenerateCaptureListener(pod, "spiffe://aether.internal/ns/default/sa/test",
 		15001, "aether.internal", false, svcs, nil, true, nil)
 	require.NoError(t, err)
 
-	var portless int
+	var ports []uint32
 	for _, fc := range l.GetFilterChains() {
 		m := fc.GetFilterChainMatch()
-		if len(m.GetPrefixRanges()) > 0 && m.GetDestinationPort() == nil {
-			portless++
+		if len(m.GetPrefixRanges()) == 0 {
+			continue
 		}
+		assert.NotNil(t, m.GetDestinationPort(), "chain %s claims the VIP on every port", fc.GetName())
+		ports = append(ports, m.GetDestinationPort().GetValue())
 	}
-	assert.Equal(t, 1, portless, "a TCP-primary service keeps its portless floor chain")
+	assert.ElementsMatch(t, []uint32{9000, 18082}, ports,
+		"a TCP-primary service is reached on its own port and on the TCP mesh port, and on nothing else")
 }
 
-// TestAnyPortShimIsCountedSeparately is the gate Phase 4 depends on.
+// TestAnyPortShimIsCountedSeparately was the gate the removal of the any-port
+// chain depended on: the shim had a stat prefix of its own
+// (cap_tcp_anyport_<cluster>), so its counter could tell "someone relies on
+// the deprecated behaviour" from "someone used a supported spelling".
 //
-// Phase 4 proposes deleting the portless floor chain — the only step in
-// proposal 037 that changes what an existing client observes — and it is gated
-// on evidence that no client observes it: the shim's own counter reading zero
-// across a full release on the reference cluster.
-//
-// That evidence is only obtainable if the shim has a stat prefix of its own. If
-// it shared one with the supported spellings (:18082 and the primary port), the
-// counter could never distinguish "someone relies on the deprecated behaviour"
-// from "someone used a supported spelling", and the removal would be a guess.
+// The chain was removed in chart 2.7.0. What the test holds now is the other
+// half of the same sentence: the two spellings that survive are each counted
+// under their own chain's name, and no tcp_proxy of the listener counts under
+// the any-port prefix, so a dashboard or a harness that still reads it reads
+// a series that does not exist rather than one that is silently zero for
+// another reason.
 func TestAnyPortShimIsCountedSeparately(t *testing.T) {
 	pod := &cniv1.CNIPod{Name: "p1", NetworkNamespace: "/var/run/netns/p1"}
 	svcs := []CaptureTCPService{{
 		ClusterName:   "tcp:echo-tcp.aether-test.aether.internal",
 		ClusterIP:     "10.96.1.50",
 		LegacyTCPPort: 9000,
-		AnyPort:       true,
 	}}
 
 	l, err := GenerateCaptureListener(pod, "spiffe://aether.internal/ns/default/sa/test",
@@ -174,12 +179,12 @@ func TestAnyPortShimIsCountedSeparately(t *testing.T) {
 		}
 	}
 
-	shim := "cap_tcp_anyport_tcp:echo-tcp.aether-test.aether.internal"
-	require.Contains(t, prefixes, shim, "the shim must have its own stat prefix, or Phase 4 has no evidence to act on")
-	assert.Zero(t, prefixes[shim], "the shim is PORTLESS: it catches what no destination_port chain claimed")
-
-	// The two spellings that survive Phase 4 are counted apart from it.
-	assert.Equal(t, uint32(18082), prefixes["cap_tcp_tcp:echo-tcp.aether-test.aether.internal_18082"])
-	assert.Equal(t, uint32(9000), prefixes["cap_tcp_tcp:echo-tcp.aether-test.aether.internal_9000"],
-		"the service's own primary port keeps working after the shim is removed")
+	// Exactly the two surviving spellings, each on its own port, each under
+	// its own prefix. A third entry would be a chain nobody asked for; the
+	// any-port prefix in particular would be the removed chain coming back.
+	assert.Equal(t, map[string]uint32{
+		"cap_tcp_tcp:echo-tcp.aether-test.aether.internal_18082": 18082,
+		"cap_tcp_tcp:echo-tcp.aether-test.aether.internal_9000":  9000,
+	}, prefixes)
+	assert.NotContains(t, prefixes, "cap_tcp_anyport_tcp:echo-tcp.aether-test.aether.internal")
 }
