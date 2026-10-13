@@ -148,6 +148,9 @@ func (c *SnapshotCache) clustersEndpointsVhostsAndPinsInto(buf []entryClass, mtl
 	// The authorities out_http refuses by name (proposal 043): a mesh service
 	// addressed on a port it does not serve as HTTP.
 	vhosts = append(vhosts, c.outboundRefusalVhostsLocked(rules)...)
+	// And the services with a service-wide HTTP filter that have no cluster
+	// here yet: their own virtual host on the on-demand route.
+	vhosts = append(vhosts, c.outboundColdVhostsLocked(rules)...)
 	c.noteQUICFanout(quicClusters, len(quic.pairs), len(quic.identities), len(quic.awaitingCert))
 	sortResourcesByName(clusters)
 	sortResourcesByName(clas)

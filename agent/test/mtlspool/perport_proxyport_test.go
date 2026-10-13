@@ -93,6 +93,64 @@ func ppSendRaw(addr, method, target, host string) ppRaw {
 	return ppRaw{status: resp.StatusCode, reason: resp.Header.Get("x-aether-error"), filter: resp.Header.Get(ppHeader) != "", seen: strings.TrimSpace(string(body))}
 }
 
+// ppAwaitListening waits until something accepts on addr.
+func ppAwaitListening(t *testing.T, addr string) {
+	t.Helper()
+	require.Eventually(t, func() bool {
+		c, err := net.DialTimeout("tcp", addr, time.Second)
+		if err != nil {
+			return false
+		}
+		_ = c.Close()
+		return true
+	}, 20*time.Second, 200*time.Millisecond, "the proxy never bound %s", addr)
+}
+
+// TestPerPort_ParkedRequestOnTheProxyPortRunsTheChainFilter: the loopback
+// path's half of TestPerPort_ParkedRequestSkipsTheChainFilter. The node holds
+// no endpoint of the service when the request arrives on the loopback
+// listener; the on-demand filter parks it; the registry answers, the cluster
+// is published and the request resumes. It must not be delivered without the
+// service's chain filter (an ext_authz filter is one).
+func TestPerPort_ParkedRequestOnTheProxyPortRunsTheChainFilter(t *testing.T) {
+	r := ppStart(t, ppChain(t))
+	port := ppFreePort(t)
+	r.mu.Lock()
+	r.proxyPort = port
+	r.mu.Unlock()
+	r.publish()
+	addr := fmt.Sprintf("127.0.0.1:%d", port)
+	ppAwaitListening(t, addr)
+	time.Sleep(2 * time.Second) // let RDS land
+
+	published := make(chan struct{})
+	r.onClusterSubscribe = func(string) {
+		// The registry becomes reachable while the request is parked.
+		time.Sleep(300 * time.Millisecond)
+		r.reg.armed.Store(true)
+		require.NoError(t, r.c.LoadClustersFromRegistry(context.Background(), "cluster-1", ppNodeName, r.reg))
+		r.publish()
+		close(published)
+	}
+	host := ppMesh + ":8080"
+	first := ppGet(addr, host)
+	t.Logf("no endpoint held, loopback, Host %s (parked on ODCDS) -> %s", host, first)
+	select {
+	case <-published:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the proxy never asked for the cluster by name: the request was not parked, and the test saw nothing")
+	}
+	time.Sleep(2 * time.Second)
+	second := ppGet(addr, host)
+	t.Logf("endpoints held,   loopback, Host %s                   -> %s", host, second)
+	if !second.filter {
+		t.Errorf("control: the SECOND request did not run the chain filter either (%s); the harness cannot see the filter", second)
+	}
+	if first.status == 200 && !first.filter {
+		t.Errorf("the parked request was delivered to the backend (200) WITHOUT the service's chain filter: %s", first)
+	}
+}
+
 // TestPerPort_ProxyPortAbsoluteForm measures, on the pinned proxy, what the
 // loopback outbound listener does with an absolute-form request line.
 //

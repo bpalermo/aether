@@ -235,6 +235,32 @@ func buildOnDemandCatchAllVirtualHost(onDemandAuthorityRegex string, passthrough
 	}
 }
 
+// BuildOnDemandServiceVirtualHost builds the loopback table's virtual host of
+// ONE mesh service the node holds no cluster of: its authorities, routed like
+// the catch-all's on-demand route (the cluster the authority names, fetched by
+// the on-demand filter).
+//
+// It exists so that the service has a virtual host of its OWN before its
+// cluster arrives. What a service-wide HTTP filter does is enabled by the
+// service's virtual host; a request the catch-all parked resumes on the
+// catch-all's route and was delivered with that filter skipped. The caller
+// applies the filter to what this returns.
+func BuildOnDemandServiceVirtualHost(name string, domains []string) *routev3.VirtualHost {
+	return &routev3.VirtualHost{
+		Name:    name,
+		Domains: domains,
+		Routes: []*routev3.Route{stripOutcomeHeader(&routev3.Route{
+			Match: &routev3.RouteMatch{PathSpecifier: &routev3.RouteMatch_Prefix{Prefix: "/"}},
+			Action: &routev3.Route_Route{
+				Route: &routev3.RouteAction{
+					ClusterSpecifier: &routev3.RouteAction_ClusterHeader{ClusterHeader: onDemandClusterHeader},
+					RetryPolicy:      outboundRetryPolicy(),
+				},
+			},
+		})},
+	}
+}
+
 // BuildCaptureCatchAllVirtualHost builds the "*" virtual host of ONE capture
 // route table (proposal 043).
 //

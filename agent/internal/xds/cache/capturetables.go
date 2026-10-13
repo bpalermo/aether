@@ -319,6 +319,39 @@ func (c *SnapshotCache) outboundRefusalVhostsLocked(in ruleInputs) []*routev3.Vi
 	return c.dropClaimedDomainsLocked(out)
 }
 
+// outboundColdVhostsLocked returns the out_http virtual hosts of the services
+// that carry a service-wide HTTP filter and that this node holds no cluster
+// of. Caller must hold clusterMu.
+//
+// Such a service is reached on the loopback path through the on-demand route:
+// the request is parked, the cluster is fetched, the request resumes. On the
+// catch-all's route it resumed WITHOUT the service's filter, which only the
+// service's own virtual host enables (an ext_authz filter is one: the first
+// request to a service from a node was not authorized). So the service gets a
+// virtual host of its own before its cluster does, with the same on-demand
+// route and the filter. Once the node holds the cluster, the entry's virtual
+// hosts and the refusals replace it.
+func (c *SnapshotCache) outboundColdVhostsLocked(in ruleInputs) []*routev3.VirtualHost {
+	if c.edge || len(in.chainFilters) == 0 {
+		return nil
+	}
+	routed := make(map[string]struct{}, len(c.clusters))
+	for _, entry := range c.clusters {
+		routed[entry.service] = struct{}{}
+	}
+	var out []*routev3.VirtualHost
+	for svc := range in.chainFilters {
+		fqdn := proxy.ServiceClusterName(svc, c.meshDomain)
+		if _, ok := routed[svc]; ok || fqdn == "" {
+			continue
+		}
+		vh := proxy.BuildOnDemandServiceVirtualHost(fqdn+"|cold", []string{fqdn, fqdn + ":*"})
+		applyChainFilter(vh, in.chainFilters, svc)
+		out = append(out, vh)
+	}
+	return c.dropClaimedDomainsLocked(out)
+}
+
 // dropClaimedDomainsLocked removes from the refusing virtual hosts every
 // domain a cluster entry's own virtual host already claims, and every virtual
 // host left with none. Caller must hold clusterMu.

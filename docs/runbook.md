@@ -4048,6 +4048,33 @@ requests with their original `Host` to a different port.
   and `80` for a backend that does not declare it, keep meaning the declared
   port.
 
+##### Fixed: requests that skipped a service-wide HTTP filter
+
+A service-wide (`CHAIN`-scope) `HTTPFilter` is enabled by the destination
+service's own virtual host in the source proxy's route table. `ext_authz` is
+one such filter. Through chart 2.6, two kinds of request were delivered to the
+service **without** it:
+
+- **A captured request that spelled a real port of the service**
+  (`http://<svc>.<ns>.<mesh-domain>:8080/` from a redirect-all pod). A mesh
+  service's virtual host claimed its port-less and `:18081` authorities; an
+  authority with another port fell to the catch-all, which routes by name and
+  enables no service's filter.
+- **The first request to a service from a node that held no endpoint of it
+  yet**, on either path. The catch-all parked it while the cluster was
+  fetched, and it resumed on the catch-all's route.
+
+Both are closed: every table gives a mesh service a virtual host of its own
+for every authority that can reach it, with the filter, before and after the
+node holds its cluster. If a service relied on such a filter for
+authorization on 2.6 or earlier, requests of these two shapes were not
+authorized by it; its own access log (not the filter's) shows them.
+
+Not closed: a Gateway API route's own filters and matches (an `HTTPRoute`
+parented to the service) are still not applied to that first, parked request
+on the loopback path. The request is delivered to the service's default
+backend as if the route did not exist yet.
+
 ##### BREAKING: a raw-TCP service is reached on its declared ports only
 
 Until this chart, a service whose declared port is raw TCP and that has no
