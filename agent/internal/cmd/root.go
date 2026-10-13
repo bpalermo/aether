@@ -73,6 +73,7 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	ctrlcache "sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/event"
 	ctrlmanager "sigs.k8s.io/controller-runtime/pkg/manager"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
@@ -851,16 +852,34 @@ func wireGAMMA(m ctrl.Manager, snapshotCache *cache.SnapshotCache) error {
 		Client:    m.GetClient(),
 		APIReader: m.GetAPIReader(),
 		// The class of a pod port for a route's status is the cache's own
-		// answer, the one its tables are built from: no registry read.
-		PodPorts:   snapshotCache,
-		Sink:       snapshotCache,
-		MeshDomain: cfg.MeshDomain,
-		Log:        l,
+		// answer, the one its tables are built from: no registry read. The
+		// cache says when that answer changed, and the status is judged again.
+		PodPorts:        snapshotCache,
+		PodPortsChanged: podPortsEvents(snapshotCache),
+		Sink:            snapshotCache,
+		MeshDomain:      cfg.MeshDomain,
+		Log:             l,
 	}
 	if err := gammaReconciler.SetupWithManager(m); err != nil {
 		return fmt.Errorf("failed to set up GAMMA reconciler: %w", err)
 	}
 	return nil
+}
+
+// podPortsEvents returns a channel that carries an event whenever the cache
+// says what its pods' ports are has changed (OnPodPortsChanged), for the route
+// reconciler to judge every status again. One pending event is enough, since a
+// reconcile judges every route; the cache calls the hook with its lock held,
+// so the send never blocks.
+func podPortsEvents(c interface{ OnPodPortsChanged(func()) }) <-chan event.GenericEvent {
+	events := make(chan event.GenericEvent, 1)
+	c.OnPodPortsChanged(func() {
+		select {
+		case events <- event.GenericEvent{}:
+		default:
+		}
+	})
+	return events
 }
 
 // wireEndpointPolicies registers the EndpointPolicy reconciler, which projects

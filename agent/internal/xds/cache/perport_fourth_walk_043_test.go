@@ -1,7 +1,7 @@
 package cache
 
-// Fourth adversarial pass on the proposal-043 stack (head 7b3a177a). Review
-// tests: uncommitted, not part of the pull requests.
+// Fourth adversarial pass on the proposal-043 stack (head 7b3a177a). Tests
+// adopted from the review.
 
 import (
 	"context"

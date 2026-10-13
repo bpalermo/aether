@@ -1,6 +1,6 @@
 package gamma
 
-// Third adversarial pass on the proposal-043 stack: review test, uncommitted.
+// Third adversarial pass on the proposal-043 stack: tests adopted from the review.
 
 import (
 	"testing"

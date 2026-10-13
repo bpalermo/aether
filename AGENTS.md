@@ -64,7 +64,7 @@ make actionlint    # GitHub Actions workflows (pinned actionlint + ShellCheck)
 - `agent/internal/gatewaystatus` — Gateway API status writers scoped to aether's `controllerName`.
 - `cni/internal/plugin` — the chained CNI plugin, including the TPROXY capture divert (proposal 038) and the mesh-DNS `:53` DNAT.
 
-**Ports:** 18001 per-pod TCP capture (TPROXY target), 18008 inbound TCP + UDP/QUIC, 18009 east/west waypoint, 18021 edge readiness, 18054 host mesh-DNS, 18081 per-pod outbound HTTP, 18082 L4 TCP + UDP (`common/constants/mesh`, `agent/internal/xds/proxy`).
+**Ports:** 18001 per-pod TCP capture (TPROXY target), 18008 inbound TCP + UDP/QUIC, 18009 east/west waypoint, 18021 edge readiness, 18054 host mesh-DNS, 18081 the HTTP proxy port (the per-pod outbound HTTP listener; a port of no service), 18082 L4 TCP + UDP (`common/constants/mesh`, `agent/internal/xds/proxy`).
 
 **Carried Envoy patches:** `proxy/bazel/patches/` (applied by `proxy/MODULE.bazel`; each one listed in `proxy/README.md`).
 

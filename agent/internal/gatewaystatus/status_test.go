@@ -122,3 +122,41 @@ func TestMergeConditions_TransitionOnPreExisting(t *testing.T) {
 	})
 	assert.True(t, changed2, "reason change on a pre-existing condition must report changed")
 }
+
+// TestRemoveRouteParentCondition: only the named condition of the controller's
+// own entry for that parentRef goes; nothing else is touched, and removing
+// what is not there is not a change.
+func TestRemoveRouteParentCondition(t *testing.T) {
+	ref := func(name string) gatewayv1.ParentReference {
+		return gatewayv1.ParentReference{Name: gatewayv1.ObjectName(name)}
+	}
+	conds := func() []metav1.Condition {
+		return []metav1.Condition{{Type: "Accepted", Status: metav1.ConditionTrue}, {Type: "example.com/Extra", Status: metav1.ConditionTrue}}
+	}
+	parents := []gatewayv1.RouteParentStatus{
+		{ParentRef: ref("a"), ControllerName: "example.com/other", Conditions: conds()},
+		{ParentRef: ref("a"), ControllerName: MeshControllerName, Conditions: conds()},
+		{ParentRef: ref("b"), ControllerName: MeshControllerName, Conditions: conds()},
+	}
+
+	got, changed := RemoveRouteParentCondition(parents, MeshControllerName, ref("a"), "example.com/Extra")
+	if !changed {
+		t.Fatal("removing a condition that is there is a change")
+	}
+	if len(parents[1].Conditions) != 2 {
+		t.Fatal("the input was modified")
+	}
+	if len(got[1].Conditions) != 1 || got[1].Conditions[0].Type != "Accepted" {
+		t.Fatalf("our entry for a: %+v", got[1].Conditions)
+	}
+	if len(got[0].Conditions) != 2 || len(got[2].Conditions) != 2 {
+		t.Fatalf("another controller's entry or another parentRef's was touched: %+v", got)
+	}
+
+	if _, changed := RemoveRouteParentCondition(got, MeshControllerName, ref("a"), "example.com/Extra"); changed {
+		t.Fatal("removing a condition that is not there is not a change")
+	}
+	if _, changed := RemoveRouteParentCondition(parents, MeshControllerName, ref("c"), "Accepted"); changed {
+		t.Fatal("no entry for that parentRef: not a change")
+	}
+}

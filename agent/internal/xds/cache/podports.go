@@ -35,3 +35,22 @@ func (c *SnapshotCache) PodPortClasses(_ context.Context, service string) (map[u
 	}
 	return out, true
 }
+
+// OnPodPortsChanged registers fn to be called whenever a registry refresh
+// changes what PodPortClasses answers for any service: a service's rows were
+// held for the first time, were dropped, or declare other ports.
+//
+// A route's status is judged by that answer, and nothing the route reconciler
+// watches changes when it does. In particular the reconcile of a route event
+// makes the route's services dependencies of this node, and the refresh that
+// then loads their rows comes after it: the status written by that reconcile
+// said "not checked" of a reference the tables answered 500 for a moment
+// later, until a timer came round. The reconciler is told instead, by this.
+//
+// fn is called with the cache's cluster lock held: it must not block and must
+// not call the cache. Register before the first refresh; there is one hook.
+func (c *SnapshotCache) OnPodPortsChanged(fn func()) {
+	c.clusterMu.Lock()
+	defer c.clusterMu.Unlock()
+	c.podPortsChanged = fn
+}

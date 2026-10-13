@@ -4010,7 +4010,7 @@ go in 3.1.0. The skew the project designs and tests for is still two adjacent
 minors; 2.6 with 3.0 in one cluster is NOT such a pair, and what it does is
 measured below instead of promised. The harness contract's version (4) and
 the `crds` chart are unchanged by the number; `prober` is 1.1.1 and `udsecho`
-2.0.6, for template tests only (their renders are those of 1.1.1 and 2.0.5).
+2.0.6, for template tests only (their renders are those of 1.1.0 and 2.0.5).
 
 ##### What is fixed
 
@@ -4081,21 +4081,53 @@ requests with their original `Host` to a different port.
     The two come from the same facts, also for a Service of yours. There the
     Service says only that a port exists and which pod port is behind it;
     whether the pods serve that port as HTTP is what they declare
-    (`endpoint.aether.io/ports`), and both the proxy and the status read it
-    from the registry. A `backendRef` to a port of your Service whose target
-    port the registered pods declare raw TCP or UDP is `UnsupportedProtocol`;
-    one whose target port no registered pod declares is `BackendNotFound`;
-    both are answered 500. Where pods disagree about the port, both go by
-    what most pods declare. A `parentRef` to such a port is judged the same
-    way and is `Accepted=False`. A node that holds no pod of the Service
-    knows nothing: it answers no 500 for it, says "Not checked", and leaves
-    a `False` that another node's agent wrote for the same generation of the
-    route in place (every node's agent writes the one status, and the nodes
-    that hold the pods are the ones that answer 500). The status is judged
-    again every 30 s while a route names a Service the mesh did not
-    generate, since nothing the agent watches changes when such a pod
-    registers. A `False` whose pods have all gone stays until the route's
-    spec changes or a node holds a pod of the Service again.
+    (`endpoint.aether.io/ports`). The status does not read the registry for
+    it: the agent that writes it takes the class of the pod port from its own
+    node's route tables, the very value they were built from, so that node's
+    status and that node's proxy cannot differ. A `backendRef` to a port of
+    your Service whose target port the registered pods declare raw TCP or UDP
+    is `UnsupportedProtocol`; one whose target port no registered pod
+    declares is `BackendNotFound`; both are answered 500. Where pods disagree
+    about the port, both go by what most pods declare. A `parentRef` to such
+    a port is judged the same way and is `Accepted=False`. The same holds for
+    a service that has **no Service object yet** (pods can register before
+    the registrar has generated their Service): a reference to it is judged
+    by the ports its pods declare, in the tables and in the status alike.
+  - **Every node's agent writes the one status of a route**, and the nodes do
+    not all hold the pods of a Service of yours. Each condition is computed
+    again on every reconcile, from what the agent reads itself: the route,
+    the `ReferenceGrant`s, the Services and their ports. Nothing the status
+    said before is kept, so a `False` goes the moment its cause does (a grant
+    is created, a Service gains the port). The one thing a node may not be
+    able to judge is what the pods behind a port of your Service serve; only
+    a node whose proxy holds the service can, and such a node says what its
+    own tables do. Its verdict is written in the route's status, in a third
+    condition beside `Accepted` and `ResolvedRefs` on the same parent, of
+    type `gateway.aether.io/PodPortsJudged`, whose message lists
+    `<ns>/<svc>:<service port>><pod port>=<http|tcp|udp|undeclared>`. A node
+    that holds no pod of the Service takes the verdict from there, for that
+    port, that target port and that generation of the route, a `True` like a
+    `False`, and writes the same conditions the judging node did; it never
+    writes "Not checked" over a verdict, and never keeps one about anything
+    else. A port nobody has judged is "Not checked" (and answered by no 500
+    anywhere). The condition is always `True`; it is a record, not a verdict
+    on the route, and it is absent when the route names no such port.
+    Two nodes that hold the pods read the same rows and agree, so an
+    unchanged route's status settles after at most a write or two per node
+    and is then written by nobody. A verdict whose pods have all gone stays
+    until a node holds a pod of the Service again or the route's spec
+    changes.
+  - The status is judged again **when what a node's tables are built from
+    changes**: the agent's cache tells its route reconciler whenever a
+    registry refresh changed the ports of any service (first held, dropped,
+    or declared differently). That includes the refresh a route itself
+    causes, by making its Services dependencies of the node. (Through the
+    first builds of this chart it was a 30 s timer, and a new route to a
+    port its pods declare raw TCP said "Not checked" for up to that long
+    while the proxy already answered 500.) For a generated Service the status
+    follows the Service's own ports, which the registrar writes from the
+    registry; between a pod registering and that write the status is one
+    registrar update behind the proxy.
   - A `parentRef` to such a port attaches the route to **nothing**: the
     service answers as if the route did not exist, and the status says
     `Accepted=False` with `NoMatchingParent`.
@@ -4313,8 +4345,16 @@ registry and the agent watches.
   A service-wide HTTP filter that targets such a Service changes none of this:
   it is in force on the mesh name and on the proxy port, and the Service's
   Kubernetes names, the name without a namespace included, still pass through
-  to the Service unfiltered. An HTTPRoute that names the Service does make its
-  Kubernetes names the mesh's, by the Service's port map.
+  to the Service unfiltered. So does a dial to the Service's own address and
+  port with the **mesh name** in `Host` (`curl -H 'Host: <svc>.<ns>.<mesh-domain>:8000'
+  http://<svc>:8000/`), on a port number no mesh service serves as HTTP: it
+  passed through before the filter, and attaching a filter does not turn a
+  call that worked into a refusal. (For a while it did: `421
+  port-not-declared`, from the moment the filter made the node hold the
+  service.) On a port number some mesh service does serve as HTTP, that
+  request is the mesh's and is routed with the filter. An HTTPRoute that
+  names the Service does make its Kubernetes names the mesh's, by the
+  Service's port map.
 
 - An authority that names `18081` or `18082` is never offered on demand, for a
   name the node knows nothing of either: `421 port-not-declared`, at once. No
@@ -4383,17 +4423,17 @@ service is addressed on a port it declares.
 loopback listener and on a dial to `<name>:18081` alike, the port in `Host`
 (or in an absolute request line) is the port. See "Using the proxy port" in
 the getting-started guide. A `421` for a service whose ports the node knows
-lists them in its body ("Its ports: 8080 (http), 9000 (tcp)"). These bodies
-name no port, because the node has none to name:
+lists them in its body ("Its ports: 8080 (http), 9000 (tcp)"). One body says
+"Its ports: none": `port-not-declared` for a name the node knows by a
+Service's port map only (a Service of yours with a route or a filter, no
+endpoint held), since a port map says which Service ports exist and not what
+the pods serve. These bodies have no "Its ports:" line at all, because the
+node has no port to name:
 
 - a `Host` that names `18081` or `18082` (`port-not-declared`: the port is
   the mesh's);
 - `short-name-cold` and `caller-namespace-unknown`;
 - `port-required` for a service the node knows by name only;
-- `port-not-declared` for a name the node knows by a Service's port map only
-  (a Service of yours with a route or a filter, no endpoint held): "Its
-  ports: none", since a port map says which Service ports exist and not what
-  the pods serve;
 - `no-http-port` for a service that declares nothing but UDP, or only ports
   reserved for the mesh: there is no raw-TCP address to offer instead.
 
@@ -5869,7 +5909,7 @@ for a dead pod's frozen burst. Guard `on (node, pod)` instead.
 stdout: a fixed marker, then one JSON object:
 
 ```
-AETHER_PROBE_FAIL {"t":"2026-09-28T04:37:52.114Z","tier":"mesh_dns","target":"echo.aether-test.aether.internal:8080","result":"timeout","err":"Get \"http://echo.aether-test.aether.internal:8080/\": context deadline exceeded","elapsed_ms":2000.4,"phase":"first_byte","reused":false,"conn_ms":412.6,"dns_ms":0.9,"connect_ms":411.5,"tls_ms":-1,"write_ms":0.1,"ttfb_ms":1587.6,"dial":"10.96.0.7:18081","remote":"10.96.0.7:18081","local":"10.0.3.114:49292","trace_id":"9fa32b3befe77ea2253e8831d3472fa8","pod":"prober-h2mzs","node":"node-a","n":1,"truncated":false}
+AETHER_PROBE_FAIL {"t":"2026-09-28T04:37:52.114Z","tier":"mesh_dns","target":"echo.aether-test.aether.internal:8080","result":"timeout","err":"Get \"http://echo.aether-test.aether.internal:8080/\": context deadline exceeded","elapsed_ms":2000.4,"phase":"first_byte","reused":false,"conn_ms":412.6,"dns_ms":0.9,"connect_ms":411.5,"tls_ms":-1,"write_ms":0.1,"ttfb_ms":1587.6,"dial":"10.96.0.7:8080","remote":"10.96.0.7:8080","local":"10.0.3.114:49292","trace_id":"9fa32b3befe77ea2253e8831d3472fa8","pod":"prober-h2mzs","node":"node-a","n":1,"truncated":false}
 ```
 
 - `t` is the client-side timestamp. Line it up against the proxy's hot-restart

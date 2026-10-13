@@ -168,7 +168,7 @@ There is no top-level `cmd/`: each component owns its own (`agent/cmd/`, `cni/cm
 
 ### Data-plane ports
 
-`common/constants/mesh/mesh.go` (18001, 18054, 18081, 18082) and `agent/internal/xds/proxy/` (`ingress.go` 18008, `edge.go` 18009/18021): **18001** per-pod TCP capture (the TPROXY divert target for every captured TCP port); **18008** mesh inbound, TCP and UDP/QUIC on the same number; **18009** host-netns east/west waypoint tunnel (019); **18021** edge readiness listener; **18054** the host mesh-DNS resolver (pod `:53` is DNATed to `HOST_IP:18054`); **18081** per-pod outbound HTTP; **18082** the L4 port, TCP and UDP (UDP capture binds it directly: a datagram reply's source port is the bound port).
+`common/constants/mesh/mesh.go` (18001, 18054, 18081, 18082) and `agent/internal/xds/proxy/` (`ingress.go` 18008, `edge.go` 18009/18021): **18001** per-pod TCP capture (the TPROXY divert target for every captured TCP port); **18008** mesh inbound, TCP and UDP/QUIC on the same number; **18009** host-netns east/west waypoint tunnel (019); **18021** edge readiness listener; **18054** the host mesh-DNS resolver (pod `:53` is DNATed to `HOST_IP:18054`); **18081** the HTTP proxy port (the per-pod outbound HTTP listener; a port of no service); **18082** the L4 port, TCP and UDP (UDP capture binds it directly: a datagram reply's source port is the bound port).
 
 ### Carried Envoy patches
 

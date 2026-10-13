@@ -160,7 +160,10 @@
 #                  names are not captured mesh names: http://mp-own:8000/
 #                  and http://mp-own.<ns>:8000/ reach the pods through the
 #                  Service. A service-wide HTTPFilter that targets it (seen
-#                  in force on the mesh name: 403) changes neither
+#                  in force on the mesh name: 403 on the loopback listener
+#                  and through the proxy port from the captured client)
+#                  changes neither, nor a dial to the Service's port with
+#                  the mesh name in Host
 #   T1  replaced   mp-move serves HTTP on 8080, then is redeployed serving
 #                  raw TCP on 9000 only. Host mp-move:8080 on loopback is
 #                  refused (421 port-not-declared) within T1_WINDOW of the
@@ -2216,12 +2219,19 @@ leg_V1() {
 # holds the port map of every Service.
 #
 # The filter is an RBAC policy no caller satisfies. That it is in force is
-# seen where the mesh applies it: the service's MESH name on the loopback
-# listener answers 403. The Kubernetes names must still answer as before.
+# seen where the mesh applies it, by an answer only the filter gives: the
+# service's MESH name answers 403 on the loopback listener, and 403 through
+# the proxy port from the CAPTURED client, the pod whose calls are looked at
+# below. No call that worked before the filter
+# may be refused after it: the Kubernetes names, and the mesh name in Host on
+# a dial to the Service's own port, must all still answer.
 # (With the filter, the short name alone was claimed and refused 421
-# port-not-declared, while "<name>.<ns>" still passed through.)
+# port-not-declared, while "<name>.<ns>" still passed through; and then the
+# mesh name in Host on a dial to the Service's port was, which this leg read
+# as its proof that the filter had arrived.)
 leg_U1() {
-	local short="$OWN_NAME:$OWN_SERVICE_PORT" two="$OWN_NAME.$TEST_NS:$OWN_SERVICE_PORT" meaning
+	local short="$OWN_NAME:$OWN_SERVICE_PORT" two="$OWN_NAME.$TEST_NS:$OWN_SERVICE_PORT" meaning mesh
+	mesh="$(mesh_name "$OWN_NAME"):$OWN_SERVICE_PORT"
 	log "U1 a mesh service behind a user's Service ($OWN_NAME, $OWN_SERVICE_PORT -> $HTTP_PORT): its Kubernetes names pass through, with a service-wide filter too"
 	meaning="HTTP421 is the name claimed by the mesh for a port map the agent does not have"
 	captured "$OWN_MARKER" "$short" "" "control, no filter: $meaning"
@@ -2233,7 +2243,8 @@ leg_U1() {
 	# through like the Service's own names.
 	expect "captured dial to $short with Host $(mesh_name "$OWN_NAME"):$OWN_SERVICE_PORT, no filter" "$OWN_MARKER" "$A_TIMEOUT" "$A_PROBES" \
 		"control: the table of the dialled port claims the service's mesh name before any filter exists" \
-		http_tokens client "http://$short/" "$(mesh_name "$OWN_NAME"):$OWN_SERVICE_PORT"
+		http_tokens client "http://$short/" "$mesh"
+	proxied "$OWN_MARKER" client "$mesh" "control, no filter: the mesh name reaches the service through the proxy port from the captured client"
 
 	kc apply -f - >/dev/null <<YAML || die "U1: the HTTPFilter was not accepted"
 apiVersion: config.aether.io/v1
@@ -2254,16 +2265,17 @@ YAML
 	expect "loopback, Host $(mesh_name "$OWN_NAME"):$OWN_SERVICE_PORT with the filter" "HTTP403" 90 "$A_PROBES" \
 		"the service-wide filter never came into force on the mesh name, so the checks below would show nothing" \
 		http_tokens client-nocapture "$LOOPBACK_URL" "$(mesh_name "$OWN_NAME"):$OWN_SERVICE_PORT"
-	# And on the very table the two calls below go through. The filter gives
-	# the service a virtual host there, for its MESH name: the same dial with
-	# the mesh name in Host, which passed through a moment ago, is now the
-	# mesh's and refused (the pods serve no port $OWN_SERVICE_PORT, and no route
-	# makes the Service's port map count on a dialled port). That change is
-	# the filter having reached this table; before the fix it took the short
-	# name with it.
-	expect "captured dial to $short with Host $(mesh_name "$OWN_NAME"):$OWN_SERVICE_PORT, with the filter" "HTTP421:port-not-declared" 90 "$A_PROBES" \
-		"'$OWN_MARKER' is the filter not having reached the table of the dialled port, so the two checks below would show nothing" \
-		http_tokens client "http://$short/" "$(mesh_name "$OWN_NAME"):$OWN_SERVICE_PORT"
+	# And for the captured client, whose three calls below are the point: the
+	# proxy port answers it 403 for the mesh name too. (That the filter had
+	# reached this pod was read off a refusal: the dial to the Service's port
+	# with the mesh name in Host turned 421 port-not-declared when the filter
+	# arrived. That refusal was the defect: the call had worked.)
+	expect "client: curl --proxy $PROXY_URL http://$mesh/ with the filter" "HTTP403" 90 "$A_PROBES" \
+		"'$OWN_MARKER' is the filter not being in force for the captured client, so the three checks below would show nothing" \
+		proxy_tokens client "http://$mesh/" ""
+	expect "captured dial to $short with Host $mesh, with the filter" "$OWN_MARKER" "$A_TIMEOUT" "$A_PROBES" \
+		"HTTP421:port-not-declared is the filter having made the mesh claim, and refuse, a call that passed through to the user's Service before it" \
+		http_tokens client "http://$short/" "$mesh"
 	captured "$OWN_MARKER" "$short" "" "with the filter: $meaning"
 	captured "$OWN_MARKER" "$two" "" "with the filter: $meaning"
 

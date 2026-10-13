@@ -921,12 +921,68 @@ answered `500` and the route's status says `ResolvedRefs=False`
 attaches the route to nothing and the status says `Accepted=False`
 (`NoMatchingParent`). The table and the status are built from the same facts:
 whenever the data plane answers 500 for a reference the status says False,
-and where the agent cannot know (a Service of the user's with no registered
-pod) it answers no 500 and says "Not checked". For a user's Service the facts
-are the registry's rows of the pods behind it, read by the status writer as
-by the data plane. "A named `targetPort` is reported as a WARN only" and "any
-other wrong port falls back to the declared port", under *Phase 1 as built*,
-are superseded by this.
+and where no node can know (a Service of the user's with no registered pod)
+none answers 500 and the status says "Not checked". For a user's Service the
+facts are what the pods behind it declare, and the status writer does not
+read the registry for them: it is handed the class of each pod port by its
+own node's snapshot cache, the value that node's tables were built from (see
+the ruling of 2026-10-13 below). "A named `targetPort` is reported as a WARN
+only" and "any other wrong port falls back to the declared port", under
+*Phase 1 as built*, are superseded by this, except for a named `targetPort`
+that cannot be resolved, which is listed under *Behaviour awaiting an owner
+ruling*.
+
+**2026-10-13: one truth per port, for every table and for the status; and
+one status from many writers.** A node derives the class of a port of a
+service once, by one function, from the registry rows it holds (the class
+most pods declare where they disagree; a row whose port map names a port it
+does not list is refused). Every route table of the node is built from that
+value: the loopback table, the proxy-port table, the table of each dialled
+port. A refresh that forgets a service's ports rebuilds what was built from
+them in the same snapshot. The route's status is computed from the same value,
+handed out by the cache, and is judged again when the value changes, by an
+event, not on a timer.
+
+A route has one status and every node's agent writes it. Each condition is a
+function of facts, computed anew on every reconcile; nothing a status said
+before is carried forward, with one exception. What the pods behind a port of
+a user's Service serve is known only to a node that holds the service. That
+verdict, per (Service, Service port, pod port) and per generation of the
+route, is recorded in the route's own status (a condition of type
+`gateway.aether.io/PodPortsJudged` on aether's parent entry), which is the
+one place every agent reads. A node that holds the pods writes its own
+verdict; a node that does not computes its conditions from the recorded one,
+a True like a False. So a node that knows beats one that does not, two that
+know agree, a False goes when its cause does, and an unchanged route reaches
+a status that no node writes again. A service with no Service object yet is
+judged the same way, by the ports its pods declare. Two things this does not
+claim: for a generated Service the status follows the Service's ports, which
+trail the rows by one registrar write; and while two nodes hold different
+rows of one service (a registry update in flight) each writes what it holds,
+until the rows are the same.
+
+**2026-10-13: a filter does not turn a working call into a refusal, on any
+spelling.** A dial to a user-owned Service's address and port with the
+service's mesh name in `Host`, on a port number no mesh service serves as
+HTTP, passed through before a service-wide filter was attached and passes
+through after it. The table of such a port number does not refuse a name it
+has by its mesh authority alone.
+
+### Behaviour awaiting an owner ruling
+
+Built, described in the runbook, and **not ruled on**. It is listed here so
+that it is not read as decided.
+
+- **A named `targetPort` that cannot be resolved falls back to the pods'
+  declared port.** A Service port whose `targetPort` is a name is resolved
+  through the Service's EndpointSlices. When that fails (no slice yet, or
+  slices that disagree) the agent logs a WARN, a `backendRef` to that Service
+  port reaches the port in the backend pods' `endpoint.aether.io/port`, and
+  the route's status says "Not checked" for it. This is the one place left
+  where "the port the pods declare" stands in for a port a reference named,
+  which the strict-reference ruling above otherwise forbids; the alternative
+  consistent with that ruling is to treat the reference as invalid (500,
+  `ResolvedRefs=False`) until the name resolves.
 
 **No status-code rewrites (2026-10-12).** The mesh does not turn one HTTP
 status into another to signal between proxies or to a client: a refusal is a
@@ -953,7 +1009,7 @@ What shipped, against the plan below:
 |---|---|
 | Phase 1: per-port truth on both backends; the dialled port decides; the four refusals | yes |
 | Phase 2: a deprecation release with a counter per legacy spelling | **not built.** The spellings are removed outright; the runbook says how to find their clients on 2.6.x from the access log and the any-port chain's counter |
-| Phase 2: the prober, the e2e suites, `udsecho` and the docs moved to real ports | yes (prober chart 1.1.0) |
+| Phase 2: the prober, the e2e suites, `udsecho` and the docs moved to real ports | yes (prober chart 1.1.1) |
 | Phase 3: `<name>:18081` and a name without a port no longer mean "the port the pods declare" | yes. **18081 stays, permanently, as the HTTP proxy port**: a client that connects to it is asked, by `Host`, for a service and a port. No cluster is named for it and no pod may declare it |
 | Phase 3: the any-port chain; `aether.io/app-protocol` and `aether.io/port`; the `http`/`https` placeholder ports | removed |
 | Phase 3: `:18082` for raw TCP, the Service's `mesh` and `mesh-tcp` ports, the floor cluster | **kept.** A raw-TCP service is reached on its declared ports and on `:18082` |
@@ -1421,6 +1477,9 @@ accepted.
 5. **A dial to `:18081` with a `Host` that names another port is refused
    (`port-mismatch`).** A12's "any `Host`" would route it to the legacy
    target; on `main` it was routed by `Host`. No documented spelling does this.
+   (**Superseded** by the ruling of 2026-10-12, "18081 is the proxy port, and
+   the authority names the target": such a dial reaches the port `Host` names,
+   as on the loopback listener.)
 6. **A bare name that two namespaces share is no longer answered.** The
    known-target route matched a bare name for every namespace that had it and
    took the first, so half the callers got another namespace's service. A

@@ -1,7 +1,7 @@
 package cache
 
-// Fifth adversarial pass on the proposal-043 stack (head 3990f748). Review
-// tests: uncommitted, not part of the pull requests.
+// Fifth adversarial pass on the proposal-043 stack (head 3990f748). Tests
+// adopted from the review.
 
 import (
 	"context"

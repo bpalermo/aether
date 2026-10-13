@@ -293,7 +293,7 @@ string — so `http://<svc>/` is unambiguous without one. Raw TCP has no
 authority; its only demux key is the 5-tuple. That asymmetry is intrinsic to
 the protocols, not to this mesh, and it is why TCP gets a well-known port of
 its own (`18082`) rather than the bare name changing meaning depending on
-which protocol a service's primary port happens to be.
+which protocols a service's ports happen to be.
 
 **`:18082` does not require redirect-all.** The scoped capture rule diverts
 it alongside `:18081` — on both transports — and the generated mesh Service

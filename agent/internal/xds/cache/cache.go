@@ -217,6 +217,9 @@ type SnapshotCache struct {
 	// servicePortsGen counts content changes of servicePorts: an input
 	// generation of the capture route tables' memo. Guarded by clusterMu.
 	servicePortsGen uint64
+	// podPortsChanged, when set, is called (clusterMu held) each time
+	// servicePortsGen advances: OnPodPortsChanged.
+	podPortsChanged func()
 	// vhostRuleGen is the rule-input generation (ruleGen) the cluster
 	// entries' loopback virtual hosts were last built at
 	// (refreshEntryVhosts). Guarded by clusterMu.

@@ -48,12 +48,15 @@ func podsOf(name string, classes map[uint32]registryv1.PortProtocol) PodPorts {
 // declare what pods says.
 func userFacts(t *testing.T, svc *corev1.Service, pods PodPorts) portFacts {
 	t.Helper()
-	f := servicePortFacts(svc)
+	key := "ns/" + svc.Name
 	m, _ := servicePortMap(svc)
-	if classes, known := pods.PodPortClasses(context.Background(), "ns/"+svc.Name); known {
-		f = f.withPodPorts(m, classes)
+	f := (&Reconciler{PodPorts: pods}).withPods(context.Background(), key, servicePortFacts(svc), m)
+	var refs []portRef
+	for port := range m {
+		refs = append(refs, portRef{service: key, port: port})
 	}
-	return f
+	judged, _ := judgedFacts(map[string]portFacts{key: f}, nil, refs)
+	return judged[key]
 }
 
 // TestStatus_UserServicePortIsJudgedByWhatItsPodsDeclare: the data plane
@@ -114,10 +117,8 @@ func TestStatus_UserServicePortIsJudgedByWhatItsPodsDeclare(t *testing.T) {
 	assert.True(t, ok)
 	assert.Contains(t, msg, "Not checked: whether the pods serve ns/db:9999 as HTTP")
 	assert.Empty(t, parent(9999))
-	named := gatewayv1.PortNumber(9999)
-	assert.True(t, parentPortUnchecked(facts, gatewayv1.ParentReference{Name: "db", Port: &named}, "ns"))
-	web := gatewayv1.PortNumber(8000)
-	assert.False(t, parentPortUnchecked(facts, gatewayv1.ParentReference{Name: "db", Port: &web}, "ns"))
+	assert.True(t, facts["ns/db"].unverified[9999])
+	assert.False(t, facts["ns/db"].unverified[8000])
 }
 
 // TestStatus_APortThePodsDisagreeAboutIsJudgedAsTheTableServesIt: two pods
@@ -148,15 +149,6 @@ func TestStatus_UserServiceThisNodeHoldsNoPodOfIsNotJudged(t *testing.T) {
 	assert.Contains(t, msg, "turns False")
 }
 
-// TestPodPortsRecheck: a status judged by what pods declare is judged again
-// on a timer, because no watch of the reconciler fires when a pod registers.
-func TestPodPortsRecheck(t *testing.T) {
-	gen := servicePortFacts(generatedService("multi", map[int32]string{8080: "http"}))
-	user := servicePortFacts(plainService("db", corev1.ServicePort{Port: 5432}))
-	assert.Zero(t, podPortsRecheck(map[string]portFacts{"ns/multi": gen}))
-	assert.Equal(t, podPortsRecheckInterval, podPortsRecheck(map[string]portFacts{"ns/multi": gen, "ns/db": user}))
-}
-
 // statusOf reads aether's condition of one type on the route's only parent.
 func statusOf(t *testing.T, c client.Client, condType gatewayv1.RouteConditionType) *metav1.Condition {
 	t.Helper()
@@ -171,7 +163,8 @@ func statusOf(t *testing.T, c client.Client, condType gatewayv1.RouteConditionTy
 // TestReconcile_WritesTheStatusOfAUserServicePortFromWhatItsPodsDeclare is the
 // whole path: a reconcile of an HTTPRoute whose backendRef and parentRef name
 // a port of a user's Service writes ResolvedRefs and Accepted by what the pods
-// of that Service declare, and asks to be run again.
+// of that Service declare. (It asked to be run again on a 30 s timer; it is
+// told when the answer changed instead, Reconciler.PodPortsChanged.)
 func TestReconcile_WritesTheStatusOfAUserServicePortFromWhatItsPodsDeclare(t *testing.T) {
 	svc := plainService("web", corev1.ServicePort{Name: "http", Port: 80, TargetPort: intstr.FromInt32(8080)})
 	// Another Service of the user's that no route names: never asked about.
@@ -206,7 +199,7 @@ func TestReconcile_WritesTheStatusOfAUserServicePortFromWhatItsPodsDeclare(t *te
 			res, err := r.Reconcile(context.Background(), reconcile.Request{})
 			require.NoError(t, err)
 			assert.Equal(t, []string{"ns/web"}, asked, "asked once, for the user's Service a route names, and for nothing else")
-			assert.Equal(t, podPortsRecheckInterval, res.RequeueAfter)
+			assert.Zero(t, res.RequeueAfter, "no timer: the cache says when what the pods declare has changed")
 
 			resolved := statusOf(t, c, gatewayv1.RouteConditionResolvedRefs)
 			assert.Equal(t, tc.resolved, resolved.Status, resolved.Message)
@@ -243,8 +236,9 @@ func TestReconcile_WritesTheStatusOfAUserServicePortFromWhatItsPodsDeclare(t *te
 // writes the one status of a route, and they do not all hold the pods of a
 // user's Service. A node that holds none must not write "True, not checked"
 // over the False of a node whose table answers 500: for the same generation
-// of the route, the judgement stands. A node that can judge overwrites it, and
-// so does any node once the route's spec changes.
+// of the route, the verdict on that port stands (judged.go), and the node
+// computes its conditions from it. A node that can judge overwrites it, and
+// no node carries it over once the route's spec changes.
 func TestReconcile_ANodeThatCannotJudgeKeepsWhatWasJudged(t *testing.T) {
 	svc := plainService("web", corev1.ServicePort{Name: "http", Port: 80, TargetPort: intstr.FromInt32(8080)})
 	hr := httpRoute("r1", "ns", "web", "web")

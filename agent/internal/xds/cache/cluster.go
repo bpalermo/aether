@@ -432,7 +432,20 @@ func (c *SnapshotCache) LoadClustersFromRegistry(ctx context.Context, clusterNam
 	// the listings were being read), the next snapshot build must rebuild
 	// them: say which generation they are at, never leave a newer one standing.
 	c.vhostRuleGen = loadRuleGen
+	remembered := len(c.servicePorts)
 	c.pruneServicePortsLocked(listed)
+	if len(c.servicePorts) != remembered {
+		// The entries' virtual hosts above were built while the ports of a
+		// service this refresh has now forgotten were still known (a service
+		// whose grace ran out, or one reset to its generated Service: both go
+		// in the retention step, after the passes). A rule of ANOTHER service
+		// whose backendRef names it was judged by those ports: the loopback
+		// table answered 500 where the capture tables of the same snapshot
+		// and a node that starts now route the reference, or routed it to
+		// the bare cluster where they answer 500. The next snapshot build
+		// rebuilds the virtual hosts from what is known now.
+		c.vhostRuleGen = loadRuleGen - 1
+	}
 	c.noteServicePortsLocked(prevPorts)
 	conflicts := c.servicePortConflictsLocked()
 	derived := make(map[string]servicePorts, len(c.servicePorts))

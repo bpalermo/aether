@@ -143,6 +143,9 @@ go_test(
         "perport_routes_043_test.go",
         "perport_second_043_test.go",
         "perport_shapes_043_test.go",
+        "perport_sixth_043_test.go",
+        "perport_sixth_backend_043_test.go",
+        "perport_sixth_walk_043_test.go",
         "perport_skew_043_test.go",
         "perport_third_043_test.go",
         "perport_third_gaps_043_test.go",
@@ -154,6 +157,7 @@ go_test(
         "pinreport_test.go",
         "podchurn_cds_test.go",
         "podname_namespace_1584_test.go",
+        "podports_changed_043_test.go",
         "quic_burst_test.go",
         "quic_cert_gate_test.go",
         "quic_demand_test.go",
@@ -175,6 +179,7 @@ go_test(
         "snapshot_test.go",
         "snapshot_watch_test.go",
         "stalenetns_test.go",
+        "status_table_walk_043_test.go",
         "tcp_floor_warn_grace_test.go",
         "tcp_service_test.go",
         "tcpfloor_identity_test.go",
@@ -193,11 +198,15 @@ go_test(
     ],
     embed = [":cache"],
     # The randomized tests of proposal 043 (the walk, the cold/warm modes)
-    # are most of the suite's time and share nothing: in four shards the race
-    # leg stays well inside the timeout instead of at its edge.
-    shard_count = 4,
+    # are most of the suite's time and share nothing: in eight shards the race
+    # leg stays well inside the timeout instead of at its edge (in four, the
+    # slowest shard took 867 s of the 900 once the sixth review's walks were
+    # in).
+    shard_count = 8,
     deps = [
         "//agent/internal/capture",
+        "//agent/internal/gamma",
+        "//agent/internal/gatewaystatus",
         "//agent/internal/meshdns",
         "//agent/internal/xds/ack",
         "//agent/internal/xds/cache/cachemetrics",
@@ -211,6 +220,7 @@ go_test(
         "//api/aether/cni/v1:cni",
         "//api/aether/registry/v1:registry",
         "//common/constants/annotations",
+        "//common/constants/labels",
         "//common/constants/mesh",
         "//common/extensionfilter",
         "//common/udspath",
@@ -244,6 +254,17 @@ go_test(
         "@com_github_envoyproxy_go_control_plane_envoy//service/discovery/v3:discovery",
         "@com_github_stretchr_testify//assert",
         "@com_github_stretchr_testify//require",
+        "@io_k8s_api//core/v1:core",
+        "@io_k8s_apimachinery//pkg/api/meta",
+        "@io_k8s_apimachinery//pkg/apis/meta/v1:meta",
+        "@io_k8s_apimachinery//pkg/runtime",
+        "@io_k8s_apimachinery//pkg/types",
+        "@io_k8s_apimachinery//pkg/util/intstr",
+        "@io_k8s_client_go//kubernetes/scheme",
+        "@io_k8s_sigs_controller_runtime//pkg/client",
+        "@io_k8s_sigs_controller_runtime//pkg/client/fake",
+        "@io_k8s_sigs_controller_runtime//pkg/reconcile",
+        "@io_k8s_sigs_gateway_api//apis/v1:apis",
         "@io_opentelemetry_go_otel_sdk_metric//:metric",
         "@io_opentelemetry_go_otel_sdk_metric//metricdata",
         "@org_golang_google_grpc//:grpc",

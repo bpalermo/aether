@@ -1,7 +1,7 @@
 package cache
 
-// Fifth adversarial pass on the proposal-043 stack (head 3990f748). Review
-// tests: uncommitted, not part of the pull requests.
+// Fifth adversarial pass on the proposal-043 stack (head 3990f748). Tests
+// adopted from the review.
 
 import (
 	"context"
@@ -35,6 +35,12 @@ func TestPerPort_ListedBeforeItIsADependency(t *testing.T) {
 			c := a043Cache(t, nil)
 			require.NotContains(t, c.DependencySet(), "demo/echo", "control: not a dependency yet")
 			require.NoError(t, c.LoadClustersFromRegistry(ctx, "cluster-1", "node-1", a043Registry([]a043Service{echo})))
+			// The fix itself, held directly (what follows only says what must
+			// not be delivered, and nothing is once the classifier of the
+			// loopback table exists, with or without this): the ports of a
+			// service that is not a dependency are not derived at all.
+			_, known := c.PodPortClasses(ctx, "demo/echo")
+			require.False(t, known, "the node derived the ports of a service that is not one of its dependencies")
 
 			c.SetServiceChainFilters(map[string]proxy.ExtensionFilter{"demo/echo": r3ChainCfg(t)})
 			c.SetServiceRoutes(map[string][]proxy.GammaRoute{"demo/echo": {{Matches: []proxy.GammaMatch{{Prefix: "/"}}, HeaderMutation: rtpMark("rule")}}})

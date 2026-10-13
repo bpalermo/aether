@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"strings"
 
+	registryv1 "aethermesh.dev/api/aether/registry/v1"
 	aetherlabels "aethermesh.dev/common/constants/labels"
 	"aethermesh.dev/common/referencegrant"
 	"aethermesh.dev/common/serviceref"
@@ -31,19 +32,31 @@ type portFacts struct {
 	// false for a real port that is known not to: a generated Service's
 	// raw-TCP or UDP port.
 	ports map[uint32]bool
-	// unverified names the ports of a USER Service that could not be judged
-	// by what its pods declare (withPodPorts): this node holds no row of the
-	// service, or its targetPort is a name that was not resolved. The data
-	// plane of this node knows no more and does not answer 500 for it; the
-	// status says it did not check, and does not overwrite what a node that
-	// does know has said (keptJudgement).
+	// unverified names the ports of a USER Service that are not judged by
+	// what its pods declare: no node that holds a row of the service has
+	// judged the port (judgedFacts), or its targetPort is a name that was not
+	// resolved. The data plane of a node that knows no more does not answer
+	// 500 for it, and the status says it was not checked.
 	unverified map[uint32]bool
+	// pods: a USER Service's port map, Service port to pod port, for the
+	// ports whose target is a known number.
+	pods map[uint32]uint32
+	// classes and held are what this node's own tables serve the service's
+	// pod ports as (PodPorts), for a Service the mesh did not generate and
+	// for a service that has no Service object. held is false when the node
+	// holds no row of the service.
+	classes map[uint32]registryv1.PortProtocol
+	held    bool
+	// absent: no Service object of this name exists (pods can register
+	// before the registrar has generated their Service). The data plane then
+	// has the pods' own ports and nothing else, so ports holds only what was
+	// judged from them (judgedFacts), and a port that is not in it is not
+	// spoken for.
+	absent bool
 	// undeclared: a USER Service's port (key) whose pod port (value) no
 	// registered pod of the service declares. The data plane answers 500 for
 	// a backendRef to it.
 	undeclared map[uint32]uint32
-	// user: the Service is not one the mesh generated.
-	user bool
 	// unknown: a generated Service that carries no real port at all, as a
 	// registrar of chart 2.6 writes it. Nothing is known of the service's
 	// ports from it (the data plane reads the registry), so nothing is said.
@@ -82,11 +95,13 @@ func servicePortFacts(svc *corev1.Service) portFacts {
 		f.ports[uint32(sp.Port)] = tcp && sp.AppProtocol != nil && *sp.AppProtocol == "http"
 	}
 	f.unknown = generated && len(f.ports) == 0
-	f.user = !generated
 	return f
 }
 
 func (f portFacts) describe() string {
+	if f.absent {
+		return "as its registered pods declare it; the Service does not exist yet"
+	}
 	if len(f.ports) == 0 {
 		return "it has no port"
 	}
@@ -111,6 +126,42 @@ func mapsKeys(m map[uint32]bool) func(func(uint32) bool) {
 	}
 }
 
+// portProblem is what is wrong with a port a route names.
+type portProblem int
+
+const (
+	portFine portProblem = iota
+	// portMissing: the Service has no such port.
+	portMissing
+	// portUndeclared: no registered pod declares the pod port behind it.
+	portUndeclared
+	// portUndeclaredNoService: the same, of a service with no Service object.
+	portUndeclaredNoService
+	// portNotHTTP: a real port that is raw TCP or UDP.
+	portNotHTTP
+)
+
+// problem says what is wrong with Service port `port` as a route's port, and
+// the pod port behind it where that is the matter. A port of a service with
+// no Service object that nobody has judged is not spoken for: portFine.
+func (f portFacts) problem(port uint32) (portProblem, uint32) {
+	http, has := f.ports[port]
+	pod, undeclared := f.undeclared[port]
+	switch {
+	case !has && f.absent:
+		return portFine, 0
+	case !has:
+		return portMissing, 0
+	case undeclared && f.absent:
+		return portUndeclaredNoService, pod
+	case undeclared:
+		return portUndeclared, pod
+	case !http:
+		return portNotHTTP, 0
+	}
+	return portFine, 0
+}
+
 // parentPortProblem reports why a Service parentRef's port names no HTTP port
 // of the Service, "" when it does, when it names no port, or when the Service
 // is not known here (then nothing can be said, and nothing is).
@@ -127,14 +178,15 @@ func parentPortProblem(facts map[string]portFacts, p gatewayv1.ParentReference, 
 		return ""
 	}
 	port := uint32(*p.Port)
-	http, has := f.ports[port]
-	pod, undeclared := f.undeclared[port]
-	switch {
-	case !has:
+	problem, pod := f.problem(port)
+	switch problem {
+	case portMissing:
 		return fmt.Sprintf("Service %s/%s has no port %d (%s); the route is attached to nothing", ns, p.Name, port, f.describe())
-	case undeclared:
+	case portUndeclaredNoService:
+		return fmt.Sprintf("Service %s/%s does not exist yet, and no registered pod of the service declares port %d (endpoint.aether.io/ports); the route is attached to nothing", ns, p.Name, port)
+	case portUndeclared:
 		return fmt.Sprintf("port %d of Service %s/%s targets pod port %d, which no registered pod of the service declares (endpoint.aether.io/ports); the route is attached to nothing", port, ns, p.Name, pod)
-	case !http:
+	case portNotHTTP:
 		return fmt.Sprintf("port %d of Service %s/%s is not an HTTP port (%s); the route is attached to nothing", port, ns, p.Name, f.describe())
 	}
 	return ""
@@ -158,39 +210,38 @@ func backendPortProblem(facts map[string]portFacts, routeNamespace string, refs 
 		if !known || f.unknown {
 			continue
 		}
-		port := uint32(*ref.Port)
-		http, has := f.ports[port]
-		pod, undeclared := f.undeclared[port]
-		switch {
-		case !has:
-			return false, string(gatewayv1.RouteReasonBackendNotFound),
-				fmt.Sprintf("backendRef %s/%s: the Service has no port %d (%s); requests for this backendRef are answered 500", ns, ref.Name, port, f.describe())
-		case undeclared:
-			return false, string(gatewayv1.RouteReasonBackendNotFound),
-				fmt.Sprintf("backendRef %s/%s: port %d of the Service targets pod port %d, which no registered pod of the service declares (endpoint.aether.io/ports); requests for this backendRef are answered 500", ns, ref.Name, port, pod)
-		case !http:
-			return false, string(gatewayv1.RouteReasonUnsupportedProtocol),
-				fmt.Sprintf("backendRef %s/%s: port %d is not an HTTP port (%s); requests for this backendRef are answered 500", ns, ref.Name, port, f.describe())
+		if reason, message := f.backendProblem(ns, string(ref.Name), uint32(*ref.Port)); reason != "" {
+			return false, reason, message
 		}
 	}
 	return true, "", ""
 }
 
-// parentPortUnchecked reports whether a Service parentRef names a port that
-// could not be judged here (portFacts.unverified).
-func parentPortUnchecked(facts map[string]portFacts, p gatewayv1.ParentReference, routeNamespace string) bool {
-	if p.Port == nil {
-		return false
+// backendProblem is the ResolvedRefs reason and message of a backendRef to
+// Service port `port` of ns/name, "" when the port is an HTTP port (or not
+// spoken for).
+func (f portFacts) backendProblem(ns, name string, port uint32) (reason, message string) {
+	const answered = "; requests for this backendRef are answered 500"
+	problem, pod := f.problem(port)
+	switch problem {
+	case portMissing:
+		return string(gatewayv1.RouteReasonBackendNotFound),
+			fmt.Sprintf("backendRef %s/%s: the Service has no port %d (%s)", ns, name, port, f.describe()) + answered
+	case portUndeclaredNoService:
+		return string(gatewayv1.RouteReasonBackendNotFound),
+			fmt.Sprintf("backendRef %s/%s: the Service does not exist yet, and no registered pod of the service declares port %d (endpoint.aether.io/ports)", ns, name, port) + answered
+	case portUndeclared:
+		return string(gatewayv1.RouteReasonBackendNotFound),
+			fmt.Sprintf("backendRef %s/%s: port %d of the Service targets pod port %d, which no registered pod of the service declares (endpoint.aether.io/ports)", ns, name, port, pod) + answered
+	case portNotHTTP:
+		return string(gatewayv1.RouteReasonUnsupportedProtocol),
+			fmt.Sprintf("backendRef %s/%s: port %d is not an HTTP port (%s)", ns, name, port, f.describe()) + answered
 	}
-	ns := routeNamespace
-	if p.Namespace != nil && string(*p.Namespace) != "" {
-		ns = string(*p.Namespace)
-	}
-	return facts[serviceref.New(ns, string(p.Name)).Key()].unverified[uint32(*p.Port)]
+	return "", ""
 }
 
 // uncheckedRefsPrefix opens the ResolvedRefs message of a route whose
-// references could not all be judged here.
+// references are not all judged: no node holds a pod of the Service to say.
 const uncheckedRefsPrefix = "All backend references name a port of their Service. Not checked: "
 
 // resolveRefs is the ResolvedRefs verdict of a route: the shape and
@@ -205,7 +256,7 @@ func resolveRefs(facts map[string]portFacts, routeNamespace, routeKind string, r
 	if unchecked := uncheckedBackendPorts(facts, routeNamespace, refs); len(unchecked) > 0 {
 		return true, string(gatewayv1.RouteReasonResolvedRefs),
 			uncheckedRefsPrefix + "whether the pods serve " + strings.Join(unchecked, ", ") +
-				" as HTTP (a port of a Service the mesh did not generate, and this node holds no pod of it to say, or its targetPort is a name that was not resolved). Requests are routed to it; this condition turns False, and they are answered 500, once registered pods declare the port raw TCP or do not declare it"
+				" as HTTP (a port of a Service the mesh did not generate, and no node that holds a pod of it has said, or its targetPort is a name that was not resolved). Requests are routed to it; this condition turns False, and they are answered 500, once registered pods declare the port raw TCP or do not declare it"
 	}
 	return true, string(gatewayv1.RouteReasonResolvedRefs), "All backend references resolved"
 }

@@ -1,7 +1,7 @@
 package mtlspool
 
-// Third adversarial pass on the proposal-043 stack (head 7f0f8299): review
-// tests on the pinned proxy, uncommitted. They use the stack's own rig
+// Third adversarial pass on the proposal-043 stack (head 7f0f8299): tests
+// on the pinned proxy, adopted from the review. They use the stack's own rig
 // (perport_live_test.go): the listeners and route tables are the ones the
 // agent's cache generates.
 

@@ -15,7 +15,6 @@ import (
 	"maps"
 	"slices"
 	"strings"
-	"time"
 
 	"aethermesh.dev/agent/internal/gatewaystatus"
 	"aethermesh.dev/agent/internal/xds/proxy"
@@ -40,6 +39,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
+	"sigs.k8s.io/controller-runtime/pkg/source"
 	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
 	gatewayv1beta1 "sigs.k8s.io/gateway-api/apis/v1beta1"
 )
@@ -87,6 +87,10 @@ type Reconciler struct {
 	// PodPorts says what the pods of a user's Service declare, for a route's
 	// status (podports.go). Nil: such a port is reported as not checked.
 	PodPorts PodPorts
+	// PodPortsChanged delivers an event each time what PodPorts answers has
+	// changed (the cache's OnPodPortsChanged): every route's status is then
+	// judged again. Nil: the status follows only what the reconciler watches.
+	PodPortsChanged <-chan event.GenericEvent
 
 	// Sink receives the projected per-service rules (the snapshot cache).
 	Sink RouteSink
@@ -153,6 +157,14 @@ func (r *Reconciler) SetupWithManager(mgr ctrl.Manager) error {
 		For(&gatewayv1.HTTPRoute{})
 	for _, w := range r.secondaryWatches() {
 		b = b.Watches(w.object, enqueueAll, builder.WithPredicates(w.predicates...))
+	}
+	if r.PodPortsChanged != nil {
+		// What the pods of a service declare is not an API object this
+		// reconciler watches: the cache says when its answer changed. That
+		// includes the refresh a reconcile itself causes, by making a route's
+		// services dependencies of the node: the status is judged again when
+		// their rows have landed, not on a timer.
+		b = b.WatchesRawSource(source.Channel(r.PodPortsChanged, enqueueAll))
 	}
 	return b.Named("gamma").WithOptions(ctrlqueue.Options()).Complete(r)
 }
@@ -228,24 +240,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, _ reconcile.Request) (reconc
 	// projected); the next reconcile retries.
 	r.writeHTTPRouteStatuses(ctx, httpList, grants, facts)
 	r.writeGRPCRouteStatuses(ctx, grpcList, grants, facts)
-	return reconcile.Result{RequeueAfter: podPortsRecheck(facts)}, nil
-}
-
-// podPortsRecheckInterval is how often a status that depends on what the pods
-// of a user's Service declare is judged again. Nothing this reconciler
-// watches changes when such a pod registers, re-registers or leaves.
-const podPortsRecheckInterval = 30 * time.Second
-
-// podPortsRecheck returns podPortsRecheckInterval when some route names a
-// port of a Service the mesh did not generate, and zero (no requeue)
-// otherwise: only those ports are judged by the registry.
-func podPortsRecheck(facts map[string]portFacts) time.Duration {
-	for _, f := range facts {
-		if f.user {
-			return podPortsRecheckInterval
-		}
-	}
-	return 0
+	return reconcile.Result{}, nil
 }
 
 // listGammaResources lists HTTPRoutes, GRPCRoutes, and ReferenceGrants (all CRD-gated).
@@ -504,25 +499,37 @@ func (r *Reconciler) servicePortMaps(ctx context.Context, routes map[string][]pr
 			r.resolveNamedTargetPorts(ctx, svc, key, m, namedPorts)
 		}
 		if routed {
-			facts[key] = r.judgedByPods(ctx, key, facts[key], m)
+			facts[key] = r.withPods(ctx, key, facts[key], m)
 		}
 		out[key] = m
+	}
+	// A service a route names that has no Service object: pods can register
+	// before the registrar has generated their Service. The data plane judges
+	// a reference to it by the pods' own ports, so the status does too.
+	for key := range named {
+		if _, exists := facts[key]; !exists {
+			facts[key] = r.withPods(ctx, key, portFacts{absent: true, ports: map[uint32]bool{}}, nil)
+		}
 	}
 	return out, facts, nil
 }
 
-// judgedByPods returns a user Service's facts judged by what its registered
-// pods declare (portFacts.withPodPorts), or as they are when nothing is known
-// of them.
-func (r *Reconciler) judgedByPods(ctx context.Context, key string, f portFacts, portMap map[uint32]uint32) portFacts {
-	if r.PodPorts == nil {
-		return f
+// withPods returns the facts of a service only its pods can speak for (a
+// user's Service, or a service with no Service object) with what is needed to
+// judge its ports: the Service's port map (Service port to pod port, 0 for a
+// named targetPort that was not resolved), and what this node's tables serve
+// the pod ports as. The judging is per route: judgedFacts.
+func (r *Reconciler) withPods(ctx context.Context, key string, f portFacts, portMap map[uint32]uint32) portFacts {
+	f.pods = make(map[uint32]uint32, len(portMap))
+	for port, pod := range portMap {
+		if pod != 0 {
+			f.pods[port] = pod
+		}
 	}
-	classes, known := r.PodPorts.PodPortClasses(ctx, key)
-	if !known {
-		return f
+	if r.PodPorts != nil {
+		f.classes, f.held = r.PodPorts.PodPortClasses(ctx, key)
 	}
-	return f.withPodPorts(portMap, classes)
+	return f
 }
 
 // resolveNamedTargetPorts fills in, in m, the pod port of every Service port
@@ -649,8 +656,8 @@ func buildRouteTargetPorts(portSets map[string]map[uint32]struct{}) map[string][
 func (r *Reconciler) writeHTTPRouteStatuses(ctx context.Context, httpList *gatewayv1.HTTPRouteList, grants []gatewayv1beta1.ReferenceGrant, facts map[string]portFacts) {
 	for i := range httpList.Items {
 		hr := &httpList.Items[i]
-		resolved, reason, msg := resolveRefs(facts, hr.Namespace, "HTTPRoute", httpBackendRefs(hr.Spec.Rules), grants)
-		if err := r.writeRouteStatus(ctx, hr, hr.Generation, &hr.Status.RouteStatus, hr.Spec.ParentRefs, facts, resolved, reason, msg); err != nil {
+		in := routeStatusInputs{kind: "HTTPRoute", parentRefs: hr.Spec.ParentRefs, backendRefs: httpBackendRefs(hr.Spec.Rules), grants: grants, facts: facts}
+		if err := r.writeRouteStatus(ctx, hr, &hr.Status.RouteStatus, in); err != nil {
 			r.Log.WarnContext(ctx, "failed to write HTTPRoute status", "route", hr.Name, "namespace", hr.Namespace, "error", err.Error())
 		}
 	}
@@ -660,11 +667,21 @@ func (r *Reconciler) writeHTTPRouteStatuses(ctx context.Context, httpList *gatew
 func (r *Reconciler) writeGRPCRouteStatuses(ctx context.Context, grpcList *gatewayv1.GRPCRouteList, grants []gatewayv1beta1.ReferenceGrant, facts map[string]portFacts) {
 	for i := range grpcList.Items {
 		gr := &grpcList.Items[i]
-		resolved, reason, msg := resolveRefs(facts, gr.Namespace, "GRPCRoute", grpcBackendRefs(gr.Spec.Rules), grants)
-		if err := r.writeRouteStatus(ctx, gr, gr.Generation, &gr.Status.RouteStatus, gr.Spec.ParentRefs, facts, resolved, reason, msg); err != nil {
+		in := routeStatusInputs{kind: "GRPCRoute", parentRefs: gr.Spec.ParentRefs, backendRefs: grpcBackendRefs(gr.Spec.Rules), grants: grants, facts: facts}
+		if err := r.writeRouteStatus(ctx, gr, &gr.Status.RouteStatus, in); err != nil {
 			r.Log.WarnContext(ctx, "failed to write GRPCRoute status", "route", gr.Name, "namespace", gr.Namespace, "error", err.Error())
 		}
 	}
+}
+
+// routeStatusInputs is what one route's status is computed from.
+type routeStatusInputs struct {
+	kind        string
+	parentRefs  []gatewayv1.ParentReference
+	backendRefs []gatewayv1.BackendObjectReference
+	grants      []gatewayv1beta1.ReferenceGrant
+	// facts: every named Service's ports, as this node knows them.
+	facts map[string]portFacts
 }
 
 // writeRouteStatus upserts our (mesh controller) RouteParentStatus for each
@@ -673,20 +690,22 @@ func (r *Reconciler) writeGRPCRouteStatuses(ctx context.Context, grpcList *gatew
 // HTTP port of the Service, in which case the route is attached to nothing)
 // and ResolvedRefs per the backend check. It preserves status entries owned by
 // other controllers and only issues a status update when something changed.
-func (r *Reconciler) writeRouteStatus(
-	ctx context.Context,
-	obj client.Object,
-	generation int64,
-	status *gatewayv1.RouteStatus,
-	parentRefs []gatewayv1.ParentReference,
-	facts map[string]portFacts,
-	backendsResolved bool,
-	resolvedReason, resolvedMsg string,
-) error {
+//
+// Every condition is computed here, now, from the route, the grants, the
+// Services and the pod-port verdicts (judged.go): nothing of what the status
+// said before is kept, except those verdicts, for the ports this node cannot
+// judge.
+func (r *Reconciler) writeRouteStatus(ctx context.Context, obj client.Object, status *gatewayv1.RouteStatus, in routeStatusInputs) error {
+	generation := obj.GetGeneration()
 	parents := status.Parents
+	facts, record := judgedFacts(in.facts, priorJudgements(parents, generation),
+		routePortRefs(obj.GetNamespace(), in.parentRefs, in.backendRefs))
+	ok, reason, msg := resolveRefs(facts, obj.GetNamespace(), in.kind, in.backendRefs, in.grants)
+	resolved := resolvedCondition(ok, reason, msg)
+
 	changed := false
 	var written []gatewayv1.ParentReference
-	for _, p := range parentRefs {
+	for _, p := range in.parentRefs {
 		if p.Group != nil && string(*p.Group) != "" {
 			continue
 		}
@@ -694,11 +713,15 @@ func (r *Reconciler) writeRouteStatus(
 			continue
 		}
 		written = append(written, p)
-		accepted := acceptedCondition(parents, p, generation, facts, obj.GetNamespace())
-		resolved := resolvedCondition(parents, p, generation, backendsResolved, resolvedReason, resolvedMsg)
-		var upd bool
-		parents, upd = gatewaystatus.MergeRouteParentStatus(parents, gatewaystatus.MeshControllerName, p, generation, accepted, resolved)
-		changed = changed || upd
+		conditions := []gatewaystatus.Condition{acceptedCondition(p, facts, obj.GetNamespace()), resolved}
+		var upd, removed bool
+		if len(record) > 0 {
+			conditions = append(conditions, judgedCondition(record))
+		} else {
+			parents, removed = gatewaystatus.RemoveRouteParentCondition(parents, gatewaystatus.MeshControllerName, p, JudgedConditionType)
+		}
+		parents, upd = gatewaystatus.MergeRouteParentStatus(parents, gatewaystatus.MeshControllerName, p, generation, conditions...)
+		changed = changed || upd || removed
 	}
 	// The mesh's entry of a parentRef the route no longer names (an edited
 	// port, a removed parent) goes with it.
@@ -711,7 +734,7 @@ func (r *Reconciler) writeRouteStatus(
 }
 
 // acceptedCondition is the Accepted condition of one Service parentRef.
-func acceptedCondition(parents []gatewayv1.RouteParentStatus, p gatewayv1.ParentReference, generation int64, facts map[string]portFacts, routeNamespace string) gatewaystatus.Condition {
+func acceptedCondition(p gatewayv1.ParentReference, facts map[string]portFacts, routeNamespace string) gatewaystatus.Condition {
 	accepted := gatewaystatus.Condition{
 		Type:    string(gatewayv1.RouteConditionAccepted),
 		Status:  metav1.ConditionTrue,
@@ -722,17 +745,13 @@ func acceptedCondition(parents []gatewayv1.RouteParentStatus, p gatewayv1.Parent
 		accepted.Status = metav1.ConditionFalse
 		accepted.Reason = string(gatewayv1.RouteReasonNoMatchingParent)
 		accepted.Message = problem
-		return accepted
-	}
-	if parentPortUnchecked(facts, p, routeNamespace) {
-		return keptJudgement(parents, p, generation, accepted)
 	}
 	return accepted
 }
 
 // resolvedCondition is the ResolvedRefs condition of a route, as written on
-// one of its parents.
-func resolvedCondition(parents []gatewayv1.RouteParentStatus, p gatewayv1.ParentReference, generation int64, ok bool, reason, msg string) gatewaystatus.Condition {
+// each of its parents.
+func resolvedCondition(ok bool, reason, msg string) gatewaystatus.Condition {
 	resolved := gatewaystatus.Condition{
 		Type:    string(gatewayv1.RouteConditionResolvedRefs),
 		Status:  metav1.ConditionTrue,
@@ -741,31 +760,8 @@ func resolvedCondition(parents []gatewayv1.RouteParentStatus, p gatewayv1.Parent
 	}
 	if !ok {
 		resolved.Status = metav1.ConditionFalse
-		return resolved
-	}
-	if strings.HasPrefix(msg, uncheckedRefsPrefix) {
-		return keptJudgement(parents, p, generation, resolved)
 	}
 	return resolved
-}
-
-// keptJudgement returns the condition to write where this node could not judge
-// a port of a user's Service (it holds no pod of it): unjudged, the condition
-// as computed; but when the route's status already says False for this parent,
-// for THIS generation of the route, that False.
-//
-// Every node's agent writes the one status of a route, and they do not all
-// hold the same services. A node that holds the pods says False when they do
-// not serve the port as HTTP, and its table answers 500. A node that holds
-// none must not write "True, not checked" over that: the False is still true
-// on the node that answers 500. It is overwritten by a node that can judge,
-// and by any node when the route's spec changes.
-func keptJudgement(parents []gatewayv1.RouteParentStatus, p gatewayv1.ParentReference, generation int64, unjudged gatewaystatus.Condition) gatewaystatus.Condition {
-	prev := gatewaystatus.RouteParentCondition(parents, gatewaystatus.MeshControllerName, p, unjudged.Type)
-	if prev == nil || prev.Status != metav1.ConditionFalse || prev.ObservedGeneration != generation {
-		return unjudged
-	}
-	return gatewaystatus.Condition{Type: prev.Type, Status: prev.Status, Reason: prev.Reason, Message: prev.Message}
 }
 
 func httpBackendRefs(rules []gatewayv1.HTTPRouteRule) []gatewayv1.BackendObjectReference {

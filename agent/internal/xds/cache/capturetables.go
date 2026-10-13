@@ -806,6 +806,9 @@ func (c *SnapshotCache) noteServicePortsLocked(prev map[string]servicePorts) {
 	})
 	if !same {
 		c.servicePortsGen++
+		if c.podPortsChanged != nil {
+			c.podPortsChanged()
+		}
 	}
 }
 
@@ -875,6 +878,12 @@ type meshName struct {
 	// arms are the service's east-west QUIC selection arms, when eligible.
 	arms map[string]string
 }
+
+// meshOnly reports whether the tables of a dialled port have the name by its
+// mesh authority alone: a mesh service whose Kubernetes names are not the
+// mesh's (a user's Service owns them and no route names it, or its generated
+// Service has not been seen yet).
+func (n meshName) meshOnly() bool { return len(n.names) == 1 && n.names[0] == n.mesh }
 
 // servicePortFor returns the pod port behind SERVICE port p of the name, and
 // whether the Service has that port at all.
@@ -1282,7 +1291,7 @@ func (c *SnapshotCache) shortNamesOf(in captureTableInputs, port uint32) *proxy.
 		// behind a user's Service that no route names: the agent has neither
 		// a generated Service nor a port map for it). Its Kubernetes names
 		// pass through to the user's Service, and so does its short name.
-		if len(n.names) == 1 && n.names[0] == n.mesh {
+		if n.meshOnly() {
 			short.MeshOnly = append(short.MeshOnly, n.mesh)
 		}
 	}
@@ -1305,7 +1314,18 @@ func (c *SnapshotCache) captureTableVhosts(in captureTableInputs, port uint32) [
 		}
 		// cap_http_other: HTTP on a port number no service is known to
 		// declare as HTTP. A name this node knows the ports of is refused.
-		if n.ports.known() || n.mapped {
+		//
+		// Not one the table has by its mesh name alone (meshOnly: a mesh
+		// service behind a Service of the user's that no route names). That
+		// refusal appeared the moment a service-wide filter made the service
+		// one the node holds, and turned a dial to the user's Service port
+		// with the mesh name in Host, which had passed through, into a 421.
+		// This table has no on-demand route, so what is not claimed here
+		// leaves as any name that is not the mesh's does, to the address that
+		// was dialled. (In the table of a port number that HAS a chain the
+		// name keeps its virtual hosts: an unclaimed mesh authority there
+		// would be fetched on demand without the service's filter.)
+		if (n.ports.known() || n.mapped) && !n.meshOnly() {
 			vhosts = append(vhosts, proxy.BuildRefusalVirtualHost(n.mesh+"|undeclared", domains(n.names, "", ":*"), proxy.RefusalPortNotDeclared,
 				refusalBody(n.mesh, "does not declare the port that was dialled", n.ports)))
 			continue
