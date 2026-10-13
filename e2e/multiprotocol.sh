@@ -170,14 +170,18 @@
 #                  through as before the filter, and the second, which was a
 #                  mesh delivery before it, is one WITH the filter (403).
 #                  None is refused 421
-#   U2  named      a Service of the user's whose targetPort is a NAME is
-#                  created before its pods, and an HTTPRoute sends
-#                  mp-httponly's traffic to it. Until a pod exists the name
-#                  resolves to nothing: ResolvedRefs=False/BackendNotFound
-#                  and the request is answered 500 on both paths, never
-#                  delivered to a port the pods declare. The pods arrive:
-#                  the status turns True and the request is answered by
-#                  them, with no route or Service touched in between
+#   U2  named      a Service port whose targetPort is a NAME is refused
+#                  until the name resolves, and resolves on the
+#                  EndpointSlice's EVENT. (a) A selectorless Service and an
+#                  HTTPRoute to it: False/BackendNotFound and 500 on both
+#                  paths; an EndpointSlice made by hand names the port and
+#                  the status turns True, a second that gives the name
+#                  another number turns it False again, and deleting that
+#                  one turns it back: nothing but the slices changes, so
+#                  only the agent's slice watch can have told it. (b) A
+#                  Service of the user's with a named targetPort that NO
+#                  route names fronts mesh pods: their mesh name answers on
+#                  the proxy port by the Service's port
 #   T1  replaced   mp-move serves HTTP on 8080, then is redeployed serving
 #                  raw TCP on 9000 only. Host mp-move:8080 on loopback is
 #                  refused (421 port-not-declared) within T1_WINDOW of the
@@ -325,6 +329,7 @@ LATE_NAME="mp-late"
 LATE_MARKER="late8080"
 LATE_SERVICE_PORT=8000
 LATE_ROUTE="mp-late-route"
+LATE_SLICED="mp-late-sliced"
 # Two more Services of the user's that select mp-own's pods: on a port number
 # another mesh service declares as HTTP, and on the port the pods serve.
 OWN_ALT_SERVICE="mp-own-alt"
@@ -932,7 +937,7 @@ deploy_workloads() {
 	for w in "${WORKLOADS[@]}" "$TCP_ONLY"; do
 		upstreams+="${upstreams:+,}$w.$TEST_NS"
 	done
-	upstreams+=",$SHORT_NAME.$TEST_NS,$MOVE_NAME.$TEST_NS,$OWN_NAME.$TEST_NS"
+	upstreams+=",$SHORT_NAME.$TEST_NS,$MOVE_NAME.$TEST_NS,$OWN_NAME.$TEST_NS,$LATE_NAME.$TEST_NS"
 	# The user's Service first: the registrar generates a Service only for a
 	# name no other Service owns.
 	deploy_user_service "$OWN_NAME" "$OWN_SERVICE_PORT" "$HTTP_PORT"
@@ -2345,28 +2350,36 @@ YAML
 
 # U2 — a Service port whose targetPort is a NAME names nothing until an
 # EndpointSlice of the Service says which number the name is (owner's ruling,
-# 2026-10-13). $LATE_NAME is a Service of the user's, port $LATE_SERVICE_PORT,
-# targetPort "web", created with no pod behind it, and an HTTPRoute sends
-# everything of mp-httponly's to that port.
+# 2026-10-13), and the agent learns that from the slice's EVENT.
 #
-# Until a pod exists the reference is invalid: the status says so and the
-# request is answered 500, on the captured path and on the loopback listener.
-# (It was delivered to the port the backend's pods declare, which here would
-# be nothing at all, and with pods of another shape a port the route never
-# named.) Then the pods arrive, with a container port named "web": nothing
-# the route reconciler used to watch changes, only the Service's
-# EndpointSlice appears. The status must turn True and the request must be
-# answered by the new pods without the route or the Service being touched.
+# (a) The event. $LATE_SLICED is a Service with NO selector, port
+# $LATE_SERVICE_PORT, targetPort "web": Kubernetes makes no EndpointSlice for
+# it, so every slice it has is one this leg writes, and a slice is the only
+# thing that changes between two checks. An HTTPRoute sends mp-httponly's
+# traffic to it. With no slice the reference is invalid: the status says so
+# and the request is answered 500 on the captured path and on the loopback
+# listener (it was delivered to the port the backend's pods declare). A slice
+# that names the port makes the status True; a second slice that gives the
+# same name another number makes it False again; deleting that one makes it
+# True. An agent that does not watch EndpointSlices sees none of the three.
+# (The first form of this leg created the pods instead, and passed with the
+# watch removed: the pods' registration is an event of its own.)
+#
+# (b) No route. $LATE_NAME is a Service of the user's, port
+# $LATE_SERVICE_PORT, targetPort "web", in front of mesh pods whose container
+# port is named "web", and NO route names it. The mesh name of the service
+# answers on the proxy port by the Service's port. Names were resolved only
+# for a Service a route named, so this one stayed unresolved for ever: 421
+# "Its ports: none" on every spelling, with nothing logged.
 leg_U2() {
 	local name
 	name="$(mesh_name mp-httponly)"
-	log "U2 a named targetPort is refused until it resolves: Service $LATE_NAME ($LATE_SERVICE_PORT -> \"web\") is created before its pods"
-	kc apply -f - >/dev/null <<YAML || die "U2: Service $LATE_NAME apply failed"
+	log "U2 a named targetPort is refused until it resolves, and resolves on the EndpointSlice's event"
+	kc apply -f - >/dev/null <<YAML || die "U2: Service $LATE_SLICED apply failed"
 apiVersion: v1
 kind: Service
-metadata: {name: $LATE_NAME, namespace: $TEST_NS}
+metadata: {name: $LATE_SLICED, namespace: $TEST_NS}
 spec:
-  selector: {app: $LATE_NAME}
   ports: [{name: http, port: $LATE_SERVICE_PORT, targetPort: web}]
 YAML
 	kc apply -f - >/dev/null <<YAML || die "U2: the HTTPRoute was not accepted"
@@ -2378,16 +2391,38 @@ spec:
     - {group: "", kind: Service, name: mp-httponly}
   rules:
     - backendRefs:
-        - {group: "", kind: Service, name: $LATE_NAME, port: $LATE_SERVICE_PORT}
+        - {group: "", kind: Service, name: $LATE_SLICED, port: $LATE_SERVICE_PORT}
 YAML
 	expect_condition "$LATE_ROUTE" ResolvedRefs "False/BackendNotFound" \
 		"'True/ResolvedRefs' is a named targetPort that resolves to nothing being taken on trust"
 	captured "HTTP500" "$name:$HTTP_PORT" "" \
-		"no pod of $LATE_NAME exists, so its port's name resolves to nothing: a marker or HTTP503 is the request sent on to a port nothing named"
+		"no EndpointSlice of $LATE_SLICED names its port: a marker or HTTP503 is the request sent on to a port nothing named"
 	loopback "HTTP500" "$name:$HTTP_PORT" "the same on the loopback listener"
 
-	# The pods arrive. Only the Service's EndpointSlice changes.
-	kc apply -f - >/dev/null <<YAML || die "U2: workload $LATE_NAME apply failed"
+	u2_slice a "$HTTP_PORT"
+	expect_condition "$LATE_ROUTE" ResolvedRefs "True/ResolvedRefs" \
+		"'False/BackendNotFound' is the agent not having seen the EndpointSlice appear: nothing else changed"
+	u2_slice b "$ALT_PORT"
+	expect_condition "$LATE_ROUTE" ResolvedRefs "False/BackendNotFound" \
+		"'True/ResolvedRefs' is two EndpointSlices that give the name different numbers resolved to one of them, or the second slice not seen"
+	kc -n "$TEST_NS" delete endpointslice "$LATE_SLICED-b" --wait=true >/dev/null 2>&1 || true
+	expect_condition "$LATE_ROUTE" ResolvedRefs "True/ResolvedRefs" \
+		"'False/BackendNotFound' is the agent not having seen the EndpointSlice go"
+
+	remove_route "$LATE_ROUTE"
+	kc -n "$TEST_NS" delete endpointslice "$LATE_SLICED-a" --ignore-not-found --wait=true >/dev/null 2>&1 || true
+	kc -n "$TEST_NS" delete service "$LATE_SLICED" --ignore-not-found --wait=true >/dev/null 2>&1 || true
+	captured "$(marker mp-httponly "$HTTP_PORT")" "$name:$HTTP_PORT" "" "the HTTPRoute was deleted and mp-httponly does not answer for itself"
+
+	# (b) a user's Service with a named targetPort that no route names.
+	kc apply -f - >/dev/null <<YAML || die "U2: Service and workload $LATE_NAME apply failed"
+apiVersion: v1
+kind: Service
+metadata: {name: $LATE_NAME, namespace: $TEST_NS}
+spec:
+  selector: {app: $LATE_NAME}
+  ports: [{name: http, port: $LATE_SERVICE_PORT, targetPort: web}]
+---
 apiVersion: v1
 kind: ServiceAccount
 metadata: {name: $LATE_NAME, namespace: $TEST_NS}
@@ -2423,18 +2458,29 @@ spec:
 YAML
 	kc -n "$TEST_NS" rollout status "deploy/$LATE_NAME" --timeout=180s >/dev/null ||
 		die "U2: $LATE_NAME never became ready"
-	expect_condition "$LATE_ROUTE" ResolvedRefs "True/ResolvedRefs" \
-		"'False/BackendNotFound' is the agent not having seen the Service's EndpointSlice appear: nothing else changed"
-	expect "captured http://$name:$HTTP_PORT/ once $LATE_NAME's pods exist" "$LATE_MARKER" 90 "$A_PROBES" \
-		"HTTP500 is the port still refused although its name resolves now" \
-		http_tokens client "http://$name:$HTTP_PORT/" ""
-	loopback "$LATE_MARKER" "$name:$HTTP_PORT" "the same on the loopback listener"
+	expect "loopback $LOOPBACK_URL with Host: $(mesh_name "$LATE_NAME"):$LATE_SERVICE_PORT (a named targetPort, no route)" "$LATE_MARKER" 90 "$A_PROBES" \
+		"HTTP421 is the Service's named targetPort never resolved because no route names the Service: its mesh service has no port at all on the proxy port" \
+		http_tokens client-nocapture "$LOOPBACK_URL" "$(mesh_name "$LATE_NAME"):$LATE_SERVICE_PORT"
+	proxied "$LATE_MARKER" client "$(mesh_name "$LATE_NAME"):$LATE_SERVICE_PORT" "the same through the proxy port from the captured client"
 
-	remove_route "$LATE_ROUTE"
 	kc -n "$TEST_NS" delete deploy "$LATE_NAME" --ignore-not-found --wait=true >/dev/null 2>&1 || true
 	kc -n "$TEST_NS" delete service "$LATE_NAME" --ignore-not-found --wait=true >/dev/null 2>&1 || true
-	captured "$(marker mp-httponly "$HTTP_PORT")" "$name:$HTTP_PORT" "" "the HTTPRoute was deleted and mp-httponly does not answer for itself"
-	loopback "$(marker mp-httponly "$HTTP_PORT")" "$name:$HTTP_PORT" "the HTTPRoute was deleted and mp-httponly does not answer for itself, on the loopback listener"
+}
+
+# u2_slice SUFFIX PORT — an EndpointSlice of $LATE_SLICED, written by hand,
+# that gives its port name "http" the number PORT.
+u2_slice() {
+	kc apply -f - >/dev/null <<YAML || die "U2: EndpointSlice $LATE_SLICED-$1 apply failed"
+apiVersion: discovery.k8s.io/v1
+kind: EndpointSlice
+metadata:
+  name: $LATE_SLICED-$1
+  namespace: $TEST_NS
+  labels: {kubernetes.io/service-name: $LATE_SLICED}
+addressType: IPv4
+ports: [{name: http, port: $2, protocol: TCP}]
+endpoints: [{addresses: ["10.250.0.9"]}]
+YAML
 }
 
 # --- a port that stops being HTTP is refused at once ----------------------------

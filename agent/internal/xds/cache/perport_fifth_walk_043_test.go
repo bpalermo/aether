@@ -87,7 +87,9 @@ func r5PortMap(rng *rand.Rand) map[uint32]uint32 {
 	out := map[uint32]uint32{}
 	for _, sp := range []uint32{80, 8000, 8080, 9000} {
 		if rng.Intn(2) == 0 {
-			out[sp] = []uint32{8080, 9090, 80, 9000, 7000}[rng.Intn(5)]
+			// 0: a targetPort that is a name the Service's EndpointSlices do
+			// not resolve. The port is refused until it does.
+			out[sp] = []uint32{8080, 9090, 80, 9000, 7000, 0}[rng.Intn(6)]
 		}
 	}
 	if len(out) == 0 {

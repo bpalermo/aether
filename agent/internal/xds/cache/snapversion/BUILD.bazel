@@ -1,5 +1,9 @@
 load("@rules_go//go:def.bzl", "go_library", "go_test")
 
+# The parent package maps go_test to its own two-target macro, and a Gazelle
+# directive is inherited: this package's test is a plain go_test.
+# gazelle:map_kind go_test go_test @rules_go//go:def.bzl
+
 go_library(
     name = "snapversion",
     srcs = ["snapversion.go"],

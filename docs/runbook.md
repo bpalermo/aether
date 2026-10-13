@@ -3991,7 +3991,11 @@ namespace's, a pod cannot declare the mesh's own two ports, and a registry row
 must say the protocol of each of its ports. Each has a section
 below headed BREAKING, with what to look for on 2.6.x before upgrading.
 
-No chart value, flag or CRD changes. `18081` stays, permanently, as the
+No chart value, flag or CRD changes. One RBAC rule changes: the agent's
+ClusterRole gains `list`, `get` and `watch` on `endpointslices`
+(`discovery.k8s.io`), which a cluster that pins or audits the chart's roles
+will see (see "a Service port whose `targetPort` is a name" below, and the
+rollback note). `18081` stays, permanently, as the
 mesh's HTTP proxy port (`curl --proxy http://127.0.0.1:18081`), where the
 `Host` header says which service and which port.
 
@@ -4153,7 +4157,7 @@ requests with their original `Host` to a different port.
       deleted and created again under the same name is a new route.
   - **A status write that fails is retried.** A timeout or an error of the
     API server fails the agent's reconcile, which the controller runs again
-    with its usual back-off; it logs `failed to write route status`. (It
+    with a back-off capped at 30 s; it logs `failed to write route status`. (It
     used to be logged and dropped: the status then stayed as it was, `True`
     while the proxy answered 500, until some other event came by.) A
     conflict is not retried that way: the route changed, and that change is
@@ -4163,8 +4167,8 @@ requests with their original `Host` to a different port.
     with long names in a long namespace, and both the "Not checked" message
     and the record can pass that. A message is cut and ends in
     `... (truncated)`. The record is never cut: one that would not fit is
-    written with a 12-digit digest in place of every key
-    (`#1a2b3c4d5e6f=http, ...`), which every agent reads as it reads the long
+    written with a 32-digit digest (128 bits) in place of every key
+    (`#1a2b3c4d5e6f...=http, ...`), which every agent reads as it reads the long
     form. (For a few builds it left verdicts out instead, and a node that
     held no pod of a left-out Service wrote "Not checked", `True`, over the
     `False` of the node that did.)
@@ -4196,16 +4200,34 @@ requests with their original `Host` to a different port.
       backendRef are answered 500 until it resolves`;
     - a `parentRef` to it attaches the route to nothing, `Accepted=False` /
       `NoMatchingParent`, with the same reason; a request to that port of the
-      Service is `421 port-not-declared` with a body that says the port's
-      `targetPort` is a name that does not resolve yet.
+      Service is `421 port-not-declared`;
+    - on the proxy port and the loopback listener the mesh name with that
+      port is `421 port-not-declared` too. Every one of these 421s says why
+      in its body, on every table: `Its Service's port 8000 has a targetPort
+      that is a name the Service's EndpointSlices do not resolve yet: it is
+      refused until they do.`
+
+    **Whose names are resolved.** Every Service of yours the node's proxy
+    can reach a mesh service through: one a route names, one a service-wide
+    filter targets, and one that fronts a mesh service the node holds
+    endpoints of, with or without a route. (For a few builds only a Service a
+    route named was resolved. A mesh service behind an unrouted Service with
+    `targetPort: <name>`, which is the common way to write a Service, then
+    had no port at all on the proxy port: `421`, "Its ports: none", on every
+    spelling and for as long as the Service existed, with nothing logged.) A
+    Service that fronts nothing of the mesh on the node is not read. The cost
+    is one EndpointSlice list per reconcile for each such Service that has a
+    named `targetPort`, and none for any other.
 
     Through chart 2.6, and the first builds of this one, such a reference
     was served by the port the pods declare in `endpoint.aether.io/port`: a
     route that worked that way needs the name to resolve now, or a numeric
     `targetPort`, which has none of this. The three reasons a name does not
     resolve, each named in the status and in the agent's WARN (`a Service
-    port a route names has a named targetPort that does not resolve to a pod
-    port`): **no EndpointSlice** of the Service names the port yet; the
+    port has a named targetPort that does not resolve to a pod port`, logged
+    once per Service, port and reason, not on every reconcile; for a Service
+    no route names it is the only trace): **no EndpointSlice** of the Service
+    names the port yet; the
     slices **resolve it to different ports** (`... resolve to different ports
     (8080, 9090)`: pods of one Service whose containers give the name
     different numbers; it stays refused while they disagree); the slices
@@ -4216,13 +4238,24 @@ requests with their original `Host` to a different port.
     with `targetPort: http` has no EndpointSlice that names the port until a
     pod behind it exists and is selected. A route that names the port
     answers 500 (or is attached to nothing) for exactly that long. The agent
-    watches the EndpointSlices of the Services a route names that have a
-    named `targetPort`, their metadata only, and judges again on the slice's
-    event: the 500 ends when the slice appears, not on a timer. A slice that
+    watches the EndpointSlices of the Services whose names it resolves, their
+    metadata only, and judges again on the slice's event: the 500 ends when
+    the slice appears, not on a timer. Every event of such a slice is one
+    reconcile, also one that changes only its endpoints (a pod of that
+    Service starting or going) and not its ports; slices of other Services
+    cause none. A slice that
     goes again (the Service scaled to nothing) un-resolves the name, and the
     port is refused again. The agent's ClusterRole has `list`, `get` and
     `watch` on `endpointslices` for this; the slices themselves are read
     from the API for those Services only and are not cached.
+
+    **When the API server cannot be read.** A reconcile that cannot list a
+    Service's EndpointSlices refuses that Service's named ports and fails;
+    the controller runs it again with a back-off that starts at 5 ms and is
+    capped at **30 s** (controller-runtime's default grows to 1000 s). So
+    after an API outage the ports are routed again within 30 s of the API
+    answering, and during it they are refused, not served from an older
+    answer. The same cap holds for a status write that fails.
   - A `backendRef` of another kind than a Service, or to a Service in another
     namespace with no `ReferenceGrant`, is invalid in the same way: its share
     is answered **500** (the status already said `InvalidKind` or
@@ -4853,6 +4886,22 @@ of those is marked below where it comes up.
 - **Rollback** to 2.6.x: the 2.6 registrar stamps the annotations and the
   placeholder ports back on its next reconcile, and the old spellings work
   again node by node as the agents roll back (read from the code, not run).
+  - **The ClusterRole goes back at once, the agents node by node.** `helm
+    rollback` replaces the agent's ClusterRole in one step, and the 2.6 role
+    has no `endpointslices` rule at all. A 3.0 agent that is already running
+    keeps running. A 3.0 agent that **restarts** under the 2.6 role (its
+    node not yet rolled back) cannot start its EndpointSlice informer: it
+    never becomes Ready, logs a cache-sync timeout about every two and a
+    half minutes and is restarted, until the DaemonSet roll replaces it with
+    a 2.6 agent. The exposure is bounded by the length of the roll and
+    limited to the nodes whose agent restarts during it. Watch `kubectl -n
+    <aether namespace> rollout status ds/<agent>` and the agents' restart
+    counts; do not pause a rollback half way.
+  - Under a role that has `list` and `get` on `endpointslices` but no `watch`
+    (a role edited by hand, or an older copy of this chart's) the agent IS
+    Ready and resolves names, and sees a slice change only when something
+    else makes it reconcile: tens of seconds, not at once. The chart's own
+    role has the three verbs.
 
 **Release order.** The change was built as a stack of pull requests. Its
 first twelve were merged to `main` ahead of the last two, and each merge to

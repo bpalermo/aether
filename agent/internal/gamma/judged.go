@@ -104,11 +104,16 @@ func joinJudgements(j map[string]string, name func(string) string) string {
 }
 
 // judgementDigest is the short form of a key, for a record too long to be
-// written with its keys: "#" and the first 12 hex digits of the key's
-// SHA-256. A key itself starts with a namespace and never with "#".
+// written with its keys: "#" and the first 32 hex digits (128 bits) of the
+// key's SHA-256. A key itself starts with a namespace and never with "#".
+//
+// It was 48 bits, and two valid keys that share 48 bits are found in seconds:
+// a route that names both would have one read the other's verdict. With 128
+// bits no such pair can be searched for, and the longest record (some 290
+// keys) is still under half the cap.
 func judgementDigest(key string) string {
 	sum := sha256.Sum256([]byte(key))
-	return "#" + hex.EncodeToString(sum[:6])
+	return "#" + hex.EncodeToString(sum[:16])
 }
 
 // judgementFor returns the verdict a record (decodeJudgements) holds for key,

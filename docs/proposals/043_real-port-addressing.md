@@ -1031,9 +1031,13 @@ such a reference reached until now and what the strict-reference ruling
 forbids everywhere else. The status and the tables come from the same fact,
 and a node that has not read the slices refuses too: it does not guess. The
 agent judges again on the EndpointSlice's event (it watches, metadata only,
-the slices of the Services a route names that have a named `targetPort`), so
-the refusal ends when the slice appears; slices that disagree stay refused
-and the status says so; a failed read refuses and is retried. This was the
+the slices of the Services whose names it resolves), so the refusal ends when
+the slice appears; slices that disagree stay refused and the status says so;
+a failed read refuses and is retried, with a back-off capped at 30 s. The
+names are resolved for every user Service the node's tables can reach a mesh
+service through (one a route names, one a filter targets, one that fronts a
+mesh service the node holds), not only for a routed one: "refused until it
+resolves" must not mean "refused for ever" for a Service nobody routes. This was the
 one behaviour left "awaiting an owner ruling", and that heading is gone with
 it.
 
@@ -1080,7 +1084,9 @@ virtual host is replaced on evidence; a user-owned Service is left as it is.
 ## Phases as planned (superseded by *The release*)
 
 Kept as the record of what was accepted on 2026-10-11. The chart numbers are
-the plan's: none of 2.7.0 to 2.10.0 was published. Where this text and *The
+the plan's. None of 2.8.0 to 2.10.0 exists; 2.7.0 and 2.7.1 were published
+as intermediates when the first pull requests were merged and are not
+releases (see *The release*). Where this text and *The
 release* or a ruling differ, they hold.
 
 ### Phase 1 (chart 2.7.0): per-port truth, no client-visible change

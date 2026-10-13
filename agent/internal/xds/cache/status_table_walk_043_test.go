@@ -67,7 +67,14 @@ func swObjects(st r5State) []client.Object {
 		case 2:
 			svc := &corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: s.name, Namespace: s.ns}}
 			for _, sp := range slices.Sorted(maps.Keys(s.portMap)) {
-				svc.Spec.Ports = append(svc.Spec.Ports, corev1.ServicePort{Name: fmt.Sprintf("s%d", sp), Port: int32(sp), TargetPort: intstr.FromInt32(int32(s.portMap[sp]))})
+				target := intstr.FromInt32(int32(s.portMap[sp]))
+				if s.portMap[sp] == 0 {
+					// A name nothing resolves (the walk's reconcilers read no
+					// EndpointSlice): refused in the tables, False in the
+					// status.
+					target = intstr.FromString("unresolved")
+				}
+				svc.Spec.Ports = append(svc.Spec.Ports, corev1.ServicePort{Name: fmt.Sprintf("s%d", sp), Port: int32(sp), TargetPort: target})
 			}
 			out = append(out, svc)
 		}

@@ -89,11 +89,13 @@ func TestPodPortsEvents(t *testing.T) {
 	}
 }
 
-// TestWireGAMMA_RegistersAReconcilerThatIsGivenTheCachesEvents: the same, of
-// the reconciler wireGAMMA REGISTERS with the manager. Building it right and
-// then registering another, or clearing the channel on the way, leaves every
-// status that depends on a pod's ports as it was first written.
-func TestWireGAMMA_RegistersAReconcilerThatIsGivenTheCachesEvents(t *testing.T) {
+// TestWireGAMMA_ReturnsTheReconcilerItBuiltWithTheCachesEvents: the same, of
+// the reconciler wireGAMMA hands to SetupWithManager and returns: the channel
+// is not cleared between building it and registering it. What the test does
+// NOT see is the manager's side: that the controller the manager runs is this
+// reconciler and watches the channel is held by gamma's own
+// TestSetupWithManager_APodPortsChangeIsAReconcile, with a running manager.
+func TestWireGAMMA_ReturnsTheReconcilerItBuiltWithTheCachesEvents(t *testing.T) {
 	scheme := runtime.NewScheme()
 	if err := clientgoscheme.AddToScheme(scheme); err != nil {
 		t.Fatal(err)

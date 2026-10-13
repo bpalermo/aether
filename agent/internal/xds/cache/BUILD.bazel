@@ -1,4 +1,7 @@
-load("@rules_go//go:def.bzl", "go_library", "go_test")
+load("@rules_go//go:def.bzl", "go_library")
+load(":defs.bzl", "cache_go_test")
+
+# gazelle:map_kind go_test cache_go_test //agent/internal/xds/cache:defs.bzl
 
 go_library(
     name = "cache",
@@ -88,7 +91,10 @@ go_library(
 
 # size=medium, not small: ~12 s plain, but 54-58 s under --config=race (the CI
 # race gate), which is at the edge of small's 60 s timeout.
-go_test(
+#
+# Two targets come of this one call (defs.bzl): cache_test, everything but the
+# seeded random walks, and cache_walk_test, the walks alone.
+cache_go_test(
     name = "cache_test",
     size = "medium",
     # Under the race detector the suite takes most of a medium test's five
@@ -142,6 +148,7 @@ go_test(
         "perport_fourth_retention_043_test.go",
         "perport_fourth_walk_043_test.go",
         "perport_held_043_test.go",
+        "perport_ninth_043_test.go",
         "perport_routes_043_test.go",
         "perport_second_043_test.go",
         "perport_seventh_043_test.go",
@@ -206,12 +213,6 @@ go_test(
         "waypoint_test.go",
     ],
     embed = [":cache"],
-    # The randomized tests of proposal 043 (the walk, the cold/warm modes)
-    # are most of the suite's time and share nothing: in eight shards the race
-    # leg stays well inside the timeout instead of at its edge (in four, the
-    # slowest shard took 867 s of the 900 once the sixth review's walks were
-    # in).
-    shard_count = 8,
     deps = [
         "//agent/internal/capture",
         "//agent/internal/gamma",
@@ -264,6 +265,7 @@ go_test(
         "@com_github_stretchr_testify//assert",
         "@com_github_stretchr_testify//require",
         "@io_k8s_api//core/v1:core",
+        "@io_k8s_api//discovery/v1:discovery",
         "@io_k8s_apimachinery//pkg/api/meta",
         "@io_k8s_apimachinery//pkg/apis/meta/v1:meta",
         "@io_k8s_apimachinery//pkg/runtime",
@@ -272,6 +274,7 @@ go_test(
         "@io_k8s_client_go//kubernetes/scheme",
         "@io_k8s_sigs_controller_runtime//pkg/client",
         "@io_k8s_sigs_controller_runtime//pkg/client/fake",
+        "@io_k8s_sigs_controller_runtime//pkg/client/interceptor",
         "@io_k8s_sigs_controller_runtime//pkg/reconcile",
         "@io_k8s_sigs_gateway_api//apis/v1:apis",
         "@io_opentelemetry_go_otel_sdk_metric//:metric",

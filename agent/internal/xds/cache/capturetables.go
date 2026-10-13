@@ -1,6 +1,7 @@
 package cache
 
 import (
+	"cmp"
 	"context"
 	"fmt"
 	"maps"
@@ -402,6 +403,27 @@ func refusalBody(fqdn, what string, ports servicePorts) string {
 	return fmt.Sprintf("aether: %s %s. Its ports: %s. Address it as %s:<port>.\n", fqdn, what, ports.describe(), fqdn)
 }
 
+// mappedRefusalBody is refusalBody for a name that may be a user Service's:
+// it lists the ports an authority can name (portsAsAddressed), and says which
+// ports of the Service cannot be named YET because their targetPort is a name
+// the Service's EndpointSlices do not resolve. Every refusal of such a name
+// says it, on every table: a caller refused on the proxy port for "<name>:8000"
+// was told "Its ports: none" and nothing of why.
+func mappedRefusalBody(fqdn, what string, portMap map[uint32]uint32, mapped bool, ports servicePorts) string {
+	body := refusalBody(fqdn, what, portsAsAddressed(portMap, mapped, ports))
+	var unresolved []string
+	for sp, pod := range portMap {
+		if pod == 0 {
+			unresolved = append(unresolved, strconv.Itoa(int(sp)))
+		}
+	}
+	if len(unresolved) == 0 {
+		return body
+	}
+	slices.SortFunc(unresolved, func(a, b string) int { return cmp.Compare(len(a), len(b))*2 + strings.Compare(a, b) })
+	return body + "Its Service's port " + strings.Join(unresolved, ", ") + " has a targetPort that is a name the Service's EndpointSlices do not resolve yet: it is refused until they do.\n"
+}
+
 // portsAsAddressed returns the ports a refusal's body lists: the ports an
 // authority can NAME, which are the ones the refusal was judged by. For a
 // name a Service of the user's owns those are the SERVICE's ports, each with
@@ -748,14 +770,13 @@ func (c *SnapshotCache) appendOutboundRefusalsLocked(out []*routev3.VirtualHost,
 		return out
 	}
 	portMap, mapped := in.portMaps[svc]
-	named := portsAsAddressed(portMap, mapped, ports)
 	// The port-less authority, when the service has no HTTP port 80 for it.
 	// It is refused by name: 18081 is the proxy's port, not a port of the
 	// service, and a name without a port is port 80 and nothing else.
 	if _, ok := portlessPodPort(in.portMaps, svc, ports); !ok {
 		if ports.servesHTTP() {
 			out = append(out, proxy.BuildRefusalVirtualHost(fqdn+"|port-required", []string{fqdn}, proxy.RefusalPortRequired,
-				refusalBody(fqdn, "was addressed without a port: a name without a port is port 80, which it does not serve as HTTP", named)))
+				mappedRefusalBody(fqdn, "was addressed without a port: a name without a port is port 80, which it does not serve as HTTP", portMap, mapped, ports)))
 		} else {
 			out = append(out, c.noHTTPPortVhost(fqdn+"|port-required", svc, []string{fqdn}, ports))
 		}
@@ -775,10 +796,10 @@ func (c *SnapshotCache) appendOutboundRefusalsLocked(out []*routev3.VirtualHost,
 	if len(notHTTP) > 0 {
 		slices.Sort(notHTTP)
 		out = append(out, proxy.BuildRefusalVirtualHost(fqdn+"|not-http", notHTTP, proxy.RefusalPortNotHTTP,
-			refusalBody(fqdn, "does not serve HTTP on that port", named)))
+			mappedRefusalBody(fqdn, "does not serve HTTP on that port", portMap, mapped, ports)))
 	}
 	return append(out, proxy.BuildRefusalVirtualHost(fqdn+"|undeclared", []string{fqdn + ":*"}, proxy.RefusalPortNotDeclared,
-		refusalBody(fqdn, "declares no such port", named)))
+		mappedRefusalBody(fqdn, "declares no such port", portMap, mapped, ports)))
 }
 
 // tcpSpellings returns the raw-TCP addresses of a service that serves no HTTP
@@ -1360,7 +1381,7 @@ func (c *SnapshotCache) captureTableVhosts(in captureTableInputs, port uint32) [
 		// on-demand route, and says so itself: appendMeshOnlyVhosts.)
 		if (n.ports.known() || n.mapped) && !n.meshOnly() {
 			vhosts = append(vhosts, proxy.BuildRefusalVirtualHost(n.mesh+"|undeclared", domains(n.names, "", ":*"), proxy.RefusalPortNotDeclared,
-				refusalBody(n.mesh, "does not declare the port that was dialled", portsAsAddressed(n.portMap, n.mapped, n.ports))))
+				mappedRefusalBody(n.mesh, "does not declare the port that was dialled", n.portMap, n.mapped, n.ports)))
 			continue
 		}
 		// A name nothing is known of (no endpoint held, no Service with
@@ -1380,7 +1401,7 @@ func (c *SnapshotCache) appendNameVhosts(vhosts []*routev3.VirtualHost, in captu
 		return c.appendMeshOnlyVhosts(vhosts, in, n, d)
 	}
 	refuse := func(kind, reason, what string, doms []string) {
-		vhosts = append(vhosts, proxy.BuildRefusalVirtualHost(n.mesh+"|"+kind, doms, reason, refusalBody(n.mesh, what, portsAsAddressed(n.portMap, n.mapped, n.ports))))
+		vhosts = append(vhosts, proxy.BuildRefusalVirtualHost(n.mesh+"|"+kind, doms, reason, mappedRefusalBody(n.mesh, what, n.portMap, n.mapped, n.ports)))
 	}
 	// What this node can say about the name's ports. Without it (a service it
 	// holds no endpoint of, a route target that is only a name) there is
