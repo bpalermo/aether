@@ -3995,7 +3995,11 @@ No chart value, flag or CRD changes. `18081` stays, permanently, as the
 mesh's HTTP proxy port (`curl --proxy http://127.0.0.1:18081`), where the
 `Host` header says which service and which port.
 
-- Chart 2.7.x was never published: 3.0.0 follows 2.6.x.
+- **Charts 2.7.0 and 2.7.1 are not releases.** They exist in the registry
+  because every merge to `main` publishes a chart and the first pull requests
+  of this work were merged ahead of the rest. Each holds a part of the change
+  described here, neither was deployed or validated as a whole, and neither
+  is supported: do not install them. 3.0.0 follows 2.6.x.
 - The upgrade is not hitless across versions, by decision. See "During the
   roll, and rolling back" before scheduling it.
 - Deploy prober chart 1.1.1 first (its section follows this one).
@@ -4127,14 +4131,26 @@ requests with their original `Host` to a different port.
     every write of one is an event for the other. An agent of this chart
     that finds its own entry overwritten with something else writes it back
     **once at once, then no sooner than 5 s, 10 s, 20 s, 40 s, 80 s, 160 s
-    and from there 5 minutes after its previous write**: per route and per
-    node, at most 5 writes in the first minute of a disagreement and at most
-    one every 5 minutes from about ten minutes on. Until the writers agree
-    the status alternates between their texts at that rate; when the other
-    stops (the rows arrive, the roll completes), the next write of an agent
-    that holds the current rows stands. The count starts again when what the
-    agent wants to write changes (the route's generation, its own verdict)
-    or after ten quiet minutes.
+    and from there 5 minutes after its previous write**: at most 5 writes in
+    the first minute of a disagreement and at most one every 5 minutes from
+    about ten minutes on.
+    - **The bound is per route and per NODE.** Every agent keeps its own
+      count, so N agents of this chart against one writer that disagrees
+      write N times as often, and that writer answers each: with 10 agents,
+      50 writes of one route by this chart in the first minute and 50 by the
+      other (held by `TestStatus_TheBoundIsPerNode`).
+    - **While it lasts, the OTHER writer's text is what you read most of the
+      time.** It answers at once; an agent of this chart waits. The status
+      shows this chart's verdict for the moment between its write and the
+      answer, and the other's for the rest of every wait.
+    - When the other writer stops (the rows arrive, the roll completes), the
+      next write of an agent that holds the current rows stands.
+    - The wait is only for writing the SAME status again. A status the agent
+      has not written before is written at once, always: another generation
+      of the route, or another verdict of its own (a fault that appears,
+      clears, or comes back), also while it is being held back for the old
+      one. The count also starts again after ten quiet minutes, and a route
+      deleted and created again under the same name is a new route.
   - **A status write that fails is retried.** A timeout or an error of the
     API server fails the agent's reconcile, which the controller runs again
     with its usual back-off; it logs `failed to write route status`. (It
@@ -4143,12 +4159,15 @@ requests with their original `Host` to a different port.
     conflict is not retried that way: the route changed, and that change is
     itself an event.
   - **A condition's message is at most 32768 characters**, or the API server
-    refuses the whole status. A route can name some 250 ports of Services
+    refuses the whole status. A route can name some 290 ports of Services
     with long names in a long namespace, and both the "Not checked" message
     and the record can pass that. A message is cut and ends in
-    `... (truncated)`; the record leaves whole verdicts out from the end of
-    its sorted list, the same on every node. A node that holds no pod of a
-    Service whose verdict was left out says "Not checked" of it.
+    `... (truncated)`. The record is never cut: one that would not fit is
+    written with a 12-digit digest in place of every key
+    (`#1a2b3c4d5e6f=http, ...`), which every agent reads as it reads the long
+    form. (For a few builds it left verdicts out instead, and a node that
+    held no pod of a left-out Service wrote "Not checked", `True`, over the
+    `False` of the node that did.)
   - The status is judged again **when what a node's tables are built from
     changes**: the agent's cache tells its route reconciler whenever a
     registry refresh changed the ports of any service (first held, dropped,
@@ -4163,19 +4182,47 @@ requests with their original `Host` to a different port.
   - A `parentRef` to such a port attaches the route to **nothing**: the
     service answers as if the route did not exist, and the status says
     `Accepted=False` with `NoMatchingParent`.
-  - A Service port whose `targetPort` is a **name** is resolved through the
-    Service's EndpointSlices (the registry carries no port names). The agent
-    reads them on demand, for Services a route names, and re-reads them when
-    a route or a Service changes, not when the pods behind an unchanged
-    Service start resolving the name to another number. A name it cannot
-    resolve (no slice yet, or slices that disagree) is logged, and a
-    `backendRef` to it reaches the port the backend's pods declare in
-    `endpoint.aether.io/port`. This is the one place left where that port
-    stands in for another: nothing says which port the name is, and the
-    route's status says "Not checked" for it. Use a numeric `targetPort`. A numeric
-    `targetPort` has none of this. The agent's ClusterRole gains `list`,
-    `get` and `watch` on `endpointslices` for it (the watch holds the slices'
-    metadata only).
+  - **BREAKING: a Service port whose `targetPort` is a name is refused until
+    the name resolves** (owner's ruling, 2026-10-13). The registry carries no
+    port names; the name is resolved through the Service's EndpointSlices,
+    whose ports carry the Service port's name and the number it has on the
+    pods. While it does not resolve, the port is not a port the mesh can
+    route:
+    - a `backendRef` to it is invalid: its share is answered **500**, on the
+      loopback listener, the proxy port and every captured dial, and the
+      route's status says `ResolvedRefs=False` / `BackendNotFound`: `backendRef
+      <ns>/<svc>: port 80 of the Service has the named targetPort "http",
+      which no EndpointSlice of the Service resolves yet; requests for this
+      backendRef are answered 500 until it resolves`;
+    - a `parentRef` to it attaches the route to nothing, `Accepted=False` /
+      `NoMatchingParent`, with the same reason; a request to that port of the
+      Service is `421 port-not-declared` with a body that says the port's
+      `targetPort` is a name that does not resolve yet.
+
+    Through chart 2.6, and the first builds of this one, such a reference
+    was served by the port the pods declare in `endpoint.aether.io/port`: a
+    route that worked that way needs the name to resolve now, or a numeric
+    `targetPort`, which has none of this. The three reasons a name does not
+    resolve, each named in the status and in the agent's WARN (`a Service
+    port a route names has a named targetPort that does not resolve to a pod
+    port`): **no EndpointSlice** of the Service names the port yet; the
+    slices **resolve it to different ports** (`... resolve to different ports
+    (8080, 9090)`: pods of one Service whose containers give the name
+    different numbers; it stays refused while they disagree); the slices
+    **could not be read**, which also fails the agent's reconcile so that it
+    is retried.
+
+    **The window after a Service is created before its pods.** A Service
+    with `targetPort: http` has no EndpointSlice that names the port until a
+    pod behind it exists and is selected. A route that names the port
+    answers 500 (or is attached to nothing) for exactly that long. The agent
+    watches the EndpointSlices of the Services a route names that have a
+    named `targetPort`, their metadata only, and judges again on the slice's
+    event: the 500 ends when the slice appears, not on a timer. A slice that
+    goes again (the Service scaled to nothing) un-resolves the name, and the
+    port is refused again. The agent's ClusterRole has `list`, `get` and
+    `watch` on `endpointslices` for this; the slices themselves are read
+    from the API for those Services only and are not cached.
   - A `backendRef` of another kind than a Service, or to a Service in another
     namespace with no `ReferenceGrant`, is invalid in the same way: its share
     is answered **500** (the status already said `InvalidKind` or
@@ -4390,14 +4437,29 @@ registry and the agent watches.
 
   | Dialled port | `Host` | What happens |
   |---|---|---|
-  | a port of your Service that owns the name (through its port map), or the port number the service's own pods serve as HTTP | the mesh name with that port, or with no port | delivered **through the mesh, with the service's filters** (before a filter existed the proxy fetched the cluster on demand; a filter that denies the caller answers its own `403`) |
-  | any other port number | any spelling of the mesh name | leaves to the address that was dialled, as it did before the filter |
+  | a port number the service's **own pods** serve as HTTP | the mesh name with that port, or with no port | delivered **through the mesh, with the service's filters** (before a filter existed the proxy fetched the cluster on demand; a filter that denies the caller answers its own `403`) |
+  | any other port number, the ports of your Service that owns the name included | any spelling of the mesh name | leaves to the address that was dialled, as it did before the filter |
   | any | the mesh name with a port other than the one dialled | leaves to the address that was dialled |
 
-  It is never delivered through the mesh *without* the filter. (Through the
-  first builds of this chart the filter made the node hold the service, and
-  the last two rows, and the first on the pods' own port, became `421
-  port-not-declared` or `421 port-mismatch`.) The proxy port and the loopback
+  Only the service's own pods' ports decide which row applies: not the port
+  map of your Service, and not what any other service declares. (For a few
+  builds a port of your Service was a delivery too, but only where another
+  mesh service happened to declare the same port number.) It is never
+  delivered through the mesh *without* the filter.
+
+  One case changes with the filter, for a service the node holds **no row
+  of** (nothing is registered under the name the filter targets, or the
+  registry has not answered yet). The node cannot tell which port its pods
+  serve, so on every port number some mesh service serves as HTTP the mesh
+  name is parked for that port's cluster, with the filter, until the rows
+  arrive: with the port in `Host` as before the filter, and also with **no
+  port** in `Host`, which before the filter left to the address that was
+  dialled. It ends in a filtered delivery or, if the service never has that
+  port, in the on-demand timeout (`503`); it is never an unfiltered delivery.
+
+  (Through the first builds of this chart the filter made the node hold the
+  service, and the last two rows, and the first on the pods' own port, became
+  `421 port-not-declared` or `421 port-mismatch`.) The proxy port and the loopback
   listener are not such a dial: there a port the service cannot be addressed
   on is refused as for any service, and the body lists the ports of your
   Service ("Its ports: 8000 (http)"), the ones an authority can name, not the
@@ -4752,12 +4814,28 @@ of those is marked below where it comes up.
   5 writes of one route by one node in the first minute, then fewer), so the
   status of such a route shows the old agents' text most of the time and the
   new agents' briefly, until the last 2.6 agent is gone; the next write of a
-  3.0 agent then stands. **A roll that stalls leaves it so** for as long as
-  it is stalled: read the status of a route from a 3.0 agent's point of view
-  only once the roll has completed. Measured on kind before the bound
-  existed: 450 rewrites of one route in 20 s. With it: the unit test
-  `TestStatus_AContestedStatusIsWrittenAtABoundedRate` holds the schedule;
-  the mixed pair was not re-run on kind.
+  3.0 agent then stands. The bound is **per node**: with N agents already on
+  3.0 the route is written N times as often, and the remaining 2.6 agents
+  answer each write (10 agents: 50 writes each side in the first minute).
+  **A roll that stalls leaves it so** for as long as it is stalled: read the
+  status of a route from a 3.0 agent's point of view only once the roll has
+  completed. Measured on kind before the bound existed: 450 rewrites of one
+  route in 20 s. With it: the unit tests
+  `TestStatus_AContestedStatusIsWrittenAtABoundedRate` and
+  `TestStatus_TheBoundIsPerNode` hold the schedule; the mixed pair was not
+  re-run on kind.
+- **The `PodPortsJudged` condition outlives a rollback.** A 2.6 agent writes
+  its two conditions into aether's entry and leaves every other one there, so
+  a `gateway.aether.io/PodPortsJudged` condition a 3.0 agent wrote stays on
+  the route after every agent is back on 2.6. It is inert: 2.6 does not read
+  it, and a 3.0 agent reads it only for the generation it was written for.
+  To remove it from one route:
+
+  ```bash
+  kubectl -n <ns> get httproute <name> -o json \
+    | jq 'del(.status.parents[].conditions[] | select(.type == "gateway.aether.io/PodPortsJudged"))' \
+    | kubectl replace --subresource=status -f -
+  ```
 - **A client on a 3.0 node** is held to the new addressing from the moment its
   node's agent is 3.0, whatever version the destination's node runs: the
   refusals are decided by the source proxy.
@@ -4776,11 +4854,12 @@ of those is marked below where it comes up.
   placeholder ports back on its next reconcile, and the old spellings work
   again node by node as the agents roll back (read from the code, not run).
 
-**Release order.** The change is a stack of pull requests that merge as one
-GitHub stack, in one operation, so that `main` never holds a part of it: each
-merge to `main` publishes images and a chart, and the first pull request alone
-would publish a chart with half of the addressing rule. No chart between 2.6.x
-and 3.0.0 exists.
+**Release order.** The change was built as a stack of pull requests. Its
+first twelve were merged to `main` ahead of the last two, and each merge to
+`main` publishes images and a chart: charts 2.7.0 and 2.7.1 are those
+intermediates, with part of the addressing rule each. They are not releases
+(see the top of this section). The release is 3.0.0, which is the first chart
+that holds all of it.
 
 Do it in a maintenance window, clients moved first (see the two BREAKING
 sections above and "Prober chart 1.1.1"), and expect raw-TCP services to be

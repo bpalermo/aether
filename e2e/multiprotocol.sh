@@ -170,6 +170,14 @@
 #                  through as before the filter, and the second, which was a
 #                  mesh delivery before it, is one WITH the filter (403).
 #                  None is refused 421
+#   U2  named      a Service of the user's whose targetPort is a NAME is
+#                  created before its pods, and an HTTPRoute sends
+#                  mp-httponly's traffic to it. Until a pod exists the name
+#                  resolves to nothing: ResolvedRefs=False/BackendNotFound
+#                  and the request is answered 500 on both paths, never
+#                  delivered to a port the pods declare. The pods arrive:
+#                  the status turns True and the request is answered by
+#                  them, with no route or Service touched in between
 #   T1  replaced   mp-move serves HTTP on 8080, then is redeployed serving
 #                  raw TCP on 9000 only. Host mp-move:8080 on loopback is
 #                  refused (421 port-not-declared) within T1_WINDOW of the
@@ -311,6 +319,12 @@ MOVE_NAME="mp-move"
 OWN_NAME="mp-own"
 OWN_MARKER="own8080"
 OWN_SERVICE_PORT=8000
+# Leg U2: a Service of the user's with a named targetPort, created before its
+# pods.
+LATE_NAME="mp-late"
+LATE_MARKER="late8080"
+LATE_SERVICE_PORT=8000
+LATE_ROUTE="mp-late-route"
 # Two more Services of the user's that select mp-own's pods: on a port number
 # another mesh service declares as HTTP, and on the port the pods serve.
 OWN_ALT_SERVICE="mp-own-alt"
@@ -356,7 +370,7 @@ AGENT_GROUP=(agent mesh-dns proxy-supervisor cni-install uds-csi)
 REGISTRAR_GROUP=(registrar controller)
 # Red-run aids (see "A RED RUN" in the header). CI sets none of them.
 ALL_LEGS=(M0 M1 M2 M3 M4 M5 M6 M7 X1 X2 X3 X4 X5 X6 A1 A2 A3 A4 A5 A6 A7 A8 A9 A10 A11 A12
-	W1 W2 W3 P1 P2 P3 P4 P5 R1 R2 R3 S1 N1 N2 N3 V1 U1 T1)
+	W1 W2 W3 P1 P2 P3 P4 P5 R1 R2 R3 S1 N1 N2 N3 V1 U1 U2 T1)
 MP_LEGS="${MP_LEGS:-${ALL_LEGS[*]}}"
 MP_KEEP_GOING="${MP_KEEP_GOING:-0}"
 MP_TIMEOUT="${MP_TIMEOUT:-}"
@@ -2325,6 +2339,102 @@ YAML
 
 	kc -n "$TEST_NS" delete httpfilters.config.aether.io "$OWN_FILTER" --ignore-not-found --wait=true >/dev/null 2>&1 || true
 	loopback "$OWN_MARKER" "$(mesh_name "$OWN_NAME"):$OWN_SERVICE_PORT" "the HTTPFilter was deleted and is still in force"
+}
+
+# --- a named targetPort is refused until it resolves ----------------------------
+
+# U2 — a Service port whose targetPort is a NAME names nothing until an
+# EndpointSlice of the Service says which number the name is (owner's ruling,
+# 2026-10-13). $LATE_NAME is a Service of the user's, port $LATE_SERVICE_PORT,
+# targetPort "web", created with no pod behind it, and an HTTPRoute sends
+# everything of mp-httponly's to that port.
+#
+# Until a pod exists the reference is invalid: the status says so and the
+# request is answered 500, on the captured path and on the loopback listener.
+# (It was delivered to the port the backend's pods declare, which here would
+# be nothing at all, and with pods of another shape a port the route never
+# named.) Then the pods arrive, with a container port named "web": nothing
+# the route reconciler used to watch changes, only the Service's
+# EndpointSlice appears. The status must turn True and the request must be
+# answered by the new pods without the route or the Service being touched.
+leg_U2() {
+	local name
+	name="$(mesh_name mp-httponly)"
+	log "U2 a named targetPort is refused until it resolves: Service $LATE_NAME ($LATE_SERVICE_PORT -> \"web\") is created before its pods"
+	kc apply -f - >/dev/null <<YAML || die "U2: Service $LATE_NAME apply failed"
+apiVersion: v1
+kind: Service
+metadata: {name: $LATE_NAME, namespace: $TEST_NS}
+spec:
+  selector: {app: $LATE_NAME}
+  ports: [{name: http, port: $LATE_SERVICE_PORT, targetPort: web}]
+YAML
+	kc apply -f - >/dev/null <<YAML || die "U2: the HTTPRoute was not accepted"
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata: {name: $LATE_ROUTE, namespace: $TEST_NS}
+spec:
+  parentRefs:
+    - {group: "", kind: Service, name: mp-httponly}
+  rules:
+    - backendRefs:
+        - {group: "", kind: Service, name: $LATE_NAME, port: $LATE_SERVICE_PORT}
+YAML
+	expect_condition "$LATE_ROUTE" ResolvedRefs "False/BackendNotFound" \
+		"'True/ResolvedRefs' is a named targetPort that resolves to nothing being taken on trust"
+	captured "HTTP500" "$name:$HTTP_PORT" "" \
+		"no pod of $LATE_NAME exists, so its port's name resolves to nothing: a marker or HTTP503 is the request sent on to a port nothing named"
+	loopback "HTTP500" "$name:$HTTP_PORT" "the same on the loopback listener"
+
+	# The pods arrive. Only the Service's EndpointSlice changes.
+	kc apply -f - >/dev/null <<YAML || die "U2: workload $LATE_NAME apply failed"
+apiVersion: v1
+kind: ServiceAccount
+metadata: {name: $LATE_NAME, namespace: $TEST_NS}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: $LATE_NAME, namespace: $TEST_NS}
+spec:
+  replicas: 1
+  selector: {matchLabels: {app: $LATE_NAME}}
+  template:
+    metadata:
+      labels: {app: $LATE_NAME, aether.io/managed: "true"}
+      annotations:
+        endpoint.aether.io/port: "$HTTP_PORT"
+        endpoint.aether.io/protocol: "http"
+        endpoint.aether.io/ports: "$HTTP_PORT"
+    spec:
+      serviceAccountName: $LATE_NAME
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        seccompProfile: {type: RuntimeDefault}
+      containers:
+        - name: web
+          image: $HTTP_ECHO_IMAGE
+          args: ["-text=$LATE_MARKER", "-listen=:$HTTP_PORT"]
+          ports: [{name: web, containerPort: $HTTP_PORT}]
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: ["ALL"]}
+YAML
+	kc -n "$TEST_NS" rollout status "deploy/$LATE_NAME" --timeout=180s >/dev/null ||
+		die "U2: $LATE_NAME never became ready"
+	expect_condition "$LATE_ROUTE" ResolvedRefs "True/ResolvedRefs" \
+		"'False/BackendNotFound' is the agent not having seen the Service's EndpointSlice appear: nothing else changed"
+	expect "captured http://$name:$HTTP_PORT/ once $LATE_NAME's pods exist" "$LATE_MARKER" 90 "$A_PROBES" \
+		"HTTP500 is the port still refused although its name resolves now" \
+		http_tokens client "http://$name:$HTTP_PORT/" ""
+	loopback "$LATE_MARKER" "$name:$HTTP_PORT" "the same on the loopback listener"
+
+	remove_route "$LATE_ROUTE"
+	kc -n "$TEST_NS" delete deploy "$LATE_NAME" --ignore-not-found --wait=true >/dev/null 2>&1 || true
+	kc -n "$TEST_NS" delete service "$LATE_NAME" --ignore-not-found --wait=true >/dev/null 2>&1 || true
+	captured "$(marker mp-httponly "$HTTP_PORT")" "$name:$HTTP_PORT" "" "the HTTPRoute was deleted and mp-httponly does not answer for itself"
+	loopback "$(marker mp-httponly "$HTTP_PORT")" "$name:$HTTP_PORT" "the HTTPRoute was deleted and mp-httponly does not answer for itself, on the loopback listener"
 }
 
 # --- a port that stops being HTTP is refused at once ----------------------------

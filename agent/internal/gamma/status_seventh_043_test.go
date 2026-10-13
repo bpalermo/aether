@@ -8,7 +8,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"maps"
 	"slices"
 	"strings"
 	"testing"
@@ -23,6 +22,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
@@ -538,43 +538,57 @@ func TestContestLedger(t *testing.T) {
 	assert.Zero(t, l.holdBack("r", "b", later), "a route that was gone is forgotten")
 }
 
-// TestJudgements_FitTheConditionMessage: a route can name some 250 ports of
-// Services with long names, and the record of their verdicts can pass the
-// 32768 characters the API server accepts in a condition's message; the whole
-// status update is then rejected, Accepted and ResolvedRefs with it. Whole
-// verdicts are left out from the end of the sorted list, the same on every
-// node, and what is written still reads back.
+// TestJudgements_FitTheConditionMessage: a route can name some 290 ports of
+// Services with long names, and the record of their verdicts, written with
+// its keys, can pass the 32768 characters the API server accepts in a
+// condition's message; the whole status update is then rejected, Accepted and
+// ResolvedRefs with it. Such a record is written with a short digest in place
+// of every key. It fits, it is the same on every node, and EVERY verdict
+// still reads back: a record with verdicts left out made a node that holds no
+// pod say "Not checked" of a port another had judged False.
 func TestJudgements_FitTheConditionMessage(t *testing.T) {
 	long := strings.Repeat("n", 63)
 	all := map[string]string{}
 	for i := 0; i < 300; i++ {
-		all[judgementKey(fmt.Sprintf("%s/%s%03d", long, long[:60], i), 65535, 65535)] = verdictUndeclared
+		v := verdictHTTP
+		if i%7 == 0 {
+			v = verdictTCP
+		}
+		all[judgementKey(fmt.Sprintf("%s/%s%03d", long, long[:60], i), 65535, 65535)] = v
 	}
+	require.Greater(t, len(joinJudgements(all, func(k string) string { return k })), gatewaystatus.MaxConditionMessage, "control: with its keys the record does not fit")
 	msg := encodeJudgements(all)
 	require.LessOrEqual(t, len(msg), gatewaystatus.MaxConditionMessage)
-	require.Greater(t, len(msg), gatewaystatus.MaxConditionMessage-200, "more was left out than had to be")
 	read := decodeJudgements(msg)
-	require.NotEmpty(t, read)
-	require.Less(t, len(read), len(all), "control: the record did not fit")
-	keys := slices.Sorted(maps.Keys(all))
-	for i, k := range keys {
-		_, kept := read[k]
-		assert.Equalf(t, i < len(read), kept, "verdict %d of the sorted list: the ones left out are the last ones", i)
+	require.Len(t, read, len(all), "a verdict was left out, or two keys share a digest")
+	for k, want := range all {
+		got, ok := judgementFor(read, k)
+		require.Truef(t, ok, "the verdict of %s does not read back", k)
+		require.Equal(t, want, got, k)
 	}
+	_, ok := judgementFor(read, judgementKey("ns/other", 80, 8080))
+	assert.False(t, ok, "a key that is not in the record reads a verdict")
 	assert.Equal(t, msg, encodeJudgements(all), "two nodes with the same verdicts write the same bytes")
-	assert.Equal(t, msg, gatewaystatus.ClampMessage(msg), "and the merge does not cut it again")
+	assert.Equal(t, msg, gatewaystatus.ClampMessage(msg), "and the merge does not cut it")
 
-	// A record that fits is whole.
+	// A record that fits keeps its keys: it is the one a person reads.
 	small := map[string]string{"ns/a:80>8080": verdictHTTP, "ns/b:80>8080": verdictTCP}
+	assert.Equal(t, "ns/a:80>8080=http, ns/b:80>8080=tcp", encodeJudgements(small))
 	assert.Equal(t, small, decodeJudgements(encodeJudgements(small)))
+	// Exactly at the cap it still does; one character more and it does not.
+	atCap := map[string]string{strings.Repeat("k", gatewaystatus.MaxConditionMessage-len("=http")): verdictHTTP}
+	assert.Len(t, encodeJudgements(atCap), gatewaystatus.MaxConditionMessage)
+	over := map[string]string{strings.Repeat("k", gatewaystatus.MaxConditionMessage-len("=http")+1): verdictHTTP}
+	assert.True(t, strings.HasPrefix(encodeJudgements(over), "#"), "a record one character over the cap was written with its keys")
 }
 
 // TestReconcile_ARouteWithMoreUserServiceRefsThanAMessageHoldsIsStillWritten:
 // the whole path. 16 rules of 16 backendRefs to user Services with 63
 // character names in a namespace with a 63 character name. On a node that
 // holds no pod of any, the "Not checked" message names every one of them and
-// passes the cap; on a node that holds them all, the record does. The API
-// server here refuses a status with a longer message, as the real one does.
+// passes the cap and is cut; on a node that holds them all, the record with
+// its keys does, and is written with digests instead. The API server here
+// refuses a status with a longer message, as the real one does.
 // The status is written all the same, and a second reconcile finds it as it
 // would write it.
 func TestReconcile_ARouteWithMoreUserServiceRefsThanAMessageHoldsIsStillWritten(t *testing.T) {
@@ -634,7 +648,12 @@ func TestReconcile_ARouteWithMoreUserServiceRefsThanAMessageHoldsIsStillWritten(
 					assert.Equal(t, metav1.ConditionTrue, cond.Status)
 				}
 			}
-			require.Greater(t, longest, gatewaystatus.MaxConditionMessage-200, "control: no message of this route came near the cap, so nothing was cut")
+			if record := meta.FindStatusCondition(got.Status.Parents[0].Conditions, JudgedConditionType); record != nil {
+				require.True(t, strings.HasPrefix(record.Message, "#"), "control: the record of this route fits with its keys, so nothing was shortened")
+				require.Len(t, decodeJudgements(record.Message), 256, "a verdict is missing from the record")
+			} else {
+				require.Greater(t, longest, gatewaystatus.MaxConditionMessage-200, "control: no message of this route came near the cap, so nothing was cut")
+			}
 			r6Run(t, r)
 			assert.Equal(t, got.ResourceVersion, route().ResourceVersion, "the status, cut, is written again on every reconcile")
 		})

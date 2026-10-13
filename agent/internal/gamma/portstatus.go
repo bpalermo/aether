@@ -34,9 +34,10 @@ type portFacts struct {
 	ports map[uint32]bool
 	// unverified names the ports of a USER Service that are not judged by
 	// what its pods declare: no node that holds a row of the service has
-	// judged the port (judgedFacts), or its targetPort is a name that was not
-	// resolved. The data plane of a node that knows no more does not answer
-	// 500 for it, and the status says it was not checked.
+	// judged the port (judgedFacts). The data plane of a node that knows no
+	// more does not answer 500 for it, and the status says it was not
+	// checked. (A port whose targetPort is a name that does not resolve is
+	// not one of these: it is refused, unresolved below.)
 	unverified map[uint32]bool
 	// pods: a USER Service's port map, Service port to pod port, for the
 	// ports whose target is a known number.
@@ -59,6 +60,11 @@ type portFacts struct {
 	// undeclared: a port (key) whose pod port (value) no registered pod of
 	// the service declares. The data plane answers 500 for a backendRef to it.
 	undeclared map[uint32]uint32
+	// unresolved: a USER Service's port whose targetPort is a name that does
+	// not resolve to a pod port, and why (resolveNamedTargetPorts). The data
+	// plane refuses the port: 500 for a backendRef to it, and a rule for it
+	// is attached to nothing.
+	unresolved map[uint32]unresolvedTarget
 }
 
 // generatedPortName matches the name the registrar gives a REAL port of a
@@ -137,6 +143,8 @@ const (
 	portUndeclaredNoService
 	// portNotHTTP: a real port that is raw TCP or UDP.
 	portNotHTTP
+	// portUnresolved: its targetPort is a name that does not resolve.
+	portUnresolved
 )
 
 // problem says what is wrong with Service port `port` as a route's port, and
@@ -150,6 +158,8 @@ func (f portFacts) problem(port uint32) (portProblem, uint32) {
 		return portFine, 0
 	case !has:
 		return portMissing, 0
+	case f.unresolved[port].name != "":
+		return portUnresolved, 0
 	case undeclared && f.absent:
 		return portUndeclaredNoService, pod
 	case undeclared:
@@ -186,6 +196,9 @@ func parentPortProblem(facts map[string]portFacts, p gatewayv1.ParentReference, 
 		return fmt.Sprintf("port %d of Service %s/%s targets pod port %d, which no registered pod of the service declares (endpoint.aether.io/ports); the route is attached to nothing", port, ns, p.Name, pod)
 	case portNotHTTP:
 		return fmt.Sprintf("port %d of Service %s/%s is not an HTTP port (%s); the route is attached to nothing", port, ns, p.Name, f.describe())
+	case portUnresolved:
+		u := f.unresolved[port]
+		return fmt.Sprintf("port %d of Service %s/%s has the named targetPort %q, which %s; the route is attached to nothing until it resolves", port, ns, p.Name, u.name, u.why)
 	}
 	return ""
 }
@@ -234,6 +247,10 @@ func (f portFacts) backendProblem(ns, name string, port uint32) (reason, message
 	case portNotHTTP:
 		return string(gatewayv1.RouteReasonUnsupportedProtocol),
 			fmt.Sprintf("backendRef %s/%s: port %d is not an HTTP port (%s)", ns, name, port, f.describe()) + answered
+	case portUnresolved:
+		u := f.unresolved[port]
+		return string(gatewayv1.RouteReasonBackendNotFound),
+			fmt.Sprintf("backendRef %s/%s: port %d of the Service has the named targetPort %q, which %s", ns, name, port, u.name, u.why) + answered + " until it resolves"
 	}
 	return "", ""
 }
@@ -254,7 +271,7 @@ func resolveRefs(facts map[string]portFacts, routeNamespace, routeKind string, r
 	if unchecked := uncheckedBackendPorts(facts, routeNamespace, refs); len(unchecked) > 0 {
 		return true, string(gatewayv1.RouteReasonResolvedRefs),
 			uncheckedRefsPrefix + "whether the pods serve " + strings.Join(unchecked, ", ") +
-				" as HTTP (a port of a Service the mesh did not generate, and no node that holds a pod of it has said, or its targetPort is a name that was not resolved). Requests are routed to it; this condition turns False, and they are answered 500, once registered pods declare the port raw TCP or do not declare it"
+				" as HTTP (a port of a Service the mesh did not generate, and no node that holds a pod of it has said). Requests are routed to it; this condition turns False, and they are answered 500, once registered pods declare the port raw TCP or do not declare it"
 	}
 	return true, string(gatewayv1.RouteReasonResolvedRefs), "All backend references resolved"
 }

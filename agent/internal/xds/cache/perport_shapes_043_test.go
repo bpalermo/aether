@@ -605,9 +605,14 @@ func TestPerPort_UndeclaredPortOfARawTCPOnlyService(t *testing.T) {
 
 // TestPerPort_NamedTargetPortOfARouteParent: a user Service that owns a
 // mesh service's name, is the parent of an HTTPRoute, and whose Service port
-// has a NAMED targetPort (`targetPort: http`, the common spelling). The port
-// map cannot resolve it (pod port 0). What does a request to that Service port
-// get?
+// has a NAMED targetPort (`targetPort: http`, the common spelling) that has
+// not resolved to a pod port (pod port 0: no EndpointSlice of the Service
+// yet, or slices that disagree). By the owner's ruling of 2026-10-13 the port
+// is REFUSED until the name resolves, on every table, and the rule that names
+// it is attached to nothing. It was routed to the service's default cluster,
+// the port the pods declare, with the parent's rules: a request answered by a
+// port nothing had named. When the name resolves, the same request is routed
+// to that port's cluster, with the rule.
 func TestPerPort_NamedTargetPortOfARouteParent(t *testing.T) {
 	ctx := context.Background()
 	h := registryv1.PortProtocol_PORT_PROTOCOL_HTTP
@@ -615,19 +620,60 @@ func TestPerPort_NamedTargetPortOfARouteParent(t *testing.T) {
 	c := a043Cache(t, a043Fixture()) // "web" has NO generated Service: a user Service owns the name
 	mesh := "web.demo." + a043Mesh
 	c.SetServiceRoutes(map[string][]proxy.GammaRoute{"demo/web": {{
-		ParentPort: 8080,
-		Matches:    []proxy.GammaMatch{{Prefix: "/"}},
-		Backends:   []proxy.GammaBackend{{Service: "demo/web", Cluster: mesh, Weight: 1, Port: 8080}},
+		ParentPort:     8080,
+		Matches:        []proxy.GammaMatch{{Prefix: "/"}},
+		Backends:       []proxy.GammaBackend{{Service: "demo/web", Cluster: mesh, Weight: 1, Port: 8080}},
+		HeaderMutation: rtpMark("rule"),
 	}}})
 	c.SetRouteTargetPorts(map[string][]uint32{"demo/web": {8080}})
 	// Service port 8080 -> targetPort "http" (a name): pod port unknown, 0.
 	c.SetServicePortMaps(map[string]map[uint32]uint32{"demo/web": {8080: 0}})
 	require.NoError(t, c.LoadClustersFromRegistry(ctx, "cluster-1", "node-1", a043Registry(services)))
 	tables := a043Tables(t, c)
-	for _, host := range []string{"web.demo.svc.cluster.local:8080", "web.demo.svc.cluster.local", "web.demo:8080", "web:8080"} {
+	hosts := []string{"web.demo.svc.cluster.local:8080", "web.demo.svc.cluster.local", "web.demo:8080", "web:8080", mesh + ":8080"}
+	for _, host := range hosts {
 		ans := a043Resolve(t, tables["cap_http_8080"], host)
 		t.Logf("dial :8080, Host %-34s -> vhost=%s cluster=%q status=%d refusal=%q", host, ans.vhost, ans.cluster, ans.status, ans.refusal)
-		assert.Zerof(t, ans.status, "Host %s: refused with %d %s (%s)", host, ans.status, ans.refusal, strings.TrimSpace(ans.body))
+		assert.Equalf(t, uint32(421), ans.status, "Host %s on the table of the dialled port: the name has not resolved, and the request is routed to %q", host, ans.cluster)
+		assert.Empty(t, ans.cluster)
+		if ans.vhost != "web|short|:8080" {
+			assert.Containsf(t, ans.body, "a targetPort that is a name its Service's EndpointSlices do not resolve yet", "Host %s: the refusal does not say why", host)
+		}
+	}
+	// The loopback listener and the proxy port: the Service's port is the
+	// port an authority names, and it names nothing yet.
+	for _, table := range []string{proxy.OutboundHTTPRouteName, "cap_http_18081"} {
+		ans := a043Resolve(t, tables[table], mesh+":8080")
+		assert.Equalf(t, uint32(421), ans.status, "%s, Host %s:8080: routed to %q", table, mesh, ans.cluster)
+		assert.Emptyf(t, ans.cluster, "%s", table)
+	}
+	// The rule that names the port is on no table at all.
+	for name, table := range tables {
+		for _, vh := range table.GetVirtualHosts() {
+			for _, r := range vh.GetRoutes() {
+				for _, hdr := range r.GetResponseHeadersToAdd() {
+					assert.NotEqualf(t, "rule", hdr.GetHeader().GetValue(), "table %s, virtual host %s carries the rule of a port that has not resolved", name, vh.GetName())
+				}
+			}
+		}
+	}
+
+	// The EndpointSlice appears and the name resolves to the pods' 8080: the
+	// reconciler hands the cache the port map, and the same requests are
+	// routed, with the rule.
+	c.SetServicePortMaps(map[string]map[uint32]uint32{"demo/web": {8080: 8080}})
+	require.NoError(t, c.generateSnapshot(ctx))
+	tables = a043Tables(t, c)
+	for _, at := range []struct{ table, host string }{
+		{"cap_http_8080", "web.demo.svc.cluster.local:8080"},
+		{"cap_http_8080", "web:8080"},
+		{"cap_http_8080", mesh + ":8080"},
+		{proxy.OutboundHTTPRouteName, mesh + ":8080"},
+		{"cap_http_18081", mesh + ":8080"},
+	} {
+		ans := r5Resolve(t, tables[at.table], a043NS, at.host, "/")
+		assert.Truef(t, ans.delivered, "%s, Host %s after the name resolved: %s", at.table, at.host, ans.sig)
+		assert.Containsf(t, ans.marks, "rule", "%s, Host %s: routed without the rule: %s", at.table, at.host, ans.sig)
 	}
 }
 

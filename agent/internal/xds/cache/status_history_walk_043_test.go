@@ -32,8 +32,19 @@ import (
 	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
 )
 
+// S7_SEED is the first seed, S7_SEEDS how many seeds are walked from it (one
+// by default: the eighth review found eight seeds in forty that failed where
+// seed 1 passed, so the number of seeds a change was run over is part of what
+// is claimed for it), S7_WALKS and S7_STEPS the size of each.
 func TestStatus_AgreesWithTheTables_OverAHistory(t *testing.T) {
-	seed := int64(r4Env("S7_SEED", 1))
+	first := r4Env("S7_SEED", 1)
+	for seed := first; seed < first+r4Env("S7_SEEDS", 1) && !t.Failed(); seed++ {
+		statusHistoryWalk(t, int64(seed))
+	}
+}
+
+func statusHistoryWalk(t *testing.T, seed int64) {
+	t.Helper()
 	walks, steps := r4Env("S7_WALKS", 25), r4Env("S7_STEPS", 8)
 	rng := rand.New(rand.NewSource(seed))
 	ctx := context.Background()

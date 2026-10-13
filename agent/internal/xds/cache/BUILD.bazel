@@ -131,6 +131,8 @@ go_test(
         "outbound_mtls_test.go",
         "outboundroute_test.go",
         "perport_coldroutes_043_test.go",
+        "perport_eighth_meshonly_043_test.go",
+        "perport_eighth_stamp_043_test.go",
         "perport_fifth_043_test.go",
         "perport_fifth_walk_043_test.go",
         "perport_filters_043_test.go",

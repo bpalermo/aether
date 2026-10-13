@@ -26,7 +26,7 @@ import (
 // with the filter skipped, until the next rule event or the end of the grace.
 //
 // The two calls run on their own goroutines here, as in the agent (the route
-// reconciler and the registry refresh loop). R7_RACE_ROUNDS tunes the run.
+// reconciler and the registry refresh loop). S7_RACE_ROUNDS tunes the run.
 func TestPerPort_AFilterAttachedWhileARefreshRunsReachesARetainedEntry(t *testing.T) {
 	ctx := context.Background()
 	h := registryv1.PortProtocol_PORT_PROTOCOL_HTTP

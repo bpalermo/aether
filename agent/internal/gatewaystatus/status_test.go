@@ -171,6 +171,9 @@ func TestClampMessage(t *testing.T) {
 	if ClampMessage(short) != short {
 		t.Fatal("a message of exactly the cap was changed")
 	}
+	if got := ClampMessage(short + "a"); len(got) > MaxConditionMessage || !strings.HasSuffix(got, " ... (truncated)") {
+		t.Fatalf("a message one character over the cap came out %d characters long, ending %q", len(got), got[len(got)-20:])
+	}
 	long := strings.Repeat("€", MaxConditionMessage) // three bytes each: the cut does not fall on a boundary
 	got := ClampMessage(long)
 	if len(got) > MaxConditionMessage {

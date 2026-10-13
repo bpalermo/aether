@@ -1,6 +1,8 @@
 package gamma
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"maps"
 	"slices"
@@ -77,31 +79,52 @@ func judgementKey(service string, port, pod uint32) string {
 // write the same bytes.
 //
 // A condition's message has a cap (gatewaystatus.MaxConditionMessage), and a
-// longer one fails the whole status update. A route can name some 250 ports,
+// longer one fails the whole status update. A route can name some 290 ports,
 // with names of up to 63 characters each way: the record of such a route can
-// pass it. Whole verdicts are then left out from the END of the sorted list,
-// the same ones on every node. A port whose verdict is left out is one a node
-// that holds no pod of the Service cannot read: it says "Not checked" of it,
-// and the node that holds the pods writes its own status back at the bounded
-// rate of a contested status (contest.go).
+// pass it. It is then written with every key replaced by a short digest of it
+// (judgementDigest), all of them, which always fits. Nothing is left out: a
+// record with verdicts missing made a node that holds no pod of the Service
+// say "Not checked" (True) of a port another node had judged False, and the
+// two wrote over each other for as long as the route existed, with the True
+// standing most of the time while the tables answered 500.
 func encodeJudgements(j map[string]string) string {
-	parts := make([]string, 0, len(j))
-	for k, v := range j {
-		parts = append(parts, k+"="+v)
+	if plain := joinJudgements(j, func(k string) string { return k }); len(plain) <= gatewaystatus.MaxConditionMessage {
+		return plain
 	}
-	slices.Sort(parts)
-	size, fit := 0, len(parts)
-	for i, part := range parts {
-		if size += len(part) + len(", "); size-len(", ") > gatewaystatus.MaxConditionMessage {
-			fit = i
-			break
-		}
-	}
-	return strings.Join(parts[:fit], ", ")
+	return joinJudgements(j, judgementDigest)
 }
 
-// decodeJudgements is the inverse. Anything that is not "key=verdict" with a
-// verdict this build knows is dropped: the message is another writer's.
+func joinJudgements(j map[string]string, name func(string) string) string {
+	parts := make([]string, 0, len(j))
+	for k, v := range j {
+		parts = append(parts, name(k)+"="+v)
+	}
+	slices.Sort(parts)
+	return strings.Join(parts, ", ")
+}
+
+// judgementDigest is the short form of a key, for a record too long to be
+// written with its keys: "#" and the first 12 hex digits of the key's
+// SHA-256. A key itself starts with a namespace and never with "#".
+func judgementDigest(key string) string {
+	sum := sha256.Sum256([]byte(key))
+	return "#" + hex.EncodeToString(sum[:6])
+}
+
+// judgementFor returns the verdict a record (decodeJudgements) holds for key,
+// under the key or under its digest.
+func judgementFor(record map[string]string, key string) (string, bool) {
+	if v, ok := record[key]; ok {
+		return v, true
+	}
+	v, ok := record[judgementDigest(key)]
+	return v, ok
+}
+
+// decodeJudgements is the inverse: verdicts by key, or by the key's digest
+// for a record that was written short. Anything that is not "key=verdict"
+// with a verdict this build knows is dropped: the message is another
+// writer's.
 func decodeJudgements(message string) map[string]string {
 	out := map[string]string{}
 	for _, part := range strings.Split(message, ", ") {
@@ -201,7 +224,7 @@ func judgedFacts(facts map[string]portFacts, prior map[string]string, refs []por
 		key := judgementKey(ref.service, ref.port, pod)
 		v, ok := f.verdict(pod)
 		if !ok {
-			v, ok = prior[key]
+			v, ok = judgementFor(prior, key)
 		}
 		if !ok {
 			continue

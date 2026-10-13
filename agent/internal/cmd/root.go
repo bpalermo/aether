@@ -810,7 +810,7 @@ func wireSpireBridge(ctx context.Context, m ctrl.Manager, snapshotCache *cache.S
 // wireReconcilers registers the node agent's CR-driven reconcilers (GAMMA,
 // EndpointPolicy, L4 routes, capture) in a fixed order.
 func wireReconcilers(m ctrl.Manager, snapshotCache *cache.SnapshotCache) error {
-	if err := wireGAMMA(m, snapshotCache); err != nil {
+	if _, err := wireGAMMA(m, snapshotCache); err != nil {
 		return err
 	}
 	if err := wireEndpointPolicies(m, snapshotCache); err != nil {
@@ -825,19 +825,23 @@ func wireReconcilers(m ctrl.Manager, snapshotCache *cache.SnapshotCache) error {
 // wireGAMMA registers the GAMMA east-west L7 routing reconciler when --gamma is set
 // (proposal 018, Phase 2). It installs the required Gateway API and config.aether.io
 // schemes and sets up the reconciler with the manager.
-func wireGAMMA(m ctrl.Manager, snapshotCache *cache.SnapshotCache) error {
+//
+// It returns the reconciler it registered (nil when GAMMA is off), so that a
+// test can hold the registered one, not a copy of how it is built, to what it
+// must be given.
+func wireGAMMA(m ctrl.Manager, snapshotCache gammaCache) (*gamma.Reconciler, error) {
 	if !cfg.Gamma {
-		return nil
+		return nil, nil
 	}
 	// GAMMA east-west L7 routing (proposal 018, Phase 2): watch HTTPRoutes parented
 	// to a Service and enrich the outbound routes. Default off — registers nothing
 	// (and adds no gateway-api watch) unless --gamma is set.
 	if err := gatewayv1.Install(m.GetScheme()); err != nil {
-		return fmt.Errorf("register gateway.networking.k8s.io scheme: %w", err)
+		return nil, fmt.Errorf("register gateway.networking.k8s.io scheme: %w", err)
 	}
 	// ReferenceGrant (v1beta1) gates cross-namespace backendRefs on GAMMA routes.
 	if err := gatewayv1beta1.Install(m.GetScheme()); err != nil {
-		return fmt.Errorf("register gateway.networking.k8s.io/v1beta1 scheme: %w", err)
+		return nil, fmt.Errorf("register gateway.networking.k8s.io/v1beta1 scheme: %w", err)
 	}
 	// HTTPFilter (config.aether.io, proposal 025): the gamma reconciler watches it
 	// for ExtensionRef/targetRef escape-hatch filters. MUST be in the scheme —
@@ -846,13 +850,13 @@ func wireGAMMA(m ctrl.Manager, snapshotCache *cache.SnapshotCache) error {
 	// gate (#453) does not cover this: it checks the CRD on the API server, not
 	// the client scheme.
 	if err := configapisv1.AddToScheme(m.GetScheme()); err != nil {
-		return fmt.Errorf("register config.aether.io scheme: %w", err)
+		return nil, fmt.Errorf("register config.aether.io scheme: %w", err)
 	}
 	gammaReconciler := newGammaReconciler(m.GetClient(), m.GetAPIReader(), snapshotCache, cfg.MeshDomain)
 	if err := gammaReconciler.SetupWithManager(m); err != nil {
-		return fmt.Errorf("failed to set up GAMMA reconciler: %w", err)
+		return nil, fmt.Errorf("failed to set up GAMMA reconciler: %w", err)
 	}
-	return nil
+	return gammaReconciler, nil
 }
 
 // gammaCache is what the GAMMA reconciler is given of the snapshot cache.

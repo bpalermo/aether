@@ -920,9 +920,9 @@ func TestAddressing_BackendRefPort(t *testing.T) {
 		// the backend's pods declare, and answered a route to 9090 from it.
 		{"a service this node knows no port of is named by the port the route names", proxy.GammaBackend{Service: "demo/cold", Cluster: "cold.demo.aether.internal", Port: 9090}, nil, "cold.demo.aether.internal:9090", false},
 		{"a user Service this node knows no pod of: the pod port its Service maps the port to", proxy.GammaBackend{Service: "demo/cold", Cluster: "cold.demo.aether.internal", Port: 80}, map[string]map[uint32]uint32{"demo/cold": {80: 8080}}, "cold.demo.aether.internal:8080", false},
-		{"a user Service this node knows no pod of: a named targetPort keeps the projected cluster", proxy.GammaBackend{Service: "demo/cold", Cluster: "cold.demo.aether.internal", Port: 80}, map[string]map[uint32]uint32{"demo/cold": {80: 0}}, "cold.demo.aether.internal", false},
+		{"a user Service this node knows no pod of: a named targetPort that has not resolved is invalid (cold as warm)", proxy.GammaBackend{Service: "demo/cold", Cluster: "cold.demo.aether.internal", Port: 80}, map[string]map[uint32]uint32{"demo/cold": {80: 0}}, "cold.demo.aether.internal", true},
 		{"a user Service: its port resolves through targetPort", proxy.GammaBackend{Service: "demo/multi", Cluster: multi, Port: 80}, userMap, multi + ":9090", false},
-		{"a user Service: a named targetPort cannot be resolved or refuted and keeps the projected cluster", proxy.GammaBackend{Service: "demo/multi", Cluster: multi, Port: 81}, userMap, multi, false},
+		{"a user Service: a named targetPort that has not resolved is invalid, not delivered to the port the pods declare", proxy.GammaBackend{Service: "demo/multi", Cluster: multi, Port: 81}, userMap, multi, true},
 		{"a user Service: a port it does not have, though the pods declare that number", proxy.GammaBackend{Service: "demo/multi", Cluster: multi, Port: 8080}, userMap, multi, true},
 		{"a user Service: a targetPort the pods do not declare", proxy.GammaBackend{Service: "demo/multi", Cluster: multi, Port: 443}, userMap, multi, true},
 		{"a user Service this node knows no pod of: a port it does not have is invalid already", proxy.GammaBackend{Service: "demo/cold", Cluster: "cold.demo.aether.internal", Port: 9090}, map[string]map[uint32]uint32{"demo/cold": {80: 8080}}, "cold.demo.aether.internal", true},
@@ -985,7 +985,7 @@ func TestAddressing_UserServicePortMap(t *testing.T) {
 	for _, p := range []uint32{80, 3000, 8080} {
 		require.Contains(t, tables, proxy.CaptureHTTPRouteName(p))
 	}
-	assert.Contains(t, tables, "cap_http_9", "a Service port with a named targetPort still has its table")
+	assert.NotContains(t, tables, "cap_http_9", "a Service port whose named targetPort has not resolved carries nothing: it has no table of its own")
 
 	// http://echo/ dials 80: the route's backend is echo-v1's SERVICE port 80,
 	// which is pod port 8080, its default cluster.

@@ -16,7 +16,9 @@ import (
 	"log/slog"
 	"maps"
 	"slices"
+	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"aethermesh.dev/agent/internal/gatewaystatus"
@@ -110,6 +112,20 @@ type Reconciler struct {
 	// Now is the clock of the status writer's back-off; nil is time.Now.
 	Now func() time.Time
 
+	// After runs f after d; nil is time.AfterFunc. It is the timer that keeps
+	// a held-back status's wait when a reconcile ends in an error (wakeIn).
+	After func(d time.Duration, f func())
+
+	// namedTargets are the Services a route names that have a named
+	// targetPort, as of the last reconcile (setNamedTargets).
+	namedMu      sync.Mutex
+	namedTargets map[string]struct{}
+
+	wakeOnce sync.Once
+	wake     chan event.GenericEvent
+	wakeMu   sync.Mutex
+	wakeAt   time.Time
+
 	// contested remembers, per route, what this agent last wanted its status
 	// to be and when it wrote it, to hold back when another writer keeps
 	// overwriting it (contest.go).
@@ -168,8 +184,14 @@ func (r *Reconciler) SetupWithManager(mgr ctrl.Manager) error {
 	b := ctrl.NewControllerManagedBy(mgr).
 		For(&gatewayv1.HTTPRoute{})
 	for _, w := range r.secondaryWatches() {
-		b = b.Watches(w.object, enqueueAll, builder.WithPredicates(w.predicates...))
+		opts := []builder.WatchesOption{builder.WithPredicates(w.predicates...)}
+		if w.metadataOnly {
+			opts = append(opts, builder.OnlyMetadata)
+		}
+		b = b.Watches(w.object, enqueueAll, opts...)
 	}
+	// The reconciler's own timer (wakeIn).
+	b = b.WatchesRawSource(source.Channel((<-chan event.GenericEvent)(r.wakeEvents()), enqueueAll))
 	if r.PodPortsChanged != nil {
 		// What the pods of a service declare is not an API object this
 		// reconciler watches: the cache says when its answer changed. That
@@ -186,6 +208,9 @@ func (r *Reconciler) SetupWithManager(mgr ctrl.Manager) error {
 type secondaryWatch struct {
 	object     client.Object
 	predicates []predicate.Predicate
+	// metadataOnly: the informer holds the objects' metadata and nothing
+	// else of them.
+	metadataOnly bool
 }
 
 // secondaryWatches returns what the reconciler watches besides HTTPRoute,
@@ -210,7 +235,10 @@ func (r *Reconciler) secondaryWatches() []secondaryWatch {
 	// fronts. A Service whose ports change must reach the cache. Only a
 	// change of ports or of ownership counts; Services change status and
 	// annotations far more often than that.
-	return append(out, secondaryWatch{object: &corev1.Service{}, predicates: []predicate.Predicate{servicePortsChanged()}})
+	out = append(out, secondaryWatch{object: &corev1.Service{}, predicates: []predicate.Predicate{servicePortsChanged()}})
+	// The EndpointSlices of the Services a route names that have a named
+	// targetPort: when one appears or changes, the name may resolve.
+	return append(out, secondaryWatch{object: &discoveryv1.EndpointSlice{}, predicates: []predicate.Predicate{r.namedTargetSlices()}, metadataOnly: true})
 }
 
 // Reconcile re-lists every HTTPRoute and GRPCRoute, keeps those attached to a Service,
@@ -231,7 +259,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, _ reconcile.Request) (reconc
 
 	routes, portSets := r.projectAllRoutes(httpList, grpcList, grants, httpFilters, specs)
 	routeTargetPorts := buildRouteTargetPorts(portSets)
-	portMaps, facts, err := r.servicePortMaps(ctx, routes)
+	portMaps, facts, unresolvedErr, err := r.servicePortMaps(ctx, routes)
 	if err != nil {
 		return reconcile.Result{}, err
 	}
@@ -262,10 +290,54 @@ func (r *Reconciler) Reconcile(ctx context.Context, _ reconcile.Request) (reconc
 	wait, err := r.writeHTTPRouteStatuses(ctx, httpList, grants, facts, seen)
 	grpcWait, grpcErr := r.writeGRPCRouteStatuses(ctx, grpcList, grants, facts, seen)
 	r.contested.keep(seen)
-	if err := errors.Join(err, grpcErr); err != nil {
+	due := soonest(wait, grpcWait)
+	if err := errors.Join(err, grpcErr, unresolvedErr); err != nil {
+		// The controller ignores a RequeueAfter beside an error and runs the
+		// reconciler again on its error back-off, which grows to 1000 s. A
+		// route that is being held back must not wait for that: its wait is
+		// kept by a timer of the reconciler's own.
+		r.wakeIn(due)
 		return reconcile.Result{}, err
 	}
-	return reconcile.Result{RequeueAfter: soonest(wait, grpcWait)}, nil
+	return reconcile.Result{RequeueAfter: due}, nil
+}
+
+// wakeIn has the reconciler run again in d (zero: nothing to do), whatever
+// the controller's queue does with the request meanwhile. One timer at a
+// time: a later call with a longer wait than the one pending adds nothing.
+func (r *Reconciler) wakeIn(d time.Duration) {
+	if d <= 0 {
+		return
+	}
+	at := r.now().Add(d)
+	r.wakeMu.Lock()
+	defer r.wakeMu.Unlock()
+	if !r.wakeAt.IsZero() && !at.Before(r.wakeAt) {
+		return
+	}
+	r.wakeAt = at
+	after := r.After
+	if after == nil {
+		after = func(d time.Duration, f func()) { time.AfterFunc(d, f) }
+	}
+	after(d, func() {
+		r.wakeMu.Lock()
+		if r.wakeAt.Equal(at) {
+			r.wakeAt = time.Time{}
+		}
+		r.wakeMu.Unlock()
+		select {
+		case r.wakeEvents() <- event.GenericEvent{}:
+		default:
+		}
+	})
+}
+
+// wakeEvents is the channel wakeIn's timer sends on; the controller watches
+// it (SetupWithManager).
+func (r *Reconciler) wakeEvents() chan event.GenericEvent {
+	r.wakeOnce.Do(func() { r.wake = make(chan event.GenericEvent, 1) })
+	return r.wake
 }
 
 // soonest returns the shorter of two waits, where zero is "none".
@@ -499,9 +571,16 @@ func servicePortsChanged() predicate.Predicate {
 // It also returns, for every Service a route names that exists (generated or
 // not), what the Service says about its real ports: the facts a route's
 // status is judged by (portstatus.go).
-func (r *Reconciler) servicePortMaps(ctx context.Context, routes map[string][]proxy.GammaRoute) (map[string]map[uint32]uint32, map[string]portFacts, error) {
+//
+// unresolvedErr is not fatal to the reconcile: the port maps and the facts
+// are complete, with the named targetPorts whose EndpointSlices could not be
+// read left unresolved, which is refused. The reconcile projects them and
+// returns the error, so that it is run again.
+func (r *Reconciler) servicePortMaps(ctx context.Context, routes map[string][]proxy.GammaRoute) (portMaps map[string]map[uint32]uint32, _ map[string]portFacts, unresolvedErr, err error) {
 	out := map[string]map[uint32]uint32{}
 	facts := map[string]portFacts{}
+	namedTargets := map[string]struct{}{}
+	var unresolved []error
 	named := map[string]struct{}{}
 	for _, key := range routeServiceKeys(routes) {
 		named[key] = struct{}{}
@@ -515,16 +594,22 @@ func (r *Reconciler) servicePortMaps(ctx context.Context, routes map[string][]pr
 	// and no memory that was not already held.
 	var services corev1.ServiceList
 	if err := r.List(ctx, &services); err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	for i := range services.Items {
 		svc := &services.Items[i]
 		key := serviceref.New(svc.Namespace, svc.Name).Key()
 		_, routed := named[key]
-		if m, user := r.servicePortMapAndFacts(ctx, svc, key, routed, facts); user {
+		m, user, err := r.servicePortMapAndFacts(ctx, svc, key, routed, facts)
+		if user {
 			out[key] = m
 		}
+		if routed && user && hasNamedTargetPort(svc) {
+			namedTargets[key] = struct{}{}
+		}
+		unresolved = append(unresolved, err)
 	}
+	r.setNamedTargets(namedTargets)
 	// A service a route names that has no Service object: pods can register
 	// before the registrar has generated their Service. The data plane judges
 	// a reference to it by the pods' own ports, so the status does too
@@ -534,13 +619,52 @@ func (r *Reconciler) servicePortMaps(ctx context.Context, routes map[string][]pr
 			facts[key] = r.withPods(ctx, key, portFacts{absent: true, ports: map[uint32]bool{}}, nil)
 		}
 	}
-	return out, facts, nil
+	return out, facts, errors.Join(unresolved...), nil
+}
+
+// hasNamedTargetPort reports whether a Service has a TCP port whose targetPort
+// is a name.
+func hasNamedTargetPort(svc *corev1.Service) bool {
+	_, named := servicePortMap(svc)
+	return len(named) > 0
+}
+
+// setNamedTargets records the Services a route names that have a named
+// targetPort: the ones whose EndpointSlices the reconciler reads, and
+// therefore the only ones whose slice events it reconciles for.
+func (r *Reconciler) setNamedTargets(keys map[string]struct{}) {
+	r.namedMu.Lock()
+	defer r.namedMu.Unlock()
+	r.namedTargets = keys
+}
+
+// namedTargetSlices passes the events of the EndpointSlices of those Services.
+// A named targetPort resolves, or stops resolving, when a slice of its
+// Service appears, changes its ports or goes; nothing else the reconciler
+// watches changes then, and the port stays refused (or resolved to a number
+// the pods have left) until it is told. The watch is metadata-only: the
+// slice's Service is in its labels, and the slices themselves are read from
+// the API for the few Services concerned.
+func (r *Reconciler) namedTargetSlices() predicate.Predicate {
+	return predicate.NewPredicateFuncs(func(o client.Object) bool {
+		svc := o.GetLabels()[discoveryv1.LabelServiceName]
+		if svc == "" {
+			return false
+		}
+		r.namedMu.Lock()
+		defer r.namedMu.Unlock()
+		_, concerned := r.namedTargets[serviceref.New(o.GetNamespace(), svc).Key()]
+		return concerned
+	})
 }
 
 // servicePortMapAndFacts returns the port map of one Service when it is a
 // user's (user), and records in facts, for a Service a route names (routed),
 // what it says of its ports.
-func (r *Reconciler) servicePortMapAndFacts(ctx context.Context, svc *corev1.Service, key string, routed bool, facts map[string]portFacts) (m map[uint32]uint32, user bool) {
+//
+// err is a failed read of the EndpointSlices of a Service with a named
+// targetPort: the port is refused meanwhile, and the reconcile must run again.
+func (r *Reconciler) servicePortMapAndFacts(ctx context.Context, svc *corev1.Service, key string, routed bool, facts map[string]portFacts) (m map[uint32]uint32, user bool, err error) {
 	if routed {
 		facts[key] = servicePortFacts(svc)
 	}
@@ -550,16 +674,18 @@ func (r *Reconciler) servicePortMapAndFacts(ctx context.Context, svc *corev1.Ser
 			// pods' own ports are all there is, for the tables and here.
 			facts[key] = r.withPods(ctx, key, facts[key], nil)
 		}
-		return nil, false
+		return nil, false, nil
 	}
 	m, namedPorts := servicePortMap(svc)
-	if routed && len(namedPorts) > 0 {
-		r.resolveNamedTargetPorts(ctx, svc, key, m, namedPorts)
+	if !routed {
+		return m, true, nil
 	}
-	if routed {
-		facts[key] = r.withPods(ctx, key, facts[key], m)
+	f := facts[key]
+	if len(namedPorts) > 0 {
+		f.unresolved, err = r.resolveNamedTargetPorts(ctx, svc, key, m, namedPorts)
 	}
-	return m, true
+	facts[key] = r.withPods(ctx, key, f, m)
+	return m, true, err
 }
 
 // withPods returns the facts of a service only its pods can speak for (a
@@ -580,61 +706,106 @@ func (r *Reconciler) withPods(ctx context.Context, key string, f portFacts, port
 	return f
 }
 
+// unresolvedTarget is a Service port whose targetPort is a NAME that does not
+// resolve to a pod port: the name, and why.
+type unresolvedTarget struct {
+	name string
+	why  string
+}
+
 // resolveNamedTargetPorts fills in, in m, the pod port of every Service port
-// whose targetPort is a NAME, for a Service a route names. The registry
-// carries no port names; the cluster's own answer is in the Service's
-// EndpointSlices, whose ports carry the Service port's name and the number
-// the name resolved to on the pods behind it.
+// whose targetPort is a NAME, for a Service a route names, and returns the
+// ports it could not resolve. The registry carries no port names; the
+// cluster's own answer is in the Service's EndpointSlices, whose ports carry
+// the Service port's name and the number the name resolved to on the pods
+// behind it.
+//
+// A port that does not resolve stays 0 in m, and that is a refusal (owner's
+// ruling of 2026-10-13): the data plane answers 500 for a backendRef to it
+// and attaches a rule for it to nothing, and the status says False with the
+// reason returned here. It used to mean "the port the pods declare". There
+// are three reasons: no EndpointSlice of the Service names the port yet (a
+// Service created before its pods), the slices resolve the name to different
+// numbers, and the slices could not be read. The last is also the error
+// returned, which fails the reconcile so that it is run again: an older
+// resolution is not kept, because nothing shows it is still true.
 //
 // The slices are read from the API, uncached and only for these Services: an
 // EndpointSlice informer would hold every slice of the cluster in every node
 // agent for the sake of the few Services that are both route targets and use
-// a named targetPort. The price is freshness: the answer is re-read when a
-// route or a Service changes, not when the pods behind an unchanged Service
-// start resolving the name to another number. A port that cannot be resolved
-// (no reader, no slice yet, or slices that disagree) stays 0 and is logged:
-// a backendRef to it keeps the backend's declared port, as before.
-func (r *Reconciler) resolveNamedTargetPorts(ctx context.Context, svc *corev1.Service, key string, m map[uint32]uint32, namedPorts []corev1.ServicePort) {
-	resolved := map[string]uint32{}
+// a named targetPort. What the reconciler watches of them is their metadata
+// only (namedTargetSlices), which is what tells it to read again.
+func (r *Reconciler) resolveNamedTargetPorts(ctx context.Context, svc *corev1.Service, key string, m map[uint32]uint32, namedPorts []corev1.ServicePort) (map[uint32]unresolvedTarget, error) {
+	resolved, conflicts := map[string]uint32{}, map[string][]uint32{}
+	var readErr error
+	// No reader (never so in the agent, which is given the manager's): the
+	// names stay unresolved and refused, and there is nothing to retry.
 	if r.APIReader != nil {
 		var slices discoveryv1.EndpointSliceList
-		err := r.APIReader.List(ctx, &slices, client.InNamespace(svc.Namespace), client.MatchingLabels{discoveryv1.LabelServiceName: svc.Name})
-		if err != nil {
-			r.Log.WarnContext(ctx, "could not read the EndpointSlices of a Service with a named targetPort; its named ports stay unresolved", "service", key, "error", err.Error())
+		readErr = r.APIReader.List(ctx, &slices, client.InNamespace(svc.Namespace), client.MatchingLabels{discoveryv1.LabelServiceName: svc.Name})
+		if readErr == nil {
+			resolved, conflicts = namedPortNumbers(slices.Items)
 		}
-		resolved = namedPortNumbers(slices.Items)
 	}
+	var unresolved map[uint32]unresolvedTarget
 	for _, sp := range namedPorts {
 		if n := resolved[sp.Name]; n != 0 {
 			m[uint32(sp.Port)] = n
 			continue
 		}
-		r.Log.WarnContext(ctx, "a Service port a route can address has a named targetPort that could not be resolved from the Service's EndpointSlices; a backendRef to it reaches the backend's declared port. Use a numeric targetPort",
-			"service", key, "port", sp.Port, "targetPort", sp.TargetPort.StrVal)
+		why := "no EndpointSlice of the Service resolves yet"
+		switch {
+		case readErr != nil:
+			why = "could not be read from the Service's EndpointSlices"
+		case len(conflicts[sp.Name]) > 0:
+			why = "the Service's EndpointSlices resolve to different ports (" + joinPorts(conflicts[sp.Name]) + ")"
+		}
+		if unresolved == nil {
+			unresolved = map[uint32]unresolvedTarget{}
+		}
+		unresolved[uint32(sp.Port)] = unresolvedTarget{name: sp.TargetPort.StrVal, why: why}
+		r.Log.WarnContext(ctx, "a Service port a route names has a named targetPort that does not resolve to a pod port; the port is refused until it does (500 for a backendRef to it, and a rule for it is attached to nothing)",
+			"service", key, "port", sp.Port, "targetPort", sp.TargetPort.StrVal, "reason", why)
 	}
+	if readErr != nil {
+		return unresolved, fmt.Errorf("read the EndpointSlices of Service %s, which has a named targetPort: %w", key, readErr)
+	}
+	return unresolved, nil
+}
+
+func joinPorts(ports []uint32) string {
+	parts := make([]string, 0, len(ports))
+	for _, p := range ports {
+		parts = append(parts, strconv.FormatUint(uint64(p), 10))
+	}
+	return strings.Join(parts, ", ")
 }
 
 // namedPortNumbers returns, per Service port name, the number the
-// EndpointSlices give it, and nothing for a name the slices disagree about.
-func namedPortNumbers(slices []discoveryv1.EndpointSlice) map[string]uint32 {
-	out := map[string]uint32{}
-	conflict := map[string]struct{}{}
-	for _, sl := range slices {
+// EndpointSlices give it, and, for a name the slices disagree about, nothing
+// in the first map and the numbers they give, sorted, in the second.
+func namedPortNumbers(slices_ []discoveryv1.EndpointSlice) (resolved map[string]uint32, conflicts map[string][]uint32) {
+	seen := map[string][]uint32{}
+	for _, sl := range slices_ {
 		for _, p := range sl.Ports {
 			if p.Name == nil || p.Port == nil || (p.Protocol != nil && *p.Protocol != corev1.ProtocolTCP) {
 				continue
 			}
-			n := uint32(*p.Port)
-			if prev, ok := out[*p.Name]; ok && prev != n {
-				conflict[*p.Name] = struct{}{}
+			if n := uint32(*p.Port); !slices.Contains(seen[*p.Name], n) {
+				seen[*p.Name] = append(seen[*p.Name], n)
 			}
-			out[*p.Name] = n
 		}
 	}
-	for name := range conflict {
-		delete(out, name)
+	resolved, conflicts = map[string]uint32{}, map[string][]uint32{}
+	for name, numbers := range seen {
+		if len(numbers) == 1 {
+			resolved[name] = numbers[0]
+			continue
+		}
+		slices.Sort(numbers)
+		conflicts[name] = numbers
 	}
-	return out
+	return resolved, conflicts
 }
 
 // routeServiceKeys returns, sorted, the key of every Service the routes name:
@@ -798,12 +969,13 @@ func (r *Reconciler) writeRouteStatus(ctx context.Context, obj client.Object, st
 	// The mesh's entry of a parentRef the route no longer names (an edited
 	// port, a removed parent) goes with it.
 	parents, pruned := gatewaystatus.PruneRouteParentStatus(parents, gatewaystatus.MeshControllerName, written)
-	key := in.kind + "/" + obj.GetNamespace() + "/" + obj.GetName()
+	key := contestKey(in.kind, obj)
 	seen[key] = struct{}{}
+	now := r.now()
 	if !changed && !pruned {
+		r.contested.stands(key, want.String(), now)
 		return 0, nil
 	}
-	now := r.now()
 	if wait := r.contested.holdBack(key, want.String(), now); wait > 0 {
 		return wait, nil
 	}

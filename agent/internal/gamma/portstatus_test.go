@@ -95,8 +95,12 @@ func TestRouteStatus_PortsAreRealPorts(t *testing.T) {
 		"generated: a declared port 80 is a port": {
 			"eighty", 80, "eighty", 80, []client.Object{generatedService("eighty", map[int32]string{80: "http", 8080: "http"})}, ok,
 		},
-		"user Service: its ports":                          {"web", 80, "web", 80, []client.Object{user()}, ok},
-		"user Service: a named targetPort is still a port": {"web", 81, "web", 81, []client.Object{user()}, ok},
+		"user Service: its ports": {"web", 80, "web", 80, []client.Object{user()}, ok},
+		// A named targetPort that does not resolve (no EndpointSlice of the
+		// Service) is refused until it does (owner's ruling, 2026-10-13). It
+		// used to be "still a port": True, and delivered to the port the pods
+		// declare.
+		"user Service: a named targetPort that does not resolve": {"web", 81, "web", 81, []client.Object{user()}, want{"False", "NoMatchingParent", "False", "BackendNotFound"}},
 		"user Service: parentRef to a pod port it does not expose": {
 			"web", 8080, "web", 80, []client.Object{user()}, want{"False", "NoMatchingParent", "True", "ResolvedRefs"},
 		},

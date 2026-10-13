@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"aethermesh.dev/agent/internal/gatewaystatus"
+	"k8s.io/apimachinery/pkg/types"
 	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
 )
 
@@ -29,9 +30,19 @@ import (
 // for ever. It writes it back once immediately, since most overwrites are a
 // writer that was a moment behind; after that it waits, 5 s before the next
 // rewrite and twice as long before each one after, up to 5 minutes, and asks
-// to be reconciled when the wait is over. The count starts again when what
-// this agent wants to write changes: another generation of the route, another
-// verdict of its own.
+// to be reconciled when the wait is over.
+//
+// The wait is for ONE thing: writing the same status again over a writer that
+// overwrote it. A status this agent has not written before is written at
+// once, always. So the ledger is told what the agent wants on every
+// reconcile, also when the status already says it and nothing is written
+// (stands): a fault that clears and comes back is two changes of what is
+// wanted, and neither waits. (It was told only when it wrote. A fault that
+// cleared into the status another writer had left was not a write, the ledger
+// kept the old wish, and when the fault came back the agent was held back as
+// if it were answering that writer: True in the status while the table
+// answered 500, for up to five minutes.) A route is the object, not its name:
+// one deleted and created again under the same name starts from nothing.
 //
 // The bound, per route and per node, while a disagreement lasts: the first
 // write, one rewrite at once, then rewrites no closer than 5 s, 10 s, 20 s,
@@ -106,6 +117,29 @@ func (l *contestLedger) wrote(key, wanted string, now time.Time) {
 		c.rewrites++
 	}
 	c.written, c.last = true, now
+}
+
+// stands records that the route's status IS what this agent wants, without
+// its having written it now. When that is another status than the one
+// remembered, what the agent wants has changed, and the count starts again.
+func (l *contestLedger) stands(key, wanted string, now time.Time) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if c := l.routes[key]; c != nil && c.wanted != wanted {
+		l.routes[key] = &contest{wanted: wanted, written: true, last: now}
+	}
+}
+
+// contestKey names one route OBJECT: kind, namespace and name, and the UID
+// the API server gave it, so that a route deleted and created again under the
+// same name is another route.
+func contestKey(kind string, obj interface {
+	GetNamespace() string
+	GetName() string
+	GetUID() types.UID
+},
+) string {
+	return kind + "/" + obj.GetNamespace() + "/" + obj.GetName() + "/" + string(obj.GetUID())
 }
 
 // keep forgets every route that is not in seen: the routes that are gone.

@@ -131,9 +131,9 @@ type rulePlace struct {
 //
 // The parentRef's port is a REAL port of the SERVICE, and nothing else:
 //
-//   - the Service port the table answers for, whatever its targetPort is (a
-//     named targetPort cannot be resolved to a pod port, and the rule still
-//     belongs to the port it names);
+//   - the Service port the table answers for (a port whose targetPort is a
+//     name that has not resolved has no virtual host that routes, so a rule
+//     for it is attached to nothing until it does);
 //   - a user Service's port, through its port map;
 //   - a generated Service's port, which is the pod's.
 //
@@ -202,13 +202,13 @@ func httpClusterForPort(svc, meshDomain string, ports servicePorts, port uint32)
 //   - the rule carries no port (imported from a peer, proposal 026), or the
 //     backend is not known on this node (no endpoint held yet) and nothing
 //     says the port is wrong: the cluster the projector named, as before;
-//   - a user Service's port whose targetPort is a NAME: the registry carries
-//     no port names, so it cannot be resolved or refuted; the cluster the
-//     projector named, as before, and the reconciler says so;
 //   - anything else names no HTTP port of the backend: a port the Service
 //     does not have (the mesh HTTP port 18081 and an undeclared 80 are two
 //     such numbers; until chart 3.0.0 they meant "the port the pods
-//     declare"), or one that is not HTTP. The backend is INVALID: its share
+//     declare"), one that is not HTTP, or a user Service's port whose
+//     targetPort is a NAME that has not resolved to a pod port (it was
+//     delivered to the port the pods declare; refused until it resolves,
+//     owner's ruling of 2026-10-13). The backend is INVALID: its share
 //     of the rule is answered 500, as the Gateway API specifies, never
 //     delivered to another port. The reconciler reports it in the route's
 //     status (ResolvedRefs=False).
@@ -263,8 +263,11 @@ func backendCluster(b proxy.GammaBackend, portMaps map[string]map[uint32]uint32,
 			// The Service has no such port, whatever its pods declare.
 			return b.Cluster, true
 		case target == 0:
-			// A named targetPort.
-			return b.Cluster, false
+			// A targetPort that is a name the Service's EndpointSlices do
+			// not resolve (yet): nothing says which port it is. Invalid, as
+			// any reference that names no HTTP port of the backend; it was
+			// delivered to the port the backend's pods declare.
+			return b.Cluster, true
 		}
 		pod = target
 	}
@@ -892,6 +895,9 @@ type meshName struct {
 	// service by: the mesh name, the cluster.local forms and, when one
 	// namespace owns it, the bare name.
 	names []string
+	// only: names is the mesh name and nothing else, because the service's
+	// Kubernetes names are not the mesh's (meshOnly). Set where names is.
+	only bool
 	// ports is what this node knows of the service's ports; the zero value
 	// when it holds no endpoint of it.
 	ports servicePorts
@@ -911,7 +917,7 @@ type meshName struct {
 // mesh authority alone: a mesh service whose Kubernetes names are not the
 // mesh's (a user's Service owns them and no route names it, or its generated
 // Service has not been seen yet).
-func (n meshName) meshOnly() bool { return len(n.names) == 1 && n.names[0] == n.mesh }
+func (n meshName) meshOnly() bool { return n.only }
 
 // servicePortFor returns the pod port behind SERVICE port p of the name, and
 // whether the Service has that port at all.
@@ -934,10 +940,10 @@ func (n meshName) httpServicePorts() []uint32 {
 		out := make([]uint32, 0, len(n.portMap))
 		for sp, pod := range n.portMap {
 			// A port of a service this node knows the classes of counts only
-			// when its pod port is HTTP. A named targetPort (pod 0) cannot be
-			// resolved; the port still has its table, where the parent's
-			// rules are (appendNameVhosts).
-			if pod != 0 && n.ports.known() && !n.ports.hasHTTP(pod) {
+			// when its pod port is HTTP, and one whose targetPort is a name
+			// that has not resolved (pod 0) carries nothing: it is refused
+			// (appendNameVhosts).
+			if pod == 0 || (n.ports.known() && !n.ports.hasHTTP(pod)) {
 				continue
 			}
 			out = append(out, sp)
@@ -1043,7 +1049,7 @@ func (c *SnapshotCache) captureTableInputsFor(deps map[string]struct{}, quicArms
 		if _, routed := in.rules.routes[svc]; generated || routed {
 			n.names = serviceNames(ref, fqdn, n.mesh)
 		} else {
-			n.names = []string{n.mesh}
+			n.names, n.only = []string{n.mesh}, true
 		}
 		in.names = append(in.names, n)
 	}
@@ -1385,19 +1391,24 @@ func (c *SnapshotCache) appendNameVhosts(vhosts []*routev3.VirtualHost, in captu
 	exact := fmt.Sprintf(":%d", d)
 	pod, declared := n.servicePortFor(d)
 	// A Service port routes when its pod port is HTTP, or is not known to be
-	// anything else: a name this node holds no endpoint of, and a user
-	// Service's port whose targetPort is a NAME (pod 0). The registry carries
-	// no port names, so that port cannot be told from a raw-TCP one; it is
-	// routed to the service's default cluster with the parent's rules, as it
-	// was before the tables were per port, and reported by the reconciler.
-	named := declared && pod == 0 && n.mapped
-	routable := declared && (named || (pod != 0 && (!n.ports.known() || n.ports.hasHTTP(pod))))
+	// anything else (a name this node holds no endpoint of).
+	//
+	// A user Service's port whose targetPort is a NAME that has not resolved
+	// to a pod port (pod 0) routes nowhere: nothing says which port it is.
+	// It was routed to the service's default cluster, the port the pods
+	// declare, with the parent's rules; by the owner's ruling of 2026-10-13
+	// it is refused until the name resolves, and the route reconciler says
+	// so in the status of every route that names it.
+	unresolved := declared && pod == 0 && n.mapped
+	routable := declared && pod != 0 && (!n.ports.known() || n.ports.hasHTTP(pod))
 	own := domains(n.names, "", exact)
 
 	switch {
 	case routable:
 		// A port-less Host means the port that was dialled, port 80 included.
 		vhosts = append(vhosts, c.portVhost(in, n, d, pod, own))
+	case unresolved:
+		refuse("refused", proxy.RefusalPortNotDeclared, "has, on the port that was dialled, a targetPort that is a name its Service's EndpointSlices do not resolve yet", own)
 	case n.ports.known() && !n.ports.servesHTTP():
 		// HTTP to a service that serves none: say where it is reached.
 		vhosts = append(vhosts, c.noHTTPPortVhost(n.mesh+"|refused", n.svc, own, n.ports))
@@ -1423,25 +1434,30 @@ func (c *SnapshotCache) appendNameVhosts(vhosts []*routev3.VirtualHost, in captu
 }
 
 // appendMeshOnlyVhosts appends the virtual hosts, in the table of dialled port
-// d, of a name the table has by its mesh authority alone (meshName.meshOnly):
-// a mesh service whose Kubernetes names a Service of the user's owns and that
-// no route names. The node has it in its tables because something applies to
-// it, typically a service-wide filter.
+// d, of a name the table has by its mesh authority alone (meshName.only): a
+// mesh service whose Kubernetes names a Service of the user's owns and that no
+// route names. The node has it in its tables because something applies to it,
+// typically a service-wide filter.
 //
 // Such a service is reached by a captured dial only at an address that is not
 // the mesh's (the user's Service, or another Service that selects the same
 // pods), so what the dial meant was decided before any filter existed, and a
 // filter must not turn a call that worked into a refusal. On this table an
 // authority that names the service is therefore NEVER refused, and it is one
-// of two things:
+// of two things, decided by the service's OWN pods and by nothing else:
 //
-//   - a mesh delivery, WITH the service's filters and rules, where the port
-//     that was dialled is one the node can route: a port of the user's
-//     Service (by its port map), or a port number the service's own pods
-//     declare as HTTP, with a Host that names that port or none. Before the
-//     filter this was fetched on demand by the catch-all;
+//   - a mesh delivery, WITH the service's filters and rules, when the port
+//     number that was dialled is one the service's own pods declare as HTTP,
+//     with a Host that names that port or none. Before the filter the
+//     catch-all fetched that cluster on demand;
 //   - what the table's catch-all does for a name that is not the mesh's, for
-//     every other spelling: it leaves to the address that was dialled.
+//     every other dial: it leaves to the address that was dialled.
+//
+// The port map of the Service that owns the name decides nothing here. It did
+// for a while (a port of that Service was a delivery too), and since this
+// table exists only for a port number some mesh service declares as HTTP, the
+// same dial to the user's Service was taken into the mesh, or left alone,
+// according to whether an UNRELATED service happened to declare that number.
 //
 // What it must never be is fetched on demand WITHOUT the filter. The
 // catch-all of a table with a chain offers on demand exactly one spelling of
@@ -1450,27 +1466,25 @@ func (c *SnapshotCache) appendNameVhosts(vhosts []*routev3.VirtualHost, in captu
 // So that one spelling is the one that must be claimed here: by a virtual
 // host that carries the filter, or by one that reaches no mesh cluster
 // (BuildFallthroughVirtualHost). Nothing else of the name is claimed, and it
-// leaves as it did before the node held the service. A service the node knows
-// no port of is offered on demand from a virtual host of its own, with the
-// filter (coldVhost).
+// leaves as it did before the node held the service.
+//
+// A service the node knows no port of cannot be told either way. Its mesh
+// name with the port of the table was offered on demand before the filter and
+// still is, from a virtual host of its own that carries the filter
+// (coldVhost). That virtual host claims the port-less mesh name as well, so a
+// port-less Host, which passed through before the filter, is parked on demand
+// with it until the node holds the service's rows: the one spelling where the
+// filter changes what a dial does, and it changes it to a filtered delivery
+// or a timeout, never to an unfiltered one.
 func (c *SnapshotCache) appendMeshOnlyVhosts(vhosts []*routev3.VirtualHost, in captureTableInputs, n meshName, d uint32) []*routev3.VirtualHost {
 	own := domains(n.names, "", fmt.Sprintf(":%d", d))
-	pod, declared := n.servicePortFor(d)
 	switch {
-	case declared && (pod == 0 || !n.ports.known() || n.ports.hasHTTP(pod)):
-		// A port of the user's Service (or, with no port map, a declared
-		// port): routed as in any other table.
-		vhosts = append(vhosts, c.portVhost(in, n, d, pod, own))
 	case n.ports.hasHTTP(d):
-		// The port number the pods themselves serve HTTP on, dialled at an
-		// address the port map does not describe.
-		vhosts = append(vhosts, c.portVhost(in, n, d, d, own))
+		return append(vhosts, c.portVhost(in, n, d, d, own))
 	case !n.ports.known():
-		vhosts = append(vhosts, c.coldVhost(in, n, d))
-	default:
-		vhosts = append(vhosts, proxy.BuildFallthroughVirtualHost(n.mesh+"|dialled", own, c.captureRedirectAll))
+		return append(vhosts, c.coldVhost(in, n, d))
 	}
-	return vhosts
+	return append(vhosts, proxy.BuildFallthroughVirtualHost(n.mesh+"|dialled", own, c.captureRedirectAll))
 }
 
 // coldVhost is the virtual host of a name this node knows no port of, in the
@@ -1502,11 +1516,8 @@ func (c *SnapshotCache) coldVhost(in captureTableInputs, n meshName, d uint32) *
 // the rules that apply to the port, the service's chain filter and, on the
 // default cluster's routes, the per-source HTTP/3 selection.
 func (c *SnapshotCache) portVhost(in captureTableInputs, n meshName, d, pod uint32, doms []string) *routev3.VirtualHost {
-	cluster := n.mesh
+	var cluster string
 	switch {
-	case pod == 0:
-		// A named targetPort that could not be resolved: nothing says which
-		// port it is, and the service's own cluster is all that can be named.
 	case n.ports.known():
 		cluster = httpClusterForPort(n.svc, c.meshDomain, n.ports, pod)
 	default:

@@ -928,9 +928,8 @@ read the registry for them: it is handed the class of each pod port by its
 own node's snapshot cache, the value that node's tables were built from (see
 the ruling of 2026-10-13 below). "A named `targetPort` is reported as a WARN
 only" and "any other wrong port falls back to the declared port", under
-*Phase 1 as built*, are superseded by this, except for a named `targetPort`
-that cannot be resolved, which is listed under *Behaviour awaiting an owner
-ruling*.
+*Phase 1 as built*, are superseded by this. A named `targetPort` that does
+not resolve was the last exception; it has a ruling of its own, 2026-10-13.
 
 **2026-10-13: one truth per port, for every table and for the status; and
 one status from many writers.** A node derives the class of a port of a
@@ -967,41 +966,45 @@ in flight), and an agent of the chart before during the roll. An agent that
 finds its own entry overwritten with something else writes it back once at
 once and then no sooner than 5 s, 10 s, 20 s ... up to 5 minutes after its
 previous write (per route and per node: at most 5 writes in the first minute,
-at most one every 5 minutes from about ten minutes on), and the last word is
-that of the agent whose turn comes last, which is an agent of this chart once
-the other stops. One thing is not claimed: for a generated Service that
+at most one every 5 minutes from about ten minutes on; N agents, N times
+that), and the last word is that of the agent whose turn comes last, which is
+an agent of this chart once the other stops. The wait is only for writing the
+same status again over a writer that overwrote it: a verdict that changed is
+written at once, always. One thing is not claimed: for a generated Service that
 carries ports the status follows the Service, which trails the rows by one
 registrar write.
 
-**2026-10-13: a filter does not turn a working call into a refusal, on any
-spelling or table.** A mesh service whose Kubernetes names a Service of the
-user's owns, and that no route names, is in a node's tables by its mesh
-authority alone, because something (a service-wide filter) applies to it. On
-the table of a captured dial an authority that names it is never refused. The
-request is a mesh delivery, with the service's filters, where the port that
-was dialled is a port of the user's Service that owns the name or the port
-number the service's own pods serve as HTTP, and `Host` names that port or
-none. In every other case it leaves to the address that was dialled, as it
-did before the filter existed: another port number, or a `Host` that names
-another port than the one dialled. It is never fetched on demand without the
-filter. The proxy port and the loopback listener are not a captured dial to
-another address, and refuse there as for any service.
+**2026-10-13: a filter does not turn a working call into a refusal on a
+captured dial; what such a dial does is decided by the service's own pods.**
+A mesh service whose Kubernetes names a Service of the user's owns, and that
+no route names, is in a node's tables by its mesh authority alone, because
+something (a service-wide filter) applies to it. On the table of a captured
+dial an authority that names it is never refused. The request is a mesh
+delivery, with the service's filters, only when the port number that was
+dialled is one the service's own pods declare as HTTP and `Host` names that
+port or none. Every other captured dial leaves to the address that was
+dialled, as it did before the filter existed: any other port number, the ports
+of the owning Service included, and a `Host` that names another port than the
+one dialled. Nothing another service declares changes which of the two it is.
+It is never fetched on demand without the filter. Two things are outside the
+sentence in the heading and are stated, not hidden: while the node holds no
+row of the service, a port-less mesh `Host` on a port number that has a chain
+is parked on demand with the filter, where it left to the dialled address
+before the filter; and the proxy port and the loopback listener are not a
+captured dial to another address, and refuse there as for any service.
 
-### Behaviour awaiting an owner ruling
-
-Built, described in the runbook, and **not ruled on**. It is listed here so
-that it is not read as decided.
-
-- **A named `targetPort` that cannot be resolved falls back to the pods'
-  declared port.** A Service port whose `targetPort` is a name is resolved
-  through the Service's EndpointSlices. When that fails (no slice yet, or
-  slices that disagree) the agent logs a WARN, a `backendRef` to that Service
-  port reaches the port in the backend pods' `endpoint.aether.io/port`, and
-  the route's status says "Not checked" for it. This is the one place left
-  where "the port the pods declare" stands in for a port a reference named,
-  which the strict-reference ruling above otherwise forbids; the alternative
-  consistent with that ruling is to treat the reference as invalid (500,
-  `ResolvedRefs=False`) until the name resolves.
+**2026-10-13: a service's filters and rules are in force on every path that
+delivers to it.** The worst class of defect this work produced, more than
+once, is a request delivered to a mesh service by a path that does not run
+what applies to the service: its service-wide HTTP filters (authorization
+among them), the rules of its routes. It happened through the on-demand
+catch-all (which carries neither), through a virtual host kept from an older
+state, and through a table built from other facts than its neighbour. The
+rule it is held to: for every route table of a snapshot and every authority
+that names a service, the answer is a delivery WITH everything that applies to
+the service, a refusal, or a hand-off that reaches no mesh cluster; never a
+delivery without. A change that adds a way to reach a service adds it to the
+tests that walk every table for that property.
 
 **No status-code rewrites (2026-10-12).** The mesh does not turn one HTTP
 status into another to signal between proxies or to a client: a refusal is a
@@ -1012,15 +1015,35 @@ it is a header.
 
 **2026-10-12: the release is chart 3.0.0.** The removals are made without a
 deprecation release, which the compatibility window allows only across a major
-version. The 2.7.x numbers the work carried while it was built were never
-published.
+version. Charts 2.7.0 and 2.7.1 carry numbers the work used while it was
+built; they were published as intermediates when its first pull requests were
+merged and are not releases.
+
+**2026-10-13: an unresolved named targetPort is refused.** A Service port
+whose `targetPort` is a name is resolved through the Service's EndpointSlices.
+While the name does not resolve (no slice names the port yet, the slices
+resolve it to different numbers, or they cannot be read) the port names
+nothing: a `backendRef` to it is an invalid reference, 500 for its share on
+every table and `ResolvedRefs=False` with the Service, the Service port and
+the name; a `parentRef` to it is `Accepted=False` and its rule is attached to
+no port. There is no fallback to the port the pods declare, which is what
+such a reference reached until now and what the strict-reference ruling
+forbids everywhere else. The status and the tables come from the same fact,
+and a node that has not read the slices refuses too: it does not guess. The
+agent judges again on the EndpointSlice's event (it watches, metadata only,
+the slices of the Services a route names that have a named `targetPort`), so
+the refusal ends when the slice appears; slices that disagree stay refused
+and the status says so; a failed read refuses and is retried. This was the
+one behaviour left "awaiting an owner ruling", and that heading is gone with
+it.
 
 ## The release
 
-One release, chart **3.0.0**, built as a stack of pull requests that merges as
-one. `main` never holds a part of it: every merge to `main` publishes images
-and a chart, so the first pull request alone would have published half of the
-addressing rule.
+One release, chart **3.0.0**, built as a stack of pull requests. The first
+twelve were merged to `main` ahead of the last two; every merge to `main`
+publishes images and a chart, so charts 2.7.0 and 2.7.1 exist and hold a part
+of the addressing rule each. They are intermediates, never deployed, and not
+releases.
 
 What shipped, against the plan below:
 
