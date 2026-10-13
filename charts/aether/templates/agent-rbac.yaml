@@ -75,10 +75,14 @@ rules:
     verbs: ["list", "get", "watch"]
   # GAMMA: a route-named Service whose targetPort is a NAME is resolved to the
   # pod port through its EndpointSlices (the registry carries no port names).
-  # Read on demand for those Services only; never watched, never cached.
+  # The slices are read on demand for those Services only. They are watched
+  # for their metadata alone, never cached whole: the watch is what tells the
+  # agent that a name it could not resolve (a Service created before its pods)
+  # now resolves, so that the port stops being refused when the slice appears
+  # and not at some later event.
   - apiGroups: ["discovery.k8s.io"]
     resources: ["endpointslices"]
-    verbs: ["list", "get"]
+    verbs: ["list", "get", "watch"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding

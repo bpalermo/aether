@@ -4173,8 +4173,9 @@ requests with their original `Host` to a different port.
     `endpoint.aether.io/port`. This is the one place left where that port
     stands in for another: nothing says which port the name is, and the
     route's status says "Not checked" for it. Use a numeric `targetPort`. A numeric
-    `targetPort` has none of this. The agent's ClusterRole gains `list` and
-    `get` on `endpointslices` for it.
+    `targetPort` has none of this. The agent's ClusterRole gains `list`,
+    `get` and `watch` on `endpointslices` for it (the watch holds the slices'
+    metadata only).
   - A `backendRef` of another kind than a Service, or to a Service in another
     namespace with no `ReferenceGrant`, is invalid in the same way: its share
     is answered **500** (the status already said `InvalidKind` or
