@@ -3,7 +3,8 @@
 // VIP/name handles (proposal 018, Phase 3a). Endpoints stay in the registry (the
 // Services carry no selector, so no EndpointSlices). Each Service carries the
 // service's real ports, each with its own protocol (proposal 043), beside the
-// legacy mesh ports.
+// two mesh ports. A port's protocol is on the port; the Service carries no
+// protocol or port for the service as a whole.
 package services
 
 import (
@@ -12,7 +13,6 @@ import (
 	"log/slog"
 	"maps"
 	"slices"
-	"strconv"
 	"strings"
 	"time"
 
@@ -40,60 +40,20 @@ type Generator struct {
 	Interval time.Duration
 	Log      *slog.Logger
 
-	// LegacyAnnotations selects how the two frozen annotations are derived,
-	// which depends on the registry backend. See LegacyAnnotationRule.
-	LegacyAnnotations LegacyAnnotationRule
-
 	// classConflicts is the per-service port-class disagreement last warned
 	// about, so a disagreement is logged once per distinct state and not once
 	// per reconcile. Only the reconcile loop touches it.
 	classConflicts map[client.ObjectKey]string
 }
 
-// LegacyAnnotationRule says how aether.io/app-protocol and aether.io/port are
-// derived for a generated Service.
-//
-// Both annotations are FROZEN at the value a chart 2.6 registrar stamped on the
-// same backend (proposal 043, Phase 1). No 2.7 component reads them: a port's
-// protocol is on the ServicePort and in the registry's per-endpoint
-// port_protocols. They are written only because a 2.6 agent, which may run
-// beside a 2.7 registrar for one chart minor, still reads aether.io/app-protocol
-// to choose between an HTTP and a raw-TCP capture chain. They are deleted in
-// chart 2.9.0 (proposal 043, Phase 3), and this type goes with them.
-//
-// What a 2.6 registrar stamped differs by backend because the listings did:
-//
-//   - a write-based backend (etcd) held a pod under every class it serves, and
-//     the 2.6 generator took the first listing, in registry.ServedProtocols
-//     order, that held the service;
-//   - the kubernetes backend listed a pod under ONE class, that of the port it
-//     declares in endpoint.aether.io/port, so the first listing that held the
-//     service was the declared port's class.
-//
-// Since 2.7 the kubernetes backend lists a pod under every class too, so "the
-// first listing" would stamp http on a service whose 2.6 listing was raw TCP
-// only, and a 2.6 agent would build the wrong kind of chain for it.
-type LegacyAnnotationRule int
-
-const (
-	// LegacyAnnotationsByFirstListing is the rule for write-based backends
-	// (etcd): the class of the first listing that holds the service, and the
-	// declared port of that listing's first namespaced endpoint.
-	LegacyAnnotationsByFirstListing LegacyAnnotationRule = iota
-	// LegacyAnnotationsByDeclaredPort is the rule for the kubernetes backend:
-	// the class of the port the pod declares (port_protocols[port]), and that
-	// port.
-	LegacyAnnotationsByDeclaredPort
-)
-
 // sortEndpoints orders a service's rows by (cluster, address), in place.
 //
-// The snapshot hands a service's rows over in map order. Where "the first
-// endpoint" decides something (the frozen annotations of a service whose pods
-// disagree), a fixed order keeps the answer the same from one reconcile to the
-// next: without it the Service was rewritten every time the order fell the
-// other way. The snapshot builds these slices for the caller, so sorting them
-// in place touches nothing shared.
+// The snapshot hands a service's rows over in map order. Nothing the generator
+// derives today depends on which row comes first (a port's class is a count,
+// electClass), and a fixed order keeps it that way for whatever is added: when
+// "the first endpoint" decided an annotation, the Service was rewritten every
+// time the order fell the other way. The snapshot builds these slices for the
+// caller, so sorting them in place touches nothing shared.
 func sortEndpoints(eps []*registryv1.ServiceEndpoint) {
 	slices.SortStableFunc(eps, endpointOrder)
 }
@@ -128,23 +88,17 @@ func (g *Generator) Start(ctx context.Context) error {
 type desiredService struct {
 	service   string
 	namespace string
-	// port and appProtocol are the two frozen annotations (LegacyAnnotationRule).
-	// Neither describes the Service's ports.
-	port        uint32
-	appProtocol string // "http", "tcp" or "udp" -- see protocolAppProtocol
-	// ports is the whole desired Spec.Ports: the legacy ports, then the
+	// ports is the whole desired Spec.Ports: the mesh ports, then the
 	// service's real ports.
 	ports []corev1.ServicePort
 }
 
-// protocolAppProtocol maps a registry service protocol to the frozen
-// AnnotationMeshAppProtocol value (a chart 2.6 agent's capture reconciler reads
-// it to decide HCM vs. TCP-floor vs. UDP-floor chain emission).
+// protocolAppProtocol names a port class: the appProtocol of a real TCP
+// ServicePort (http or tcp), and the word a class conflict is logged with.
 //
-// A protocol missing from this map yields "", which apply() coerces to
-// AppProtocolHTTP -- so an omission here does not fail, it mislabels the service
-// as HTTP and sends its traffic down the HCM path. Keep it total over
-// registry.ServedProtocols; TestProtocolAppProtocolIsTotal enforces that.
+// Keep it total over registry.ServedProtocols
+// (TestProtocolAppProtocolIsTotal): a class missing here would give its ports
+// an empty appProtocol.
 var protocolAppProtocol = map[registryv1.Service_Protocol]string{
 	registryv1.Service_PROTOCOL_HTTP: AppProtocolHTTP,
 	registryv1.Service_PROTOCOL_TCP:  AppProtocolTCP,
@@ -171,12 +125,11 @@ func (g *Generator) reconcile(ctx context.Context) {
 // protocol listing in the snapshot.
 //
 // A service is one Service however many listings it is in. Its ports are the
-// union of what its endpoints declare (servicePorts); its two frozen annotations
-// come from legacyAnnotations. A service with no namespaced endpoint in any
-// listing gets no Service, as before.
+// union of what its endpoints declare (servicePorts). A service with no
+// namespaced endpoint in any listing gets no Service.
 func (g *Generator) buildDesiredServices(ctx context.Context) map[client.ObjectKey]desiredService {
 	// Every listing, read once, in registry.ServedProtocols' order (HTTP, TCP,
-	// UDP): the order the frozen annotations are defined in.
+	// UDP).
 	listings := make([]map[string][]*registryv1.ServiceEndpoint, len(registry.ServedProtocols))
 	keys := map[string]struct{}{}
 	for i, protocol := range registry.ServedProtocols {
@@ -200,11 +153,12 @@ func (g *Generator) buildDesiredServices(ctx context.Context) map[client.ObjectK
 		// This service's rows, per listing, and nothing else: a port can only
 		// come from an endpoint read under this key.
 		perListing := make([][]*registryv1.ServiceEndpoint, len(listings))
+		rows := 0
 		for i := range listings {
 			perListing[i] = namespaced(listings[i][svcKey])
+			rows += len(perListing[i])
 		}
-		port, appProtocol, ok := legacyAnnotations(g.LegacyAnnotations, perListing)
-		if !ok {
+		if rows == 0 {
 			continue // no namespaced endpoint in any listing
 		}
 		realPorts, conflict := servicePorts(perListing)
@@ -213,85 +167,13 @@ func (g *Generator) buildDesiredServices(ctx context.Context) map[client.ObjectK
 			conflicts[key] = conflict
 		}
 		desired[key] = desiredService{
-			service:     ref.Name,
-			namespace:   ref.Namespace,
-			port:        port,
-			appProtocol: appProtocol,
-			ports:       mergePorts(meshServicePorts(g.MeshPort), realPorts),
+			service:   ref.Name,
+			namespace: ref.Namespace,
+			ports:     mergePorts(meshServicePorts(g.MeshPort), realPorts),
 		}
 	}
 	g.warnClassConflicts(ctx, conflicts)
 	return desired
-}
-
-// legacyAnnotations returns the frozen aether.io/port and aether.io/app-protocol
-// of one service: what a chart 2.6 registrar stamped on the same backend. See
-// LegacyAnnotationRule for why there are two rules and when both go.
-//
-// perListing holds the service's namespaced endpoints per listing, in
-// registry.ServedProtocols' order. ok is false when no listing has one.
-func legacyAnnotations(rule LegacyAnnotationRule, perListing [][]*registryv1.ServiceEndpoint) (port uint32, appProtocol string, ok bool) {
-	if rule == LegacyAnnotationsByDeclaredPort {
-		// The 2.6 kubernetes listing for P was the pods whose DECLARED port is
-		// of class P, and the first non-empty one, in registry.ServedProtocols'
-		// order, decided both annotations. A row says the class of its declared
-		// port itself (port_protocols[port]), so that listing is rebuilt from
-		// the service's rows wherever they were read: the answer is the first
-		// class any row declares, whichever of today's listings the row is in.
-		// It must not depend on the row being in the listing of that class,
-		// because the listings a reconcile sees can be partial: the kubernetes
-		// backend is listed one protocol at a time, and a registration lands
-		// one protocol at a time. A pod that declares an HTTP port and is seen
-		// in the TCP listing alone is still an HTTP-declared service; stamping
-		// the class of the listing would have a 2.6 agent build a raw-TCP chain
-		// on that service's address for as long as the listings stay partial.
-		for _, protocol := range registry.ServedProtocols {
-			if ep := firstDeclaring(perListing, protocol); ep != nil {
-				return ep.GetPort(), protocolAppProtocol[protocol], true
-			}
-		}
-		// No row declares a port of a served class, which neither backend
-		// writes. Fall through to the listing rule so the service keeps its
-		// Service.
-	}
-	for i, protocol := range registry.ServedProtocols {
-		if len(perListing[i]) > 0 {
-			return perListing[i][0].GetPort(), protocolAppProtocol[protocol], true
-		}
-	}
-	return 0, "", false
-}
-
-// firstDeclaring returns the row of one service whose declared port is of
-// class protocol, or nil when there is none. perListing is in
-// registry.ServedProtocols' order. Of several such rows it returns the first
-// by (cluster, address), and of one endpoint read from two listings the row of
-// the earlier listing, so the answer does not move with the order rows were
-// listed in.
-func firstDeclaring(perListing [][]*registryv1.ServiceEndpoint, protocol registryv1.Service_Protocol) *registryv1.ServiceEndpoint {
-	var first *registryv1.ServiceEndpoint
-	for i, listing := range registry.ServedProtocols {
-		for _, ep := range perListing[i] {
-			if declaredClass(ep, listing) != protocol {
-				continue
-			}
-			if first == nil || endpointOrder(ep, first) < 0 {
-				first = ep
-			}
-		}
-	}
-	return first
-}
-
-// declaredClass is the class of the port ep declares in endpoint.aether.io/port.
-// A row with no entry for that port (one written before port_protocols existed)
-// has the class of the listing it was read from.
-func declaredClass(ep *registryv1.ServiceEndpoint, listing registryv1.Service_Protocol) registryv1.Service_Protocol {
-	if class, ok := ep.GetPortProtocols()[ep.GetPort()]; ok && class != registryv1.PortProtocol_PORT_PROTOCOL_UNSPECIFIED {
-		// The two enums are numerically identical (endpointmeta pins it).
-		return registryv1.Service_Protocol(class)
-	}
-	return listing
 }
 
 // servicePorts returns the real ports of one service: one ServicePort per port
@@ -449,12 +331,12 @@ func servicePort(port uint32, class registryv1.Service_Protocol) (corev1.Service
 	return sp, true
 }
 
-// mergePorts returns the Service's port list: the legacy ports, then the real
+// mergePorts returns the Service's port list: the mesh ports, then the real
 // ports in the order given. A real port with the port number and Kubernetes
-// protocol of a legacy placeholder REPLACES it, because the API server rejects
-// two ports with the same number and protocol: a pod that declares 80 as HTTP
-// yields p80-tcp with appProtocol http and no "http" placeholder.
-func mergePorts(legacy, realPorts []corev1.ServicePort) []corev1.ServicePort {
+// protocol of a mesh port REPLACES it, because the API server rejects two
+// ports with the same number and protocol: a pod that declares 18082 as raw
+// TCP yields p18082-tcp with appProtocol tcp and no "mesh-tcp".
+func mergePorts(fixed, realPorts []corev1.ServicePort) []corev1.ServicePort {
 	type slot struct {
 		port     int32
 		protocol corev1.Protocol
@@ -463,8 +345,8 @@ func mergePorts(legacy, realPorts []corev1.ServicePort) []corev1.ServicePort {
 	for _, p := range realPorts {
 		taken[slot{p.Port, p.Protocol}] = struct{}{}
 	}
-	out := make([]corev1.ServicePort, 0, len(legacy)+len(realPorts))
-	for _, p := range legacy {
+	out := make([]corev1.ServicePort, 0, len(fixed)+len(realPorts))
+	for _, p := range fixed {
 		if _, replaced := taken[slot{p.Port, p.Protocol}]; !replaced {
 			out = append(out, p)
 		}
@@ -497,29 +379,28 @@ func (g *Generator) pruneServices(ctx context.Context, managed corev1.ServiceLis
 	}
 }
 
-// meshServicePorts is the legacy port set every generated mesh Service exposes
-// (proposal 037) beside the service's real ports. Proposal 043 removes these in
-// chart 2.9.0; until then mergePorts keeps each one unless a real port takes
-// its number.
+// meshServicePorts is the fixed port set every generated mesh Service exposes
+// beside the service's real ports; mergePorts keeps each one unless a real
+// port takes its number.
 //
-//   - "mesh" (18081) and "mesh-tcp" (18082) are the mesh's two well-known
-//     spellings: HTTP and raw TCP respectively. The capture listener matches
-//     both on destination_port, and the scoped CNI rule redirects both, so
-//     neither needs redirect-all.
-//   - "http" (80) and "https" (443) exist so a scheme-default dial has a REAL
-//     Service port to land on. These Services are selectorless and hold no
-//     endpoints, so kube-proxy REJECTs a connection to an unclaimed port: an
-//     uncaptured `https://<svc>/` fails immediately with ECONNREFUSED instead
-//     of hanging in a CNI-dependent way. They carry no data path of their own.
+//   - "mesh" (18081) is the mesh's HTTP proxy port: a client sends
+//     "Host: <name>:<port>" to "<name>:18081". It is not a port of the service.
+//   - "mesh-tcp" (18082) is the raw-TCP and UDP spelling of the port the pods
+//     declare.
 //
-// All four are TCP at the Kubernetes level and carry no appProtocol: they name
-// a spelling, not a port of the service.
+// The capture listener matches both on destination_port, and the CNI diverts
+// both for a pod that is not on redirect-all, so neither needs redirect-all.
+// Both are TCP at the Kubernetes level and carry no appProtocol: they name a
+// way in, not a port of the service.
+//
+// Until chart 2.7.0 there were two more, "http" (80) and "https" (443), so
+// that a scheme-default dial had a Service port to land on. They are gone: a
+// port the pods declare is on the Service as a real port, 80 and 443
+// included, and a port they do not declare is not a port of the service.
 func meshServicePorts(meshPort int32) []corev1.ServicePort {
 	return []corev1.ServicePort{
 		{Name: "mesh", Port: meshPort, Protocol: corev1.ProtocolTCP, TargetPort: intstr.FromInt32(meshPort)},
 		{Name: "mesh-tcp", Port: mesh.ProxyL4OutboundPort, Protocol: corev1.ProtocolTCP, TargetPort: intstr.FromInt32(mesh.ProxyL4OutboundPort)},
-		{Name: "http", Port: 80, Protocol: corev1.ProtocolTCP, TargetPort: intstr.FromInt32(80)},
-		{Name: "https", Port: 443, Protocol: corev1.ProtocolTCP, TargetPort: intstr.FromInt32(443)},
 	}
 }
 
@@ -557,53 +438,45 @@ func sameAppProtocol(a, b *string) bool {
 	return *a == *b
 }
 
-// AppProtocolHTTP / AppProtocolTCP / AppProtocolUDP are the frozen
-// AnnotationMeshAppProtocol values the generator writes. AppProtocolHTTP and
-// AppProtocolTCP are also the two values a real ServicePort's appProtocol takes.
+// AppProtocolHTTP / AppProtocolTCP / AppProtocolUDP name the three port
+// classes. AppProtocolHTTP and AppProtocolTCP are the two values a real TCP
+// ServicePort's appProtocol takes; a UDP port has no appProtocol.
 const (
 	AppProtocolHTTP = "http"
 	AppProtocolTCP  = "tcp"
 	AppProtocolUDP  = "udp"
 )
 
+// staleServiceAnnotations are the two annotations the generator stamped on a
+// mesh Service through chart 2.7.0: one protocol and one port for the whole
+// service, read by a chart 2.6 agent to choose a capture chain. Nothing reads
+// them any more (a port's protocol is on the ServicePort and in the registry),
+// so the generator no longer writes them and removes them from the Services it
+// owns.
+var staleServiceAnnotations = [...]string{aetherlabels.AnnotationMeshPort, aetherlabels.AnnotationMeshAppProtocol}
+
+// dropStaleAnnotations removes staleServiceAnnotations from annotations and
+// reports whether there was one to remove.
+func dropStaleAnnotations(annotations map[string]string) bool {
+	dropped := false
+	for _, a := range staleServiceAnnotations {
+		if _, ok := annotations[a]; ok {
+			delete(annotations, a)
+			dropped = true
+		}
+	}
+	return dropped
+}
+
 // apply creates or updates the VIP Service for one mesh service. It NEVER touches a
 // Service it doesn't own — a name collision with a user's Service is logged, not
 // clobbered.
 func (g *Generator) apply(ctx context.Context, d desiredService) {
 	key := client.ObjectKey{Namespace: d.namespace, Name: d.service}
-	port := strconv.Itoa(int(d.port))
-	appProto := d.appProtocol
-	if appProto == "" {
-		appProto = AppProtocolHTTP
-	}
 
 	existing := &corev1.Service{}
 	if err := g.Get(ctx, key, existing); err == nil {
-		if existing.Labels[aetherlabels.LabelMeshService] != "true" {
-			g.Log.WarnContext(ctx, "a non-aether Service owns this name; skipping mesh VIP", "service", key.String())
-			return
-		}
-		// Spec.Ports is part of what must converge, not just the annotations.
-		// This path used to compare annotations alone and return early, so a
-		// Service created before proposal 037 would have kept its single "mesh"
-		// port forever and the new spellings would never have appeared on an
-		// existing cluster — the feature would have worked only on a fresh
-		// install, which is the worst way to find out.
-		if existing.Annotations[aetherlabels.AnnotationMeshPort] == port &&
-			existing.Annotations[aetherlabels.AnnotationMeshAppProtocol] == appProto &&
-			samePorts(existing.Spec.Ports, d.ports) {
-			return // converged
-		}
-		if existing.Annotations == nil {
-			existing.Annotations = map[string]string{}
-		}
-		existing.Annotations[aetherlabels.AnnotationMeshService] = d.service
-		existing.Annotations[aetherlabels.AnnotationMeshPort] = port
-		existing.Annotations[aetherlabels.AnnotationMeshAppProtocol] = appProto
-		existing.Spec.Ports = d.ports
-		if err := g.Update(ctx, existing); err != nil {
-			g.Log.ErrorContext(ctx, "update mesh Service failed", "service", key.String(), "error", err)
-		}
+		g.converge(ctx, key, existing, d)
 		return
 	} else if !apierrors.IsNotFound(err) {
 		g.Log.ErrorContext(ctx, "get mesh Service failed", "service", key.String(), "error", err)
@@ -612,14 +485,10 @@ func (g *Generator) apply(ctx context.Context, d desiredService) {
 
 	svc := &corev1.Service{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      d.service,
-			Namespace: d.namespace,
-			Labels:    map[string]string{aetherlabels.LabelMeshService: "true"},
-			Annotations: map[string]string{
-				aetherlabels.AnnotationMeshService:     d.service,
-				aetherlabels.AnnotationMeshPort:        port,
-				aetherlabels.AnnotationMeshAppProtocol: appProto,
-			},
+			Name:        d.service,
+			Namespace:   d.namespace,
+			Labels:      map[string]string{aetherlabels.LabelMeshService: "true"},
+			Annotations: map[string]string{aetherlabels.AnnotationMeshService: d.service},
 		},
 		Spec: corev1.ServiceSpec{
 			Type: corev1.ServiceTypeClusterIP,
@@ -631,13 +500,39 @@ func (g *Generator) apply(ctx context.Context, d desiredService) {
 	if err := g.Create(ctx, svc); err != nil && !apierrors.IsAlreadyExists(err) {
 		g.Log.ErrorContext(ctx, "create mesh Service failed", "service", key.String(), "error", err)
 	} else if err == nil {
-		g.Log.InfoContext(ctx, "created mesh Service (transparent-capture VIP)", "service", key.String(), "port", port)
+		g.Log.InfoContext(ctx, "created mesh Service (transparent-capture VIP)", "service", key.String())
+	}
+}
+
+// converge brings an EXISTING Service of the mesh service's name to d: its
+// ports, and the two stale annotations gone. One Update when either differs,
+// none when the Service is already right. A Service the generator does not own
+// is left exactly as it is.
+func (g *Generator) converge(ctx context.Context, key client.ObjectKey, existing *corev1.Service, d desiredService) {
+	if existing.Labels[aetherlabels.LabelMeshService] != "true" {
+		g.Log.WarnContext(ctx, "a non-aether Service owns this name; skipping mesh VIP", "service", key.String())
+		return
+	}
+	// Spec.Ports is part of what must converge. This path once compared
+	// annotations alone and returned early, so a Service created before
+	// proposal 037 would have kept its single "mesh" port forever.
+	cleaned := dropStaleAnnotations(existing.Annotations)
+	if !cleaned && samePorts(existing.Spec.Ports, d.ports) {
+		return // converged
+	}
+	if existing.Annotations == nil {
+		existing.Annotations = map[string]string{}
+	}
+	existing.Annotations[aetherlabels.AnnotationMeshService] = d.service
+	existing.Spec.Ports = d.ports
+	if err := g.Update(ctx, existing); err != nil {
+		g.Log.ErrorContext(ctx, "update mesh Service failed", "service", key.String(), "error", err)
 	}
 }
 
 // namespaced returns the endpoints that carry a Kubernetes namespace, in order.
-// An endpoint without one contributes neither a port nor an annotation to a
-// generated Service, as it never decided one before.
+// An endpoint without one contributes no port to a generated Service, and a
+// service with no namespaced endpoint gets none.
 func namespaced(eps []*registryv1.ServiceEndpoint) []*registryv1.ServiceEndpoint {
 	out := make([]*registryv1.ServiceEndpoint, 0, len(eps))
 	for _, ep := range eps {

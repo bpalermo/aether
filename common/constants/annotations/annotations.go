@@ -87,10 +87,9 @@ const (
 	// reached via the HCM path; "tcp" registers it as a PROTOCOL_TCP service
 	// reached as a raw mTLS passthrough through the transparent-capture TCP
 	// floor (proposal 018, Phase 3a); "udp" registers it as a PROTOCOL_UDP
-	// service reached through the UDP floor (Phase 3b) in PLAINTEXT. Distinct
-	// from aether.io/app-protocol (AnnotationMeshAppProtocol), which the
-	// registrar STAMPS on the generated mesh Service for the agent's capture
-	// reconciler to read.
+	// service reached through the UDP floor (Phase 3b) in PLAINTEXT. It types
+	// the port in endpoint.aether.io/port; a port in endpoint.aether.io/ports
+	// carries its own type.
 	AnnotationEndpointProtocol = annotationAetherEndpointPrefix + "protocol"
 	// ProtocolHTTP / ProtocolTCP / ProtocolUDP are the accepted
 	// AnnotationEndpointProtocol values.

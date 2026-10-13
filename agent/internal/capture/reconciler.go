@@ -133,9 +133,9 @@ func (r *Reconciler) Reconcile(ctx context.Context, _ reconcile.Request) (reconc
 		// (proposal 043, Phase 1). What its ports are and what speaks on each
 		// is derived by the cache from the registry endpoints it holds, per
 		// port. The aether.io/app-protocol and aether.io/port annotations are
-		// NOT read: they said one thing about the whole service, #878 and
-		// #1672 are what happened when that one thing was wrong, and the
-		// registrar only keeps stamping them for agents of chart 2.6.
+		// NOT read: they said one thing about the whole service, and #878 and
+		// #1672 are what happened when that one thing was wrong. The registrar
+		// no longer writes them, and removes them from the Services it owns.
 		if ip != "" && ip != corev1.ClusterIPNone {
 			tcpServices = append(tcpServices, CaptureTCPService{ServiceName: svc, ClusterIP: ip})
 		}
