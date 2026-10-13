@@ -30,15 +30,18 @@ func TestRowProblem(t *testing.T) {
 	}{
 		{"one typed port", row(8080, nil, classes{8080: h}), ""},
 		{"every listed port typed, three classes", row(8080, []uint32{8080, 9000, 5353}, classes{8080: h, 9000: tcp, 5353: udp}), ""},
-		{"the map may name a port the lists do not", row(8080, []uint32{8080}, classes{8080: h, 9000: tcp}), ""},
-		{"no declared port, a typed map", row(0, nil, classes{8080: h}), ""},
+		{"no declared port, a list and a map that agree", row(0, []uint32{8080}, classes{8080: h}), ""},
 
 		{"nil row", nil, RowNoPortProtocols},
 		{"no map", row(8080, []uint32{8080, 9090}, nil), RowNoPortProtocols},
 		{"an empty map", row(8080, nil, classes{}), RowNoPortProtocols},
 		{"only an address", row(0, nil, nil), RowNoPortProtocols},
 
-		{"the declared port is not named", row(8080, nil, classes{9090: h}), RowPortNotTyped},
+		{"the declared port is not named", row(8080, []uint32{9090}, classes{9090: h}), RowPortNotTyped},
+		{"a class this build does not know", row(8080, nil, classes{8080: registryv1.PortProtocol(7)}), RowPortNotTyped},
+
+		{"the map names a port the lists do not", row(8080, []uint32{8080}, classes{8080: h, 9000: tcp}), RowPortNotListed},
+		{"no declared port and no list, a typed map", row(0, nil, classes{8080: h}), RowPortNotListed},
 		{"a port of the list is not named", row(8080, []uint32{8080, 9090}, classes{8080: h}), RowPortNotTyped},
 		{"the declared port is named with no class", row(8080, nil, classes{8080: none}), RowPortNotTyped},
 		{"a port only the map names, with no class", row(8080, nil, classes{8080: h, 9000: none}), RowPortNotTyped},

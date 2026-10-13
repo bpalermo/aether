@@ -538,7 +538,7 @@ func (m *Metrics) seedAnomalyCounters() {
 	m.udpRouteUnsupported.Add(ctx, 0)
 	m.udpNoHealthyBackend.Add(ctx, 0)
 	// One series per reason: "no row was refused" is a zero, not an absence.
-	for _, reason := range []string{endpointmeta.RowNoPortProtocols, endpointmeta.RowPortNotTyped} {
+	for _, reason := range endpointmeta.RowProblems {
 		m.registryRowsRefused.Add(ctx, 0, metric.WithAttributes(attribute.String("reason", reason)))
 	}
 	m.versionMemoMismatch.Add(ctx, 0)

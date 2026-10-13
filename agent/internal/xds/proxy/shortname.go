@@ -146,7 +146,25 @@ type ShortNameFloor func(fqdn, suffix string) []*routev3.Route
 // name gets in this table. A caller whose namespace has no mesh service of the
 // short name gets exactly those (see shortNameVirtualHost).
 func ShortNameVirtualHosts(vhosts []*routev3.VirtualHost, meshDomain string, known []string, floor ShortNameFloor, notMesh []*routev3.Route) []*routev3.VirtualHost {
+	return shortNameVirtualHosts(vhosts, meshDomain, known, floor, notMesh, nil)
+}
+
+// shortNameVirtualHosts is ShortNameVirtualHosts with meshOnly: the mesh names
+// ("<svc>.<ns>.<meshDomain>") whose short name this table does NOT answer for.
+//
+// On a captured dial a short name is a Kubernetes name: the client resolved it
+// through the cluster's DNS and dialled the address of the Service that owns
+// it. A mesh service fronted by a user's Service the agent has no port map of
+// is addressed in such a table by its mesh name alone; "echo.demo" and
+// "echo.demo.svc.cluster.local" are not claimed and pass through to the
+// user's Service, and "echo" must do exactly what they do. Derived from the
+// mesh name's virtual host like every other short name, it was claimed as
+// soon as the service had one (a service-wide filter gives it one), and a
+// call that worked was refused 421 for a port of the Service the agent knows
+// nothing of.
+func shortNameVirtualHosts(vhosts []*routev3.VirtualHost, meshDomain string, known []string, floor ShortNameFloor, notMesh []*routev3.Route, meshOnly []string) []*routev3.VirtualHost {
 	claims, suffixes := shortNameClaims(vhosts, meshDomain)
+	known = withoutMeshOnly(claims, known, meshOnly, meshDomain)
 	unclaimed := unclaimedNames(claims, suffixes, meshDomain, known, floor)
 	var out []*routev3.VirtualHost
 	for _, svc := range slices.Sorted(maps.Keys(suffixes)) {
@@ -163,6 +181,26 @@ func ShortNameVirtualHosts(vhosts []*routev3.VirtualHost, meshDomain string, kno
 		}
 	}
 	return out
+}
+
+// withoutMeshOnly takes the mesh names of meshOnly out of claims and returns
+// known without them: their short names get no arm, from a virtual host or
+// from the floor.
+func withoutMeshOnly(claims map[shortOwner]map[string]*routev3.VirtualHost, known, meshOnly []string, meshDomain string) []string {
+	if len(meshOnly) == 0 {
+		return known
+	}
+	skip := make(map[string]struct{}, len(meshOnly))
+	for _, name := range meshOnly {
+		skip[name] = struct{}{}
+		if svc, ns, suffix, ok := parseMeshAuthority(name, meshDomain); ok && suffix == "" {
+			delete(claims, shortOwner{svc: svc, ns: ns})
+		}
+	}
+	return slices.DeleteFunc(slices.Clone(known), func(name string) bool {
+		_, skipped := skip[name]
+		return skipped
+	})
 }
 
 // unclaimedNames returns, per short name, the known mesh names no virtual
@@ -193,10 +231,9 @@ func unclaimedNames(claims map[shortOwner]map[string]*routev3.VirtualHost, suffi
 // ShortNames is what a capture table's builder needs to add its short names.
 type ShortNames struct {
 	MeshDomain string
-	// Known and Floor: see ShortNameVirtualHosts. Both empty for a table
-	// that gives every name a virtual host.
-	Known []string
-	Floor ShortNameFloor
+	// MeshOnly are the mesh names this table answers for under their mesh
+	// name alone: their short name is not the table's (shortNameVirtualHosts).
+	MeshOnly []string
 }
 
 // shortOwner is one namespace's service of a short name.
@@ -305,17 +342,6 @@ func LoopbackShortNameFloor(fqdn, suffix string) []*routev3.Route {
 		return BuildRefusalVirtualHost("", nil, RefusalPortNotDeclared, RefusalReservedPortBody).GetRoutes()
 	}
 	return BuildOutboundClusterVirtualHost(fqdn+suffix, nil).GetRoutes()
-}
-
-// FallthroughShortNameFloor is the ShortNameFloor of a table that claims
-// nothing for a name nothing is known of and has no on-demand route for it
-// (cap_http_other): the request leaves as any name that is not the mesh's
-// does, through the ORIGINAL_DST passthrough with redirect-all, 404 without.
-func FallthroughShortNameFloor(passthrough bool) ShortNameFloor {
-	return func(string, string) []*routev3.Route {
-		routes := buildOnDemandCatchAllVirtualHost("", passthrough).GetRoutes()
-		return routes[len(routes)-1:]
-	}
 }
 
 // RefusalFilterLevels: a short-name route on which a service-wide filter and

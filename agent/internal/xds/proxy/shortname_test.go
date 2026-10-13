@@ -1,7 +1,10 @@
 package proxy
 
 import (
+	"fmt"
 	"testing"
+
+	meshconst "aethermesh.dev/common/constants/mesh"
 
 	"aethermesh.dev/common/extensionfilter"
 	xdsmatcherv3 "github.com/cncf/xds/go/xds/type/matcher/v3"
@@ -354,4 +357,29 @@ func TestShortName_NotAMeshNameForTheCallerGetsTheTablesFloor(t *testing.T) {
 			assert.Equal(t, RefusalCallerUnknown, unknown[0].GetResponseHeadersToAdd()[0].GetHeader().GetValue())
 		})
 	}
+}
+
+// TestLoopbackShortNameFloor: what the short name of a service the node knows
+// by name only gets on the loopback table, per authority suffix. The mesh's
+// own two ports are a port of no service there either: refused by name, never
+// a route to a cluster named for them (which no agent builds, so the request
+// would wait out the on-demand timeout).
+func TestLoopbackShortNameFloor(t *testing.T) {
+	const fqdn = "echo.demo.aether.internal"
+	refusal := func(routes []*routev3.Route) string {
+		require.Len(t, routes, 1)
+		require.NotNil(t, routes[0].GetDirectResponse(), "not a refusal: %v", routes[0])
+		assert.Equal(t, uint32(421), routes[0].GetDirectResponse().GetStatus())
+		return routes[0].GetResponseHeadersToAdd()[0].GetHeader().GetValue()
+	}
+	for _, port := range []uint32{meshconst.ProxyOutboundPort, meshconst.ProxyL4OutboundPort} {
+		routes := LoopbackShortNameFloor(fqdn, fmt.Sprintf(":%d", port))
+		assert.Equalf(t, RefusalPortNotDeclared, refusal(routes), "port %d", port)
+	}
+	assert.Equal(t, RefusalPortRequired, refusal(LoopbackShortNameFloor(fqdn, "")))
+	assert.Equal(t, RefusalShortNameCold, refusal(LoopbackShortNameFloor(fqdn, ":*")))
+	// A real port: parked for the cluster the FULL name spells.
+	routes := LoopbackShortNameFloor(fqdn, ":8080")
+	require.NotEmpty(t, routes)
+	assert.Equal(t, fqdn+":8080", routes[len(routes)-1].GetRoute().GetCluster())
 }

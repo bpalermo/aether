@@ -77,7 +77,7 @@ graph TD
 
 **Observability** — Push-first OpenTelemetry. When `otel.endpoint` is set (chart value; `--otlp-endpoint` on each binary), the agent, registrar and controller export OTLP metrics (`--otel-enabled`) and optionally traces (`--trace-export`) to a collector; the CNI plugin takes no endpoint and the agent exports its timings. The proxy ships its Envoy stats over the same sink, and the compiled-in `aether_stats` extension emits per-source/destination request counters. A separate chart, `prober`, runs a per-node synthetic prober that measures availability from the client side (proposal [013](docs/proposals/013_mesh-availability-prober.md)).
 
-**Data-plane ports** — `18001` per-pod TCP capture (the divert target); `18008` mesh inbound, TCP and UDP/QUIC; `18009` east/west waypoint tunnel; `18021` edge readiness; `18054` the node's mesh-DNS resolver; `18081` per-pod outbound HTTP; `18082` the L4 port, TCP and UDP.
+**Data-plane ports** — `18001` per-pod TCP capture (the divert target); `18008` mesh inbound, TCP and UDP/QUIC; `18009` east/west waypoint tunnel; `18021` edge readiness; `18054` the node's mesh-DNS resolver; `18081` the HTTP proxy port (per-pod outbound HTTP: `Host` names the service and one of its declared ports; it is a port of no service); `18082` the L4 port, TCP and UDP.
 
 ## Getting Started
 

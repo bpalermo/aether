@@ -521,3 +521,51 @@ helm_mesh_names_test(
         "Deployment/authz-echo": ["endpoint_port=8080"],
     },
 )
+
+# Proposal 043: the prober addresses its targets by a port they declare. Four
+# renders that nothing else pinned: reverting any of them to the mesh's proxy
+# port (":18081"), or leaving the port in the upstream list, passed every test.
+
+# The default mesh_dns targets name a declared port, and the flag carries them
+# as written.
+helm_template_match_test(
+    name = "prober_default_mesh_dns_targets_test",
+    chart = ":prober",
+    document_patterns = {
+        "DaemonSet/release-name-prober": [
+            "\\n            - \"--mesh-dns-targets=echo\\.aether-test\\.aether\\.internal:8080,echo\\.aether-test\\.svc\\.cluster\\.local:8080\"\\n",
+        ],
+    },
+)
+
+# config.aether.io/upstreams keys on the NAME: the ":<port>" of every target,
+# of both tiers, is dropped there and kept in the flag.
+helm_template_match_test(
+    name = "prober_upstreams_carry_no_port_test",
+    chart = ":prober",
+    document_patterns = {
+        "DaemonSet/release-name-prober": [
+            "\\n        config\\.aether\\.io/upstreams: \"svc-a\\.ns-a,svc-b\\.ns-b,echo\\.aether-test\\.aether\\.internal,echo\\.aether-test\\.svc\\.cluster\\.local\"\\n",
+            "\\n            - \"--reachability-targets=svc-a\\.ns-a:8080,svc-b\\.ns-b\"\\n",
+        ],
+    },
+    opts = [
+        "--set",
+        "probe.reachabilityTargets={svc-a.ns-a:8080,svc-b.ns-b}",
+    ],
+)
+
+# The authz canary's client dials the echo on the port its pod declares.
+helm_template_match_test(
+    name = "prober_authz_canary_dials_the_declared_port_test",
+    chart = ":prober",
+    document_patterns = {
+        "Deployment/authz-canary": [
+            "url=\"http://authz-echo\\.[a-z0-9-]+\\.aether\\.internal:8080/\"",
+        ],
+        "Deployment/authz-echo": [
+            "endpoint\\.aether\\.io/port: \"8080\"",
+        ],
+    },
+    opts = AUTHZ_CANARY_OPTS,
+)

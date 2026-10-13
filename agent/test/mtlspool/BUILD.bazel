@@ -27,6 +27,7 @@ go_test(
         "perport_accept_test.go",
         "perport_callerns_test.go",
         "perport_filterlevels_test.go",
+        "perport_fourth_live_test.go",
         "perport_invalidshare_test.go",
         "perport_live_test.go",
         "perport_proxyport_test.go",

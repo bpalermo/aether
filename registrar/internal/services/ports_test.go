@@ -261,6 +261,7 @@ func TestGenerator_AMeshPortIsNeverARealPort(t *testing.T) {
 		"port 18082: reserved for the mesh, not a port of the service (1 declarations)",
 		"port 18081: reserved for the mesh, not a port of the service (1 declarations)",
 	}, log.take(), "one line per service that declares a mesh port")
+	assert.ElementsMatch(t, []string{"ns/all", "ns/udpmesh", "ns/only"}, log.services, "each line names the service it is about")
 	g.reconcile(context.Background())
 	assert.Empty(t, log.take(), "and not again while nothing changes")
 
@@ -286,6 +287,8 @@ func TestGenerator_AMeshPortIsNeverARealPort(t *testing.T) {
 type warnings struct {
 	mu      sync.Mutex
 	records []slog.Record
+	// services is the "service" attribute of every WARN ever logged.
+	services []string
 }
 
 func (w *warnings) Enabled(context.Context, slog.Level) bool { return true }
@@ -296,6 +299,12 @@ func (w *warnings) Handle(_ context.Context, r slog.Record) error {
 		w.mu.Lock()
 		defer w.mu.Unlock()
 		w.records = append(w.records, r)
+		r.Attrs(func(a slog.Attr) bool {
+			if a.Key == "service" {
+				w.services = append(w.services, a.Value.String())
+			}
+			return true
+		})
 	}
 	return nil
 }

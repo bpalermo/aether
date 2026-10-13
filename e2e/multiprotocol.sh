@@ -155,6 +155,12 @@
 #   V1  reserved   18081 and 18082 are the mesh's: Host <a name nothing
 #                  serves>:18081 -> 421 port-not-declared at once, on both
 #                  paths; a pod that declares one is denied at admission
+#   U1  user svc   mp-own is a mesh service behind a Service of the user's
+#                  (port 8000 -> 8080) that no route names. Its Kubernetes
+#                  names are not captured mesh names: http://mp-own:8000/
+#                  and http://mp-own.<ns>:8000/ reach the pods through the
+#                  Service. A service-wide HTTPFilter that targets it (seen
+#                  in force on the mesh name: 403) changes neither
 #   T1  replaced   mp-move serves HTTP on 8080, then is redeployed serving
 #                  raw TCP on 9000 only. Host mp-move:8080 on loopback is
 #                  refused (421 port-not-declared) within T1_WINDOW of the
@@ -292,6 +298,11 @@ SHORT_MARKER_PLAIN="shortplain"
 # still routed past it is the grace applied to a service the registry says has
 # changed shape.
 MOVE_NAME="mp-move"
+# Leg U1: a mesh service whose name a Service of the user's owns.
+OWN_NAME="mp-own"
+OWN_MARKER="own8080"
+OWN_SERVICE_PORT=8000
+OWN_FILTER="mp-own-deny"
 MOVE_MARKER_HTTP="move8080"
 MOVE_MARKER_TCP="movetcp"
 T1_WINDOW=60
@@ -332,7 +343,7 @@ AGENT_GROUP=(agent mesh-dns proxy-supervisor cni-install uds-csi)
 REGISTRAR_GROUP=(registrar controller)
 # Red-run aids (see "A RED RUN" in the header). CI sets none of them.
 ALL_LEGS=(M0 M1 M2 M3 M4 M5 M6 M7 X1 X2 X3 X4 X5 X6 A1 A2 A3 A4 A5 A6 A7 A8 A9 A10 A11 A12
-	W1 W2 W3 P1 P2 P3 P4 P5 R1 R2 R3 S1 N1 N2 N3 V1 T1)
+	W1 W2 W3 P1 P2 P3 P4 P5 R1 R2 R3 S1 N1 N2 N3 V1 U1 T1)
 MP_LEGS="${MP_LEGS:-${ALL_LEGS[*]}}"
 MP_KEEP_GOING="${MP_KEEP_GOING:-0}"
 MP_TIMEOUT="${MP_TIMEOUT:-}"
@@ -894,7 +905,11 @@ deploy_workloads() {
 	for w in "${WORKLOADS[@]}" "$TCP_ONLY"; do
 		upstreams+="${upstreams:+,}$w.$TEST_NS"
 	done
-	upstreams+=",$SHORT_NAME.$TEST_NS,$MOVE_NAME.$TEST_NS"
+	upstreams+=",$SHORT_NAME.$TEST_NS,$MOVE_NAME.$TEST_NS,$OWN_NAME.$TEST_NS"
+	# The user's Service first: the registrar generates a Service only for a
+	# name no other Service owns.
+	deploy_user_service "$OWN_NAME" "$OWN_SERVICE_PORT" "$HTTP_PORT"
+	deploy_workload "$OWN_NAME" "$HTTP_PORT" http "$HTTP_PORT" "http:$HTTP_PORT:$OWN_MARKER"
 	deploy_workload "$MOVE_NAME" "$HTTP_PORT" http "$HTTP_PORT" "http:$HTTP_PORT:$MOVE_MARKER_HTTP" "tcp:$TCP_PORT:$MOVE_MARKER_TCP"
 	deploy_client client "$upstreams"
 	deploy_client client-nocapture "$upstreams" false
@@ -911,7 +926,7 @@ deploy_workloads() {
 	deploy_plain_service "$TEST_NS3" "$SHORT_NAME" "$HTTP_PORT" "$SHORT_MARKER_PLAIN"
 
 	local d
-	for d in "${WORKLOADS[@]}" "$TCP_ONLY" "${CLIENTS[@]}" "$SHORT_NAME" "$MOVE_NAME"; do
+	for d in "${WORKLOADS[@]}" "$TCP_ONLY" "${CLIENTS[@]}" "$SHORT_NAME" "$MOVE_NAME" "$OWN_NAME"; do
 		kc -n "$TEST_NS" rollout status "deploy/$d" --timeout=180s >/dev/null ||
 			die "workload '$d' never became Ready"
 	done
@@ -921,6 +936,20 @@ deploy_workloads() {
 	kc -n "$TEST_NS3" rollout status deploy/client --timeout=180s >/dev/null || die "the client in $TEST_NS3 never became Ready"
 	kc -n "$TEST_NS3" rollout status "deploy/$SHORT_NAME-plain" --timeout=180s >/dev/null || die "the plain $SHORT_NAME in $TEST_NS3 never became Ready"
 	ok "workloads deployed"
+}
+
+# deploy_user_service NAME PORT TARGET — a Service of the user's, NAME, in
+# TEST_NS, whose PORT targets pod port TARGET of the pods labelled app=NAME
+# (the pods deploy_workload NAME makes, which are mesh pods).
+deploy_user_service() {
+	kc apply -f - >/dev/null <<YAML || die "user Service $1 apply failed"
+apiVersion: v1
+kind: Service
+metadata: {name: $1, namespace: $TEST_NS}
+spec:
+  selector: {app: $1}
+  ports: [{name: http, port: $2, targetPort: $3}]
+YAML
 }
 
 # deploy_plain_service NS NAME PORT TEXT — a Service NAME in NS that is NOT a
@@ -1834,10 +1863,21 @@ leg_A12() {
 # why, under aether's own controller name.
 
 # route_condition ROUTE TYPE — "<status>/<reason>" of aether's condition TYPE
-# on the route's first parent status that aether owns, "" when there is none.
+# on the route's first parent status that aether owns, "" when there is none
+# OR when the condition was written for an earlier generation of the route.
+#
+# The generation matters: R1 and R2 re-apply one route name with another port.
+# A condition read without it is the one the PREVIOUS port left, which is the
+# very answer the next port is expected to give, so the leg passed on the first
+# poll whatever the agent made of the new spec.
 route_condition() {
-	kc -n "$TEST_NS" get httproutes.gateway.networking.k8s.io "$1" \
-		-o jsonpath="{range .status.parents[?(@.controllerName==\"$MESH_CONTROLLER\")]}{range .conditions[?(@.type==\"$2\")]}{.status}/{.reason}{end}{end}" 2>/dev/null
+	local out gen observed rest
+	out="$(kc -n "$TEST_NS" get httproutes.gateway.networking.k8s.io "$1" \
+		-o jsonpath="{.metadata.generation} {range .status.parents[?(@.controllerName==\"$MESH_CONTROLLER\")]}{range .conditions[?(@.type==\"$2\")]}{.observedGeneration} {.status}/{.reason}{end}{end}" 2>/dev/null || true)"
+	read -r gen observed rest <<<"$out" || true
+	if [ -n "$gen" ] && [ "$gen" = "$observed" ]; then
+		printf '%s' "$rest"
+	fi
 }
 
 # expect_condition ROUTE TYPE WANT MEANING — poll until the condition is WANT.
@@ -2128,7 +2168,7 @@ leg_V1() {
 	for port in "$MESH_HTTP_PORT" "$MESH_TCP_PORT"; do
 		if out="$(reserved_pod "$port" | kc apply --dry-run=server -f - 2>&1)"; then
 			fail "a pod that declares port $port was admitted: $out" "the controller's pod webhook must deny it"
-		elif ! grep -q "are the mesh's own ports" <<<"$out"; then
+		elif ! grep -q "port $port as an application port" <<<"$out" || ! grep -q "are the mesh's own ports" <<<"$out"; then
 			fail "a pod that declares port $port was refused for another reason: $out" ""
 		else
 			passed "a pod declaring $port is denied at admission, naming the port"
@@ -2139,6 +2179,56 @@ leg_V1() {
 	else
 		fail "the same pod declaring $HTTP_PORT is refused: $out" "the denial above is then not about the port"
 	fi
+}
+
+# --- a mesh service behind a Service of the user's ------------------------------
+
+# U1 — a mesh service fronted by a user-owned Service is not a captured mesh
+# name, and attaching a service-wide filter to it does not make its SHORT name
+# one. The Service has no route, so the agent has no port map of it: a dial to
+# any of its Kubernetes names leaves through the passthrough to the Service's
+# own address and reaches the pods.
+#
+# On the mesh name the port is the Service's ($OWN_SERVICE_PORT): the agent
+# holds the port map of every Service.
+#
+# The filter is an RBAC policy no caller satisfies. That it is in force is
+# seen where the mesh applies it: the service's MESH name on the loopback
+# listener answers 403. The Kubernetes names must still answer as before.
+# (With the filter, the short name alone was claimed and refused 421
+# port-not-declared, while "<name>.<ns>" still passed through.)
+leg_U1() {
+	local short="$OWN_NAME:$OWN_SERVICE_PORT" two="$OWN_NAME.$TEST_NS:$OWN_SERVICE_PORT" meaning
+	log "U1 a mesh service behind a user's Service ($OWN_NAME, $OWN_SERVICE_PORT -> $HTTP_PORT): its Kubernetes names pass through, with a service-wide filter too"
+	meaning="HTTP421 is the name claimed by the mesh for a port map the agent does not have"
+	captured "$OWN_MARKER" "$short" "" "control, no filter: $meaning"
+	captured "$OWN_MARKER" "$two" "" "control, no filter: $meaning"
+	loopback "$OWN_MARKER" "$(mesh_name "$OWN_NAME"):$OWN_SERVICE_PORT" "control, no filter: the mesh name reaches the service through the mesh"
+
+	kc apply -f - >/dev/null <<YAML || die "U1: the HTTPFilter was not accepted"
+apiVersion: config.aether.io/v1
+kind: HTTPFilter
+metadata: {name: $OWN_FILTER, namespace: $TEST_NS}
+spec:
+  scope: SCOPE_CHAIN
+  targetRefs:
+    - kind: Service
+      name: $OWN_NAME
+  rbac:
+    action: ACTION_ALLOW
+    policies:
+      - name: nobody
+        principals:
+          - namespace: mp-no-such-namespace
+YAML
+	expect "loopback, Host $(mesh_name "$OWN_NAME"):$OWN_SERVICE_PORT with the filter" "HTTP403" 90 "$A_PROBES" \
+		"the service-wide filter never came into force on the mesh name, so the checks below would show nothing" \
+		http_tokens client-nocapture "$LOOPBACK_URL" "$(mesh_name "$OWN_NAME"):$OWN_SERVICE_PORT"
+	captured "$OWN_MARKER" "$short" "" "with the filter: $meaning"
+	captured "$OWN_MARKER" "$two" "" "with the filter: $meaning"
+
+	kc -n "$TEST_NS" delete httpfilters.config.aether.io "$OWN_FILTER" --ignore-not-found --wait=true >/dev/null 2>&1 || true
+	loopback "$OWN_MARKER" "$(mesh_name "$OWN_NAME"):$OWN_SERVICE_PORT" "the HTTPFilter was deleted and is still in force"
 }
 
 # --- a port that stops being HTTP is refused at once ----------------------------

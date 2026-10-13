@@ -272,3 +272,18 @@ helm_mesh_names_test(
         ],
     },
 )
+
+# Proposal 043: the client dials each echo on the port its pods declare
+# (endpoint.aether.io/port: "8080"), not on the mesh's proxy port.
+helm_template_match_test(
+    name = "udsecho_client_dials_the_declared_port_test",
+    chart = ":udsecho",
+    document_patterns = {
+        "Deployment/uds-client": [
+            "\"http://\\$s\\.aether-test\\.aether\\.internal:8080/\"",
+        ],
+        "Deployment/uds-echo": [
+            "endpoint\\.aether\\.io/port: \"8080\"",
+        ],
+    },
+)

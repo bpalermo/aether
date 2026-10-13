@@ -896,6 +896,28 @@ passthrough. The mesh name and the proxy port reach such a service through the
 mesh, by the user Service's port map. No code change; the runbook states it as
 a known limit.
 
+**A reference is strict and visible (decided with the proposal, restated
+2026-10-12 because older text below says otherwise).** A `backendRef` whose
+port is not an HTTP port of its Service is invalid: its share of the rule is
+answered `500` and the route's status says `ResolvedRefs=False`
+(`BackendNotFound`, `UnsupportedProtocol`). A `parentRef` to such a port
+attaches the route to nothing and the status says `Accepted=False`
+(`NoMatchingParent`). The table and the status are built from the same facts:
+whenever the data plane answers 500 for a reference the status says False,
+and where the agent cannot know (a Service of the user's with no registered
+pod) it answers no 500 and says "Not checked". For a user's Service the facts
+are the registry's rows of the pods behind it, read by the status writer as
+by the data plane. "A named `targetPort` is reported as a WARN only" and "any
+other wrong port falls back to the declared port", under *Phase 1 as built*,
+are superseded by this.
+
+**No status-code rewrites (2026-10-12).** The mesh does not turn one HTTP
+status into another to signal between proxies or to a client: a refusal is a
+`421` (or the `500` the Gateway API specifies for an invalid reference) with
+an `x-aether-error` header that names the reason, and an upstream's own status
+is passed on as it is. Where two proxies need to tell each other something,
+it is a header.
+
 **2026-10-12: the release is chart 3.0.0.** The removals are made without a
 deprecation release, which the compatibility window allows only across a major
 version. The 2.7.x numbers the work carried while it was built were never
@@ -1410,7 +1432,8 @@ accepted.
 
 - **A13** and the `filter_disabled` inspector change (optional).
 - **A named `targetPort` is reported as a WARN only**, not on the route's
-  status.
+  status. (Superseded: see *Rulings after acceptance*, "A reference is strict
+  and visible".)
 - **The Service port map is read for the Services a route names** (as its
   parent or as a backend). A user Service that owns a mesh service's name and
   has no route is passed through, as on `main`.

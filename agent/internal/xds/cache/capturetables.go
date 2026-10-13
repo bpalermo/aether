@@ -466,10 +466,6 @@ func (c *SnapshotCache) outboundColdVhostsLocked(in ruleInputs) []*routev3.Virtu
 	if c.edge || (len(in.chainFilters) == 0 && len(in.routes) == 0) {
 		return nil
 	}
-	routed := make(map[string]struct{}, len(c.clusters))
-	for _, entry := range c.clusters {
-		routed[entry.service] = struct{}{}
-	}
 	cold := map[string]struct{}{}
 	// Only a name that carries a filter or a route. A port map alone does not
 	// make a name the mesh's: the agent has the port map of EVERY Service in
@@ -489,10 +485,12 @@ func (c *SnapshotCache) outboundColdVhostsLocked(in ruleInputs) []*routev3.Virtu
 	}
 	var out []*routev3.VirtualHost
 	for svc := range cold {
-		_, isRouted := routed[svc]
-		// A service whose generated Service says what its ports are is not
-		// cold: outboundDeclaredVhostsLocked routes and refuses it by them.
-		if !isRouted && !c.portsMap(in)[svc].known() {
+		// A service whose ports are known is not cold: by its endpoints
+		// (outboundRefusalVhostsLocked and its entries' own virtual hosts)
+		// or by its generated Service (outboundDeclaredVhostsLocked). "Known"
+		// is what decides, not "has a cluster entry": a retained raw-TCP
+		// floor is an entry and gives the service no virtual host.
+		if !c.portsMap(in)[svc].known() {
 			out = c.appendColdVhostsLocked(out, in, svc)
 		}
 	}
@@ -515,13 +513,11 @@ func (c *SnapshotCache) outboundDeclaredVhostsLocked(in ruleInputs) []*routev3.V
 	if c.edge || len(in.declared) == 0 {
 		return nil
 	}
-	routed := make(map[string]struct{}, len(c.clusters))
-	for _, entry := range c.clusters {
-		routed[entry.service] = struct{}{}
-	}
 	var out []*routev3.VirtualHost
 	for svc, ports := range in.declared {
-		if _, ok := routed[svc]; ok || c.servicePorts[svc].known() {
+		// Held or not is what servicePorts says, not "has a cluster entry"
+		// (see outboundColdVhostsLocked).
+		if c.servicePorts[svc].known() {
 			continue
 		}
 		for _, p := range ports.http {
@@ -1258,16 +1254,22 @@ func (c *SnapshotCache) captureRouteTables(ports []uint32) []types.Resource {
 // builds its short names.
 func (c *SnapshotCache) shortNamesOf(in captureTableInputs, port uint32) *proxy.ShortNames {
 	short := &proxy.ShortNames{MeshDomain: c.meshDomain}
-	if port == 0 {
-		// cap_http_other claims nothing for a name nothing is known of: its
-		// full name leaves through the table's floor, and so does its short
-		// name for a caller in its namespace. (A real-port table gives every
-		// name a virtual host, so there is nothing unclaimed there.)
-		short.Floor = proxy.FallthroughShortNameFloor(c.captureRedirectAll)
-		for _, n := range in.names {
-			short.Known = append(short.Known, n.mesh)
+	for _, n := range in.names {
+		// A name the table claims by its mesh name alone (a mesh service
+		// behind a user's Service that no route names: the agent has neither
+		// a generated Service nor a port map for it). Its Kubernetes names
+		// pass through to the user's Service, and so does its short name.
+		if len(n.names) == 1 && n.names[0] == n.mesh {
+			short.MeshOnly = append(short.MeshOnly, n.mesh)
 		}
 	}
+	// cap_http_other (port 0) claims nothing for a name nothing is known of:
+	// its full name leaves through the table's catch-all. So does its short
+	// name, with no arm of its own: a caller whose namespace has no arm gets
+	// a copy of the catch-all's routes (shortNameVirtualHost), which is the
+	// same answer. (It had an arm that held the catch-all's last route alone;
+	// nothing told the two apart, except that the arm skipped the catch-all's
+	// refusal of the mesh's own two ports.)
 	return short
 }
 

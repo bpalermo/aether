@@ -1148,6 +1148,19 @@ func TestPerPort_Walk(t *testing.T) {
 								if got.kind == "ondemand" && short.kind == "refuse" && short.reason == proxy.RefusalShortNameCold {
 									same = true
 								}
+								// A name a dialled-port table claims by its mesh
+								// name alone (a mesh service behind a Service the
+								// agent knows nothing of: no generated Service, no
+								// route). On a captured dial the short name is a
+								// Kubernetes name, and it does what the service's
+								// other Kubernetes names do there: nothing of the
+								// mesh's, like a name that is no service at all.
+								if !same && (tname == proxy.CaptureHTTPOtherRouteName || (isCapture && d != meshconst.ProxyOutboundPort)) {
+									k := spResolve(t, table, name+"."+ns+suffix)
+									none := spResolve(t, table, "no-such-name.nowhere"+suffix)
+									same = short.kind == k.kind && short.reason == k.reason && short.cluster == k.cluster &&
+										k.kind == none.kind && k.reason == none.reason && k.cluster == none.cluster
+								}
 								if !same {
 									note("S: a short name does not answer as the full name of the caller's namespace",
 										fmt.Sprintf("%s: table %s, Host %s -> %s; Host %s -> %s\nafter:\n  %s", where, tname, name+suffix, short, n+suffix, got, strings.Join(trail, "\n  ")))

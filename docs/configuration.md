@@ -1147,8 +1147,8 @@ Defined in [`common/constants/`](../common/constants). Prefixes:
 
 | Annotation | Default | Meaning |
 |---|---|---|
-| `endpoint.aether.io/port` | `8080` | Primary/default service port. |
-| `endpoint.aether.io/ports` | — | All served ports, comma-separated (multi-port, 005). |
+| `endpoint.aether.io/port` | `8080` | The pod's declared port: served, health-checked, and what `<name>:18082` reaches when it is raw TCP. Not a default for HTTP addressing: a client names the port it wants. `18081` and `18082` are refused at admission. |
+| `endpoint.aether.io/ports` | — | Every served port, comma-separated, each optionally typed (`8080,9090=h2,9000=tcp,5353=udp`). A service is reached on these ports and on no other. |
 | `endpoint.aether.io/weight` | `1024` | Load-balancing weight. |
 | `endpoint.aether.io/health-path` | `/` | Path the agent active-health-checks. |
 | `endpoint.aether.io/health-check-mode` | `eds` | `eds` (agent vets + publishes over EDS) or `active` (each client proxy probes). |

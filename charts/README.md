@@ -164,7 +164,7 @@ separately, node by node) and after a rollback.
 | Components of two **adjacent** minors side by side (an upgrade or a rollback in progress, e.g. a 2.5.x agent with a 2.6.x proxy, or a 2.6.x registrar with 2.5.x agents) | yes, for the length of the roll |
 | An upgrade that skips a minor (2.4.x straight to 2.6.x) | no: go through the minor in between and let it finish rolling |
 | A chart with image digests overridden to those of another minor, as a steady state | no |
-| A major version step | only as its own runbook section says ("Upgrading to chart 2.0.0", "Chart 3.0.0") |
+| A major version step | only as its own runbook section says ("Upgrading to chart 2.0.0", "Chart 3.0.0"). A major version may remove something without a deprecation in a published chart; that section then lists each removal as BREAKING and says what a mixed cluster does during the roll |
 
 **Deprecation.** Something deprecated in a chart of minor *N* (a flag, a value,
 a metric or one of its labels, a file or wire format, a tolerance for an older

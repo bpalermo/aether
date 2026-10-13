@@ -15,6 +15,7 @@ import (
 	"maps"
 	"slices"
 	"strings"
+	"time"
 
 	"aethermesh.dev/agent/internal/gatewaystatus"
 	"aethermesh.dev/agent/internal/xds/proxy"
@@ -82,6 +83,10 @@ type Reconciler struct {
 	// the EndpointSlices of a route-named Service whose targetPort is a name
 	// (resolveNamedTargetPorts). Nil disables that resolution.
 	APIReader client.Reader
+
+	// PodPorts says what the pods of a user's Service declare, for a route's
+	// status (podports.go). Nil: such a port is reported as not checked.
+	PodPorts PodPorts
 
 	// Sink receives the projected per-service rules (the snapshot cache).
 	Sink RouteSink
@@ -223,7 +228,24 @@ func (r *Reconciler) Reconcile(ctx context.Context, _ reconcile.Request) (reconc
 	// projected); the next reconcile retries.
 	r.writeHTTPRouteStatuses(ctx, httpList, grants, facts)
 	r.writeGRPCRouteStatuses(ctx, grpcList, grants, facts)
-	return reconcile.Result{}, nil
+	return reconcile.Result{RequeueAfter: podPortsRecheck(facts)}, nil
+}
+
+// podPortsRecheckInterval is how often a status that depends on what the pods
+// of a user's Service declare is judged again. Nothing this reconciler
+// watches changes when such a pod registers, re-registers or leaves.
+const podPortsRecheckInterval = 30 * time.Second
+
+// podPortsRecheck returns podPortsRecheckInterval when some route names a
+// port of a Service the mesh did not generate, and zero (no requeue)
+// otherwise: only those ports are judged by the registry.
+func podPortsRecheck(facts map[string]portFacts) time.Duration {
+	for _, f := range facts {
+		if f.user {
+			return podPortsRecheckInterval
+		}
+	}
+	return 0
 }
 
 // listGammaResources lists HTTPRoutes, GRPCRoutes, and ReferenceGrants (all CRD-gated).
@@ -481,9 +503,26 @@ func (r *Reconciler) servicePortMaps(ctx context.Context, routes map[string][]pr
 		if routed && len(namedPorts) > 0 {
 			r.resolveNamedTargetPorts(ctx, svc, key, m, namedPorts)
 		}
+		if routed {
+			facts[key] = r.judgedByPods(ctx, key, facts[key], m)
+		}
 		out[key] = m
 	}
 	return out, facts, nil
+}
+
+// judgedByPods returns a user Service's facts judged by what its registered
+// pods declare (portFacts.withPodPorts), or as they are when nothing is known
+// of them.
+func (r *Reconciler) judgedByPods(ctx context.Context, key string, f portFacts, portMap map[uint32]uint32) portFacts {
+	if r.PodPorts == nil {
+		return f
+	}
+	classes, known := r.PodPorts.PodPortClasses(ctx, key)
+	if !known {
+		return f
+	}
+	return f.withPodPorts(portMap, classes)
 }
 
 // resolveNamedTargetPorts fills in, in m, the pod port of every Service port

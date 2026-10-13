@@ -55,8 +55,10 @@ func TestStatus_UserServicePortIsNamedAsUnchecked(t *testing.T) {
 	ok, reason, msg := resolveRefs(facts, "ns", "HTTPRoute", []gatewayv1.BackendObjectReference{{Name: "db", Port: &port}}, nil)
 	assert.True(t, ok)
 	assert.Equal(t, string(gatewayv1.RouteReasonResolvedRefs), reason)
-	assert.Contains(t, msg, "Not checked here: whether the pods serve ns/db:5432 as HTTP")
-	assert.Contains(t, msg, "is answered 500")
+	// (No pod of ns/db is known here: with one, the port is judged by what
+	// the pods declare. TestStatus_UserServicePortIsJudgedByWhatItsPodsDeclare.)
+	assert.Contains(t, msg, "Not checked: whether the pods serve ns/db:5432 as HTTP")
+	assert.Contains(t, msg, "turns False, and they are answered 500, once registered pods declare the port raw TCP or do not declare it")
 
 	// A generated Service's port IS checked, and says so.
 	gen := gatewayv1.PortNumber(8080)

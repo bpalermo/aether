@@ -109,7 +109,7 @@ func TestUntypedRow_ContributesNothingOnAnyPath(t *testing.T) {
 		udp  = registryv1.Service_PROTOCOL_UDP
 	)
 	ctx := context.Background()
-	names := []string{"uhttp", "utcp", "uudp", "half", "noclass", "mixed", "ok", "cold"}
+	names := []string{"uhttp", "utcp", "uudp", "half", "noclass", "maponly", "mixed", "ok", "cold"}
 	c := a043Cache(t, nil)
 	rec := &recorder{}
 	c.log = slog.New(&captureHandler{rec: rec})
@@ -138,6 +138,8 @@ func TestUntypedRow_ContributesNothingOnAnyPath(t *testing.T) {
 				"demo/half": {untypedRow(a043NS, "10.0.9.4", 8080, []uint32{8080, 9090}, map[uint32]registryv1.PortProtocol{8080: rtpH})},
 				// A port named with no class.
 				"demo/noclass": {untypedRow(a043NS, "10.0.9.8", 8080, nil, map[uint32]registryv1.PortProtocol{8080: registryv1.PortProtocol_PORT_PROTOCOL_UNSPECIFIED})},
+				// A port the map names and the lists do not.
+				"demo/maponly": {untypedRow(a043NS, "10.0.9.10", 8080, []uint32{8080}, map[uint32]registryv1.PortProtocol{8080: rtpH, 9000: rtpTCP})},
 				"demo/mixed":   {mixedTyped, untypedRow(a043NS, "10.0.9.6", 8080, nil, nil)},
 				"demo/ok":      {okRow},
 			},
@@ -158,7 +160,7 @@ func TestUntypedRow_ContributesNothingOnAnyPath(t *testing.T) {
 	load := func() { require.NoError(t, c.LoadClustersFromRegistry(ctx, "cluster-1", "node-1", reg)) }
 	load()
 
-	refused := []string{"uhttp", "utcp", "uudp", "half", "noclass", "cold"}
+	refused := []string{"uhttp", "utcp", "uudp", "half", "noclass", "maponly", "cold"}
 	check := func() {
 		t.Helper()
 		c.clusterMu.RLock()
@@ -205,7 +207,7 @@ func TestUntypedRow_ContributesNothingOnAnyPath(t *testing.T) {
 	check()
 	// 7 rows: uhttp, utcp, uudp, mixed's second, cold under three listings
 	// (one row identity per listing), and two whose map is incomplete.
-	want := map[string]int64{endpointmeta.RowNoPortProtocols: 7, endpointmeta.RowPortNotTyped: 2}
+	want := map[string]int64{endpointmeta.RowNoPortProtocols: 7, endpointmeta.RowPortNotTyped: 2, endpointmeta.RowPortNotListed: 1}
 	assert.Equal(t, want, counterByReason(t, reader, refusedRowsCtr))
 	logged := func() map[string]int {
 		out := map[string]int{}
@@ -216,7 +218,8 @@ func TestUntypedRow_ContributesNothingOnAnyPath(t *testing.T) {
 		return out
 	}
 	first := logged()
-	assert.Len(t, first, 9)
+	assert.Len(t, first, 10)
+	assert.Equal(t, 1, first["demo/maponly|PROTOCOL_HTTP|cluster-1|10.0.9.10 port_not_listed"], "%v", first)
 	assert.Equal(t, 1, first["demo/uhttp|PROTOCOL_HTTP|cluster-1|10.0.9.1 no_port_protocols"], "%v", first)
 	assert.Equal(t, 1, first["demo/half|PROTOCOL_HTTP|cluster-1|10.0.9.4 port_not_typed"], "%v", first)
 
@@ -275,4 +278,46 @@ func TestUntypedRow_TheListingLendsNoClass(t *testing.T) {
 	tcpRow := &registryv1.ServiceEndpoint{Ip: "10.0.0.4", Port: 9000, PortProtocols: map[uint32]registryv1.PortProtocol{9000: rtpTCP}}
 	assert.False(t, servesPortAsHTTP(tcpRow, 9000))
 	assert.True(t, listsPort(tcpRow, 9000))
+}
+
+// TestTypedRegistry_LeavesTheRegistryAsItIs: the filter in front of a refresh
+// hands on a listing without the refused rows, leaves a service that has no
+// row left OUT of it (a service listed with no row is a listed service to
+// every reader: it would be "held" with nothing to hold), and never writes to
+// the map or the slices the registry returned, which are the registry's.
+func TestTypedRegistry_LeavesTheRegistryAsItIs(t *testing.T) {
+	const http = registryv1.Service_PROTOCOL_HTTP
+	typed := untypedRow(a043NS, "10.0.9.1", 8080, []uint32{8080}, map[uint32]registryv1.PortProtocol{8080: rtpH})
+	bad := untypedRow(a043NS, "10.0.9.2", 8080, nil, nil)
+	own := map[string][]*registryv1.ServiceEndpoint{
+		"demo/all-bad": {bad},
+		"demo/mixed":   {typed, bad},
+		"demo/ok":      {typed},
+	}
+	reg := &rawRegistry{all: map[registryv1.Service_Protocol]map[string][]*registryv1.ServiceEndpoint{http: own}}
+	// The registry hands out ITS map here, as the registrar client's cache does
+	// for its slices.
+	filtered, seen := typedRowsOf(&ownMapRegistry{rawRegistry: reg, own: own})
+	got, err := filtered.ListAllEndpoints(context.Background(), http)
+	require.NoError(t, err)
+
+	assert.NotContains(t, got, "demo/all-bad", "a service left with no row is still listed, empty")
+	assert.Len(t, got["demo/mixed"], 1)
+	assert.Len(t, got["demo/ok"], 1)
+	assert.Len(t, seen.refused, 2)
+
+	assert.Len(t, own, 3, "the filter deleted a service from the registry's own map")
+	assert.Len(t, own["demo/all-bad"], 1, "the filter rewrote a slice of the registry's own map")
+	assert.Len(t, own["demo/mixed"], 2, "the filter rewrote a slice of the registry's own map")
+	assert.Same(t, bad, own["demo/mixed"][1])
+}
+
+// ownMapRegistry returns the very map it holds from ListAllEndpoints.
+type ownMapRegistry struct {
+	*rawRegistry
+	own map[string][]*registryv1.ServiceEndpoint
+}
+
+func (r *ownMapRegistry) ListAllEndpoints(context.Context, registryv1.Service_Protocol) (map[string][]*registryv1.ServiceEndpoint, error) {
+	return r.own, nil
 }

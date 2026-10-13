@@ -448,8 +448,8 @@ func r3Build(t *testing.T, st r3State, held bool) *SnapshotCache {
 func TestPerPort_ColdAndWarmAnswerAlike(t *testing.T) {
 	seed := r3Seed(t)
 	rng := rand.New(rand.NewSource(seed))
-	// COLD_WARM_ROUNDS=60 and more is for a run by hand.
-	rounds := 20
+	// 60 rounds by default; COLD_WARM_ROUNDS widens a run by hand.
+	rounds := 60
 	if s := os.Getenv("COLD_WARM_ROUNDS"); s != "" {
 		rounds, _ = strconv.Atoi(s)
 	}

@@ -597,12 +597,34 @@ func (c *SnapshotCache) refreshEntryVhosts(ruleGen uint64, rules ruleInputs) {
 		return
 	}
 	rules.ports = effectivePorts(c.servicePorts, rules.declared)
+	// The entries built from a live listing first, then the retained ones,
+	// which give way again to the authorities a live entry claims
+	// (yieldClaimedDomains, as in the refresh that retained them). Rebuilt
+	// like any other, a retained default entry got back every authority it
+	// had yielded: for the one snapshot between a rule event and the next
+	// refresh, "<fqdn>:<port>" and the port-less name were routed to the
+	// retained cluster, whose endpoints by then are another entry's.
+	var retained []string
+	claimed := make(map[string]string, 2*len(c.clusters))
 	for name, e := range c.clusters {
 		if e.vhost == nil || e.l4Floor {
 			continue
 		}
+		if !e.absentSince.IsZero() {
+			retained = append(retained, name)
+			continue
+		}
 		e.vhost = c.outboundPortVhostLocked(e.service, name, primaryPortOf(e), name == e.service, rules)
 		c.clusters[name] = e
+		for _, d := range e.vhost.GetDomains() {
+			claimed[d] = e.service
+		}
+	}
+	slices.Sort(retained)
+	for _, name := range retained {
+		e := c.clusters[name]
+		e.vhost = c.outboundPortVhostLocked(e.service, name, primaryPortOf(e), name == e.service, rules)
+		c.clusters[name] = c.yieldClaimedDomains(context.Background(), claimed, name, e)
 	}
 	c.vhostRuleGen = ruleGen
 }
@@ -1323,10 +1345,8 @@ func (c *SnapshotCache) retainAbsentClustersLocked(ctx context.Context, prev map
 	claimed := c.claimedVhostDomainsLocked()
 	now := time.Now()
 	replaced := map[string]struct{}{}
-	defer func() {
-		c.forgetReplacedHTTPPortsLocked(replaced, evidence)
-		c.rehomeBareLoadAssignmentLocked(replaced)
-	}()
+	reset := c.resetByServiceLocked(prev, deps, evidence)
+	defer func() { c.rehomeBareLoadAssignmentLocked(replaced) }()
 	for name, entry := range prev {
 		if _, present := c.clusters[name]; present {
 			continue
@@ -1336,6 +1356,13 @@ func (c *SnapshotCache) retainAbsentClustersLocked(ctx context.Context, prev map
 		// per-port clusters are retained/dropped together.
 		if _, inScope := deps[entry.service]; !inScope {
 			c.log.InfoContext(ctx, "service left dependency set; dropping cluster/vhost (cold path takes over)", "cluster", name, "service", entry.service)
+			continue
+		}
+		// A service its generated Service replaced a port of keeps nothing
+		// the node remembered: see resetByServiceLocked.
+		if _, ok := reset[entry.service]; ok {
+			c.log.InfoContext(ctx, "cluster/vhost not retained: the service is now what its generated Service declares",
+				"cluster", name, "service", entry.service)
 			continue
 		}
 		// A REPLACEMENT is not retained: see retentionEvidence.
@@ -1436,35 +1463,42 @@ func (e retentionEvidence) replacedBy(ports map[string]servicePorts, entry clust
 	return ""
 }
 
-// forgetReplacedHTTPPortsLocked takes the HTTP ports the generated Service no
-// longer declares out of what is remembered of a service no row is listed of
-// (servicePorts keeps the last derivation for as long as an entry is
-// retained). The tables are built from it: left alone, a port whose entry was
-// just replaced would still be routed, to a cluster that is gone. A listed
-// service needs nothing: its ports were derived from its rows in this
-// refresh. Caller must hold clusterMu.
-func (c *SnapshotCache) forgetReplacedHTTPPortsLocked(replaced map[string]struct{}, evidence retentionEvidence) {
-	for svc := range replaced {
-		if _, ok := evidence.listed[svc]; ok {
+// resetByServiceLocked returns the services that are, from this refresh on,
+// exactly what their generated Service says and nothing the node remembers:
+// no row of them is listed, their Service declares ports, and those ports
+// replace at least one HTTP entry the node would otherwise retain
+// (retentionEvidence.replacedBy). Caller must hold clusterMu.
+//
+// Such a service keeps NO retained entry, of any class, and with its last
+// entry goes what was derived from its last rows (pruneServicePortsLocked,
+// which runs after the retention step): it becomes what it is to a node that
+// starts now, a
+// service known by its declared ports, routed and refused by them
+// (outboundDeclaredVhostsLocked). A mix of the two did not hold together.
+// Keeping the last derivation minus the replaced ports left a port the
+// Service newly declares refused (it was no port of what was remembered),
+// where a node that started in that state routes it; and dropping the
+// derivation while a retained raw-TCP floor entry stayed left the service
+// with no virtual host at all, so a request to it fell to the catch-all's
+// on-demand route, without its service-wide filter and without its routes.
+// One state, the same on every node: what the evidence says.
+func (c *SnapshotCache) resetByServiceLocked(prev map[string]clusterEntry, deps map[string]struct{}, evidence retentionEvidence) map[string]struct{} {
+	reset := map[string]struct{}{}
+	for name, entry := range prev {
+		if _, present := c.clusters[name]; present {
 			continue
 		}
-		last, declared := c.servicePorts[svc], evidence.declared[svc]
-		kept := make([]uint32, 0, len(last.http))
-		for _, port := range last.http {
-			if declared.hasHTTP(port) {
-				kept = append(kept, port)
-			}
+		if _, inScope := deps[entry.service]; !inScope {
+			continue
 		}
-		last.http = kept
-		if last.legacyClass == registryv1.PortProtocol_PORT_PROTOCOL_HTTP && !declared.hasHTTP(last.legacyPort) {
-			last.legacyPort, last.legacyClass = 0, registryv1.PortProtocol_PORT_PROTOCOL_UNSPECIFIED
+		if _, listed := evidence.listed[entry.service]; listed {
+			continue
 		}
-		if last.known() {
-			c.servicePorts[svc] = last
-		} else {
-			delete(c.servicePorts, svc)
+		if evidence.replacedBy(c.servicePorts, entry) != "" {
+			reset[entry.service] = struct{}{}
 		}
 	}
+	return reset
 }
 
 // rehomeBareLoadAssignmentLocked gives the bare-name load assignment of a
