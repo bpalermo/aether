@@ -535,9 +535,13 @@ export no_proxy="$NO_PROXY"
 - The port in the authority is the service's declared port. `18081` itself is
   not a port of any service.
 
-Authorities are FQDN-only and deterministic: bare names, foreign domains, or
-nested labels match no route and **404 immediately**. A `:port` suffix is
-stripped before routing.
+The authority names the service and the port: `<service>.<namespace>.<meshDomain>:<port>`,
+with a port the pods declare. The port is never stripped, and a name without
+one is port 80. A name without a namespace is the service of that name in the
+caller's own namespace. A name that is not a mesh service answers **404** here
+(on a captured dial it passes through to the address dialled), and a port the
+service does not serve as HTTP answers **421** with an `x-aether-error` header
+that says why.
 
 ### Declare your upstreams (recommended)
 
@@ -871,7 +875,8 @@ otel:
 | Symptom | Likely cause | Check |
 |---|---|---|
 | App can't reach the mesh (connection refused to `127.0.0.1:18081`) | Pod isn't managed, or the proxy hasn't programmed the listener yet | Confirm `aether.io/managed: "true"` and that the pod is **not** in an ignored namespace (§5); check the agent log for `adding listeners for pod`. |
-| Request 404s immediately | Authority isn't a valid mesh FQDN | Use the namespace-qualified `<service>.<namespace>.<meshDomain>` (or the k8s Service name) — bare names and foreign domains 404 at the route table. |
+| Request 404s immediately | The authority names no mesh service | Use `<service>.<namespace>.<meshDomain>:<port>` (or the k8s Service name). A name without a namespace is looked up in the caller's own namespace only. |
+| Request answers `421` | The authority names a mesh service and a port it does not serve as HTTP | Read the `x-aether-error` response header (`port-not-declared`, `port-not-http`, `port-required`, `port-mismatch`, `no-http-port`); the body lists the service's ports. A name without a port is port 80. See the runbook, "The four refusals". |
 | Request 503s on a pin | The pinned endpoint is gone (drained/ejected/never existed) | Pin-or-fail is by design; drop the `x-aether-ip`/`x-aether-pod` header to load-balance. |
 | First call to a service is slow | Cold path (undeclared upstream) — one xDS round-trip | Declare it in `config.aether.io/upstreams`; watch `aether.agent.upstreams.miss`. |
 | Dropped requests during a roll | Missing `minReadySeconds` / `preStop` / `maxUnavailable: 0` | Apply all three (§8); avoid `--grace-period=0`. |

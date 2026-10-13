@@ -263,6 +263,17 @@ func syncFiltersStoredRows(t *testing.T, revisioned bool) {
 	store.set(tcp, "ns/olddb", row043("10.0.0.4", 5432, nil, nil))
 	store.set(udp, "ns/olddns", row043("10.0.0.5", 5353, nil, nil))
 	store.set(http, "ns/half", row043("10.0.0.6", 8080, []uint32{8080, 9090}, map[uint32]registryv1.PortProtocol{8080: h043}))
+	// A port the map names and the lists do not.
+	store.set(http, "ns/maponly", row043("10.0.0.7", 8080, []uint32{8080}, map[uint32]registryv1.PortProtocol{8080: h043, 9000: tcp043}))
+	// One address, four rows: a row is one (service, listing, cluster, address),
+	// and each is said once. (Two clusters of a shared etcd reuse pod addresses;
+	// a pod of two classes is in two listings.)
+	same := func(cluster string) *registryv1.ServiceEndpoint {
+		return &registryv1.ServiceEndpoint{Ip: "10.0.0.9", ClusterName: cluster, Port: 8080}
+	}
+	store.set(http, "ns/same-a", same("c1"), same("c2"))
+	store.set(tcp, "ns/same-a", same("c1"))
+	store.set(http, "ns/same-b", same("c1"))
 
 	metrics, reader := newTestMetrics(t)
 	logs := &msgLog{}
@@ -281,7 +292,7 @@ func syncFiltersStoredRows(t *testing.T, revisioned bool) {
 		assert.Empty(t, got["ns/half"], "a row with an untyped port is listed")
 		assert.Empty(t, snap.GetAll(tcp)["ns/olddb"], "an untyped row is listed under TCP")
 		assert.Empty(t, snap.GetAll(udp)["ns/olddns"], "an untyped row is listed under UDP")
-		assert.Equal(t, map[string]int64{endpointmeta.RowNoPortProtocols: 4, endpointmeta.RowPortNotTyped: 1},
+		assert.Equal(t, map[string]int64{endpointmeta.RowNoPortProtocols: 8, endpointmeta.RowPortNotTyped: 1, endpointmeta.RowPortNotListed: 1},
 			byReason(t, reader, "aether.registrar.rows.untyped"))
 	}
 	s.sync(context.Background())
@@ -290,7 +301,8 @@ func syncFiltersStoredRows(t *testing.T, revisioned bool) {
 		s.sync(context.Background())
 	}
 	check()
-	for _, ip := range []string{"10.0.0.2", "10.0.0.3", "10.0.0.4", "10.0.0.5", "10.0.0.6"} {
+	assert.Equal(t, 4, logs.count(untypedStoredMsg, "10.0.0.9"), "one address in two services, two listings and two clusters is four rows, each said once")
+	for _, ip := range []string{"10.0.0.2", "10.0.0.3", "10.0.0.4", "10.0.0.5", "10.0.0.6", "10.0.0.7"} {
 		assert.Equalf(t, 1, logs.count(untypedStoredMsg, ip), "row %s: said once per row, not once per sync", ip)
 	}
 	assert.Zero(t, logs.count(untypedStoredMsg, "10.0.0.1"), "the typed row is not reported")
@@ -302,11 +314,41 @@ func syncFiltersStoredRows(t *testing.T, revisioned bool) {
 	store.set(http, "ns/old", row043("10.0.0.3", 8080, []uint32{8080, 9090}, map[uint32]registryv1.PortProtocol{8080: h043, 9090: h043}))
 	store.set(tcp, "ns/olddb")
 	store.set(udp, "ns/olddns")
+	// A row that appears beside one already said, and differs from it in ONE
+	// part of its identity, is a new row and is said: another cluster's pod
+	// at the same address, the same pod under another listing, the same
+	// address in another service.
+	before := logs.count(untypedStoredMsg, "10.0.0.9")
+	store.set(http, "ns/same-b", same("c1"), same("c3"))
+	s.sync(context.Background())
+	assert.Equal(t, before+1, logs.count(untypedStoredMsg, "10.0.0.9"), "the same address in another cluster is not said")
+	store.set(udp, "ns/same-b", same("c1"))
+	s.sync(context.Background())
+	assert.Equal(t, before+2, logs.count(untypedStoredMsg, "10.0.0.9"), "the same pod under another listing is not said")
+	store.set(http, "ns/same-c", same("c1"))
+	s.sync(context.Background())
+	assert.Equal(t, before+3, logs.count(untypedStoredMsg, "10.0.0.9"), "the same address in another service is not said")
+	s.sync(context.Background())
+	assert.Equal(t, before+3, logs.count(untypedStoredMsg, "10.0.0.9"))
+
+	// A row whose problem CHANGES is said again: it is another thing to fix.
+	store.set(http, "ns/half", row043("10.0.0.6", 8080, []uint32{8080, 9090}, nil))
+	s.sync(context.Background())
+	assert.Equal(t, 2, logs.count(untypedStoredMsg, "10.0.0.6"), "a row whose reason changed is not said again")
+	s.sync(context.Background())
+	assert.Equal(t, 2, logs.count(untypedStoredMsg, "10.0.0.6"))
+
 	store.set(http, "ns/half")
+	store.set(http, "ns/maponly")
+	store.set(http, "ns/same-a")
+	store.set(tcp, "ns/same-a")
+	store.set(http, "ns/same-b")
+	store.set(udp, "ns/same-b")
+	store.set(http, "ns/same-c")
 	s.sync(context.Background())
 	assert.ElementsMatch(t, []string{"10.0.0.1", "10.0.0.2"}, ips(snap.GetAll(http)["ns/mixed"]))
 	assert.Equal(t, []string{"10.0.0.3"}, ips(snap.GetAll(http)["ns/old"]))
-	assert.Equal(t, map[string]int64{endpointmeta.RowNoPortProtocols: 0, endpointmeta.RowPortNotTyped: 0},
+	assert.Equal(t, map[string]int64{endpointmeta.RowNoPortProtocols: 0, endpointmeta.RowPortNotTyped: 0, endpointmeta.RowPortNotListed: 0},
 		byReason(t, reader, "aether.registrar.rows.untyped"), "a reason that went to zero reads zero, not its last value")
 	assert.Equal(t, 1, logs.count(untypedGoneMsg, ""))
 

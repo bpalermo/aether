@@ -1024,7 +1024,7 @@ is its whole flag set.
 | `--liveness-authority` | `liveness.aether.internal` | Reserved `Host` authority for the liveness probe; must not be a real service, so the request lands on that catch-all vhost. |
 | `--mesh-domain` | `aether.internal` | Mesh authority suffix for the reachability tier. |
 | `--reachability-targets` | `[]` | Echo upstreams for the `reachability` tier, `<svc>.<ns>:<port>` with a port the service declares: the probe goes to the proxy port with `Host: <svc>.<ns>.<meshDomain>:<port>`. Without a port the `Host` is port-less, which is port 80. Empty disables the tier. |
-| `--mesh-dns-targets` | `[]` | Namespace-qualified authorities for the `mesh_dns` tier, `<fqdn>:<port>` with a port the service declares (no port is appended: without one the probe dials 80; until prober chart 1.1.0 the default was `18081`). Unlike the other two tiers these are **resolved** through the mesh DNS path rather than Host-overridden, so a real mesh-DNS outage becomes an alertable `dns_*` result (#574). Probed on a no-keep-alive client, so every probe resolves and dials afresh. |
+| `--mesh-dns-targets` | `[]` | Namespace-qualified authorities for the `mesh_dns` tier, `<fqdn>:<port>` with a port the service declares (no port is appended: without one the probe dials 80; until prober chart 1.1.1 the default was `18081`). Unlike the other two tiers these are **resolved** through the mesh DNS path rather than Host-overridden, so a real mesh-DNS outage becomes an alertable `dns_*` result (#574). Probed on a no-keep-alive client, so every probe resolves and dials afresh. |
 | `--rate` | `5` | Probes per second, per target. |
 | `--timeout` | `2s` | Per-probe timeout. |
 | `--max-concurrent` | `16` | Max in-flight probes per target; a tick that finds the semaphore full records `saturated` instead of probing. |
@@ -1147,8 +1147,8 @@ Defined in [`common/constants/`](../common/constants). Prefixes:
 
 | Annotation | Default | Meaning |
 |---|---|---|
-| `endpoint.aether.io/port` | `8080` | Primary/default service port. |
-| `endpoint.aether.io/ports` | — | All served ports, comma-separated (multi-port, 005). |
+| `endpoint.aether.io/port` | `8080` | The pod's declared port: served, health-checked, and what `<name>:18082` reaches when it is raw TCP. Not a default for HTTP addressing: a client names the port it wants. `18081` and `18082` are refused at admission. |
+| `endpoint.aether.io/ports` | — | Every served port, comma-separated, each optionally typed (`8080,9090=h2,9000=tcp,5353=udp`). A service is reached on these ports and on no other. |
 | `endpoint.aether.io/weight` | `1024` | Load-balancing weight. |
 | `endpoint.aether.io/health-path` | `/` | Path the agent active-health-checks. |
 | `endpoint.aether.io/health-check-mode` | `eds` | `eds` (agent vets + publishes over EDS) or `active` (each client proxy probes). |

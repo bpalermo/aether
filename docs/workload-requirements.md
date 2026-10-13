@@ -41,7 +41,7 @@ spec:
 
 | Annotation | Default | Meaning |
 |---|---|---|
-| `endpoint.aether.io/port` | `8080` | Primary application port — what a portless authority resolves to |
+| `endpoint.aether.io/port` | `8080` | The pod's declared port: served, health-checked, and what `<name>:18082` reaches when it is raw TCP. Not what a port-less authority means (that is port 80, served only when declared): a client names the port it wants |
 | `endpoint.aether.io/ports` | `<port>` | Every port the app serves, comma-separated, each optionally suffixed `=h1`, `=h2` or `=tcp` (e.g. `8080,9090=h2,9000=tcp`). A port with no suffix takes `endpoint.aether.io/protocol` |
 | `endpoint.aether.io/protocol` | `http` | The **default** L4 class for ports with no suffix. `http` or `tcp`; a raw-TCP service rides the transparent-capture TCP floor as an mTLS passthrough |
 | `endpoint.aether.io/weight` | `1024` | Load-balancing weight |
@@ -246,23 +246,23 @@ waypoint); your application speaks what it always did, to its own proxy. That
 needs two DNS SANs on every workload SVID and UDP `18008` open beside TCP
 `18008`: see the getting-started guide, "HTTP/3 between proxies".
 
-**Authorities are FQDN-only, namespace-qualified, and deterministic.**
+**A service has a name and ports; a request names both.**
 `<service>.<namespace>.<mesh-domain>` (default domain `aether.internal`,
-agent `--mesh-domain` / chart `meshDomain`; proposal 020) is the accepted
-mesh form — it is simultaneously the vhost domain, the data-plane cluster
-name, and the on-demand (ODCDS) lookup key, declared or not. The capture path
-also honors the standard `<service>.<namespace>.svc.cluster.local` name.
-Anything else — bare names (`Host: my-svc`), foreign domains, nested labels —
-matches no route and 404s immediately; only authorities under the mesh domain
-can reach the cold path.
+agent `--mesh-domain` / chart `meshDomain`; proposal 020) is the mesh form.
+A captured dial also honors the Kubernetes names of the generated Service
+(`<service>.<namespace>.svc.cluster.local`, `<service>.<namespace>`), and a
+name without a namespace (`Host: my-svc:8080`) is `my-svc` in the caller's own
+namespace, as the cluster's DNS search makes it. A name that is not a mesh
+service is not the mesh's: on the proxy port it answers 404, and a captured
+dial passes through to the address that was dialled.
 
-**The authority's port is NOT stripped — it is part of the match.** This
-document previously said the opposite (#883). `strip_any_host_port` is off, and
-deliberately so: the portless FQDN and `<fqdn>:<primary port>` both reach the
-service's primary cluster, while `<fqdn>:<port>` reaches that port's own
-cluster. If the port were stripped, per-port routing (proposal 005) could not
-work at all. See `BuildOutboundClusterVirtualHost` in
-`agent/internal/xds/proxy/route.go`. The SPIFFE trust domain is resolved from each component's own SVID and
+**The authority's port is the port (proposal 043, chart 3.0.0).** It is not
+stripped and it has no default but HTTP's own: `<name>:<port>` reaches that
+port, which the pods must declare (`endpoint.aether.io/port`,
+`endpoint.aether.io/ports`), and a name without a port is port 80, served only
+when the pods declare 80. Nothing means "the port the pods declare": a request
+for a port the service does not serve as HTTP is refused `421` with an
+`x-aether-error` that says why. See the runbook, "Chart 3.0.0". The SPIFFE trust domain is resolved from each component's own SVID and
 matches the mesh domain by design, so addressing and identity share one
 domain.
 
@@ -277,8 +277,8 @@ ambiguous and raw TCP needs a port:
 | `http://<svc>.<ns>.<domain>/` | port 80, if the service declares it as HTTP; else `421` |
 | `https://<svc>.<ns>.<domain>/` | port 443, as the service declares it |
 | `<svc>.<ns>.<domain>:18081` | the mesh's HTTP proxy port: the port in `Host` decides. Not a port of the service |
-| `<svc>.<ns>.<domain>:18082` | the primary port, as raw TCP (the explicit L4 spelling) |
-| `<svc>.<ns>.<domain>:18082/udp` | the primary port, as plaintext UDP (the same L4 spelling; needs a `UDPRoute`) |
+| `<svc>.<ns>.<domain>:18082` | the port in `endpoint.aether.io/port` when it is raw TCP (the explicit L4 spelling, kept) |
+| `<svc>.<ns>.<domain>:18082/udp` | the port in `endpoint.aether.io/port`, as plaintext UDP (the same L4 spelling; needs a `UDPRoute`) |
 | `<svc>.<ns>.<domain>:<p>` | port `p`, in whatever class `p` declares |
 
 **`18081` and `18082` are reserved.** A pod cannot declare either in
@@ -293,7 +293,7 @@ string — so `http://<svc>/` is unambiguous without one. Raw TCP has no
 authority; its only demux key is the 5-tuple. That asymmetry is intrinsic to
 the protocols, not to this mesh, and it is why TCP gets a well-known port of
 its own (`18082`) rather than the bare name changing meaning depending on
-which protocol a service's primary port happens to be.
+which protocols a service's ports happen to be.
 
 **`:18082` does not require redirect-all.** The scoped capture rule diverts
 it alongside `:18081` — on both transports — and the generated mesh Service

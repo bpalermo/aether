@@ -155,6 +155,33 @@
 #   V1  reserved   18081 and 18082 are the mesh's: Host <a name nothing
 #                  serves>:18081 -> 421 port-not-declared at once, on both
 #                  paths; a pod that declares one is denied at admission
+#   U1  user svc   mp-own is a mesh service behind a Service of the user's
+#                  (port 8000 -> 8080) that no route names. Its Kubernetes
+#                  names are not captured mesh names: http://mp-own:8000/
+#                  and http://mp-own.<ns>:8000/ reach the pods through the
+#                  Service. A service-wide HTTPFilter that targets it (seen
+#                  in force on the mesh name: 403 on the loopback listener
+#                  and through the proxy port from the captured client)
+#                  changes neither, nor a dial to the Service's port with
+#                  the mesh name in Host. Two more Services of the user's
+#                  select the same pods, on a port number another mesh
+#                  service serves as HTTP (9090) and on the pods' own
+#                  (8080): with the mesh name in Host, the first passes
+#                  through as before the filter, and the second, which was a
+#                  mesh delivery before it, is one WITH the filter (403).
+#                  None is refused 421
+#   U2  named      a Service port whose targetPort is a NAME is refused
+#                  until the name resolves, and resolves on the
+#                  EndpointSlice's EVENT. (a) A selectorless Service and an
+#                  HTTPRoute to it: False/BackendNotFound and 500 on both
+#                  paths; an EndpointSlice made by hand names the port and
+#                  the status turns True, a second that gives the name
+#                  another number turns it False again, and deleting that
+#                  one turns it back: nothing but the slices changes, so
+#                  only the agent's slice watch can have told it. (b) A
+#                  Service of the user's with a named targetPort that NO
+#                  route names fronts mesh pods: their mesh name answers on
+#                  the proxy port by the Service's port
 #   T1  replaced   mp-move serves HTTP on 8080, then is redeployed serving
 #                  raw TCP on 9000 only. Host mp-move:8080 on loopback is
 #                  refused (421 port-not-declared) within T1_WINDOW of the
@@ -292,6 +319,22 @@ SHORT_MARKER_PLAIN="shortplain"
 # still routed past it is the grace applied to a service the registry says has
 # changed shape.
 MOVE_NAME="mp-move"
+# Leg U1: a mesh service whose name a Service of the user's owns.
+OWN_NAME="mp-own"
+OWN_MARKER="own8080"
+OWN_SERVICE_PORT=8000
+# Leg U2: a Service of the user's with a named targetPort, created before its
+# pods.
+LATE_NAME="mp-late"
+LATE_MARKER="late8080"
+LATE_SERVICE_PORT=8000
+LATE_ROUTE="mp-late-route"
+LATE_SLICED="mp-late-sliced"
+# Two more Services of the user's that select mp-own's pods: on a port number
+# another mesh service declares as HTTP, and on the port the pods serve.
+OWN_ALT_SERVICE="mp-own-alt"
+OWN_POD_SERVICE="mp-own-pod"
+OWN_FILTER="mp-own-deny"
 MOVE_MARKER_HTTP="move8080"
 MOVE_MARKER_TCP="movetcp"
 T1_WINDOW=60
@@ -332,7 +375,7 @@ AGENT_GROUP=(agent mesh-dns proxy-supervisor cni-install uds-csi)
 REGISTRAR_GROUP=(registrar controller)
 # Red-run aids (see "A RED RUN" in the header). CI sets none of them.
 ALL_LEGS=(M0 M1 M2 M3 M4 M5 M6 M7 X1 X2 X3 X4 X5 X6 A1 A2 A3 A4 A5 A6 A7 A8 A9 A10 A11 A12
-	W1 W2 W3 P1 P2 P3 P4 P5 R1 R2 R3 S1 N1 N2 N3 V1 T1)
+	W1 W2 W3 P1 P2 P3 P4 P5 R1 R2 R3 S1 N1 N2 N3 V1 U1 U2 T1)
 MP_LEGS="${MP_LEGS:-${ALL_LEGS[*]}}"
 MP_KEEP_GOING="${MP_KEEP_GOING:-0}"
 MP_TIMEOUT="${MP_TIMEOUT:-}"
@@ -894,7 +937,13 @@ deploy_workloads() {
 	for w in "${WORKLOADS[@]}" "$TCP_ONLY"; do
 		upstreams+="${upstreams:+,}$w.$TEST_NS"
 	done
-	upstreams+=",$SHORT_NAME.$TEST_NS,$MOVE_NAME.$TEST_NS"
+	upstreams+=",$SHORT_NAME.$TEST_NS,$MOVE_NAME.$TEST_NS,$OWN_NAME.$TEST_NS,$LATE_NAME.$TEST_NS"
+	# The user's Service first: the registrar generates a Service only for a
+	# name no other Service owns.
+	deploy_user_service "$OWN_NAME" "$OWN_SERVICE_PORT" "$HTTP_PORT"
+	deploy_user_service "$OWN_ALT_SERVICE" "$ALT_PORT" "$HTTP_PORT" "$OWN_NAME"
+	deploy_user_service "$OWN_POD_SERVICE" "$HTTP_PORT" "$HTTP_PORT" "$OWN_NAME"
+	deploy_workload "$OWN_NAME" "$HTTP_PORT" http "$HTTP_PORT" "http:$HTTP_PORT:$OWN_MARKER"
 	deploy_workload "$MOVE_NAME" "$HTTP_PORT" http "$HTTP_PORT" "http:$HTTP_PORT:$MOVE_MARKER_HTTP" "tcp:$TCP_PORT:$MOVE_MARKER_TCP"
 	deploy_client client "$upstreams"
 	deploy_client client-nocapture "$upstreams" false
@@ -911,7 +960,7 @@ deploy_workloads() {
 	deploy_plain_service "$TEST_NS3" "$SHORT_NAME" "$HTTP_PORT" "$SHORT_MARKER_PLAIN"
 
 	local d
-	for d in "${WORKLOADS[@]}" "$TCP_ONLY" "${CLIENTS[@]}" "$SHORT_NAME" "$MOVE_NAME"; do
+	for d in "${WORKLOADS[@]}" "$TCP_ONLY" "${CLIENTS[@]}" "$SHORT_NAME" "$MOVE_NAME" "$OWN_NAME"; do
 		kc -n "$TEST_NS" rollout status "deploy/$d" --timeout=180s >/dev/null ||
 			die "workload '$d' never became Ready"
 	done
@@ -921,6 +970,20 @@ deploy_workloads() {
 	kc -n "$TEST_NS3" rollout status deploy/client --timeout=180s >/dev/null || die "the client in $TEST_NS3 never became Ready"
 	kc -n "$TEST_NS3" rollout status "deploy/$SHORT_NAME-plain" --timeout=180s >/dev/null || die "the plain $SHORT_NAME in $TEST_NS3 never became Ready"
 	ok "workloads deployed"
+}
+
+# deploy_user_service NAME PORT TARGET [APP] — a Service of the user's, NAME,
+# in TEST_NS, whose PORT targets pod port TARGET of the pods labelled app=APP
+# (default NAME: the pods deploy_workload NAME makes, which are mesh pods).
+deploy_user_service() {
+	kc apply -f - >/dev/null <<YAML || die "user Service $1 apply failed"
+apiVersion: v1
+kind: Service
+metadata: {name: $1, namespace: $TEST_NS}
+spec:
+  selector: {app: ${4:-$1}}
+  ports: [{name: http, port: $2, targetPort: $3}]
+YAML
 }
 
 # deploy_plain_service NS NAME PORT TEXT — a Service NAME in NS that is NOT a
@@ -1834,10 +1897,21 @@ leg_A12() {
 # why, under aether's own controller name.
 
 # route_condition ROUTE TYPE — "<status>/<reason>" of aether's condition TYPE
-# on the route's first parent status that aether owns, "" when there is none.
+# on the route's first parent status that aether owns, "" when there is none
+# OR when the condition was written for an earlier generation of the route.
+#
+# The generation matters: R1 and R2 re-apply one route name with another port.
+# A condition read without it is the one the PREVIOUS port left, which is the
+# very answer the next port is expected to give, so the leg passed on the first
+# poll whatever the agent made of the new spec.
 route_condition() {
-	kc -n "$TEST_NS" get httproutes.gateway.networking.k8s.io "$1" \
-		-o jsonpath="{range .status.parents[?(@.controllerName==\"$MESH_CONTROLLER\")]}{range .conditions[?(@.type==\"$2\")]}{.status}/{.reason}{end}{end}" 2>/dev/null
+	local out gen observed rest
+	out="$(kc -n "$TEST_NS" get httproutes.gateway.networking.k8s.io "$1" \
+		-o jsonpath="{.metadata.generation} {range .status.parents[?(@.controllerName==\"$MESH_CONTROLLER\")]}{range .conditions[?(@.type==\"$2\")]}{.observedGeneration} {.status}/{.reason}{end}{end}" 2>/dev/null || true)"
+	read -r gen observed rest <<<"$out" || true
+	if [ -n "$gen" ] && [ "$gen" = "$observed" ]; then
+		printf '%s' "$rest"
+	fi
 }
 
 # expect_condition ROUTE TYPE WANT MEANING — poll until the condition is WANT.
@@ -1895,6 +1969,13 @@ leg_R1() {
 	local name port
 	name="$(mesh_name mp-httponly)"
 	for port in "$UNDECLARED_PORT" "$MESH_HTTP_PORT" "$LOW_PORT"; do
+		# The route is deleted between ports and the parent is seen answering
+		# for itself again first: the 500 asserted below is then THIS port's.
+		# (Re-applied in place, the second and third port's expected answer
+		# was the one the first had left.)
+		remove_route "$R_BACKEND_ROUTE"
+		captured "$(marker mp-httponly "$HTTP_PORT")" "$name:$HTTP_PORT" "" "before backendRef port $port: the previous port's route is deleted and its 500 is still answered"
+		loopback "$(marker mp-httponly "$HTTP_PORT")" "$name:$HTTP_PORT" "before backendRef port $port, loopback: the previous port's route is deleted and its 500 is still answered"
 		if ! apply_backend_route "$R_BACKEND_ROUTE" mp-httponly "$port"; then
 			fail "the HTTPRoute $R_BACKEND_ROUTE (backendRef port $port) was not accepted by the API server"
 			continue
@@ -1911,6 +1992,22 @@ leg_R1() {
 	loopback "$(marker mp-httponly "$HTTP_PORT")" "$name:$HTTP_PORT" "the HTTPRoute was deleted and its 500 is still answered"
 }
 
+# apply_parent_route PORT — the HTTPRoute of R2: every request of mp-httponly's
+# port PORT to mp-multi's second HTTP port.
+apply_parent_route() {
+	kc apply -f - >/dev/null <<YAML
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata: {name: $R_PARENT_ROUTE, namespace: $TEST_NS}
+spec:
+  parentRefs:
+    - {group: "", kind: Service, name: mp-httponly, port: $1}
+  rules:
+    - backendRefs:
+        - {group: "", kind: Service, name: mp-multi, port: $ALT_PORT}
+YAML
+}
+
 # R2 — a parentRef to a port the parent does not have attaches the route to
 # nothing: Accepted=False with NoMatchingParent, and the parent answers for
 # itself on every path, as if the route did not exist. The route's backendRef
@@ -1922,18 +2019,18 @@ leg_R2() {
 	name="$(mesh_name mp-httponly)"
 	own="$(marker mp-httponly "$HTTP_PORT")"
 	for port in "$MESH_HTTP_PORT" "$LOW_PORT" "$UNDECLARED_PORT"; do
-		if ! kc apply -f - >/dev/null <<YAML
-apiVersion: gateway.networking.k8s.io/v1
-kind: HTTPRoute
-metadata: {name: $R_PARENT_ROUTE, namespace: $TEST_NS}
-spec:
-  parentRefs:
-    - {group: "", kind: Service, name: mp-httponly, port: $port}
-  rules:
-    - backendRefs:
-        - {group: "", kind: Service, name: mp-multi, port: $ALT_PORT}
-YAML
-		then
+		# First the same route on a port the parent HAS: it attaches, and the
+		# request moves to its backend. Only then the wrong port. "The parent
+		# answers for itself" is also what a route the agent never read looks
+		# like; after this control it is the answer to THIS parentRef.
+		if ! apply_parent_route "$HTTP_PORT"; then
+			fail "the HTTPRoute $R_PARENT_ROUTE (parentRef port $HTTP_PORT, the control) was not accepted by the API server"
+			continue
+		fi
+		expect_condition "$R_PARENT_ROUTE" Accepted "True/Accepted" "the control: a parentRef to the parent's real port $HTTP_PORT (before parentRef port $port)"
+		captured "$(marker mp-multi "$ALT_PORT")" "$name:$HTTP_PORT" "" \
+			"the control before parentRef port $port: '$own' is the route not applied to the port it does name"
+		if ! apply_parent_route "$port"; then
 			fail "the HTTPRoute $R_PARENT_ROUTE (parentRef port $port) was not accepted by the API server"
 			continue
 		fi
@@ -2128,7 +2225,7 @@ leg_V1() {
 	for port in "$MESH_HTTP_PORT" "$MESH_TCP_PORT"; do
 		if out="$(reserved_pod "$port" | kc apply --dry-run=server -f - 2>&1)"; then
 			fail "a pod that declares port $port was admitted: $out" "the controller's pod webhook must deny it"
-		elif ! grep -q "are the mesh's own ports" <<<"$out"; then
+		elif ! grep -q "port $port as an application port" <<<"$out" || ! grep -q "are the mesh's own ports" <<<"$out"; then
 			fail "a pod that declares port $port was refused for another reason: $out" ""
 		else
 			passed "a pod declaring $port is denied at admission, naming the port"
@@ -2139,6 +2236,251 @@ leg_V1() {
 	else
 		fail "the same pod declaring $HTTP_PORT is refused: $out" "the denial above is then not about the port"
 	fi
+}
+
+# --- a mesh service behind a Service of the user's ------------------------------
+
+# U1 — a mesh service fronted by a user-owned Service is not a captured mesh
+# name, and attaching a service-wide filter to it does not make its SHORT name
+# one. The Service has no route, so the agent has no port map of it: a dial to
+# any of its Kubernetes names leaves through the passthrough to the Service's
+# own address and reaches the pods.
+#
+# On the mesh name the port is the Service's ($OWN_SERVICE_PORT): the agent
+# holds the port map of every Service.
+#
+# The filter is an RBAC policy no caller satisfies. That it is in force is
+# seen where the mesh applies it, by an answer only the filter gives: the
+# service's MESH name answers 403 on the loopback listener, and 403 through
+# the proxy port from the CAPTURED client, the pod whose calls are looked at
+# below. No call that worked before the filter
+# may be refused after it: the Kubernetes names, and the mesh name in Host on
+# a dial to the Service's own port, must all still answer.
+# (With the filter, the short name alone was claimed and refused 421
+# port-not-declared, while "<name>.<ns>" still passed through; and then the
+# mesh name in Host on a dial to the Service's port was, which this leg read
+# as its proof that the filter had arrived.)
+# u1_dial WANT AUTHORITY HOST WHEN MEANING: a captured dial to AUTHORITY (a
+# Service of the user's that selects mp-own's pods) with Host HOST.
+u1_dial() {
+	expect "captured dial to $2 with Host $3, $4" "$1" "$A_TIMEOUT" "$A_PROBES" "$5" \
+		http_tokens client "http://$2/" "$3"
+}
+
+leg_U1() {
+	local short="$OWN_NAME:$OWN_SERVICE_PORT" two="$OWN_NAME.$TEST_NS:$OWN_SERVICE_PORT" meaning mesh
+	mesh="$(mesh_name "$OWN_NAME"):$OWN_SERVICE_PORT"
+	log "U1 a mesh service behind a user's Service ($OWN_NAME, $OWN_SERVICE_PORT -> $HTTP_PORT): its Kubernetes names pass through, with a service-wide filter too"
+	meaning="HTTP421 is the name claimed by the mesh for a port map the agent does not have"
+	captured "$OWN_MARKER" "$short" "" "control, no filter: $meaning"
+	captured "$OWN_MARKER" "$two" "" "control, no filter: $meaning"
+	loopback "$OWN_MARKER" "$(mesh_name "$OWN_NAME"):$OWN_SERVICE_PORT" "control, no filter: the mesh name reaches the service through the mesh"
+	# The table of the dialled port, before the filter: the mesh name in Host
+	# on a dial to the Service's address is not claimed there either (the
+	# node has no virtual host for the service on this table), and passes
+	# through like the Service's own names.
+	expect "captured dial to $short with Host $(mesh_name "$OWN_NAME"):$OWN_SERVICE_PORT, no filter" "$OWN_MARKER" "$A_TIMEOUT" "$A_PROBES" \
+		"control: the table of the dialled port claims the service's mesh name before any filter exists" \
+		http_tokens client "http://$short/" "$mesh"
+	proxied "$OWN_MARKER" client "$mesh" "control, no filter: the mesh name reaches the service through the proxy port from the captured client"
+	# The same pods behind two more Services of the user's, dialled with the
+	# mesh name in Host: on a port number another mesh service serves as HTTP
+	# (the table of that port has an on-demand route), and on the pods' own.
+	local alt="$OWN_ALT_SERVICE:$ALT_PORT" own_pod="$OWN_POD_SERVICE:$HTTP_PORT" bare pod_host
+	bare="$(mesh_name "$OWN_NAME")"
+	pod_host="$bare:$HTTP_PORT"
+	u1_dial "$OWN_MARKER" "$alt" "$bare" "no filter" "control: the dial does not reach the pods through the user's Service before any filter exists"
+	u1_dial "$OWN_MARKER" "$alt" "$pod_host" "no filter" "control: the dial does not reach the pods through the user's Service before any filter exists"
+	u1_dial "$OWN_MARKER" "$own_pod" "$pod_host" "no filter" "control: the dial does not reach the pods before any filter exists"
+	u1_dial "$OWN_MARKER" "$own_pod" "$bare" "no filter" "control: the dial does not reach the pods before any filter exists"
+
+	kc apply -f - >/dev/null <<YAML || die "U1: the HTTPFilter was not accepted"
+apiVersion: config.aether.io/v1
+kind: HTTPFilter
+metadata: {name: $OWN_FILTER, namespace: $TEST_NS}
+spec:
+  scope: SCOPE_CHAIN
+  targetRefs:
+    - kind: Service
+      name: $OWN_NAME
+  rbac:
+    action: ACTION_ALLOW
+    policies:
+      - name: nobody
+        principals:
+          - namespace: mp-no-such-namespace
+YAML
+	expect "loopback, Host $(mesh_name "$OWN_NAME"):$OWN_SERVICE_PORT with the filter" "HTTP403" 90 "$A_PROBES" \
+		"the service-wide filter never came into force on the mesh name, so the checks below would show nothing" \
+		http_tokens client-nocapture "$LOOPBACK_URL" "$(mesh_name "$OWN_NAME"):$OWN_SERVICE_PORT"
+	# And for the captured client, whose three calls below are the point: the
+	# proxy port answers it 403 for the mesh name too. (That the filter had
+	# reached this pod was read off a refusal: the dial to the Service's port
+	# with the mesh name in Host turned 421 port-not-declared when the filter
+	# arrived. That refusal was the defect: the call had worked.)
+	expect "client: curl --proxy $PROXY_URL http://$mesh/ with the filter" "HTTP403" 90 "$A_PROBES" \
+		"'$OWN_MARKER' is the filter not being in force for the captured client, so the three checks below would show nothing" \
+		proxy_tokens client "http://$mesh/" ""
+	expect "captured dial to $short with Host $mesh, with the filter" "$OWN_MARKER" "$A_TIMEOUT" "$A_PROBES" \
+		"HTTP421:port-not-declared is the filter having made the mesh claim, and refuse, a call that passed through to the user's Service before it" \
+		http_tokens client "http://$short/" "$mesh"
+	captured "$OWN_MARKER" "$short" "" "with the filter: $meaning"
+	captured "$OWN_MARKER" "$two" "" "with the filter: $meaning"
+	# A port number another mesh service serves as HTTP: not a port of this
+	# service, so the dial goes where it went before the filter, to the
+	# address that was dialled. (It was 421 port-not-declared, and 421
+	# port-mismatch with the pods' port in Host.)
+	meaning="HTTP421 is the filter having made the mesh refuse a call that passed through to the user's Service before it; HTTP403 would be the call taken into the mesh on a port the service does not have"
+	u1_dial "$OWN_MARKER" "$alt" "$bare" "with the filter" "$meaning"
+	u1_dial "$OWN_MARKER" "$alt" "$pod_host" "with the filter" "$meaning"
+	# The pods' own port, with a Host that names it or no port: that was a
+	# mesh delivery before the filter (fetched on demand), and it is one with
+	# the filter now. The filter denies every caller, so it answers 403:
+	# refused by the policy the user attached, not by the mesh's addressing
+	# (421), and never delivered without the filter.
+	meaning="HTTP421 is the mesh refusing the name by its addressing; '$OWN_MARKER' is the request delivered without the service-wide filter"
+	u1_dial "HTTP403" "$own_pod" "$pod_host" "with the filter" "$meaning"
+	u1_dial "HTTP403" "$own_pod" "$bare" "with the filter" "$meaning"
+
+	kc -n "$TEST_NS" delete httpfilters.config.aether.io "$OWN_FILTER" --ignore-not-found --wait=true >/dev/null 2>&1 || true
+	loopback "$OWN_MARKER" "$(mesh_name "$OWN_NAME"):$OWN_SERVICE_PORT" "the HTTPFilter was deleted and is still in force"
+}
+
+# --- a named targetPort is refused until it resolves ----------------------------
+
+# U2 — a Service port whose targetPort is a NAME names nothing until an
+# EndpointSlice of the Service says which number the name is (owner's ruling,
+# 2026-10-13), and the agent learns that from the slice's EVENT.
+#
+# (a) The event. $LATE_SLICED is a Service with NO selector, port
+# $LATE_SERVICE_PORT, targetPort "web": Kubernetes makes no EndpointSlice for
+# it, so every slice it has is one this leg writes, and a slice is the only
+# thing that changes between two checks. An HTTPRoute sends mp-httponly's
+# traffic to it. With no slice the reference is invalid: the status says so
+# and the request is answered 500 on the captured path and on the loopback
+# listener (it was delivered to the port the backend's pods declare). A slice
+# that names the port makes the status True; a second slice that gives the
+# same name another number makes it False again; deleting that one makes it
+# True. An agent that does not watch EndpointSlices sees none of the three.
+# (The first form of this leg created the pods instead, and passed with the
+# watch removed: the pods' registration is an event of its own.)
+#
+# (b) No route. $LATE_NAME is a Service of the user's, port
+# $LATE_SERVICE_PORT, targetPort "web", in front of mesh pods whose container
+# port is named "web", and NO route names it. The mesh name of the service
+# answers on the proxy port by the Service's port. Names were resolved only
+# for a Service a route named, so this one stayed unresolved for ever: 421
+# "Its ports: none" on every spelling, with nothing logged.
+leg_U2() {
+	local name
+	name="$(mesh_name mp-httponly)"
+	log "U2 a named targetPort is refused until it resolves, and resolves on the EndpointSlice's event"
+	kc apply -f - >/dev/null <<YAML || die "U2: Service $LATE_SLICED apply failed"
+apiVersion: v1
+kind: Service
+metadata: {name: $LATE_SLICED, namespace: $TEST_NS}
+spec:
+  ports: [{name: http, port: $LATE_SERVICE_PORT, targetPort: web}]
+YAML
+	kc apply -f - >/dev/null <<YAML || die "U2: the HTTPRoute was not accepted"
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata: {name: $LATE_ROUTE, namespace: $TEST_NS}
+spec:
+  parentRefs:
+    - {group: "", kind: Service, name: mp-httponly}
+  rules:
+    - backendRefs:
+        - {group: "", kind: Service, name: $LATE_SLICED, port: $LATE_SERVICE_PORT}
+YAML
+	expect_condition "$LATE_ROUTE" ResolvedRefs "False/BackendNotFound" \
+		"'True/ResolvedRefs' is a named targetPort that resolves to nothing being taken on trust"
+	captured "HTTP500" "$name:$HTTP_PORT" "" \
+		"no EndpointSlice of $LATE_SLICED names its port: a marker or HTTP503 is the request sent on to a port nothing named"
+	loopback "HTTP500" "$name:$HTTP_PORT" "the same on the loopback listener"
+
+	u2_slice a "$HTTP_PORT"
+	expect_condition "$LATE_ROUTE" ResolvedRefs "True/ResolvedRefs" \
+		"'False/BackendNotFound' is the agent not having seen the EndpointSlice appear: nothing else changed"
+	u2_slice b "$ALT_PORT"
+	expect_condition "$LATE_ROUTE" ResolvedRefs "False/BackendNotFound" \
+		"'True/ResolvedRefs' is two EndpointSlices that give the name different numbers resolved to one of them, or the second slice not seen"
+	kc -n "$TEST_NS" delete endpointslice "$LATE_SLICED-b" --wait=true >/dev/null 2>&1 || true
+	expect_condition "$LATE_ROUTE" ResolvedRefs "True/ResolvedRefs" \
+		"'False/BackendNotFound' is the agent not having seen the EndpointSlice go"
+
+	remove_route "$LATE_ROUTE"
+	kc -n "$TEST_NS" delete endpointslice "$LATE_SLICED-a" --ignore-not-found --wait=true >/dev/null 2>&1 || true
+	kc -n "$TEST_NS" delete service "$LATE_SLICED" --ignore-not-found --wait=true >/dev/null 2>&1 || true
+	captured "$(marker mp-httponly "$HTTP_PORT")" "$name:$HTTP_PORT" "" "the HTTPRoute was deleted and mp-httponly does not answer for itself"
+
+	# (b) a user's Service with a named targetPort that no route names.
+	kc apply -f - >/dev/null <<YAML || die "U2: Service and workload $LATE_NAME apply failed"
+apiVersion: v1
+kind: Service
+metadata: {name: $LATE_NAME, namespace: $TEST_NS}
+spec:
+  selector: {app: $LATE_NAME}
+  ports: [{name: http, port: $LATE_SERVICE_PORT, targetPort: web}]
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata: {name: $LATE_NAME, namespace: $TEST_NS}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: $LATE_NAME, namespace: $TEST_NS}
+spec:
+  replicas: 1
+  selector: {matchLabels: {app: $LATE_NAME}}
+  template:
+    metadata:
+      labels: {app: $LATE_NAME, aether.io/managed: "true"}
+      annotations:
+        endpoint.aether.io/port: "$HTTP_PORT"
+        endpoint.aether.io/protocol: "http"
+        endpoint.aether.io/ports: "$HTTP_PORT"
+    spec:
+      serviceAccountName: $LATE_NAME
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        seccompProfile: {type: RuntimeDefault}
+      containers:
+        - name: web
+          image: $HTTP_ECHO_IMAGE
+          args: ["-text=$LATE_MARKER", "-listen=:$HTTP_PORT"]
+          ports: [{name: web, containerPort: $HTTP_PORT}]
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: ["ALL"]}
+YAML
+	kc -n "$TEST_NS" rollout status "deploy/$LATE_NAME" --timeout=180s >/dev/null ||
+		die "U2: $LATE_NAME never became ready"
+	expect "loopback $LOOPBACK_URL with Host: $(mesh_name "$LATE_NAME"):$LATE_SERVICE_PORT (a named targetPort, no route)" "$LATE_MARKER" 90 "$A_PROBES" \
+		"HTTP421 is the Service's named targetPort never resolved because no route names the Service: its mesh service has no port at all on the proxy port" \
+		http_tokens client-nocapture "$LOOPBACK_URL" "$(mesh_name "$LATE_NAME"):$LATE_SERVICE_PORT"
+	proxied "$LATE_MARKER" client "$(mesh_name "$LATE_NAME"):$LATE_SERVICE_PORT" "the same through the proxy port from the captured client"
+
+	kc -n "$TEST_NS" delete deploy "$LATE_NAME" --ignore-not-found --wait=true >/dev/null 2>&1 || true
+	kc -n "$TEST_NS" delete service "$LATE_NAME" --ignore-not-found --wait=true >/dev/null 2>&1 || true
+}
+
+# u2_slice SUFFIX PORT — an EndpointSlice of $LATE_SLICED, written by hand,
+# that gives its port name "http" the number PORT.
+u2_slice() {
+	kc apply -f - >/dev/null <<YAML || die "U2: EndpointSlice $LATE_SLICED-$1 apply failed"
+apiVersion: discovery.k8s.io/v1
+kind: EndpointSlice
+metadata:
+  name: $LATE_SLICED-$1
+  namespace: $TEST_NS
+  labels: {kubernetes.io/service-name: $LATE_SLICED}
+addressType: IPv4
+ports: [{name: http, port: $2, protocol: TCP}]
+endpoints: [{addresses: ["10.250.0.9"]}]
+YAML
 }
 
 # --- a port that stops being HTTP is refused at once ----------------------------
@@ -2342,8 +2684,13 @@ leg_S1() {
 	expect "client-nocapture, http://$name:$MESH_HTTP_PORT/ and nothing else" "HTTP421:port-not-declared" "$A_TIMEOUT" "$A_PROBES" \
 		"'$(marker mp-multi "$(wl_legacy_port mp-multi)")' is :$MESH_HTTP_PORT read as 'the port the pods declare', which it meant until chart 3.0.0" \
 		http_tokens client-nocapture "http://$name:$MESH_HTTP_PORT/" ""
-	hist="$(http_tokens client-nocapture "http://$name:$HTTP_PORT/" "" 3 | sort | uniq -c | awk '{printf "%s=%s ", $2, $1}')"
-	note "S1-OBSERVED client-nocapture, a dial to the service's own port, http://$name:$HTTP_PORT/ (not captured): $hist"
+	# The documented limit (runbook, "Prober chart 1.1.0"): a dial to a
+	# service's OWN port from a pod that is not on redirect-all is not
+	# diverted, and nothing answers it. Asserted, so that the day it is
+	# diverted the documentation is found wrong here.
+	expect "client-nocapture, a dial to the service's own port, http://$name:$HTTP_PORT/" "NOREPLY" "$A_TIMEOUT" 3 \
+		"an answer means scoped capture diverts a service's own port now: the limit the runbook states for the prober's mesh_dns tier, the authz canary and the udsecho client is gone" \
+		http_tokens client-nocapture "http://$name:$HTTP_PORT/" ""
 }
 
 # P4 — a service's HTTP filters and route rules are applied on every path to

@@ -159,9 +159,10 @@ func TestPerPort_ImportedRuleTakesEveryPort(t *testing.T) {
 // both paths, and is never delivered to another port. Until chart 3.0.0 the
 // mesh HTTP port and an undeclared 80 meant "the port the pods declare", and
 // an unresolvable port fell back to the backend's default cluster: a request
-// was answered by a port the route never named. A NAMED targetPort is the one
-// case that cannot be refuted (the registry carries no port names) and keeps
-// the backend's default cluster.
+// was answered by a port the route never named. A NAMED targetPort that has
+// not resolved to a pod port was the one case left that did (the backend's
+// default cluster); by the owner's ruling of 2026-10-13 it is invalid like
+// the others until it resolves.
 func TestPerPort_InvalidBackendRefAnswers500(t *testing.T) {
 	ctx := context.Background()
 	services := a043Fixture()
@@ -182,7 +183,8 @@ func TestPerPort_InvalidBackendRefAnswers500(t *testing.T) {
 		"user Service: no such port, though pods serve it":  {"demo/multi", map[uint32]uint32{80: 9090}, 8080, 500, ""},
 		"user Service: 18081":                               {"demo/multi", map[uint32]uint32{80: 9090}, 18081, 500, ""},
 		"user Service: a targetPort the pods do not serve":  {"demo/multi", map[uint32]uint32{443: 8443}, 443, 500, ""},
-		"user Service: a named targetPort":                  {"demo/multi", map[uint32]uint32{9090: 0}, 9090, 0, multi},
+		"user Service: a named targetPort, not resolved":    {"demo/multi", map[uint32]uint32{9090: 0}, 9090, 500, ""},
+		"user Service: a named targetPort, resolved":        {"demo/multi", map[uint32]uint32{9090: 9090}, 9090, 0, multi + ":9090"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			c := a043Cache(t, services)

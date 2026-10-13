@@ -2,6 +2,7 @@ package registrytest
 
 import (
 	"fmt"
+	"slices"
 	"strings"
 	"testing"
 
@@ -38,7 +39,15 @@ type (
 	listings = map[registryv1.Service_Protocol]map[string][]*registryv1.ServiceEndpoint
 )
 
+// row is one registry row. With no served list it lists what its map names,
+// as a writer does; a case about a list and a map that differ gives both.
 func row(ip string, port uint32, served []uint32, portProtocols classes) *registryv1.ServiceEndpoint {
+	if served == nil {
+		for p := range portProtocols {
+			served = append(served, p)
+		}
+		slices.Sort(served)
+	}
 	return &registryv1.ServiceEndpoint{Ip: ip, ClusterName: "c", Port: port, Ports: served, PortProtocols: portProtocols}
 }
 

@@ -1,6 +1,6 @@
 package gamma
 
-// Third adversarial pass on the proposal-043 stack: review test, uncommitted.
+// Third adversarial pass on the proposal-043 stack: tests adopted from the review.
 
 import (
 	"testing"
@@ -24,7 +24,7 @@ func TestStatus_GeneratedServiceWithoutRealPortsIsNotJudged(t *testing.T) {
 	svc := generatedService("multi", nil)
 	svc.Spec.Ports = append(svc.Spec.Ports, corev1.ServicePort{Name: "https", Port: 443, TargetPort: intstr.FromInt32(443)})
 	f := servicePortFacts(svc)
-	require.True(t, f.unknown)
+	require.True(t, f.absent)
 	facts := map[string]portFacts{"ns/multi": f}
 	port := gatewayv1.PortNumber(8080)
 
@@ -36,7 +36,7 @@ func TestStatus_GeneratedServiceWithoutRealPortsIsNotJudged(t *testing.T) {
 	h := "http"
 	svc.Spec.Ports = append(svc.Spec.Ports, corev1.ServicePort{Name: "p9090-tcp", Port: 9090, AppProtocol: &h})
 	facts["ns/multi"] = servicePortFacts(svc)
-	require.False(t, facts["ns/multi"].unknown)
+	require.False(t, facts["ns/multi"].absent)
 	ok, _, _ = backendPortProblem(facts, "ns", []gatewayv1.BackendObjectReference{{Name: "multi", Port: &port}})
 	assert.False(t, ok, "8080 is not a port of a Service that carries its real ports")
 }
@@ -55,8 +55,10 @@ func TestStatus_UserServicePortIsNamedAsUnchecked(t *testing.T) {
 	ok, reason, msg := resolveRefs(facts, "ns", "HTTPRoute", []gatewayv1.BackendObjectReference{{Name: "db", Port: &port}}, nil)
 	assert.True(t, ok)
 	assert.Equal(t, string(gatewayv1.RouteReasonResolvedRefs), reason)
-	assert.Contains(t, msg, "Not checked here: whether the pods serve ns/db:5432 as HTTP")
-	assert.Contains(t, msg, "is answered 500")
+	// (No pod of ns/db is known here: with one, the port is judged by what
+	// the pods declare. TestStatus_UserServicePortIsJudgedByWhatItsPodsDeclare.)
+	assert.Contains(t, msg, "Not checked: whether the pods serve ns/db:5432 as HTTP")
+	assert.Contains(t, msg, "turns False, and they are answered 500, once registered pods declare the port raw TCP or do not declare it")
 
 	// A generated Service's port IS checked, and says so.
 	gen := gatewayv1.PortNumber(8080)

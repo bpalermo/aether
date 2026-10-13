@@ -64,7 +64,7 @@ make actionlint    # GitHub Actions workflows (pinned actionlint + ShellCheck)
 - `agent/internal/gatewaystatus` — Gateway API status writers scoped to aether's `controllerName`.
 - `cni/internal/plugin` — the chained CNI plugin, including the TPROXY capture divert (proposal 038) and the mesh-DNS `:53` DNAT.
 
-**Ports:** 18001 per-pod TCP capture (TPROXY target), 18008 inbound TCP + UDP/QUIC, 18009 east/west waypoint, 18021 edge readiness, 18054 host mesh-DNS, 18081 per-pod outbound HTTP, 18082 L4 TCP + UDP (`common/constants/mesh`, `agent/internal/xds/proxy`).
+**Ports:** 18001 per-pod TCP capture (TPROXY target), 18008 inbound TCP + UDP/QUIC, 18009 east/west waypoint, 18021 edge readiness, 18054 host mesh-DNS, 18081 the HTTP proxy port (the per-pod outbound HTTP listener; a port of no service), 18082 L4 TCP + UDP (`common/constants/mesh`, `agent/internal/xds/proxy`).
 
 **Carried Envoy patches:** `proxy/bazel/patches/` (applied by `proxy/MODULE.bazel`; each one listed in `proxy/README.md`).
 
@@ -197,6 +197,14 @@ assume this section has been read.
   and never without having been deprecated in a published chart first. This
   covers flags, chart values, metrics and their labels, wire and file formats,
   and any tolerance one component keeps for an older peer.
+- The one exception is a **major version** of the `aether` chart, and only by
+  the owner's decision: it may remove or change such a thing without a
+  deprecation in a published chart (chart 3.0.0 did, proposal 043). Its
+  runbook section is then the announcement: every removal headed BREAKING,
+  with what breaks, how to find what depends on it on the previous chart, and
+  what the mixed cluster does during the roll, measured, or a statement of
+  exactly which mix was not measured. The adjacent-minor skew below is not
+  promised across a major version.
 - Skew to design and test for: components of two adjacent chart minors in one
   cluster, in both directions (a roll is not atomic, and a rollback is a roll).
   A flag the chart passes must be accepted, or ignored harmlessly, by the

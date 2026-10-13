@@ -2,8 +2,12 @@ package gamma
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"testing"
+
+	registryv1 "aethermesh.dev/api/aether/registry/v1"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	"aethermesh.dev/agent/internal/xds/proxy"
 	aetherlabels "aethermesh.dev/common/constants/labels"
@@ -286,6 +290,137 @@ func TestReconcile_NamedTargetPortResolvesThroughEndpointSlices(t *testing.T) {
 	// Without a reader nothing is resolved, and nothing fails.
 	sink = reconcileObjects(t, objs...)
 	assert.Equal(t, map[uint32]uint32{80: 0, 81: 0}, sink.portMaps["ns/echo"])
+}
+
+// TestReconcile_AnUnresolvedNamedTargetPortIsRefusedUntilItResolves: the
+// owner's ruling of 2026-10-13. A Service is created before its pods: its
+// port's targetPort is a name, and no EndpointSlice says which number that
+// is. A route that names the port, as a backendRef or as its parentRef, is
+// NOT served by the port the pods declare, as it was: the cache is handed the
+// port unresolved (0), which it refuses (500 for the backendRef, the rule
+// attached to nothing; the cache's own tests), and the status says False with
+// the Service, the port and the name. When the slice appears the same
+// reconcile, run for the slice's event, resolves it: the port map carries the
+// number and the status says True. A slice that is deleted again un-resolves
+// it.
+func TestReconcile_AnUnresolvedNamedTargetPortIsRefusedUntilItResolves(t *testing.T) {
+	ctx := context.Background()
+	web := userService("ns", "web", corev1.ServicePort{Name: "http", Port: 80, TargetPort: intstr.FromString("http-port")})
+	hr := httpRoute("r1", "ns", "web", "web")
+	hr.Spec.ParentRefs[0].Port = ptr(gatewayv1.PortNumber(80))
+	hr.Spec.Rules[0].BackendRefs[0].Port = ptr(gatewayv1.PortNumber(80))
+	sink := &fakeSink{}
+	c := fake.NewClientBuilder().WithScheme(newScheme(t)).WithObjects(hr, web).
+		WithStatusSubresource(&gatewayv1.HTTPRoute{}).Build()
+	r := &Reconciler{
+		Client: c, APIReader: c, Sink: sink, MeshDomain: "mesh", Log: slog.New(slog.DiscardHandler), grpcRouteEnabled: true, referenceGrantEnabled: true,
+		// The node holds the pods, which declare 8080 as HTTP: what the old
+		// fallback delivered to. It decides nothing while the name does not
+		// resolve.
+		PodPorts: podsOf("web", map[uint32]registryv1.PortProtocol{8080: ppHTTP}),
+	}
+	run := func() {
+		t.Helper()
+		_, err := r.Reconcile(ctx, reconcile.Request{})
+		require.NoError(t, err)
+	}
+	slice := func(name string, port int32) *discoveryv1.EndpointSlice {
+		return &discoveryv1.EndpointSlice{
+			ObjectMeta:  metav1.ObjectMeta{Name: name, Namespace: "ns", Labels: map[string]string{discoveryv1.LabelServiceName: "web"}},
+			AddressType: discoveryv1.AddressTypeIPv4,
+			Ports:       []discoveryv1.EndpointPort{{Name: ptr("http"), Port: ptr(port)}},
+		}
+	}
+
+	run()
+	assert.Equal(t, map[uint32]uint32{80: 0}, sink.portMaps["ns/web"], "the port is handed to the cache unresolved, which it refuses")
+	resolved := statusOf(t, c, gatewayv1.RouteConditionResolvedRefs)
+	assert.Equal(t, metav1.ConditionFalse, resolved.Status)
+	assert.Equal(t, string(gatewayv1.RouteReasonBackendNotFound), resolved.Reason)
+	assert.Equal(t, `backendRef ns/web: port 80 of the Service has the named targetPort "http-port", which no EndpointSlice of the Service resolves yet; requests for this backendRef are answered 500 until it resolves`, resolved.Message)
+	accepted := statusOf(t, c, gatewayv1.RouteConditionAccepted)
+	assert.Equal(t, metav1.ConditionFalse, accepted.Status)
+	assert.Equal(t, string(gatewayv1.RouteReasonNoMatchingParent), accepted.Reason)
+	assert.Equal(t, `port 80 of Service ns/web has the named targetPort "http-port", which no EndpointSlice of the Service resolves yet; the route is attached to nothing until it resolves`, accepted.Message)
+	assert.NotContains(t, resolved.Message, "Not checked")
+	assert.Empty(t, judgedOf(t, c), "nothing was judged by the pods: there is no pod port to judge")
+	// The Service is one whose slices the reconciler reconciles for.
+	r.namedMu.Lock()
+	assert.Equal(t, map[string]struct{}{"ns/web": {}}, r.namedTargets)
+	r.namedMu.Unlock()
+
+	// The pods arrive: the slice names the port.
+	require.NoError(t, c.Create(ctx, slice("web-1", 8080)))
+	run()
+	assert.Equal(t, map[uint32]uint32{80: 8080}, sink.portMaps["ns/web"])
+	assert.Equal(t, metav1.ConditionTrue, statusOf(t, c, gatewayv1.RouteConditionResolvedRefs).Status)
+	assert.Equal(t, metav1.ConditionTrue, statusOf(t, c, gatewayv1.RouteConditionAccepted).Status)
+	assert.Equal(t, "ns/web:80>8080=http", judgedOf(t, c), "and from here the port is judged by what the pods declare, like any other")
+
+	// A second slice that gives the name another number: refused again, and
+	// the status says the slices disagree.
+	require.NoError(t, c.Create(ctx, slice("web-2", 9090)))
+	run()
+	assert.Equal(t, map[uint32]uint32{80: 0}, sink.portMaps["ns/web"], "slices that disagree were resolved to one of their numbers")
+	resolved = statusOf(t, c, gatewayv1.RouteConditionResolvedRefs)
+	assert.Equal(t, metav1.ConditionFalse, resolved.Status)
+	assert.Contains(t, resolved.Message, "which the Service's EndpointSlices resolve to different ports (8080, 9090)")
+	assert.Contains(t, statusOf(t, c, gatewayv1.RouteConditionAccepted).Message, "resolve to different ports (8080, 9090)")
+
+	// Both go (the Service is scaled to nothing): unresolved again.
+	require.NoError(t, c.Delete(ctx, slice("web-1", 8080)))
+	require.NoError(t, c.Delete(ctx, slice("web-2", 9090)))
+	run()
+	assert.Equal(t, map[uint32]uint32{80: 0}, sink.portMaps["ns/web"], "a resolution was kept after the slices that gave it were gone")
+	assert.Contains(t, statusOf(t, c, gatewayv1.RouteConditionResolvedRefs).Message, "no EndpointSlice of the Service resolves yet")
+}
+
+// TestReconcile_ASliceReadErrorRefusesAndIsRetried: the slices cannot be read
+// (the API server is restarting, the agent's role lacks the verb). The name is
+// not resolved, so the port is refused, and the reconcile returns the error so
+// that it is run again. A resolution from an earlier reconcile is not kept:
+// nothing shows it is still true.
+func TestReconcile_ASliceReadErrorRefusesAndIsRetried(t *testing.T) {
+	ctx := context.Background()
+	web := userService("ns", "web", corev1.ServicePort{Name: "http", Port: 80, TargetPort: intstr.FromString("http-port")})
+	hr := httpRoute("r1", "ns", "web", "web")
+	hr.Spec.Rules[0].BackendRefs[0].Port = ptr(gatewayv1.PortNumber(80))
+	sl := &discoveryv1.EndpointSlice{
+		ObjectMeta:  metav1.ObjectMeta{Name: "web-1", Namespace: "ns", Labels: map[string]string{discoveryv1.LabelServiceName: "web"}},
+		AddressType: discoveryv1.AddressTypeIPv4,
+		Ports:       []discoveryv1.EndpointPort{{Name: ptr("http"), Port: ptr(int32(8080))}},
+	}
+	fail := false
+	c := fake.NewClientBuilder().WithScheme(newScheme(t)).WithObjects(hr, web, sl).
+		WithStatusSubresource(&gatewayv1.HTTPRoute{}).
+		WithInterceptorFuncs(interceptor.Funcs{List: func(ctx context.Context, cl client.WithWatch, list client.ObjectList, opts ...client.ListOption) error {
+			if _, slices := list.(*discoveryv1.EndpointSliceList); slices && fail {
+				return errors.New("endpointslices.discovery.k8s.io is forbidden")
+			}
+			return cl.List(ctx, list, opts...)
+		}}).Build()
+	sink := &fakeSink{}
+	r := &Reconciler{Client: c, APIReader: c, Sink: sink, MeshDomain: "mesh", Log: slog.New(slog.DiscardHandler), grpcRouteEnabled: true, referenceGrantEnabled: true}
+	_, err := r.Reconcile(ctx, reconcile.Request{})
+	require.NoError(t, err)
+	require.Equal(t, map[uint32]uint32{80: 8080}, sink.portMaps["ns/web"], "control: the name resolves")
+	require.Equal(t, metav1.ConditionTrue, statusOf(t, c, gatewayv1.RouteConditionResolvedRefs).Status)
+
+	fail = true
+	_, err = r.Reconcile(ctx, reconcile.Request{})
+	require.Error(t, err, "the slices could not be read and the reconcile asks for no retry")
+	assert.ErrorContains(t, err, "read the EndpointSlices of Service ns/web")
+	assert.ErrorContains(t, err, "forbidden")
+	assert.Equal(t, map[uint32]uint32{80: 0}, sink.portMaps["ns/web"], "the resolution of the reconcile before was kept")
+	resolved := statusOf(t, c, gatewayv1.RouteConditionResolvedRefs)
+	assert.Equal(t, metav1.ConditionFalse, resolved.Status, "the port is refused and the status still says True")
+	assert.Contains(t, resolved.Message, `has the named targetPort "http-port", which could not be read from the Service's EndpointSlices`)
+
+	fail = false
+	_, err = r.Reconcile(ctx, reconcile.Request{})
+	require.NoError(t, err)
+	assert.Equal(t, map[uint32]uint32{80: 8080}, sink.portMaps["ns/web"])
+	assert.Equal(t, metav1.ConditionTrue, statusOf(t, c, gatewayv1.RouteConditionResolvedRefs).Status)
 }
 
 // TestServicePortsChanged: a Service update re-projects the routes only when

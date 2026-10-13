@@ -1,7 +1,9 @@
 package gatewaystatus
 
 import (
+	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -121,4 +123,78 @@ func TestMergeConditions_TransitionOnPreExisting(t *testing.T) {
 		Message: "GatewayClass accepted by the aether edge controller",
 	})
 	assert.True(t, changed2, "reason change on a pre-existing condition must report changed")
+}
+
+// TestRemoveRouteParentCondition: only the named condition of the controller's
+// own entry for that parentRef goes; nothing else is touched, and removing
+// what is not there is not a change.
+func TestRemoveRouteParentCondition(t *testing.T) {
+	ref := func(name string) gatewayv1.ParentReference {
+		return gatewayv1.ParentReference{Name: gatewayv1.ObjectName(name)}
+	}
+	conds := func() []metav1.Condition {
+		return []metav1.Condition{{Type: "Accepted", Status: metav1.ConditionTrue}, {Type: "example.com/Extra", Status: metav1.ConditionTrue}}
+	}
+	parents := []gatewayv1.RouteParentStatus{
+		{ParentRef: ref("a"), ControllerName: "example.com/other", Conditions: conds()},
+		{ParentRef: ref("a"), ControllerName: MeshControllerName, Conditions: conds()},
+		{ParentRef: ref("b"), ControllerName: MeshControllerName, Conditions: conds()},
+	}
+
+	got, changed := RemoveRouteParentCondition(parents, MeshControllerName, ref("a"), "example.com/Extra")
+	if !changed {
+		t.Fatal("removing a condition that is there is a change")
+	}
+	if len(parents[1].Conditions) != 2 {
+		t.Fatal("the input was modified")
+	}
+	if len(got[1].Conditions) != 1 || got[1].Conditions[0].Type != "Accepted" {
+		t.Fatalf("our entry for a: %+v", got[1].Conditions)
+	}
+	if len(got[0].Conditions) != 2 || len(got[2].Conditions) != 2 {
+		t.Fatalf("another controller's entry or another parentRef's was touched: %+v", got)
+	}
+
+	if _, changed := RemoveRouteParentCondition(got, MeshControllerName, ref("a"), "example.com/Extra"); changed {
+		t.Fatal("removing a condition that is not there is not a change")
+	}
+	if _, changed := RemoveRouteParentCondition(parents, MeshControllerName, ref("c"), "Accepted"); changed {
+		t.Fatal("no entry for that parentRef: not a change")
+	}
+}
+
+// TestClampMessage: a condition message longer than the API server accepts
+// fails the whole status update, every condition of the route with it. It is
+// cut, at a character boundary, and says so; a message that fits is untouched.
+func TestClampMessage(t *testing.T) {
+	short := strings.Repeat("a", MaxConditionMessage)
+	if ClampMessage(short) != short {
+		t.Fatal("a message of exactly the cap was changed")
+	}
+	if got := ClampMessage(short + "a"); len(got) > MaxConditionMessage || !strings.HasSuffix(got, " ... (truncated)") {
+		t.Fatalf("a message one character over the cap came out %d characters long, ending %q", len(got), got[len(got)-20:])
+	}
+	long := strings.Repeat("€", MaxConditionMessage) // three bytes each: the cut does not fall on a boundary
+	got := ClampMessage(long)
+	if len(got) > MaxConditionMessage {
+		t.Fatalf("clamped to %d bytes, the cap is %d", len(got), MaxConditionMessage)
+	}
+	if !utf8.ValidString(got) {
+		t.Fatal("cut inside a character")
+	}
+	if !strings.HasSuffix(got, " ... (truncated)") || !strings.HasPrefix(got, "€€") {
+		t.Fatalf("clamped message is %q...%q", got[:8], got[len(got)-20:])
+	}
+
+	// The merge is where every route status is written from.
+	parents, changed := MergeRouteParentStatus(nil, MeshControllerName, gatewayParentRef("gw"), 1,
+		Condition{Type: "ResolvedRefs", Status: metav1.ConditionTrue, Reason: "ResolvedRefs", Message: long})
+	if !changed || len(parents[0].Conditions[0].Message) > MaxConditionMessage {
+		t.Fatalf("the merge wrote a message of %d bytes", len(parents[0].Conditions[0].Message))
+	}
+	// And it is stable: the same too-long message again is not a change.
+	if _, changed := MergeRouteParentStatus(parents, MeshControllerName, gatewayParentRef("gw"), 1,
+		Condition{Type: "ResolvedRefs", Status: metav1.ConditionTrue, Reason: "ResolvedRefs", Message: long}); changed {
+		t.Fatal("the same message, clamped the same, was written again")
+	}
 }

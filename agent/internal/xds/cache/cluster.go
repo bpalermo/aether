@@ -365,6 +365,19 @@ func (c *SnapshotCache) LoadClustersFromRegistry(ctx context.Context, clusterNam
 	// below, because a GAMMA backendRef of one service resolves to a port of
 	// ANOTHER service.
 	ports := deriveAllServicePorts(serviceEndpoints, tcpServiceEndpoints, udpServiceEndpoints)
+	// Scoped to the dependency set, as the cluster entries are. A listing is
+	// not always scoped (the registry client answers from an RPC of the whole
+	// mesh while its watch is not ready, and a registry need not scope at
+	// all). Ports derived for a service the node builds no entry of made it
+	// "held" with nothing to hold: every builder of the loopback table that
+	// asks "are its ports known" stood aside for one that asks "has it an
+	// entry", and when a filter or a route then made the service a
+	// dependency, its authority fell to the catch-all until the next refresh.
+	for svc := range ports {
+		if _, inScope := deps[svc]; !inScope {
+			delete(ports, svc)
+		}
+	}
 	listed := make(map[string]struct{}, len(ports))
 	for svc := range ports {
 		listed[svc] = struct{}{}
@@ -391,6 +404,8 @@ func (c *SnapshotCache) LoadClustersFromRegistry(ctx context.Context, clusterNam
 		}
 	}
 	c.servicePorts = ports
+	// The ports the passes below judge every rule by.
+	builtWith := maps.Clone(ports)
 	// Rebuild the cluster set so this method is idempotent and safe to call
 	// repeatedly (on registry changes, not just at startup). Services that
 	// disappeared from the listing are NOT dropped immediately: pod churn can
@@ -414,13 +429,27 @@ func (c *SnapshotCache) LoadClustersFromRegistry(ctx context.Context, clusterNam
 	c.buildUDPClustersLocked(ctx, deps, udpServiceEndpoints, in, prev, reuse)
 	c.commitRegistryReuseLocked(reuse)
 	c.retainAbsentClustersLocked(ctx, prev, deps, retentionEvidence{listed: listed, declared: declared})
-	// Every virtual host built or refreshed above came from the rule inputs
-	// read at loadRuleGen. If a newer generation exists (an event landed while
-	// the listings were being read), the next snapshot build must rebuild
-	// them: say which generation they are at, never leave a newer one standing.
-	c.vhostRuleGen = loadRuleGen
 	c.pruneServicePortsLocked(listed)
 	c.noteServicePortsLocked(prevPorts)
+	// Say what the virtual hosts built above were built from, on the entries
+	// that were built and on no other (stampBuiltVhostsLocked). The rule
+	// inputs were read at loadRuleGen: if a newer generation exists (an event
+	// landed while the listings were being read) the stamp is already old and
+	// the next snapshot build rebuilds them.
+	//
+	// The ports are those of this refresh only when it forgot none after
+	// building. It forgets, after the passes, the ports of a service whose
+	// grace ran out and of one reset to its generated Service; a rule of
+	// ANOTHER service whose backendRef names it was judged by them, and the
+	// loopback table answered 500 where the capture tables of the same
+	// snapshot and a node that starts now route the reference, or routed it
+	// to the bare cluster where they answer 500. Those virtual hosts get no
+	// stamp at all, and the next snapshot build rebuilds them.
+	stamp := vhostStamp{}
+	if maps.EqualFunc(builtWith, c.servicePorts, sameServicePorts) {
+		stamp = vhostStamp{rules: loadRuleGen, ports: c.servicePortsGen, built: true}
+	}
+	c.stampBuiltVhostsLocked(stamp)
 	conflicts := c.servicePortConflictsLocked()
 	derived := make(map[string]servicePorts, len(c.servicePorts))
 	for svc, p := range c.servicePorts {
@@ -586,25 +615,106 @@ func (c *SnapshotCache) refreshReusedVhostsLocked(names []string, serviceName st
 // decision.
 func (c *SnapshotCache) refreshEntryVhosts(ruleGen uint64, rules ruleInputs) {
 	c.clusterMu.RLock()
-	current := c.vhostRuleGen == ruleGen
+	current := c.vhostsBuiltAtLocked(vhostStamp{rules: ruleGen, ports: c.servicePortsGen, built: true})
 	c.clusterMu.RUnlock()
 	if current {
 		return
 	}
 	c.clusterMu.Lock()
 	defer c.clusterMu.Unlock()
-	if c.vhostRuleGen == ruleGen {
+	want := vhostStamp{rules: ruleGen, ports: c.servicePortsGen, built: true}
+	if c.vhostsBuiltAtLocked(want) {
 		return
 	}
 	rules.ports = effectivePorts(c.servicePorts, rules.declared)
+	// The entries built from a live listing first, then the retained ones,
+	// which give way again to the authorities a live entry claims
+	// (yieldClaimedDomains, as in the refresh that retained them). Rebuilt
+	// like any other, a retained default entry got back every authority it
+	// had yielded: for the one snapshot between a rule event and the next
+	// refresh, "<fqdn>:<port>" and the port-less name were routed to the
+	// retained cluster, whose endpoints by then are another entry's.
+	var retained []string
+	claimed := make(map[string]string, 2*len(c.clusters))
 	for name, e := range c.clusters {
 		if e.vhost == nil || e.l4Floor {
 			continue
 		}
+		if !e.absentSince.IsZero() {
+			retained = append(retained, name)
+			continue
+		}
 		e.vhost = c.outboundPortVhostLocked(e.service, name, primaryPortOf(e), name == e.service, rules)
+		e.vhostAt = want
+		c.clusters[name] = e
+		for _, d := range e.vhost.GetDomains() {
+			claimed[d] = e.service
+		}
+	}
+	slices.Sort(retained)
+	for _, name := range retained {
+		e := c.clusters[name]
+		e.vhost = c.outboundPortVhostLocked(e.service, name, primaryPortOf(e), name == e.service, rules)
+		e.vhostAt = want
+		c.clusters[name] = c.yieldClaimedDomains(context.Background(), claimed, name, e)
+	}
+}
+
+// vhostStamp names the inputs a cluster entry's loopback virtual host was
+// built from: the generation of the rule inputs (ruleGen: the rules, the
+// service-wide filters, the port maps, what the generated Services declare)
+// and the generation of the ports derived from the registry rows
+// (servicePortsGen), by which every rule's backendRef is judged. built is
+// false for a virtual host nothing vouches for; such a stamp equals no stamp
+// a snapshot build asks for.
+//
+// It is per ENTRY because not every entry is rebuilt by every refresh. A
+// registry refresh rebuilds the virtual hosts of the services it lists and
+// carries a retained entry over as it was. While there was one generation for
+// the whole cache, the refresh set it and thereby vouched for the retained
+// entries too: a filter or a route attached while the refresh ran, a port map
+// that changed and a backend whose ports changed never reached a retained
+// entry's virtual host, for as long as it was retained (a service-wide filter
+// skipped on the loopback listener and the proxy port; a backendRef still
+// delivered to a target the Service no longer names). A stamp can only be
+// written next to the build it describes, so "marked current without being
+// rebuilt" is not something the code can say.
+type vhostStamp struct {
+	rules uint64
+	ports uint64
+	built bool
+}
+
+// sameServicePorts reports whether two derivations of a service's ports are
+// the same, the disagreements among its pods included.
+func sameServicePorts(a, b servicePorts) bool {
+	return a.equal(b) && slices.Equal(a.conflicts, b.conflicts)
+}
+
+// stampBuiltVhostsLocked records stamp on the entries whose virtual host the
+// registry refresh that is running built: the ones of a service it listed. A
+// retained entry (absentSince set) was carried over from an earlier refresh
+// with the virtual host it had, and keeps the stamp it had. Caller must hold
+// clusterMu, after the retention step.
+func (c *SnapshotCache) stampBuiltVhostsLocked(stamp vhostStamp) {
+	for name, e := range c.clusters {
+		if e.vhost == nil || !e.absentSince.IsZero() {
+			continue
+		}
+		e.vhostAt = stamp
 		c.clusters[name] = e
 	}
-	c.vhostRuleGen = ruleGen
+}
+
+// vhostsBuiltAtLocked reports whether every loopback virtual host the cache
+// publishes was built from the inputs want names. Caller must hold clusterMu.
+func (c *SnapshotCache) vhostsBuiltAtLocked(want vhostStamp) bool {
+	for _, e := range c.clusters {
+		if e.vhost != nil && !e.l4Floor && e.vhostAt != want {
+			return false
+		}
+	}
+	return true
 }
 
 // buildHTTPServiceEntryLocked builds the cluster entries for one service in the
@@ -1323,10 +1433,8 @@ func (c *SnapshotCache) retainAbsentClustersLocked(ctx context.Context, prev map
 	claimed := c.claimedVhostDomainsLocked()
 	now := time.Now()
 	replaced := map[string]struct{}{}
-	defer func() {
-		c.forgetReplacedHTTPPortsLocked(replaced, evidence)
-		c.rehomeBareLoadAssignmentLocked(replaced)
-	}()
+	reset := c.resetByServiceLocked(prev, deps, evidence)
+	defer func() { c.rehomeBareLoadAssignmentLocked(replaced) }()
 	for name, entry := range prev {
 		if _, present := c.clusters[name]; present {
 			continue
@@ -1336,6 +1444,13 @@ func (c *SnapshotCache) retainAbsentClustersLocked(ctx context.Context, prev map
 		// per-port clusters are retained/dropped together.
 		if _, inScope := deps[entry.service]; !inScope {
 			c.log.InfoContext(ctx, "service left dependency set; dropping cluster/vhost (cold path takes over)", "cluster", name, "service", entry.service)
+			continue
+		}
+		// A service its generated Service replaced a port of keeps nothing
+		// the node remembered: see resetByServiceLocked.
+		if _, ok := reset[entry.service]; ok {
+			c.log.InfoContext(ctx, "cluster/vhost not retained: the service is now what its generated Service declares",
+				"cluster", name, "service", entry.service)
 			continue
 		}
 		// A REPLACEMENT is not retained: see retentionEvidence.
@@ -1436,35 +1551,59 @@ func (e retentionEvidence) replacedBy(ports map[string]servicePorts, entry clust
 	return ""
 }
 
-// forgetReplacedHTTPPortsLocked takes the HTTP ports the generated Service no
-// longer declares out of what is remembered of a service no row is listed of
-// (servicePorts keeps the last derivation for as long as an entry is
-// retained). The tables are built from it: left alone, a port whose entry was
-// just replaced would still be routed, to a cluster that is gone. A listed
-// service needs nothing: its ports were derived from its rows in this
-// refresh. Caller must hold clusterMu.
-func (c *SnapshotCache) forgetReplacedHTTPPortsLocked(replaced map[string]struct{}, evidence retentionEvidence) {
-	for svc := range replaced {
-		if _, ok := evidence.listed[svc]; ok {
+// resetByServiceLocked returns the services that are, from this refresh on,
+// exactly what their generated Service says and nothing the node remembers:
+// no row of them is listed, their Service declares ports, and those ports are
+// not the ones last derived from the service's rows. Caller must hold
+// clusterMu.
+//
+// "Not the same ports", and not only "a retained HTTP port is gone": a port
+// the Service GAINS while the node retains the others (the pod came back
+// elsewhere with one more port, and this node has not been handed its row) was
+// refused for the length of the grace, as no port of what was remembered,
+// where a node that starts in that state routes it. With the same ports the
+// service is a removal, and its entries keep their grace: a single-replica
+// restart is exactly this until the Service loses its ports too.
+//
+// Such a service keeps NO retained entry, of any class, and with its last
+// entry goes what was derived from its last rows (pruneServicePortsLocked,
+// which runs after the retention step): it becomes what it is to a node that
+// starts now, a
+// service known by its declared ports, routed and refused by them
+// (outboundDeclaredVhostsLocked). A mix of the two did not hold together.
+// Keeping the last derivation minus the replaced ports left a port the
+// Service newly declares refused (it was no port of what was remembered),
+// where a node that started in that state routes it; and dropping the
+// derivation while a retained raw-TCP floor entry stayed left the service
+// with no virtual host at all, so a request to it fell to the catch-all's
+// on-demand route, without its service-wide filter and without its routes.
+// One state, the same on every node: what the evidence says.
+func (c *SnapshotCache) resetByServiceLocked(prev map[string]clusterEntry, deps map[string]struct{}, evidence retentionEvidence) map[string]struct{} {
+	reset := map[string]struct{}{}
+	for name, entry := range prev {
+		if _, present := c.clusters[name]; present {
 			continue
 		}
-		last, declared := c.servicePorts[svc], evidence.declared[svc]
-		kept := make([]uint32, 0, len(last.http))
-		for _, port := range last.http {
-			if declared.hasHTTP(port) {
-				kept = append(kept, port)
-			}
+		if _, inScope := deps[entry.service]; !inScope {
+			continue
 		}
-		last.http = kept
-		if last.legacyClass == registryv1.PortProtocol_PORT_PROTOCOL_HTTP && !declared.hasHTTP(last.legacyPort) {
-			last.legacyPort, last.legacyClass = 0, registryv1.PortProtocol_PORT_PROTOCOL_UNSPECIFIED
+		if _, listed := evidence.listed[entry.service]; listed {
+			continue
 		}
-		if last.known() {
-			c.servicePorts[svc] = last
-		} else {
-			delete(c.servicePorts, svc)
+		if d, ok := evidence.declared[entry.service]; ok && d.known() && !d.sameDeclaration(c.servicePorts[entry.service]) {
+			reset[entry.service] = struct{}{}
 		}
 	}
+	return reset
+}
+
+// sameDeclaration reports whether what a generated Service declares (d: HTTP
+// ports, and every other port in tcp) is the port set last derived from the
+// service's rows.
+func (d servicePorts) sameDeclaration(last servicePorts) bool {
+	other := append(slices.Clone(last.tcp), last.udp...)
+	slices.Sort(other)
+	return slices.Equal(d.http, last.http) && slices.Equal(d.tcp, slices.Compact(other))
 }
 
 // rehomeBareLoadAssignmentLocked gives the bare-name load assignment of a

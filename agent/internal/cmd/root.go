@@ -73,6 +73,7 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	ctrlcache "sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/event"
 	ctrlmanager "sigs.k8s.io/controller-runtime/pkg/manager"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
@@ -809,7 +810,7 @@ func wireSpireBridge(ctx context.Context, m ctrl.Manager, snapshotCache *cache.S
 // wireReconcilers registers the node agent's CR-driven reconcilers (GAMMA,
 // EndpointPolicy, L4 routes, capture) in a fixed order.
 func wireReconcilers(m ctrl.Manager, snapshotCache *cache.SnapshotCache) error {
-	if err := wireGAMMA(m, snapshotCache); err != nil {
+	if _, err := wireGAMMA(m, snapshotCache); err != nil {
 		return err
 	}
 	if err := wireEndpointPolicies(m, snapshotCache); err != nil {
@@ -824,19 +825,23 @@ func wireReconcilers(m ctrl.Manager, snapshotCache *cache.SnapshotCache) error {
 // wireGAMMA registers the GAMMA east-west L7 routing reconciler when --gamma is set
 // (proposal 018, Phase 2). It installs the required Gateway API and config.aether.io
 // schemes and sets up the reconciler with the manager.
-func wireGAMMA(m ctrl.Manager, snapshotCache *cache.SnapshotCache) error {
+//
+// It returns the reconciler it registered (nil when GAMMA is off), so that a
+// test can hold the registered one, not a copy of how it is built, to what it
+// must be given.
+func wireGAMMA(m ctrl.Manager, snapshotCache gammaCache) (*gamma.Reconciler, error) {
 	if !cfg.Gamma {
-		return nil
+		return nil, nil
 	}
 	// GAMMA east-west L7 routing (proposal 018, Phase 2): watch HTTPRoutes parented
 	// to a Service and enrich the outbound routes. Default off — registers nothing
 	// (and adds no gateway-api watch) unless --gamma is set.
 	if err := gatewayv1.Install(m.GetScheme()); err != nil {
-		return fmt.Errorf("register gateway.networking.k8s.io scheme: %w", err)
+		return nil, fmt.Errorf("register gateway.networking.k8s.io scheme: %w", err)
 	}
 	// ReferenceGrant (v1beta1) gates cross-namespace backendRefs on GAMMA routes.
 	if err := gatewayv1beta1.Install(m.GetScheme()); err != nil {
-		return fmt.Errorf("register gateway.networking.k8s.io/v1beta1 scheme: %w", err)
+		return nil, fmt.Errorf("register gateway.networking.k8s.io/v1beta1 scheme: %w", err)
 	}
 	// HTTPFilter (config.aether.io, proposal 025): the gamma reconciler watches it
 	// for ExtensionRef/targetRef escape-hatch filters. MUST be in the scheme —
@@ -845,19 +850,54 @@ func wireGAMMA(m ctrl.Manager, snapshotCache *cache.SnapshotCache) error {
 	// gate (#453) does not cover this: it checks the CRD on the API server, not
 	// the client scheme.
 	if err := configapisv1.AddToScheme(m.GetScheme()); err != nil {
-		return fmt.Errorf("register config.aether.io scheme: %w", err)
+		return nil, fmt.Errorf("register config.aether.io scheme: %w", err)
 	}
-	gammaReconciler := &gamma.Reconciler{
-		Client:     m.GetClient(),
-		APIReader:  m.GetAPIReader(),
-		Sink:       snapshotCache,
-		MeshDomain: cfg.MeshDomain,
-		Log:        l,
-	}
+	gammaReconciler := newGammaReconciler(m.GetClient(), m.GetAPIReader(), snapshotCache, cfg.MeshDomain)
 	if err := gammaReconciler.SetupWithManager(m); err != nil {
-		return fmt.Errorf("failed to set up GAMMA reconciler: %w", err)
+		return nil, fmt.Errorf("failed to set up GAMMA reconciler: %w", err)
 	}
-	return nil
+	return gammaReconciler, nil
+}
+
+// gammaCache is what the GAMMA reconciler is given of the snapshot cache.
+type gammaCache interface {
+	gamma.RouteSink
+	gamma.PodPorts
+	OnPodPortsChanged(func())
+}
+
+// newGammaReconciler builds the GAMMA reconciler over the node's snapshot
+// cache. The cache is its sink; it is also what answers, for a route's status,
+// what the pods of a service declare (the class its own tables are built from:
+// no registry read), and what says when that answer changed. The last is the
+// only thing that makes the reconciler judge a status again when no API object
+// changed, so a reconciler built without it leaves "Not checked" for good.
+func newGammaReconciler(cl client.Client, reader client.Reader, c gammaCache, meshDomain string) *gamma.Reconciler {
+	return &gamma.Reconciler{
+		Client:          cl,
+		APIReader:       reader,
+		PodPorts:        c,
+		PodPortsChanged: podPortsEvents(c),
+		Sink:            c,
+		MeshDomain:      meshDomain,
+		Log:             l,
+	}
+}
+
+// podPortsEvents returns a channel that carries an event whenever the cache
+// says what its pods' ports are has changed (OnPodPortsChanged), for the route
+// reconciler to judge every status again. One pending event is enough, since a
+// reconcile judges every route; the cache calls the hook with its lock held,
+// so the send never blocks.
+func podPortsEvents(c interface{ OnPodPortsChanged(func()) }) <-chan event.GenericEvent {
+	events := make(chan event.GenericEvent, 1)
+	c.OnPodPortsChanged(func() {
+		select {
+		case events <- event.GenericEvent{}:
+		default:
+		}
+	})
+	return events
 }
 
 // wireEndpointPolicies registers the EndpointPolicy reconciler, which projects

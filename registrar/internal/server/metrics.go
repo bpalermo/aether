@@ -270,7 +270,7 @@ func (m *Metrics) rowsFiltered(ctx context.Context, byReason map[string]int64) {
 	if m == nil {
 		return
 	}
-	for _, reason := range []string{endpointmeta.RowNoPortProtocols, endpointmeta.RowPortNotTyped} {
+	for _, reason := range endpointmeta.RowProblems {
 		m.rowsUntyped.Record(ctx, byReason[reason], metric.WithAttributes(attribute.String("reason", reason)))
 	}
 }

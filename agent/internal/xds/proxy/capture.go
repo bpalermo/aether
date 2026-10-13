@@ -581,7 +581,7 @@ func BuildCaptureRouteConfiguration(name string, vhosts []*routev3.VirtualHost, 
 	all := make([]*routev3.VirtualHost, 0, 2*len(vhosts)+1)
 	all = append(all, vhosts...)
 	if short != nil {
-		all = append(all, ShortNameVirtualHosts(vhosts, short.MeshDomain, short.Known, short.Floor, catchAll.GetRoutes())...)
+		all = append(all, shortNameVirtualHosts(vhosts, short.MeshDomain, nil, nil, catchAll.GetRoutes(), short.MeshOnly)...)
 	}
 	if catchAll != nil {
 		all = append(all, catchAll)

@@ -211,22 +211,25 @@ func TestRetained_TheGeneratedServiceIsEvidenceWhenNoRowIsHeld(t *testing.T) {
 		got := rrRouted(t, c, 9090)
 		assert.Equal(t, fmt.Sprintf("x.demo.%s:9090", a043Mesh), got.cluster, "the declared port of a service the node holds no endpoint of: its own cluster, fetched on demand")
 	})
-	// Two HTTP ports, no row left, and the Service declares one of them: only
-	// the other is replaced, on every table, and the one still declared keeps
-	// its retained entry. What the node remembers of the service must lose
-	// the replaced port, or the tables built from it would still route it.
-	t.Run("declares one of two HTTP ports: the other is replaced on every table", func(t *testing.T) {
+	// Two HTTP ports, no row left, and the Service declares one of them. The
+	// service is from then on what its Service says and nothing the node
+	// remembered: no entry is kept, of either port, and nothing derived from
+	// its last rows. The port the Service declares is routed as it is on a
+	// node that starts in this state (its own cluster, fetched on demand); the
+	// other is refused, on every table.
+	t.Run("declares one of two HTTP ports: the service is what its Service says", func(t *testing.T) {
 		c, _ := rrFixture(t, map[uint32]registryv1.PortProtocol{8080: rtpH, 9090: rtpH}, 8080)
 		rrLoad(t, c, nil)
 		require.Equal(t, []uint32{8080, 9090}, rrEntries(c), "control: both retained while nothing is known")
 		project(c, []uint32{8080}, nil)
 		rrLoad(t, c, nil)
-		assert.Equal(t, []uint32{8080}, rrEntries(c))
+		assert.Empty(t, rrEntries(c))
 		c.clusterMu.RLock()
-		assert.Equal(t, "8080 (http)", c.servicePorts[rrSvc].describe(), "the replaced port is still remembered as a port of the service")
+		_, remembered := c.servicePorts[rrSvc]
 		c.clusterMu.RUnlock()
+		assert.False(t, remembered, "what was derived from the last rows is still remembered beside the Service's word")
 		tables := a043Tables(t, c)
-		assert.Equal(t, "x.demo."+a043Mesh, a043Resolve(t, tables[proxy.OutboundHTTPRouteName], rrHost(8080)).cluster)
+		assert.Equal(t, fmt.Sprintf("x.demo.%s:8080", a043Mesh), a043Resolve(t, tables[proxy.OutboundHTTPRouteName], rrHost(8080)).cluster)
 		for name, rc := range tables {
 			if name != proxy.OutboundHTTPRouteName && name != "cap_http_9090" && name != "cap_http_other" {
 				continue

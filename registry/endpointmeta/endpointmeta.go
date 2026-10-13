@@ -22,6 +22,7 @@ package endpointmeta
 import (
 	"errors"
 	"fmt"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -299,9 +300,17 @@ const (
 	// from before proposal 037 wrote such rows; none has since.
 	RowNoPortProtocols = "no_port_protocols"
 	// RowPortNotTyped: the row lists a port (port, ports) that its
-	// port_protocols does not name, or names with no class.
+	// port_protocols does not name, or names with no class, or with a class
+	// this build does not know.
 	RowPortNotTyped = "port_not_typed"
+	// RowPortNotListed: the row's port_protocols names a port that neither
+	// its port nor its ports lists.
+	RowPortNotListed = "port_not_listed"
 )
+
+// RowProblems is every value RowProblem returns besides "", in a fixed order:
+// what a metric that counts rows by reason has a series for.
+var RowProblems = []string{RowNoPortProtocols, RowPortNotTyped, RowPortNotListed}
 
 // ErrRowNotTyped is returned by every write of a row RowProblem refuses.
 var ErrRowNotTyped = errors.New("registry row does not say the protocol of each of its ports (port_protocols is required)")
@@ -317,18 +326,37 @@ var ErrRowNotTyped = errors.New("registry row does not say the protocol of each 
 // already stored, and contributes nothing in an agent that receives it
 // anyway, each of them saying so.
 //
-// A typed row names every port it lists, each with a class.
+// A typed row names every port it lists, each with a class, and names no
+// other port.
+//
+//   - A class is one this build knows. PortProtocol is an open enum: a value a
+//     newer writer defines travels through every store and stream as a number,
+//     and "not UNSPECIFIED" took it for a class, of a port nothing then built
+//     anything for.
+//   - The map names no port the lists leave out. Membership of a port's
+//     cluster is read from the lists and the class from the map; a port in the
+//     map alone was a port with a class and no member, dropped by every reader
+//     without a word. No writer produces one (the map and the list are built
+//     from the same annotations), so a row that has one was not written by a
+//     node agent, and says so here.
 func RowProblem(ep *registryv1.ServiceEndpoint) string {
 	classes := ep.GetPortProtocols()
 	if len(classes) == 0 {
 		return RowNoPortProtocols
 	}
 	typed := func(port uint32) bool {
-		return classes[port] != registryv1.PortProtocol_PORT_PROTOCOL_UNSPECIFIED
+		class := classes[port]
+		_, known := registryv1.PortProtocol_name[int32(class)]
+		return known && class != registryv1.PortProtocol_PORT_PROTOCOL_UNSPECIFIED
 	}
 	for port := range classes {
 		if !typed(port) {
 			return RowPortNotTyped
+		}
+	}
+	for port := range classes {
+		if port != ep.GetPort() && !slices.Contains(ep.GetPorts(), port) {
+			return RowPortNotListed
 		}
 	}
 	if port := ep.GetPort(); port != 0 && !typed(port) {
@@ -348,4 +376,29 @@ func CheckRow(ep *registryv1.ServiceEndpoint) error {
 		return fmt.Errorf("%w: %s (endpoint %s)", ErrRowNotTyped, problem, ep.GetIp())
 	}
 	return nil
+}
+
+// ElectPortClass picks the one class a port number of a service has when its
+// endpoints declare it with several (a rollout that retypes a port): the class
+// most endpoints declare, ties to HTTP, then raw TCP, then UDP. votes is, per
+// class, how many endpoints declare the port with it; the answer reads only
+// the counts, so it does not depend on the order the endpoints were listed in.
+// PORT_PROTOCOL_UNSPECIFIED when there is no vote.
+//
+// It is ONE function because two components elect: the registrar, for the
+// ports of the Service it generates, and the node agent, for its route tables
+// and chains. A route's status reads the first and the proxy the second, and
+// for the same rows they must not differ.
+func ElectPortClass(votes map[registryv1.PortProtocol]int) registryv1.PortProtocol {
+	winner, best := registryv1.PortProtocol_PORT_PROTOCOL_UNSPECIFIED, 0
+	for _, class := range []registryv1.PortProtocol{
+		registryv1.PortProtocol_PORT_PROTOCOL_HTTP,
+		registryv1.PortProtocol_PORT_PROTOCOL_TCP,
+		registryv1.PortProtocol_PORT_PROTOCOL_UDP,
+	} {
+		if votes[class] > best {
+			winner, best = class, votes[class]
+		}
+	}
+	return winner
 }

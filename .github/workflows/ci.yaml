@@ -789,10 +789,18 @@ jobs:
           { cat "$IMPACTED/impacted_unit.txt" "$IMPACTED/impacted_integration.txt" |
             grep -v '^[[:space:]]*$' | sort -u |
             grep -Fxf "$RUNNER_TEMP/go_tests.txt" >"$RUNNER_TEMP/race_all.txt"; } || true
+          # A target of a hot package that is run once all the same: seeded,
+          # single-goroutine random walks, which a second and a third run
+          # repeat step for step. They are nine tenths of the cache package's
+          # test time (agent/internal/xds/cache/defs.bzl), and run three times
+          # they had brought this job to 54 of its 60 minutes.
+          cat >"$RUNNER_TEMP/once_labels.txt" <<'EOF'
+          //agent/internal/xds/cache:cache_walk_test
+          EOF
           while IFS= read -r label; do
             pkg="${label%%:*}"
             pkg="${pkg#//}"
-            if grep -qxF "$pkg" "$RUNNER_TEMP/hot_packages.txt"; then
+            if grep -qxF "$pkg" "$RUNNER_TEMP/hot_packages.txt" && ! grep -qxF "$label" "$RUNNER_TEMP/once_labels.txt"; then
               printf '%s\n' "$label" >>"$RUNNER_TEMP/race_hot.txt"
             else
               printf '%s\n' "$label" >>"$RUNNER_TEMP/race_normal.txt"

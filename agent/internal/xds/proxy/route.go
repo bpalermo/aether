@@ -1181,6 +1181,32 @@ func BuildNoHTTPPortVirtualHost(name string, domains []string, tcpSpellings stri
 	return BuildRefusalVirtualHost(name, domains, RefusalNoHTTPPort, body)
 }
 
+// BuildFallthroughVirtualHost builds a virtual host that does, for its
+// domains, what a capture table's catch-all does for a name that is not the
+// mesh's: the request leaves to the address that was dialled (redirect-all),
+// or is answered 404 where nothing but mesh addresses is captured. It runs no
+// HTTP filter of any service and reaches no mesh cluster.
+//
+// It exists for the authorities a table must neither refuse nor leave to the
+// catch-all's on-demand route (BuildCaptureCatchAllVirtualHost), which would
+// fetch a mesh cluster for them without the service's filters.
+func BuildFallthroughVirtualHost(name string, domains []string, redirectAll bool) *routev3.VirtualHost {
+	route := &routev3.Route{
+		Match: &routev3.RouteMatch{PathSpecifier: &routev3.RouteMatch_Prefix{Prefix: "/"}},
+		Action: &routev3.Route_DirectResponse{
+			DirectResponse: &routev3.DirectResponseAction{Status: 404},
+		},
+	}
+	if redirectAll {
+		route.Action = &routev3.Route_Route{
+			Route: &routev3.RouteAction{
+				ClusterSpecifier: &routev3.RouteAction_Cluster{Cluster: PassthroughClusterName},
+			},
+		}
+	}
+	return &routev3.VirtualHost{Name: name, Domains: domains, Routes: []*routev3.Route{route}}
+}
+
 // BuildRefusalVirtualHost returns a virtual host whose every route answers
 // 421 Misdirected Request with reason in the x-aether-error response header
 // and body as the response body. name identifies the virtual host within its

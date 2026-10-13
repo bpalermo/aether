@@ -23,6 +23,7 @@ import (
 	"aethermesh.dev/common/serviceref"
 	"aethermesh.dev/registrar/internal/server"
 	"aethermesh.dev/registry"
+	"aethermesh.dev/registry/endpointmeta"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -272,14 +273,13 @@ func declaredPorts(ep *registryv1.ServiceEndpoint, _ registryv1.Service_Protocol
 // It answers for ONE port number and is private to this package on purpose: a
 // service has no class.
 func electClass(counts map[registryv1.Service_Protocol]int) registryv1.Service_Protocol {
-	winner, best := registryv1.Service_PROTOCOL_UNSPECIFIED, 0
-	// registry.ServedProtocols is HTTP, TCP, UDP: the tie order.
-	for _, class := range registry.ServedProtocols {
-		if counts[class] > best {
-			winner, best = class, counts[class]
-		}
+	// The election is the node agent's too (endpointmeta.ElectPortClass); the
+	// two enums are numerically identical (endpointmeta pins it).
+	votes := make(map[registryv1.PortProtocol]int, len(counts))
+	for class, n := range counts {
+		votes[registryv1.PortProtocol(class)] = n
 	}
-	return winner
+	return registryv1.Service_Protocol(endpointmeta.ElectPortClass(votes))
 }
 
 // describeReserved says that a declared port is the mesh's and not the

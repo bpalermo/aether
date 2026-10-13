@@ -274,13 +274,8 @@ func className(c registryv1.PortProtocol) string {
 // change of class hitless; the documented way to retype a port is a new port
 // number. conflict describes a disagreement, and is empty when there is none.
 func classOfPort(port uint32, votes map[registryv1.PortProtocol]int) (class registryv1.PortProtocol, conflict string) {
-	best := registryv1.PortProtocol_PORT_PROTOCOL_UNSPECIFIED
-	for c, n := range votes {
-		if best == registryv1.PortProtocol_PORT_PROTOCOL_UNSPECIFIED ||
-			n > votes[best] || (n == votes[best] && classRank(c) < classRank(best)) {
-			best = c
-		}
-	}
+	// The election is the registrar's too (endpointmeta.ElectPortClass).
+	best := endpointmeta.ElectPortClass(votes)
 	if len(votes) > 1 {
 		classes := make([]registryv1.PortProtocol, 0, len(votes))
 		for c := range votes {

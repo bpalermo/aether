@@ -11,6 +11,8 @@
 package gatewaystatus
 
 import (
+	"unicode/utf8"
+
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
@@ -29,6 +31,25 @@ const (
 	// the parent — but the controllerName still scopes our owned status entry.
 	MeshControllerName gatewayv1.GatewayController = "gateway.aether.io/mesh"
 )
+
+// MaxConditionMessage is the longest message the API server accepts in a
+// condition (metav1.Condition: maxLength 32768). A longer one fails the whole
+// status update, every condition with it.
+const MaxConditionMessage = 32768
+
+// ClampMessage returns msg when the API server accepts it, and otherwise its
+// start, cut at a character boundary, ending in a mark that says so.
+func ClampMessage(msg string) string {
+	if len(msg) <= MaxConditionMessage {
+		return msg
+	}
+	const mark = " ... (truncated)"
+	cut := MaxConditionMessage - len(mark)
+	for cut > 0 && !utf8.RuneStart(msg[cut]) {
+		cut--
+	}
+	return msg[:cut] + mark
+}
 
 // Condition is a minimal description of a status condition to set: its type,
 // status, reason, and a human message. ObservedGeneration is filled in by the
@@ -80,7 +101,7 @@ func MergeRouteParentStatus(
 			Type:               c.Type,
 			Status:             c.Status,
 			Reason:             c.Reason,
-			Message:            c.Message,
+			Message:            ClampMessage(c.Message),
 			ObservedGeneration: observedGeneration,
 		})
 	}
@@ -159,6 +180,27 @@ func PruneRouteParentStatus(
 		return parents, false
 	}
 	return result, true
+}
+
+// RemoveRouteParentCondition removes the condition of type condType from
+// controllerName's entry for parentRef. It returns the new slice and whether
+// anything was removed; entries of other controllers are never touched.
+func RemoveRouteParentCondition(parents []gatewayv1.RouteParentStatus, controllerName gatewayv1.GatewayController, parentRef gatewayv1.ParentReference, condType string) (result []gatewayv1.RouteParentStatus, changed bool) {
+	for i := range parents {
+		if parents[i].ControllerName != controllerName || !parentRefEqual(parents[i].ParentRef, parentRef) {
+			continue
+		}
+		if meta.FindStatusCondition(parents[i].Conditions, condType) == nil {
+			return parents, false
+		}
+		entry := *parents[i].DeepCopy()
+		meta.RemoveStatusCondition(&entry.Conditions, condType)
+		result = make([]gatewayv1.RouteParentStatus, len(parents))
+		copy(result, parents)
+		result[i] = entry
+		return result, true
+	}
+	return parents, false
 }
 
 // parentRefEqual reports whether two parentRefs identify the same parent. We
