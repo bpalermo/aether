@@ -4178,12 +4178,50 @@ registry and the agent watches.
 - The parked request runs the service's service-wide filter and its routes'
   rules, as any later request does.
 
-**One case is not closed.** For a name the node knows nothing of, the
-authority `<fqdn>:18081` is offered on demand like any `<fqdn>:<port>`, and a
-cluster of that name still exists as an alias of the cluster of the port the
-pods declare. If the service enters the node's scope while that request is
-parked, it is delivered to the declared port; every later request is refused
-(`port-not-declared`). Removing the alias cluster is the remaining step.
+- An authority that names `18081` or `18082` is never offered on demand, for a
+  name the node knows nothing of either: `421 port-not-declared`, at once. No
+  cluster is named for those ports (the `<fqdn>:18081` alias cluster of chart
+  2.6 is gone), so nothing that enters the node's scope while a request waits
+  can answer it.
+
+##### BREAKING: a pod cannot declare 18081 or 18082
+
+`18081` (the HTTP proxy port) and `18082` (the L4 port, TCP and UDP) are the
+mesh's own and are a port of no service. A pod that names either in
+`endpoint.aether.io/port` or `endpoint.aether.io/ports`, with any protocol, is
+refused:
+
+| Where | What happens | What the operator sees |
+|---|---|---|
+| admission (the controller's pod webhook, on by default) | the pod is denied | the `kubectl apply` / ReplicaSet event: `the pod declares port 18081 as an application port (...); 18081 and 18082 are the mesh's own ports ...` |
+| the registrar (a pod that runs anyway: admitted before the upgrade, or the webhook is off) | the port is not written onto the generated Service; the Service keeps `mesh` and `mesh-tcp` | WARN `a mesh service's ports cannot all be written as its endpoints declare them`, `ports="port 18081: reserved for the mesh, not a port of the service (N declarations)"`, once per service and state |
+| the node agent (the same pod) | the port has no cluster, chain or virtual host and is not the service's default port; the pod's other ports are served | WARN `a mesh service's ports cannot all be served as its endpoints declare them`, `ports="18081: reserved for the mesh, not served (N endpoints declare it)"`, once per service and state |
+
+A service whose pods declare **nothing but** a reserved port is known to the
+node and serves nothing: its names are refused at once (`421 no-http-port`
+without a port, `421 port-not-declared` with one), and its raw-TCP spelling
+`<name>:18082` has no cluster.
+
+Through chart 2.6 such a pod was served: `18082` declared raw TCP was an
+ordinary raw-TCP port, and a declared `18081` replaced the proxy port on the
+service's Service. **Before upgrading**, find them:
+
+```
+kubectl get pods -A -l aether.io/managed=true -o json | jq -r '.items[]
+  | select(((.metadata.annotations["endpoint.aether.io/port"] // "") + "," + (.metadata.annotations["endpoint.aether.io/ports"] // ""))
+           | test("(^|,)\\s*1808[12](=|,|$)"))
+  | .metadata.namespace + "/" + .metadata.name'
+```
+
+Move them to another port number first. The container may keep listening on
+the old number; what is refused is declaring it to the mesh.
+
+Nothing inside the mesh dials a cluster named for those ports. `18081` is a
+listener port of the node proxy (loopback, and the capture chain a dial to
+`<name>:18081` lands on); `18082` is the destination port the capture listener
+matches for the raw-TCP and UDP floors, whose clusters are named
+`tcp:<fqdn>` / `udp:<fqdn>` and are selected by the address that was dialled,
+never by an authority.
 
 ##### BREAKING: `:18081` and a name without a port no longer mean "the port the pods declare"
 

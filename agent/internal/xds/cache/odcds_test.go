@@ -37,20 +37,22 @@ func snapshotClusterNames(t *testing.T, c *SnapshotCache) map[string]types.Resou
 // set, ONE on-demand observation plus ONE reload must put the requested name
 // back in the published snapshot — no stream reset, no second round trip.
 //
-// Both port spellings the catch-all can produce are covered. The second case is
-// the production shape and the follow-up fix: the registry endpoint port is the
-// APPLICATION port (echo: 8080) while the mesh VIP Service — the only thing a
-// client can dial after mesh DNS hands it a portless A record — advertises
-// ProxyOutboundPort (18081). Deriving the alias from endpoints[0].GetPort()
-// alone published ":8080" and left ":18081" unpublished on every node, which is
-// exactly the authority that wedged for 5m10s on 2026-09-05; the first case
-// passed only because its app port happened to equal the dialed port.
+// The name in question is "<fqdn>:<the port the pods declare>": the default
+// cluster is published under the PORTLESS name, so the spelling with the port,
+// which is what the catch-all asks for, needs a cluster of its own name. Two
+// port numbers, so the name is derived from the endpoints and not fixed.
+//
+// Through chart 2.6 the authority that wedged in production was "<fqdn>:18081",
+// the mesh port every client dialled, and this test held that name. Since
+// proposal 043 18081 is the proxy's port and a port of no service: that name is
+// never published (asserted below), and every request for it is refused or
+// fails, which is what is wanted of it.
 func TestODCDS_DefaultPortAuthorityIsAnsweredInOnePush(t *testing.T) {
-	t.Run("app port is the dialed port", func(t *testing.T) {
-		assertODCDSAuthorityAnsweredInOnePush(t, 18081, "echo.aether-test.aether.internal:18081")
+	t.Run("declared port 8080", func(t *testing.T) {
+		assertODCDSAuthorityAnsweredInOnePush(t, 8080, "echo.aether-test.aether.internal:8080")
 	})
-	t.Run("mesh Service port differs from the app port", func(t *testing.T) {
-		assertODCDSAuthorityAnsweredInOnePush(t, 8080, "echo.aether-test.aether.internal:18081")
+	t.Run("declared port 9090", func(t *testing.T) {
+		assertODCDSAuthorityAnsweredInOnePush(t, 9090, "echo.aether-test.aether.internal:9090")
 	})
 }
 
@@ -89,6 +91,7 @@ func assertODCDSAuthorityAnsweredInOnePush(t *testing.T, appPort uint32, authori
 	warm := snapshotClusterNames(t, c)
 	require.Contains(t, warm, fqdn, "portless cluster is published")
 	require.Contains(t, warm, authority, "the ODCDS name for the default port must resolve to a cluster")
+	require.NotContains(t, warm, fqdn+":18081", "the proxy's port names no cluster of any service")
 
 	// Demand-set shrink (the outage trigger): the observed dependency ages out,
 	// the service leaves the dependency set and the reload drops its clusters.
@@ -122,7 +125,7 @@ func assertODCDSAuthorityAnsweredInOnePush(t *testing.T, appPort uint32, authori
 func TestObservedDependency_LiveOnDemandSubscriptionSurvivesTTL(t *testing.T) {
 	const (
 		service   = "aether-test/echo"
-		authority = "echo.aether-test.aether.internal:18081"
+		authority = "echo.aether-test.aether.internal:8080"
 	)
 
 	ctx := context.Background()
@@ -161,7 +164,7 @@ func TestObservedDependency_UnsubscribeReleasesTheTTLExemption(t *testing.T) {
 	const (
 		service  = "aether-test/echo"
 		portless = "echo.aether-test.aether.internal"
-		withPort = portless + ":18081"
+		withPort = portless + ":8080"
 	)
 
 	ctx := context.Background()
@@ -198,7 +201,7 @@ func TestRestoreDependency_AnsweredInTheFirstPushAndStillDecays(t *testing.T) {
 	const (
 		service   = "aether-test/echo"
 		fqdn      = "echo.aether-test.aether.internal"
-		authority = fqdn + ":18081"
+		authority = fqdn + ":8080"
 	)
 
 	ctx := context.Background()
@@ -238,14 +241,14 @@ func TestRestoreDependency_AnsweredInTheFirstPushAndStillDecays(t *testing.T) {
 // the #701 counterpart of the test above: the FULL agent+proxy replacement,
 // where the proxy is new too and reports no held clusters, so the only thing
 // that can warm the fresh agent is what the previous agent persisted. A fresh
-// cache over the persisted file must serve the "<fqdn>:18081" authority in its
+// cache over the persisted file must serve the "<fqdn>:8080" authority in its
 // FIRST push — no ODCDS round trip, no miss logged, no miss counted — while the
 // entry stays an ordinary TTL'd observation that still decays.
 func TestRestoreDependency_FromLocalStorage_AnsweredInTheFirstPushWithNoMiss(t *testing.T) {
 	const (
 		service   = "aether-test/echo"
 		fqdn      = "echo.aether-test.aether.internal"
-		authority = fqdn + ":18081"
+		authority = fqdn + ":8080"
 	)
 
 	ctx := context.Background()

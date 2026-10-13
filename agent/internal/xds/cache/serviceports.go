@@ -2,6 +2,7 @@ package cache
 
 import (
 	"fmt"
+	"maps"
 	"slices"
 	"strings"
 
@@ -33,11 +34,17 @@ type servicePorts struct {
 	// conflicts names, sorted, the ports whose class the service's endpoints
 	// disagree about, as "<port>: <n> http, <m> tcp". Reported, not acted on.
 	conflicts []string
+	// reservedOnly: the service's endpoints declare ports, and every one of
+	// them is a port reserved for the mesh (reservedMeshPort). The node then
+	// KNOWS the service, and knows it serves nothing: its names are refused
+	// like those of any service with no HTTP port, instead of being asked
+	// for on demand like a name nothing is known of.
+	reservedOnly bool
 }
 
 // known reports whether anything was derived for the service.
 func (p servicePorts) known() bool {
-	return p.legacyPort != 0 || len(p.http)+len(p.tcp)+len(p.udp) > 0
+	return p.reservedOnly || p.legacyPort != 0 || len(p.http)+len(p.tcp)+len(p.udp) > 0
 }
 
 // servesHTTP reports whether the service declares at least one HTTP port.
@@ -93,7 +100,7 @@ func (p servicePorts) legacyTCPPort() uint32 {
 // equal; that comparison is what keeps a pod ADD or DEL from rebuilding the
 // capture listeners (proposal 037 Risk 4, proposal 043 Risk 8).
 func (p servicePorts) equal(o servicePorts) bool {
-	return p.legacyPort == o.legacyPort && p.legacyClass == o.legacyClass &&
+	return p.legacyPort == o.legacyPort && p.legacyClass == o.legacyClass && p.reservedOnly == o.reservedOnly &&
 		slices.Equal(p.http, o.http) && slices.Equal(p.tcp, o.tcp) && slices.Equal(p.udp, o.udp)
 }
 
@@ -132,6 +139,48 @@ type listedEndpoints struct {
 	endpoints []*registryv1.ServiceEndpoint
 }
 
+// reservedMeshPort reports whether port is one of the mesh's own two ports,
+// which no service can declare as an application port: the HTTP proxy port
+// (18081) and the L4 port (18082). On a captured dial both numbers select the
+// mesh's own chains, and "<name>:18081" in an authority names the proxy, so a
+// pod's port of either number could never be told from the mesh's. The
+// controller's pod webhook refuses such a pod at admission; a pod that is
+// running anyway (admitted before, or with the webhook off) is not served on
+// that port, and the agent says so (reservedPortNotes).
+func reservedMeshPort(port uint32) bool { return meshconst.ReservedPort(port) }
+
+// reservedPortNotes names, sorted, the reserved ports the endpoints of the
+// listings declare, for the operator: "18081: reserved for the mesh, not
+// served (2 endpoints declare it)".
+func reservedPortNotes(listings []listedEndpoints) []string {
+	declaring := map[uint32]map[string]struct{}{}
+	note := func(ep *registryv1.ServiceEndpoint, port uint32) {
+		if !reservedMeshPort(port) {
+			return
+		}
+		if declaring[port] == nil {
+			declaring[port] = map[string]struct{}{}
+		}
+		declaring[port][ep.GetClusterName()+"/"+ep.GetIp()] = struct{}{}
+	}
+	for _, l := range listings {
+		for _, ep := range l.endpoints {
+			note(ep, ep.GetPort())
+			for _, p := range ep.GetPorts() {
+				note(ep, p)
+			}
+			for p := range ep.GetPortProtocols() {
+				note(ep, p)
+			}
+		}
+	}
+	out := make([]string, 0, len(declaring))
+	for _, port := range slices.Sorted(maps.Keys(declaring)) {
+		out = append(out, fmt.Sprintf("%d: reserved for the mesh, not served (%d endpoints declare it)", port, len(declaring[port])))
+	}
+	return out
+}
+
 // endpointPortClasses returns the class of every port one endpoint serves.
 //
 // The authoritative field is the endpoint's own port_protocols. A row written
@@ -147,7 +196,9 @@ func endpointPortClasses(ep *registryv1.ServiceEndpoint, listed registryv1.Servi
 	declared := ep.GetPortProtocols()
 	out := make(map[uint32]registryv1.PortProtocol, len(declared)+1)
 	add := func(port uint32) {
-		if port == 0 || port > 65535 {
+		if port == 0 || port > 65535 || reservedMeshPort(port) {
+			// A reserved port is a port of no service (reservedMeshPort):
+			// it has no class, so nothing is derived, voted or built from it.
 			return
 		}
 		if class := declared[port]; class != registryv1.PortProtocol_PORT_PROTOCOL_UNSPECIFIED {
@@ -356,13 +407,6 @@ func deriveServicePorts(listings ...listedEndpoints) servicePorts {
 	var out servicePorts
 	for port, v := range votes {
 		class, conflict := classOfPort(port, v)
-		if port == meshconst.ProxyL4OutboundPort && class == registryv1.PortProtocol_PORT_PROTOCOL_HTTP {
-			// The mesh's raw-TCP port. The capture listener matches raw-TCP
-			// chains on that number, so it cannot also select an HTTP chain:
-			// a pod that declares it as HTTP is not served on it, and is told.
-			out.conflicts = append(out.conflicts, fmt.Sprintf("%d: reserved for the mesh's raw-TCP port, not served as http", port))
-			continue
-		}
 		switch class {
 		case registryv1.PortProtocol_PORT_PROTOCOL_HTTP:
 			out.http = append(out.http, port)
@@ -378,8 +422,11 @@ func deriveServicePorts(listings ...listedEndpoints) servicePorts {
 	slices.Sort(out.http)
 	slices.Sort(out.tcp)
 	slices.Sort(out.udp)
+	reserved := reservedPortNotes(listings)
+	out.conflicts = append(out.conflicts, reserved...)
 	slices.Sort(out.conflicts)
 	out.legacyPort, out.legacyClass = legacyTarget(listings...)
+	out.reservedOnly = len(reserved) > 0 && out.legacyPort == 0 && len(out.http)+len(out.tcp)+len(out.udp) == 0
 	return out
 }
 

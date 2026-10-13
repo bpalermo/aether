@@ -281,6 +281,13 @@ ambiguous and raw TCP needs a port:
 | `<svc>.<ns>.<domain>:18082/udp` | the primary port, as plaintext UDP (the same L4 spelling; needs a `UDPRoute`) |
 | `<svc>.<ns>.<domain>:<p>` | port `p`, in whatever class `p` declares |
 
+**`18081` and `18082` are reserved.** A pod cannot declare either in
+`endpoint.aether.io/port` or `endpoint.aether.io/ports`, with any protocol:
+they are the mesh's own ports and a port of no service. The pod is denied at
+admission, and a `Host` that names one is always refused
+(`421 port-not-declared`). See the runbook, "BREAKING: a pod cannot declare
+18081 or 18082".
+
 HTTP demuxes on the **authority header**, which carries its own port as a
 string — so `http://<svc>/` is unambiguous without one. Raw TCP has no
 authority; its only demux key is the 5-tuple. That asymmetry is intrinsic to

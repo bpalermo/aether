@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	meshconst "aethermesh.dev/common/constants/mesh"
 	xdscorev3 "github.com/cncf/xds/go/xds/core/v3"
 	xdsmatcherv3 "github.com/cncf/xds/go/xds/type/matcher/v3"
 	network_inputsv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/matching/common_inputs/network/v3"
@@ -236,6 +237,40 @@ func buildOnDemandCatchAllVirtualHost(onDemandAuthorityRegex string, passthrough
 	}
 }
 
+// RefusalReservedPortBody is the body of the refusal of a mesh authority that
+// names one of the mesh's own two ports.
+const RefusalReservedPortBody = "aether: ports 18081 and 18082 are the mesh's own (its HTTP proxy port and its L4 port) and are a port of no service. " +
+	"Put the service's own port in the Host: <service>.<namespace>.<mesh domain>:<port>.\n"
+
+// refuseReservedPorts makes the catch-all of a table whose on-demand route
+// takes the port from the authority (the loopback table and the proxy port's
+// capture table) refuse a mesh authority that names 18081 or 18082, before
+// that route: 421 port-not-declared, at once.
+//
+// Those two are ports of no service, so "<fqdn>:18081" names a cluster that
+// can never exist. Left to the on-demand route it was parked while that
+// cluster was asked for, and through chart 2.6 an alias cluster of that name
+// answered: the request reached the port the pods declare. A service the node
+// knows refuses the spelling in its own virtual host; this is the same answer
+// for a name the node knows nothing of, so the spelling is never parked,
+// whatever enters the node's scope meanwhile.
+func refuseReservedPorts(catchAll *routev3.VirtualHost, meshDomain string) *routev3.VirtualHost {
+	reserved := fmt.Sprintf(":(%d|%d)", meshconst.ProxyOutboundPort, meshconst.ProxyL4OutboundPort)
+	refusal := BuildRefusalVirtualHost("", nil, RefusalPortNotDeclared, RefusalReservedPortBody).GetRoutes()[0]
+	refusal.Match.Headers = []*routev3.HeaderMatcher{{
+		Name: ":authority",
+		HeaderMatchSpecifier: &routev3.HeaderMatcher_StringMatch{StringMatch: &matcherv3.StringMatcher{
+			MatchPattern: &matcherv3.StringMatcher_SafeRegex{SafeRegex: &matcherv3.RegexMatcher{Regex: MeshAuthorityRegex(meshDomain, reserved)}},
+		}},
+	}}
+	// After the liveness route (an exact path, whatever the authority),
+	// before the on-demand route.
+	routes := make([]*routev3.Route, 0, len(catchAll.GetRoutes())+1)
+	routes = append(routes, catchAll.GetRoutes()[0], refusal)
+	catchAll.Routes = append(routes, catchAll.GetRoutes()[1:]...)
+	return catchAll
+}
+
 // BuildOnDemandServiceVirtualHost builds the loopback table's virtual host of
 // ONE mesh service the node holds no cluster of: its authorities, routed like
 // the catch-all's on-demand route (the cluster the authority names, fetched by
@@ -298,7 +333,7 @@ func BuildCaptureCatchAllVirtualHost(meshDomain string, port uint32, portless, r
 func BuildProxyPortCaptureRouteConfiguration(name string, vhosts []*routev3.VirtualHost, meshDomain string, passthrough bool) *routev3.RouteConfiguration {
 	withCatchAll := make([]*routev3.VirtualHost, 0, len(vhosts)+1)
 	withCatchAll = append(withCatchAll, vhosts...)
-	withCatchAll = append(withCatchAll, buildOnDemandCatchAllVirtualHost(MeshAuthorityRegex(meshDomain, ":[0-9]+"), passthrough))
+	withCatchAll = append(withCatchAll, refuseReservedPorts(buildOnDemandCatchAllVirtualHost(MeshAuthorityRegex(meshDomain, ":[0-9]+"), passthrough), meshDomain))
 	return &routev3.RouteConfiguration{Name: name, VirtualHosts: withCatchAll}
 }
 
@@ -330,7 +365,7 @@ func BuildOutboundRouteConfiguration(vhosts []*routev3.VirtualHost, meshDomain s
 	// the pods declare): a name without a port is port 80, and a service the
 	// node knows gets a virtual host that says so. Unknown and port-less
 	// falls through.
-	all = append(all, buildOnDemandCatchAllVirtualHost(MeshAuthorityRegex(meshDomain, ":[0-9]+"), false))
+	all = append(all, refuseReservedPorts(buildOnDemandCatchAllVirtualHost(MeshAuthorityRegex(meshDomain, ":[0-9]+"), false), meshDomain))
 	return &routev3.RouteConfiguration{
 		Name:         OutboundHTTPRouteName,
 		VirtualHosts: all,

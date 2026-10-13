@@ -216,12 +216,14 @@ func TestBuildOutboundRouteConfiguration(t *testing.T) {
 			// Route 1: liveness local-reply 200 on MeshLivePath (proposal 013).
 			// Route 2: mesh-shaped authority (regex) -> ODCDS cluster_header.
 			// Route 3: everything else -> instant 404.
-			require.Len(t, catchAll.GetRoutes(), 3)
+			require.Len(t, catchAll.GetRoutes(), 4)
 			assert.Equal(t, MeshLivePath, catchAll.GetRoutes()[0].GetMatch().GetPath())
 			assert.Equal(t, uint32(200), catchAll.GetRoutes()[0].GetDirectResponse().GetStatus())
-			assert.Equal(t, onDemandClusterHeader, catchAll.GetRoutes()[1].GetRoute().GetClusterHeader())
-			assert.NotEmpty(t, catchAll.GetRoutes()[1].GetMatch().GetHeaders(), "mesh-authority regex gate")
-			assert.Equal(t, uint32(404), catchAll.GetRoutes()[2].GetDirectResponse().GetStatus())
+			assert.Equal(t, uint32(421), catchAll.GetRoutes()[1].GetDirectResponse().GetStatus(), "the mesh's own two ports, before the on-demand route")
+			assert.NotEmpty(t, catchAll.GetRoutes()[1].GetMatch().GetHeaders())
+			assert.Equal(t, onDemandClusterHeader, catchAll.GetRoutes()[2].GetRoute().GetClusterHeader())
+			assert.NotEmpty(t, catchAll.GetRoutes()[2].GetMatch().GetHeaders(), "mesh-authority regex gate")
+			assert.Equal(t, uint32(404), catchAll.GetRoutes()[3].GetDirectResponse().GetStatus())
 		})
 	}
 }

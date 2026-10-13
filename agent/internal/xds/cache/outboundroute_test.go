@@ -64,12 +64,13 @@ func TestGenerateSnapshot_ZeroVhostsStillPublishesOutboundRoute(t *testing.T) {
 	assert.Equal(t, []string{"*"}, catchAll.GetDomains())
 
 	// Liveness 200 (proposal 013 prober), mesh-shaped authority → ODCDS, 404.
-	require.Len(t, catchAll.GetRoutes(), 3)
+	require.Len(t, catchAll.GetRoutes(), 4)
 	assert.Equal(t, uint32(200), catchAll.GetRoutes()[0].GetDirectResponse().GetStatus(),
 		"the egress liveness probe target lives on the catch-all, so it must survive a zero-vhost start")
-	assert.Equal(t, ":authority", catchAll.GetRoutes()[1].GetRoute().GetClusterHeader(),
+	assert.Equal(t, ":authority", catchAll.GetRoutes()[2].GetRoute().GetClusterHeader(),
 		"a mesh-shaped authority must still reach its cluster via ODCDS")
-	assert.Equal(t, uint32(404), catchAll.GetRoutes()[2].GetDirectResponse().GetStatus())
+	assert.Equal(t, uint32(421), catchAll.GetRoutes()[1].GetDirectResponse().GetStatus(), "the mesh's own two ports are refused before the on-demand route")
+	assert.Equal(t, uint32(404), catchAll.GetRoutes()[3].GetDirectResponse().GetStatus())
 }
 
 // TestGenerateSnapshot_OutboundRouteSurvivesEmptyingTheRegistry covers the

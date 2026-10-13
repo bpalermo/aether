@@ -209,6 +209,10 @@ func servicePorts(perListing [][]*registryv1.ServiceEndpoint) (ports []corev1.Se
 		for class, endpoints := range votes[port] {
 			counts[class] = len(endpoints)
 		}
+		if mesh.ReservedPort(port) {
+			conflicts = append(conflicts, describeReserved(port, counts))
+			continue
+		}
 		class := electClass(counts)
 		sp, ok := servicePort(port, class)
 		if !ok {
@@ -286,6 +290,17 @@ func electClass(counts map[registryv1.Service_Protocol]int) registryv1.Service_P
 	return winner
 }
 
+// describeReserved says that a declared port is the mesh's and not the
+// service's (mesh.ReservedPort): the Service keeps its "mesh" / "mesh-tcp"
+// port of that number, and the operator is told.
+func describeReserved(port uint32, counts map[registryv1.Service_Protocol]int) string {
+	n := 0
+	for _, c := range counts {
+		n += c
+	}
+	return fmt.Sprintf("port %d: reserved for the mesh, not a port of the service (%d declarations)", port, n)
+}
+
 func describeConflict(port uint32, counts map[registryv1.Service_Protocol]int, elected registryv1.Service_Protocol) string {
 	parts := make([]string, 0, len(counts))
 	for _, class := range registry.ServedProtocols {
@@ -304,8 +319,10 @@ func (g *Generator) warnClassConflicts(ctx context.Context, conflicts map[client
 		if g.classConflicts[key] == conflict {
 			continue
 		}
-		g.Log.WarnContext(ctx, "a mesh service's endpoints declare one port number with different protocols; "+
-			"the Service carries the protocol most endpoints declare (to change a port's protocol, use a new port number)",
+		g.Log.WarnContext(ctx, "a mesh service's ports cannot all be written as its endpoints declare them: "+
+			"a port number declared with different protocols carries the protocol most endpoints declare "+
+			"(to change a port's protocol, use a new port number), "+
+			"and a port reserved for the mesh (18081, 18082) is not written as a port of the service",
 			"service", key.String(), "ports", conflict)
 	}
 	g.classConflicts = conflicts
@@ -332,10 +349,10 @@ func servicePort(port uint32, class registryv1.Service_Protocol) (corev1.Service
 }
 
 // mergePorts returns the Service's port list: the mesh ports, then the real
-// ports in the order given. A real port with the port number and Kubernetes
-// protocol of a mesh port REPLACES it, because the API server rejects two
-// ports with the same number and protocol: a pod that declares 18082 as raw
-// TCP yields p18082-tcp with appProtocol tcp and no "mesh-tcp".
+// ports in the order given. A real port never has the number of a mesh port
+// (servicePorts leaves those out: they are reserved). Should one arrive
+// anyway, it replaces the mesh port, because the API server rejects two ports
+// with the same number and protocol.
 func mergePorts(fixed, realPorts []corev1.ServicePort) []corev1.ServicePort {
 	type slot struct {
 		port     int32

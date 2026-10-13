@@ -783,9 +783,16 @@ no rule of its own: 18081 is a port no service declares, and gets the general
   Service, which it already watches, and routes and refuses by them while it
   holds no endpoint. On-demand routes name a cluster only from an authority
   with a port.
-- *Not done:* the alias cluster `<fqdn>:18081` still exists, so for a name the
-  agent knows nothing of, a parked `<fqdn>:18081` request can be delivered to
-  the declared port if the service enters scope meanwhile.
+- *The proxy's port.* No cluster is named `<fqdn>:18081` (the alias of chart
+  2.6 is removed), and an authority that names 18081 or 18082 is refused at
+  once on the tables whose on-demand route takes the port from the authority,
+  for a name the node knows nothing of as well: it is never parked, so no
+  service that enters the node's scope meanwhile can answer it.
+- *Reserved.* 18081 and 18082 cannot be declared as an application port, in
+  any protocol. The controller's pod webhook denies such a pod; for one that
+  runs anyway the registrar does not write the port onto the Service and the
+  agent does not serve it, each with a WARN that names the service and the
+  port. One definition (`mesh.ReservedPort`), three enforcers.
 
 ## Phases
 

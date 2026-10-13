@@ -193,6 +193,48 @@ func TestOutboundCatchAll_NamesAClusterOnlyFromAnAuthorityWithAPort(t *testing.T
 	}
 }
 
+// TestOnDemandCatchAll_NeverParksAnAuthorityThatNamesAMeshPort: 18081 and
+// 18082 are ports of no service, so "<fqdn>:18081" names a cluster that can
+// never exist. On the two tables whose on-demand route takes the port from the
+// authority it is refused at once, for a name nothing is known of as well:
+// never parked, so nothing that enters the node's scope meanwhile can answer
+// it. Every other port is still offered on demand, and the liveness path
+// still answers under any authority.
+func TestOnDemandCatchAll_NeverParksAnAuthorityThatNamesAMeshPort(t *testing.T) {
+	tables := map[string]*routev3.RouteConfiguration{
+		"out_http":                    BuildOutboundRouteConfiguration(nil, "aether.internal"),
+		"cap_http_18081":              BuildProxyPortCaptureRouteConfiguration("cap_http_18081", nil, "aether.internal", false),
+		"cap_http_18081, passthrough": BuildProxyPortCaptureRouteConfiguration("cap_http_18081", nil, "aether.internal", true),
+	}
+	for name, rc := range tables {
+		vh := rc.GetVirtualHosts()[len(rc.GetVirtualHosts())-1]
+		for _, authority := range []string{"svc.ns.aether.internal:18081", "svc.ns.aether.internal:18082"} {
+			cluster, status := resolveCatchAll(vh, authority, "/")
+			assert.Emptyf(t, cluster, "%s: %s names a cluster", name, authority)
+			assert.Equalf(t, uint32(421), status, "%s: %s", name, authority)
+		}
+		var refusal *routev3.Route
+		for _, r := range vh.GetRoutes() {
+			if r.GetDirectResponse().GetStatus() == 421 {
+				refusal = r
+			}
+		}
+		require.NotNil(t, refusal, name)
+		assert.Equal(t, RefusalPortNotDeclared, refusal.GetResponseHeadersToAdd()[0].GetHeader().GetValue())
+		assert.Equal(t, RefusalReservedPortBody, refusal.GetDirectResponse().GetBody().GetInlineString())
+
+		for _, authority := range []string{"svc.ns.aether.internal:8080", "svc.ns.aether.internal:1808", "svc.ns.aether.internal:180811"} {
+			cluster, _ := resolveCatchAll(vh, authority, "/")
+			assert.Equalf(t, authority, cluster, "%s: another port is offered on demand", name)
+		}
+		_, status := resolveCatchAll(vh, "svc.ns.aether.internal:18081", MeshLivePath)
+		assert.Equalf(t, uint32(200), status, "%s: the liveness path answers under any authority", name)
+		// A name that is not a mesh name is not the mesh's to refuse.
+		_, status = resolveCatchAll(vh, "example.com:18081", "/")
+		assert.NotEqualf(t, uint32(421), status, "%s", name)
+	}
+}
+
 // TestBuildRefusalVirtualHost: a refusal is a direct 421 with the reason in
 // x-aether-error and the body given. It reaches no cluster, on any path.
 func TestBuildRefusalVirtualHost(t *testing.T) {

@@ -15,7 +15,6 @@ import (
 	"aethermesh.dev/agent/internal/xds/cache/cachemetrics"
 	"aethermesh.dev/agent/internal/xds/proxy"
 	registryv1 "aethermesh.dev/api/aether/registry/v1"
-	meshconst "aethermesh.dev/common/constants/mesh"
 	clusterv3 "github.com/envoyproxy/go-control-plane/envoy/config/cluster/v3"
 	endpointv3 "github.com/envoyproxy/go-control-plane/envoy/config/endpoint/v3"
 	routev3 "github.com/envoyproxy/go-control-plane/envoy/config/route/v3"
@@ -209,8 +208,10 @@ func (f *bareFixture) requireCheckSilent(t *testing.T) {
 
 func (f *bareFixture) tcpFloor(svc string) string { return proxy.TCPClusterName(svc, f.c.meshDomain) }
 
-func (f *bareFixture) meshAlias(svc string) string {
-	return proxy.PortClusterName(svc, f.c.meshDomain, meshconst.ProxyOutboundPort)
+// portAlias is the h2 alias of the service's HTTP port: the copy of the bare
+// load assignment an h2 cluster other than the default one subscribes to.
+func (f *bareFixture) portAlias(svc string) string {
+	return proxy.PortClusterName(svc, f.c.meshDomain, listingPort[http])
 }
 
 // requireHTTPClusterAndVhost: the retention protection. The service's h2
@@ -254,7 +255,7 @@ func TestHTTPListingLostWhileTCPStaysPublishesTheLiveLoadAssignment(t *testing.T
 	s = f.requireStable(t, want{
 		bareSvc:              2,
 		f.tcpFloor(bareSvc):  2,
-		f.meshAlias(bareSvc): 2,
+		f.portAlias(bareSvc): 2,
 		twin:                 2,
 	})
 	f.requireHTTPClusterAndVhost(t, s, bareSvc, true)
@@ -282,7 +283,7 @@ func TestTCPListingLostWhileHTTPStaysKeepsTheHTTPLoadAssignment(t *testing.T) {
 	f.refresh(t)
 
 	f.list(tcp, bareSvc, 0, 0)
-	s := f.requireStable(t, want{bareSvc: 3, f.tcpFloor(bareSvc): 3, f.meshAlias(bareSvc): 3})
+	s := f.requireStable(t, want{bareSvc: 3, f.tcpFloor(bareSvc): 3, f.portAlias(bareSvc): 3})
 	assert.Contains(t, s.GetResources(resourcev3.ClusterType), f.tcpFloor(bareSvc), "the floor cluster is retained")
 	f.requireHTTPClusterAndVhost(t, s, bareSvc, true)
 	f.requireCheckSilent(t)
@@ -311,7 +312,7 @@ func TestBothListingsLostPublishOneEmptyLoadAssignment(t *testing.T) {
 
 	f.list(http, bareSvc, 0, 0)
 	f.list(tcp, bareSvc, 0, 0)
-	s := f.requireStable(t, want{bareSvc: 0, f.tcpFloor(bareSvc): 0, f.meshAlias(bareSvc): 0})
+	s := f.requireStable(t, want{bareSvc: 0, f.tcpFloor(bareSvc): 0, f.portAlias(bareSvc): 0})
 	f.requireHTTPClusterAndVhost(t, s, bareSvc, true)
 	assert.Contains(t, s.GetResources(resourcev3.ClusterType), f.tcpFloor(bareSvc))
 	f.requireCheckSilent(t)
@@ -319,7 +320,7 @@ func TestBothListingsLostPublishOneEmptyLoadAssignment(t *testing.T) {
 	// The TCP listing comes back while the HTTP entry is still retained:
 	// the retained entry was holding the (empty) bare name and gives it up.
 	f.list(tcp, bareSvc, 2, 2)
-	s = f.requireStable(t, want{bareSvc: 2, f.tcpFloor(bareSvc): 2, f.meshAlias(bareSvc): 2})
+	s = f.requireStable(t, want{bareSvc: 2, f.tcpFloor(bareSvc): 2, f.portAlias(bareSvc): 2})
 	f.requireHTTPClusterAndVhost(t, s, bareSvc, true)
 	f.requireCheckSilent(t)
 
@@ -370,7 +371,7 @@ func TestHTTPListingLostWhileUDPStaysPublishesTheLiveLoadAssignment(t *testing.T
 	require.Equal(t, 3, published(s, bareUDPSvc))
 
 	f.list(http, bareUDPSvc, 0, 0)
-	s = f.requireStable(t, want{bareUDPSvc: 1, f.meshAlias(bareUDPSvc): 1})
+	s = f.requireStable(t, want{bareUDPSvc: 1, f.portAlias(bareUDPSvc): 1})
 	assert.Equal(t, []string{"10.2.3.1:5353"}, f.udpAddrs(s, bareUDPSvc),
 		"datagrams reach the live UDP pod at the port it registered through the grace, not at the retained HTTP entry's 8080")
 	f.requireHTTPClusterAndVhost(t, s, bareUDPSvc, true)
@@ -510,7 +511,7 @@ func (f *bareFixture) derivedViolation(s *cachev3.Snapshot) string {
 		return ""
 	}
 	for name, r := range eds {
-		isCopy := name == f.tcpFloor(bareSvc) || name == f.meshAlias(bareSvc) ||
+		isCopy := name == f.tcpFloor(bareSvc) || name == f.portAlias(bareSvc) ||
 			strings.HasPrefix(name, "quic:") && strings.Contains(name, "db.demo")
 		cla, ok := r.(*endpointv3.ClusterLoadAssignment)
 		if isCopy && ok && lbEndpoints(cla) != lbEndpoints(bare) {

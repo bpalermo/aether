@@ -118,6 +118,14 @@ func (m *Mutator) Handle(ctx context.Context, req admission.Request) admission.R
 		return admission.Denied(reason)
 	}
 
+	// The mesh's own two ports are a port of no service (proposal 043): refuse
+	// a pod that declares one, naming it.
+	if reason := reservedPortDenial(pod); reason != "" {
+		m.Log.InfoContext(ctx, "denied pod: reserved port", "namespace", req.Namespace, "name", pod.Name,
+			"generateName", pod.GenerateName, "reason", reason)
+		return admission.Denied(reason)
+	}
+
 	changed := false
 	if pod.Labels[aetherlabels.LabelAetherManaged] != "true" {
 		if pod.Labels == nil {

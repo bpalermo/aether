@@ -482,7 +482,13 @@ func TestPerPort_EveryStateAndTransitionIsConsistent(t *testing.T) {
 					rtpConsistent(t, c, "first")
 				}
 				load(to)
-				rtpConsistent(t, c, "moved (old entries retained)")
+				// A service whose pods declared nothing but a port reserved for
+				// the mesh had no entry to retain: gone, it is at once a name
+				// nothing is known of, like any absent service.
+				reservedOnly := from == "legacy18081h" || from == "legacy18082h" || from == "tcponly18081"
+				if to != "absent" || !reservedOnly {
+					rtpConsistent(t, c, "moved (old entries retained)")
+				}
 				c.serviceRetentionGrace = 1
 				load(to)
 				if to != "absent" {

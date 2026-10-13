@@ -512,7 +512,8 @@ func nsEndpoint(ip, namespace string) *registryv1.ServiceEndpoint {
 // Each HTTP service is three cluster entries (the default cluster, and its
 // mesh-port and default-port aliases), all rendered from one pin.
 func TestTLSClusterGaugeByReasonThroughAPinAndARemoval(t *testing.T) {
-	const perService = 3
+	// The default cluster and the alias of its port.
+	const perService = 2
 	c, rec, reader := newBindingTestCache(t)
 	ctx := context.Background()
 	require.NoError(t, c.SetNodeIdentity(ctx, nodeIdentity))
@@ -539,7 +540,7 @@ func TestTLSClusterGaugeByReasonThroughAPinAndARemoval(t *testing.T) {
 	c.clusterMu.RLock()
 	entries := len(c.clusters)
 	c.clusterMu.RUnlock()
-	require.Equal(t, 3*perService, entries, "fixture: three entries per HTTP service")
+	require.Equal(t, 3*perService, entries, "fixture: two entries per HTTP service")
 	assert.Equal(t, int64(perService), gauge.pinned)
 	assert.Equal(t, byCause(0, 2*perService, 0), gauge.unpinned)
 	require.Len(t, rec.with(unpinnedClusterMsg), 1)
@@ -922,7 +923,6 @@ func TestPinStateByEntryKind(t *testing.T) {
 		cause     cachemetrics.UnpinnedCause
 	}{
 		{"HTTP default", "demo/web", pinPresent, ""},
-		{"HTTP mesh-port alias", proxy.PortClusterName("demo/web", c.meshDomain, 18081), pinPresent, ""},
 		{"HTTP default-port alias", proxy.PortClusterName("demo/web", c.meshDomain, 8080), pinPresent, ""},
 		{"HTTP default, no namespace", "demo/nons", pinMissing, cachemetrics.CauseNoNamespaceMetadata},
 		{"HTTP alias, no namespace", proxy.PortClusterName("demo/nons", c.meshDomain, 8080), pinMissing, cachemetrics.CauseNoNamespaceMetadata},
@@ -948,9 +948,8 @@ func TestPinStateByEntryKind(t *testing.T) {
 	// time and shares that entry's pin, so the entry stands for both.
 	for key := range c.clusters {
 		assert.False(t, proxy.IsQUICClusterName(key), "twin %s must not be a cluster entry", key)
-		if _, ok := covered[key]; !ok {
-			// The remaining alias of demo/nons; every key must be a kind above.
-			assert.Equal(t, proxy.PortClusterName("demo/nons", c.meshDomain, 18081), key, "an entry kind this table does not state the rule for")
-		}
+		_, ok := covered[key]
+		assert.Truef(t, ok, "%s: an entry kind this table does not state the rule for", key)
+		assert.NotContains(t, key, ":18081", "no entry is named for the proxy's port")
 	}
 }

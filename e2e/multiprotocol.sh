@@ -148,6 +148,9 @@
 #                  per-port refusals apply to the short name
 #   N3  short name from a third namespace, which has no mp-short: refused,
 #                  421 name-not-in-namespace, on both paths
+#   V1  reserved   18081 and 18082 are the mesh's: Host <a name nothing
+#                  serves>:18081 -> 421 port-not-declared at once, on both
+#                  paths; a pod that declares one is denied at admission
 #   W1  captured   mp-tcponly: raw TCP to <mesh name>:9000 and to :18082
 #                  -> onlytcp
 #   W2  captured   mp-tcponly: raw TCP to :7777 (a port it listens on and does
@@ -308,7 +311,7 @@ AGENT_GROUP=(agent mesh-dns proxy-supervisor cni-install uds-csi)
 REGISTRAR_GROUP=(registrar controller)
 # Red-run aids (see "A RED RUN" in the header). CI sets none of them.
 ALL_LEGS=(M0 M1 M2 M3 M4 M5 M6 M7 X1 X2 X3 X4 X5 X6 A1 A2 A3 A4 A5 A6 A7 A8 A9 A10 A11 A12
-	W1 W2 W3 P1 P2 P3 P4 P5 R1 R2 R3 S1 N1 N2 N3)
+	W1 W2 W3 P1 P2 P3 P4 P5 R1 R2 R3 S1 N1 N2 N3 V1)
 MP_LEGS="${MP_LEGS:-${ALL_LEGS[*]}}"
 MP_KEEP_GOING="${MP_KEEP_GOING:-0}"
 MP_TIMEOUT="${MP_TIMEOUT:-}"
@@ -2016,6 +2019,64 @@ leg_N3() {
 	expect "from $TEST_NS3, captured http://$SHORT_NAME.$TEST_NS.$MESH_DOMAIN:$HTTP_PORT/" "$SHORT_MARKER_A" "$A_TIMEOUT" "$A_PROBES" \
 		"the full name must answer from any namespace" \
 		ns_tokens "$TEST_NS3" client "http://$SHORT_NAME.$TEST_NS.$MESH_DOMAIN:$HTTP_PORT/" ""
+}
+
+# --- the mesh's own two ports are a port of no service --------------------------
+
+# V1 — 18081 and 18082 are the mesh's. An authority that names one is refused
+# at once for a name the node knows NOTHING of as well (until this rule it was
+# offered on demand, parked, and failed after the on-demand timeout; an alias
+# cluster of that name answered it if the service became known meanwhile), and
+# a pod that declares one as an application port is denied at admission.
+leg_V1() {
+	log "V1 the mesh's own ports are a port of no service: an unknown name with :$MESH_HTTP_PORT is refused at once, and a pod cannot declare one"
+	local unknown out port
+	unknown="mp-nowhere.$TEST_NS.$MESH_DOMAIN"
+	for port in "$MESH_HTTP_PORT" "$MESH_TCP_PORT"; do
+		expect "loopback, Host $unknown:$port (a name nothing serves)" "HTTP421:port-not-declared" "$A_TIMEOUT" "$A_PROBES" \
+			"HTTP503 is the request offered on demand and parked for a cluster named for the mesh's own port" \
+			http_tokens client-nocapture "$LOOPBACK_URL" "$unknown:$port"
+	done
+	expect "captured dial to $(mesh_name mp-httponly):$MESH_HTTP_PORT with Host $unknown:$MESH_HTTP_PORT" "HTTP421:port-not-declared" "$A_TIMEOUT" "$A_PROBES" \
+		"HTTP503 is the request parked on the proxy port's capture table" \
+		http_tokens client "http://$(mesh_name mp-httponly):$MESH_HTTP_PORT/" "$unknown:$MESH_HTTP_PORT"
+
+	# Admission. A server-side dry run goes through the webhooks and creates
+	# nothing.
+	for port in "$MESH_HTTP_PORT" "$MESH_TCP_PORT"; do
+		if out="$(reserved_pod "$port" | kc apply --dry-run=server -f - 2>&1)"; then
+			fail "a pod that declares port $port was admitted: $out" "the controller's pod webhook must deny it"
+		elif ! grep -q "are the mesh's own ports" <<<"$out"; then
+			fail "a pod that declares port $port was refused for another reason: $out" ""
+		else
+			passed "a pod declaring $port is denied at admission, naming the port"
+		fi
+	done
+	if out="$(reserved_pod "$HTTP_PORT" | kc apply --dry-run=server -f - 2>&1)"; then
+		passed "the same pod declaring $HTTP_PORT is admitted"
+	else
+		fail "the same pod declaring $HTTP_PORT is refused: $out" "the denial above is then not about the port"
+	fi
+}
+
+# reserved_pod PORT — a mesh pod that declares PORT, for an admission dry run.
+reserved_pod() {
+	cat <<EOF
+apiVersion: v1
+kind: Pod
+metadata:
+  name: mp-reserved-$1
+  namespace: $TEST_NS
+  labels: {app: mp-reserved, aether.io/managed: "true"}
+  annotations:
+    endpoint.aether.io/port: "$HTTP_PORT"
+    endpoint.aether.io/ports: "$HTTP_PORT,$1"
+spec:
+  serviceAccountName: default
+  containers:
+    - name: app
+      image: ${IMAGE_REGISTRY}/l4echo:latest
+EOF
 }
 
 # --- a raw-TCP service is reached on the ports it declares ---------------------

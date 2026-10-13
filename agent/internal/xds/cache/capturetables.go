@@ -378,7 +378,10 @@ func (c *SnapshotCache) outboundRefusalVhostsLocked(in ruleInputs) []*routev3.Vi
 	}
 	out := make([]*routev3.VirtualHost, 0, 2*len(c.servicePorts))
 	for svc, ports := range c.servicePorts {
-		if _, ok := routed[svc]; ok {
+		// A service whose pods declare only ports reserved for the mesh has
+		// no cluster entry and never will: the node knows it, and knows it
+		// serves nothing, so it is refused by name all the same.
+		if _, ok := routed[svc]; ok || ports.reservedOnly {
 			out = c.appendOutboundRefusalsLocked(out, svc, ports, in)
 		}
 	}
@@ -497,7 +500,16 @@ func (c *SnapshotCache) appendColdVhostsLocked(out []*routev3.VirtualHost, in ru
 	add(fqdn+"|cold", []string{fqdn + ":*"}, everywhere)
 	out = append(out, proxy.BuildRefusalVirtualHost(fqdn+"|port-required", []string{fqdn}, proxy.RefusalPortRequired,
 		fmt.Sprintf("aether: %s was addressed without a port, and this node does not know its ports yet. Address it as %s:<port>.\n", fqdn, fqdn)))
+	// The mesh's own two ports are a port of no service, known or not: an
+	// authority that names one is refused here too, and not parked for a
+	// cluster that can never exist (proxy.RefusalReservedPortBody).
+	out = append(out, proxy.BuildRefusalVirtualHost(fqdn+"|reserved",
+		[]string{fmt.Sprintf("%s:%d", fqdn, meshconst.ProxyOutboundPort), fmt.Sprintf("%s:%d", fqdn, meshconst.ProxyL4OutboundPort)},
+		proxy.RefusalPortNotDeclared, proxy.RefusalReservedPortBody))
 	for pod, rules := range byPod {
+		if reservedMeshPort(pod) {
+			continue // a Service port that maps onto one: refused above
+		}
 		add(fmt.Sprintf("%s|cold|%d", fqdn, pod), []string{fmt.Sprintf("%s:%d", fqdn, pod)}, rules)
 	}
 	return out
@@ -693,7 +705,9 @@ func (c *SnapshotCache) reportServicePortConflicts(ctx context.Context, now map[
 		if last[svc] == now[svc] {
 			continue
 		}
-		c.log.WarnContext(ctx, "the endpoints of a mesh service declare different protocols for one port; the port is served as the protocol most endpoints declare (ties: http, then tcp)",
+		c.log.WarnContext(ctx, "a mesh service's ports cannot all be served as its endpoints declare them: "+
+			"a port whose endpoints declare different protocols is served as the protocol most of them declare, "+
+			"and a port reserved for the mesh (18081, 18082) is not served at all",
 			"service", svc, "ports", now[svc])
 	}
 }

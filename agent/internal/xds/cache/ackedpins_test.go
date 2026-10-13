@@ -348,12 +348,12 @@ func TestAckedPinGaugeIsWhatTheProxyAcknowledged(t *testing.T) {
 	c.ResponseAccepted(ctx, unpinnedSnapshot)
 	acked, ok := readPinGauge(t, reader, ackedTLSClustersGauge)
 	require.True(t, ok)
-	assert.Equal(t, int64(3), acked.pinned)
-	assert.Equal(t, byCause(0, 3, 0), acked.unpinned)
+	assert.Equal(t, int64(2), acked.pinned)
+	assert.Equal(t, byCause(0, 2, 0), acked.unpinned)
 	lines := rec.with(ackedClusterPinsMsg)
 	require.Len(t, lines, 1, "the acknowledged state changed and something in it is unpinned: one line")
-	assert.Equal(t, "3", lines[0].attrs["unpinned"])
-	assert.Equal(t, "3", lines[0].attrs[string(cachemetrics.CauseNoNamespaceMetadata)])
+	assert.Equal(t, "2", lines[0].attrs["unpinned"])
+	assert.Equal(t, "2", lines[0].attrs[string(cachemetrics.CauseNoNamespaceMetadata)])
 	assert.Equal(t, "0", lines[0].attrs[string(cachemetrics.CauseTrustDomainUnknown)])
 	assert.Equal(t, unpinnedVersion, lines[0].attrs["snapshot_version"])
 	assert.NotContains(t, fmt.Sprint(lines[0].attrs), "a.demo.", "counts only: the names are on the snapshot's own line")
@@ -369,7 +369,7 @@ func TestAckedPinGaugeIsWhatTheProxyAcknowledged(t *testing.T) {
 	published, _ := readPinGauge(t, reader, tlsClustersGauge)
 	assert.Equal(t, byCause(0, 0, 0), published.unpinned, "published: pinned")
 	acked, _ = readPinGauge(t, reader, ackedTLSClustersGauge)
-	assert.Equal(t, byCause(0, 3, 0), acked.unpinned, "acknowledged: still the clusters before it")
+	assert.Equal(t, byCause(0, 2, 0), acked.unpinned, "acknowledged: still the clusters before it")
 
 	// A second acknowledgement of the old clusters (another proxy generation,
 	// say) changes nothing and is silent.
@@ -377,12 +377,12 @@ func TestAckedPinGaugeIsWhatTheProxyAcknowledged(t *testing.T) {
 	c.ResponseAccepted(ctx, unpinnedSnapshot)
 	assert.Empty(t, rec.with(ackedClusterPinsMsg), "the acknowledged state did not change: no line")
 	acked, _ = readPinGauge(t, reader, ackedTLSClustersGauge)
-	assert.Equal(t, byCause(0, 3, 0), acked.unpinned)
+	assert.Equal(t, byCause(0, 2, 0), acked.unpinned)
 
 	// The proxy acknowledges the pinned clusters.
 	c.ResponseAccepted(ctx, pinnedSnapshot)
 	acked, _ = readPinGauge(t, reader, ackedTLSClustersGauge)
-	assert.Equal(t, int64(6), acked.pinned)
+	assert.Equal(t, int64(4), acked.pinned)
 	assert.Equal(t, byCause(0, 0, 0), acked.unpinned)
 	assert.Empty(t, rec.with(ackedClusterPinsMsg))
 	require.Len(t, rec.with(ackedClusterPinsClearMsg), 1, "the return to all-pinned is said once")
