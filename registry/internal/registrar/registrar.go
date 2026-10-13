@@ -16,6 +16,8 @@ import (
 	"sync/atomic"
 	"time"
 
+	"aethermesh.dev/registry/endpointmeta"
+
 	registrarv1 "aethermesh.dev/api/aether/registrar/v1"
 	registryv1 "aethermesh.dev/api/aether/registry/v1"
 	commonlog "aethermesh.dev/common/log"
@@ -572,6 +574,11 @@ func (r *RegistrarRegistry) Close() error {
 
 // RegisterEndpoint delegates to the Registrar's RegisterEndpoint RPC.
 func (r *RegistrarRegistry) RegisterEndpoint(ctx context.Context, serviceName string, protocol registryv1.Service_Protocol, endpoint *registryv1.ServiceEndpoint) error {
+	// Refused here as the registrar would refuse it: the writer is told
+	// without a round trip.
+	if err := endpointmeta.CheckRow(endpoint); err != nil {
+		return err
+	}
 	_, err := r.client.RegisterEndpoint(ctx, &registrarv1.RegisterEndpointRequest{
 		ServiceName: serviceName,
 		Protocol:    protocol,

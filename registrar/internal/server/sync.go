@@ -5,6 +5,8 @@ import (
 	"log/slog"
 	"time"
 
+	"aethermesh.dev/registry/endpointmeta"
+
 	"aethermesh.dev/common/telemetry"
 	"aethermesh.dev/registry"
 	"go.opentelemetry.io/otel"
@@ -46,6 +48,10 @@ type Syncer struct {
 	log          *slog.Logger
 	metrics      *Metrics
 	firstSync    bool
+	// untypedRows are the rows the last sync filtered (typedOnly), by
+	// identity, with the reason: a row is logged when it first shows, not on
+	// every sync. Only the sync loop touches it.
+	untypedRows map[string]string
 	// writeBehind, when set, overlays still-pending snapshot-first intents
 	// onto the fetched external state before Diff/Replace, so the sync never
 	// regresses an intent the external registry has not materialized yet.
@@ -227,7 +233,7 @@ func (s *Syncer) list(ctx context.Context) (map[string]map[registryv1.Service_Pr
 			s.log.ErrorContext(ctx, "failed to list endpoints from registry", "error", err)
 			return nil, 0, err
 		}
-		return state, revision, nil
+		return s.typedOnly(ctx, state), revision, nil
 	}
 
 	newState := make(map[string]map[registryv1.Service_Protocol][]*registryv1.ServiceEndpoint)
@@ -244,7 +250,62 @@ func (s *Syncer) list(ctx context.Context) (map[string]map[registryv1.Service_Pr
 			newState[svcName][protocol] = eps
 		}
 	}
-	return newState, 0, nil
+	return s.typedOnly(ctx, newState), 0, nil
+}
+
+// typedOnly drops, from a listing of the store, every row that does not say
+// the protocol of each of its ports (endpointmeta.RowProblem), and says so.
+//
+// Such a row cannot be written through this registrar any more
+// (RegisterEndpoint refuses it). One can still be IN the store: written before
+// the upgrade, or by a peer cluster's registrar of an older chart into a
+// shared etcd. It is filtered here, at the one place every consumer of the
+// registry reads from (the snapshot the agents watch and the Service
+// generator are both fed by it), so nothing downstream sees it; the agent
+// refuses it too, should it ever be handed one.
+//
+// It is logged once per row and reason, not once per sync: a sync runs every
+// few seconds for as long as the row is there. The count of rows currently
+// filtered is a gauge, so that "how many, and are they gone yet" is one query.
+func (s *Syncer) typedOnly(ctx context.Context, state map[string]map[registryv1.Service_Protocol][]*registryv1.ServiceEndpoint) map[string]map[registryv1.Service_Protocol][]*registryv1.ServiceEndpoint {
+	seen := map[string]string{}
+	byReason := map[string]int64{}
+	for svc, byProtocol := range state {
+		for protocol, rows := range byProtocol {
+			if kept := s.typedRows(ctx, svc, protocol, rows, seen, byReason); len(kept) != len(rows) {
+				byProtocol[protocol] = kept
+			}
+		}
+	}
+	if len(s.untypedRows) > 0 && len(seen) == 0 {
+		s.log.InfoContext(ctx, "no stored registry row is without port_protocols any more")
+	}
+	s.untypedRows = seen
+	s.metrics.rowsFiltered(ctx, byReason)
+	return state
+}
+
+// typedRows returns the rows of one listing of one service that say the
+// protocol of each of their ports, and records the others in seen (identity ->
+// reason) and byReason, logging each the first time it shows.
+func (s *Syncer) typedRows(ctx context.Context, svc string, protocol registryv1.Service_Protocol, rows []*registryv1.ServiceEndpoint, seen map[string]string, byReason map[string]int64) []*registryv1.ServiceEndpoint {
+	kept := rows[:0:0]
+	for _, ep := range rows {
+		problem := endpointmeta.RowProblem(ep)
+		if problem == "" {
+			kept = append(kept, ep)
+			continue
+		}
+		byReason[problem]++
+		id := svc + "|" + protocol.String() + "|" + ep.GetClusterName() + "|" + ep.GetIp()
+		seen[id] = problem
+		if s.untypedRows[id] != problem {
+			s.log.WarnContext(ctx, "a stored registry row is not served: it does not say the protocol of each of its ports (port_protocols is required). "+
+				"Its pod must be registered again by a node agent of this chart",
+				"service", svc, "protocol", protocol.String(), "cluster", ep.GetClusterName(), "ip", ep.GetIp(), "reason", problem)
+		}
+	}
+	return kept
 }
 
 // NeedLeaderElection returns false so the syncer runs on all replicas,

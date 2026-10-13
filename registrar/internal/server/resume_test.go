@@ -8,6 +8,8 @@ import (
 	"testing"
 	"time"
 
+	"aethermesh.dev/registry/registrytest"
+
 	registrarv1 "aethermesh.dev/api/aether/registrar/v1"
 	registryv1 "aethermesh.dev/api/aether/registry/v1"
 	"github.com/stretchr/testify/assert"
@@ -26,7 +28,7 @@ func listing(svcIPs map[string][]string) map[string]map[registryv1.Service_Proto
 	for svc, ips := range svcIPs {
 		eps := make([]*registryv1.ServiceEndpoint, 0, len(ips))
 		for _, ip := range ips {
-			eps = append(eps, &registryv1.ServiceEndpoint{Ip: ip, Port: 8080})
+			eps = append(eps, registrytest.Typed(&registryv1.ServiceEndpoint{Ip: ip, Port: 8080}, registryv1.Service_PROTOCOL_HTTP))
 		}
 		out[svc] = map[registryv1.Service_Protocol][]*registryv1.ServiceEndpoint{registryv1.Service_PROTOCOL_HTTP: eps}
 	}
@@ -216,7 +218,7 @@ func TestWatchEndpoints_TruncatedBatchIsResentOnReconnect(t *testing.T) {
 	_, err := s.RegisterEndpoint(context.Background(), &registrarv1.RegisterEndpointRequest{
 		ServiceName: "ns/new",
 		Protocol:    registryv1.Service_PROTOCOL_HTTP,
-		Endpoint:    &registryv1.ServiceEndpoint{Ip: "10.0.1.1", Port: 8080},
+		Endpoint:    registrytest.Typed(&registryv1.ServiceEndpoint{Ip: "10.0.1.1", Port: 8080}, registryv1.Service_PROTOCOL_HTTP),
 	})
 	require.NoError(t, err)
 	require.ErrorIs(t, <-done, errTransportGone)
@@ -248,7 +250,7 @@ func TestWatchEndpoints_CompleteStreamResumesWithoutResend(t *testing.T) {
 	_, err := s.RegisterEndpoint(context.Background(), &registrarv1.RegisterEndpointRequest{
 		ServiceName: "ns/a",
 		Protocol:    registryv1.Service_PROTOCOL_HTTP,
-		Endpoint:    &registryv1.ServiceEndpoint{Ip: "10.0.0.2", Port: 8080},
+		Endpoint:    registrytest.Typed(&registryv1.ServiceEndpoint{Ip: "10.0.0.2", Port: 8080}, registryv1.Service_PROTOCOL_HTTP),
 	})
 	require.NoError(t, err)
 	require.Eventually(t, func() bool { return len(stream.snapshot()) == 4 },

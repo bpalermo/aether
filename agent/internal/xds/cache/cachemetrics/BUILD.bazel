@@ -7,6 +7,7 @@ go_library(
     visibility = ["//agent:__subpackages__"],
     deps = [
         "//common/udspath",
+        "//registry/endpointmeta",
         "@io_opentelemetry_go_otel//attribute",
         "@io_opentelemetry_go_otel_metric//:metric",
     ],

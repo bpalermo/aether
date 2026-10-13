@@ -232,11 +232,17 @@ func (f *bareFixture) requireHTTPClusterAndVhost(t *testing.T, s *cachev3.Snapsh
 }
 
 // The issue's input. A service listed under HTTP (3 pods) and TCP (2 other
-// pods) loses its HTTP listing. For the retention grace its h2 cluster and
-// vhost stay; the one load assignment published under the bare name is the
-// live TCP listing's, on every build, and so is every copy derived from it:
-// the TCP floor's (tcp_proxy has no on-demand path to recover from an empty
-// one), the h2 port alias's and the QUIC twin's.
+// pods) loses its HTTP listing. The one load assignment published under the
+// bare name is the live TCP listing's, on every build, and so is the TCP
+// floor's copy (tcp_proxy has no on-demand path to recover from an empty one).
+//
+// Its h2 cluster and vhost do NOT stay for the grace any more (proposal 043):
+// the rows the node still holds of the service say what it is now, and none
+// declares 8080 as HTTP. That is a replacement, not a removal
+// (retentionEvidence). Kept, the h2 cluster resolved its endpoints through the
+// bare name: an HTTP request to :8080 was delivered to the raw-TCP pods on
+// 9000 for the length of the grace, which is what this test used to pin as
+// "the h2 port alias and the QUIC twin carry the live endpoints".
 func TestHTTPListingLostWhileTCPStaysPublishesTheLiveLoadAssignment(t *testing.T) {
 	f := newBareFixture(t)
 	f.list(tcp, bareSvc, 2, 2)
@@ -255,16 +261,16 @@ func TestHTTPListingLostWhileTCPStaysPublishesTheLiveLoadAssignment(t *testing.T
 	s = f.requireStable(t, want{
 		bareSvc:              2,
 		f.tcpFloor(bareSvc):  2,
-		f.portAlias(bareSvc): 2,
-		twin:                 2,
+		f.portAlias(bareSvc): -1,
+		twin:                 -1,
 	})
-	f.requireHTTPClusterAndVhost(t, s, bareSvc, true)
-	assert.Contains(t, s.GetResources(resourcev3.ClusterType), twin, "the retained cluster's twin stays too")
+	f.requireHTTPClusterAndVhost(t, s, bareSvc, false)
+	assert.NotContains(t, s.GetResources(resourcev3.ClusterType), twin, "the replaced cluster's twin goes with it")
 	assert.Equal(t, []string{"10.2.2.1:9000", "10.2.2.2:9000"}, f.udpAddrs(s, bareSvc),
-		"the udp: cluster is rendered from the live entry: its endpoints AND its port, not the retained HTTP entry's 8080")
+		"the udp: cluster is rendered from the live entry: its endpoints AND its port, not the HTTP entry's 8080")
 	f.requireCheckSilent(t)
 
-	// Past the grace the retained entry is pruned and nothing else changes.
+	// Past the grace nothing changes.
 	f.c.serviceRetentionGrace = time.Nanosecond
 	f.refresh(t)
 	s = f.refresh(t)
@@ -319,9 +325,12 @@ func TestBothListingsLostPublishOneEmptyLoadAssignment(t *testing.T) {
 
 	// The TCP listing comes back while the HTTP entry is still retained:
 	// the retained entry was holding the (empty) bare name and gives it up.
+	// And it goes: from here the node holds rows of the service, none of
+	// which declares 8080 as HTTP (a replacement, retentionEvidence). Until
+	// here nothing said what the service was, and it was kept.
 	f.list(tcp, bareSvc, 2, 2)
-	s = f.requireStable(t, want{bareSvc: 2, f.tcpFloor(bareSvc): 2, f.portAlias(bareSvc): 2})
-	f.requireHTTPClusterAndVhost(t, s, bareSvc, true)
+	s = f.requireStable(t, want{bareSvc: 2, f.tcpFloor(bareSvc): 2, f.portAlias(bareSvc): -1})
+	f.requireHTTPClusterAndVhost(t, s, bareSvc, false)
 	f.requireCheckSilent(t)
 
 	// And the HTTP listing after it: the HTTP entry owns the name again.
@@ -361,8 +370,8 @@ func TestTCPAndUDPListingsPublishOneLoadAssignment(t *testing.T) {
 }
 
 // HTTP lost while UDP stays: the same shape as the issue's, on the UDP floor.
-// The udp: cluster is rendered from the live load assignment, not from the
-// retained HTTP entry.
+// The udp: cluster is rendered from the live load assignment, and the HTTP
+// entry is replaced at once (the UDP rows say what the service is now).
 func TestHTTPListingLostWhileUDPStaysPublishesTheLiveLoadAssignment(t *testing.T) {
 	f := newBareFixture(t)
 	f.list(udp, bareUDPSvc, 3, 1)
@@ -371,10 +380,10 @@ func TestHTTPListingLostWhileUDPStaysPublishesTheLiveLoadAssignment(t *testing.T
 	require.Equal(t, 3, published(s, bareUDPSvc))
 
 	f.list(http, bareUDPSvc, 0, 0)
-	s = f.requireStable(t, want{bareUDPSvc: 1, f.portAlias(bareUDPSvc): 1})
+	s = f.requireStable(t, want{bareUDPSvc: 1, f.portAlias(bareUDPSvc): -1})
 	assert.Equal(t, []string{"10.2.3.1:5353"}, f.udpAddrs(s, bareUDPSvc),
-		"datagrams reach the live UDP pod at the port it registered through the grace, not at the retained HTTP entry's 8080")
-	f.requireHTTPClusterAndVhost(t, s, bareUDPSvc, true)
+		"datagrams reach the live UDP pod at the port it registered, not at the HTTP entry's 8080")
+	f.requireHTTPClusterAndVhost(t, s, bareUDPSvc, false)
 	f.requireCheckSilent(t)
 }
 
@@ -426,7 +435,12 @@ func walkRows(p registryv1.Service_Protocol, block, n, variant int) []*registryv
 			second := listingPort[p] + 1
 			ep.Ports = []uint32{ep.GetPort(), second}
 			if p == tcp {
-				ep.PortProtocols = map[uint32]registryv1.PortProtocol{second: registryv1.PortProtocol_PORT_PROTOCOL_TCP}
+				// Every port is typed: a row that left one out is refused
+				// whole (port_protocols is required).
+				ep.PortProtocols = map[uint32]registryv1.PortProtocol{
+					ep.GetPort(): registryv1.PortProtocol_PORT_PROTOCOL_TCP,
+					second:       registryv1.PortProtocol_PORT_PROTOCOL_TCP,
+				}
 			}
 		}
 		rows = append(rows, ep)
@@ -634,6 +648,10 @@ func (m *walkModel) retainH2() {
 		m.hRetained, m.hLost = false, -1
 	case m.h != 0:
 		m.hRetained, m.hLost = true, -1
+	case m.t != 0 || m.u != 0:
+		// Rows of the service are held and none declares the HTTP port: a
+		// replacement, not retained (retentionEvidence).
+		m.hRetained, m.hLost = false, -1
 	case m.hRetained && m.hLost < 0:
 		m.hLost = m.clock
 	case m.hRetained && m.clock-m.hLost > 90:

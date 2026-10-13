@@ -158,6 +158,10 @@ var seededCounters = []string{
 	// audit. Zero forever when every builder honours the rule.
 	"aether.agent.snapshot.version_memo_mismatch",
 	"aether.agent.snapshot.duplicate_resource_names",
+	// A registry row that does not say the protocol of each of its ports
+	// (port_protocols is required). Zero forever once every writer is of
+	// this chart.
+	"aether.agent.registry.rows_refused",
 	"aether.agent.identity.outbound_binding_mismatch",
 	"aether.agent.identity.inbound_binding_mismatch",
 	// #832: a cluster shipped with no SAN pin. Its healthy value is zero

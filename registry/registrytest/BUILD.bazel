@@ -2,12 +2,17 @@ load("@rules_go//go:def.bzl", "go_library", "go_test")
 
 go_library(
     name = "registrytest",
-    srcs = ["contract.go"],
+    srcs = [
+        "contract.go",
+        "fixtures.go",
+    ],
     importpath = "aethermesh.dev/registry/registrytest",
     visibility = ["//visibility:public"],
     deps = [
         "//api/aether/registry/v1:registry",
         "//common/serviceref",
+        "//registry/endpointmeta",
+        "@org_golang_google_protobuf//proto",
     ],
 )
 

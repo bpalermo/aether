@@ -2,6 +2,7 @@ package k8s
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"testing"
 	"time"
@@ -18,6 +19,7 @@ import (
 	"aethermesh.dev/common/constants"
 	aetherannotations "aethermesh.dev/common/constants/annotations"
 	aetherlabels "aethermesh.dev/common/constants/labels"
+	"aethermesh.dev/registry"
 	"aethermesh.dev/registry/endpointmeta"
 	"aethermesh.dev/registry/registrytest"
 )
@@ -1664,4 +1666,52 @@ func TestListingsCarryAPodUnderEveryProtocolItServes(t *testing.T) {
 		require.NoError(t, err, "one malformed pod must not fail the listing")
 		assert.NotContains(t, all, "default/bad", "protocol=%v", protocol)
 	}
+}
+
+// TestKubernetesRegistry_EveryListedRowIsTyped: port_protocols is required
+// (proposal 043), and this backend cannot produce a row without it. It stores
+// nothing: every row is derived from a pod's annotations at each listing, by
+// the parser the node agent registers with, which names every port it lists
+// with a class. A pod whose annotations do not parse is in no listing, so
+// there is no pod it lists with a row that is not typed.
+func TestKubernetesRegistry_EveryListedRowIsTyped(t *testing.T) {
+	sets := []map[string]string{
+		{}, // no annotation at all: the default port, HTTP
+		{aetherannotations.AnnotationEndpointPort: "9000"},
+		{aetherannotations.AnnotationEndpointProtocol: "tcp"},
+		{aetherannotations.AnnotationEndpointProtocol: "udp", aetherannotations.AnnotationEndpointPort: "5353"},
+		{aetherannotations.AnnotationEndpointPorts: "8080,9090"},
+		{aetherannotations.AnnotationEndpointPorts: "8080=h2,9000=tcp,5353=udp"},
+		{aetherannotations.AnnotationEndpointProtocol: "tcp", aetherannotations.AnnotationEndpointPort: "9000", aetherannotations.AnnotationEndpointPorts: "9000,8080=h1"},
+		{aetherannotations.AnnotationEndpointPorts: "9090"},
+		// These do not parse: no row.
+		{aetherannotations.AnnotationEndpointPorts: "8080=grpc"},
+		{aetherannotations.AnnotationEndpointProtocol: "sctp"},
+	}
+	objects := []any{topologyNode("node-1", "us-east-1", "us-east-1a")}
+	for i, a := range sets {
+		pod := managedPod(fmt.Sprintf("pod-%d", i), "default", fmt.Sprintf("svc-%d", i), fmt.Sprintf("10.0.0.%d", i+1), "node-1")
+		objects = append(objects, withAnnotations(pod, a))
+	}
+	r := newTestRegistry("test-cluster", objects...)
+
+	listed := map[string]struct{}{}
+	for _, protocol := range registry.ServedProtocols {
+		all, err := r.ListAllEndpoints(context.Background(), protocol)
+		require.NoError(t, err)
+		for svc, rows := range all {
+			for _, ep := range rows {
+				listed[svc] = struct{}{}
+				assert.Emptyf(t, endpointmeta.RowProblem(ep), "%s under %s: port %d ports %v port_protocols %v", svc, protocol, ep.GetPort(), ep.GetPorts(), ep.GetPortProtocols())
+			}
+			one, err := r.ListEndpoints(context.Background(), svc, protocol)
+			require.NoError(t, err)
+			for _, ep := range one {
+				assert.Empty(t, endpointmeta.RowProblem(ep))
+			}
+		}
+	}
+	assert.Len(t, listed, len(sets)-2, "every pod whose annotations parse is listed, and only those")
+	assert.NotContains(t, listed, "default/svc-8")
+	assert.NotContains(t, listed, "default/svc-9")
 }

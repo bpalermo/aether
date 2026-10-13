@@ -181,39 +181,30 @@ func reservedPortNotes(listings []listedEndpoints) []string {
 	return out
 }
 
-// endpointPortClasses returns the class of every port one endpoint serves.
+// endpointPortClasses returns the class of every port one endpoint serves:
+// what its port_protocols says, and nothing else.
 //
-// The authoritative field is the endpoint's own port_protocols. A row written
-// before proposal 037 carries none and was classified whole, by the protocol
-// it was registered under, so its ports (or its one port) take listed, the
-// protocol of the listing it was read from; so does a port its port_protocols
-// does not name.
-func endpointPortClasses(ep *registryv1.ServiceEndpoint, listed registryv1.Service_Protocol) map[uint32]registryv1.PortProtocol {
-	if listed == registryv1.Service_PROTOCOL_UNSPECIFIED {
-		listed = registryv1.Service_PROTOCOL_HTTP
-	}
-	fallback := endpointmeta.PortProtocolFromService(listed)
+// port_protocols is required (endpointmeta.RowProblem). A row without it used
+// to be classified whole, by the protocol of the listing it was read from, and
+// so was a port the map did not name. That fallback is gone: a class that is
+// not stated is not guessed, and a port with no class is not a port of the
+// endpoint. Rows that carry none are dropped before anything is derived
+// (typedRegistry); this is the same rule for a row that reaches here anyway.
+//
+// listed is the listing the row was read from. It decides nothing any more; it
+// stays in the signature because every caller has it and a reader of the call
+// should see that the listing was deliberately not consulted.
+func endpointPortClasses(ep *registryv1.ServiceEndpoint, _ registryv1.Service_Protocol) map[uint32]registryv1.PortProtocol {
 	declared := ep.GetPortProtocols()
-	out := make(map[uint32]registryv1.PortProtocol, len(declared)+1)
-	add := func(port uint32) {
-		if port == 0 || port > 65535 || reservedMeshPort(port) {
-			// A reserved port is a port of no service (reservedMeshPort):
-			// it has no class, so nothing is derived, voted or built from it.
-			return
+	out := make(map[uint32]registryv1.PortProtocol, len(declared))
+	for port, class := range declared {
+		if port == 0 || port > 65535 || reservedMeshPort(port) || class == registryv1.PortProtocol_PORT_PROTOCOL_UNSPECIFIED {
+			// A reserved port is a port of no service (reservedMeshPort);
+			// a port with no class is not served.
+			continue
 		}
-		if class := declared[port]; class != registryv1.PortProtocol_PORT_PROTOCOL_UNSPECIFIED {
-			out[port] = class
-			return
-		}
-		out[port] = fallback
+		out[port] = class
 	}
-	for port := range declared {
-		add(port)
-	}
-	for _, port := range ep.GetPorts() {
-		add(port)
-	}
-	add(ep.GetPort())
 	return out
 }
 

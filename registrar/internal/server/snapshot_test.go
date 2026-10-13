@@ -6,6 +6,8 @@ import (
 	"sync"
 	"testing"
 
+	"aethermesh.dev/registry/registrytest"
+
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -723,7 +725,7 @@ func TestSnapshot_ServiceCountsStaySynced(t *testing.T) {
 	event := func(t registrarv1.WatchEndpointsResponse_EventType, svc, ip string) *registrarv1.WatchEndpointsResponse {
 		return &registrarv1.WatchEndpointsResponse{
 			Type: t, ServiceName: svc, Protocol: registryv1.Service_PROTOCOL_HTTP,
-			Endpoint: &registryv1.ServiceEndpoint{Ip: ip},
+			Endpoint: registrytest.Typed(&registryv1.ServiceEndpoint{Ip: ip}, registryv1.Service_PROTOCOL_HTTP),
 		}
 	}
 	added := registrarv1.WatchEndpointsResponse_EVENT_TYPE_ENDPOINT_ADDED
@@ -842,14 +844,14 @@ func TestSnapshot_ServiceCatalogTransitions(t *testing.T) {
 		return &registrarv1.WatchEndpointsResponse{
 			Type:        registrarv1.WatchEndpointsResponse_EVENT_TYPE_ENDPOINT_ADDED,
 			ServiceName: svc, Protocol: registryv1.Service_PROTOCOL_HTTP,
-			Endpoint: &registryv1.ServiceEndpoint{Ip: ip},
+			Endpoint: registrytest.Typed(&registryv1.ServiceEndpoint{Ip: ip}, registryv1.Service_PROTOCOL_HTTP),
 		}
 	}
 	rm := func(svc, ip string) *registrarv1.WatchEndpointsResponse {
 		return &registrarv1.WatchEndpointsResponse{
 			Type:        registrarv1.WatchEndpointsResponse_EVENT_TYPE_ENDPOINT_REMOVED,
 			ServiceName: svc, Protocol: registryv1.Service_PROTOCOL_HTTP,
-			Endpoint: &registryv1.ServiceEndpoint{Ip: ip},
+			Endpoint: registrytest.Typed(&registryv1.ServiceEndpoint{Ip: ip}, registryv1.Service_PROTOCOL_HTTP),
 		}
 	}
 

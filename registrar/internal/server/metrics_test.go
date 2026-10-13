@@ -6,6 +6,8 @@ import (
 	"log/slog"
 	"testing"
 
+	"aethermesh.dev/registry/registrytest"
+
 	registrarv1 "aethermesh.dev/api/aether/registrar/v1"
 	registryv1 "aethermesh.dev/api/aether/registry/v1"
 	"aethermesh.dev/common/snapshotversion"
@@ -412,7 +414,7 @@ func TestMetrics_ContentHashGaugeDirty(t *testing.T) {
 		Type:        registrarv1.WatchEndpointsResponse_EVENT_TYPE_ENDPOINT_ADDED,
 		ServiceName: "ns/a",
 		Protocol:    registryv1.Service_PROTOCOL_HTTP,
-		Endpoint:    &registryv1.ServiceEndpoint{Ip: "10.0.0.2", Port: 8080},
+		Endpoint:    registrytest.Typed(&registryv1.ServiceEndpoint{Ip: "10.0.0.2", Port: 8080}, registryv1.Service_PROTOCOL_HTTP),
 	}})
 	st := snap.State()
 	if !st.Dirty || st.Version != "3+"+st.ContentHash {

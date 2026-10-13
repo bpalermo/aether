@@ -81,10 +81,13 @@ func TestRequirePerPortProtocols(t *testing.T) {
 			},
 		},
 		{
-			name: "a row written before port_protocols existed is exempt from rule 1",
+			// port_protocols is required. A row without it used to be exempt
+			// from every rule here ("written before the field existed").
+			name: "a row with no port_protocols is itself a breach",
 			in: listings{
 				listTCP: {"ns/old": {row("10.0.0.1", 5432, nil, nil)}},
 			},
+			want: []string{`service "ns/old" endpoint 10.0.0.1 is listed with a row that does not say the protocol of each of its ports (no_port_protocols`},
 		},
 		{
 			name: "two services, or two clusters, sharing an IP are different endpoints",
@@ -145,12 +148,17 @@ func TestRequirePerPortProtocols(t *testing.T) {
 			want: []string{`ports [8080 9000] vs [9000]`},
 		},
 		{
-			name: "a pre-field row beside the same pod's full row",
+			name: "a row with no port_protocols beside the same pod's full row",
 			in: listings{
 				listHTTP: {"ns/mixed": {mixed("10.0.0.1")}},
 				listTCP:  {"ns/mixed": {row("10.0.0.1", 8080, []uint32{8080, 9000}, nil)}},
 			},
-			want: []string{`differs between the PROTOCOL_HTTP and PROTOCOL_TCP listings`},
+			// The untyped row is the breach; the full row is then missing
+			// from the listing of its second class, which is also true.
+			want: []string{
+				`is listed with a row that does not say the protocol of each of its ports (no_port_protocols`,
+				`declares a PROTOCOL_TCP port and is missing from the PROTOCOL_TCP listing`,
+			},
 		},
 		{
 			name: "one bad pod among good ones is the only one reported",
@@ -232,21 +240,30 @@ func TestRequirePerPortProtocols(t *testing.T) {
 			},
 		},
 		{
-			name: "a row written before port_protocols existed is exempt from completeness",
+			name: "a row with no port_protocols is a breach whatever else is listed",
 			in: listings{
 				listHTTP: {},
 				listTCP:  {"ns/old": {row("10.0.0.1", 5432, []uint32{5432, 8080}, nil)}},
 				listUDP:  {},
 			},
+			want: []string{`(no_port_protocols`},
 		},
 		{
-			// A port with no class names no listing, even when the caller
-			// passes a listing under the zero protocol.
-			name: "a port of an unspecified class asks for no listing",
+			// A port named with no class is a port whose protocol the row
+			// does not say. (It used to "ask for no listing".)
+			name: "a port of an unspecified class is a breach",
 			in: listings{
 				registryv1.Service_PROTOCOL_UNSPECIFIED: {},
 				listHTTP:                                {"ns/web": {row("10.0.0.1", 8080, nil, classes{8080: classHTTP, 9000: registryv1.PortProtocol_PORT_PROTOCOL_UNSPECIFIED})}},
 			},
+			want: []string{`(port_not_typed`},
+		},
+		{
+			name: "a listed port its port_protocols does not name is a breach",
+			in: listings{
+				listHTTP: {"ns/web": {row("10.0.0.1", 8080, []uint32{8080, 9090}, classes{8080: classHTTP})}},
+			},
+			want: []string{`(port_not_typed`},
 		},
 		{
 			name: "a pod in all three listings",

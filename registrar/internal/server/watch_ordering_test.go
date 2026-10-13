@@ -8,6 +8,8 @@ import (
 	"testing"
 	"time"
 
+	"aethermesh.dev/registry/registrytest"
+
 	registrarv1 "aethermesh.dev/api/aether/registrar/v1"
 	registryv1 "aethermesh.dev/api/aether/registry/v1"
 	"github.com/stretchr/testify/assert"
@@ -108,7 +110,7 @@ func newOrderingTestServer() *RegistrarServer {
 }
 
 func addReq(svc, ip string, protocol registryv1.Service_Protocol) *registrarv1.RegisterEndpointRequest {
-	return &registrarv1.RegisterEndpointRequest{ServiceName: svc, Protocol: protocol, Endpoint: &registryv1.ServiceEndpoint{Ip: ip, Port: 8080}}
+	return &registrarv1.RegisterEndpointRequest{ServiceName: svc, Protocol: protocol, Endpoint: registrytest.Typed(&registryv1.ServiceEndpoint{Ip: ip, Port: 8080}, protocol)}
 }
 
 // TestWatchEndpoints_ChangeDuringInitialExchangeIsDelivered (#1205): a batch
@@ -190,7 +192,7 @@ func TestWatchEndpoints_PreSnapshotBatchCannotRegressTheToken(t *testing.T) {
 				Type:        registrarv1.WatchEndpointsResponse_EVENT_TYPE_ENDPOINT_ADDED,
 				ServiceName: "ns/b",
 				Protocol:    registryv1.Service_PROTOCOL_HTTP,
-				Endpoint:    &registryv1.ServiceEndpoint{Ip: "10.0.0.2"},
+				Endpoint:    registrytest.Typed(&registryv1.ServiceEndpoint{Ip: "10.0.0.2"}, registryv1.Service_PROTOCOL_HTTP),
 			}}
 			version, transitions := s.snapshot.Apply(events)
 			events = append(events, transitions...)

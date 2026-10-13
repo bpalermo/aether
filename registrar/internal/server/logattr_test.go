@@ -6,6 +6,8 @@ import (
 	"sync"
 	"testing"
 
+	"aethermesh.dev/registry/registrytest"
+
 	registrarv1 "aethermesh.dev/api/aether/registrar/v1"
 	registryv1 "aethermesh.dev/api/aether/registry/v1"
 	"github.com/stretchr/testify/assert"
@@ -102,7 +104,7 @@ func TestListAllEndpoints_ProtocolLogAttributeSurvivesOTelBridge(t *testing.T) {
 		Type:        registrarv1.WatchEndpointsResponse_EVENT_TYPE_ENDPOINT_ADDED,
 		ServiceName: "svc-a",
 		Protocol:    registryv1.Service_PROTOCOL_HTTP,
-		Endpoint:    &registryv1.ServiceEndpoint{Ip: "10.0.0.1"},
+		Endpoint:    registrytest.Typed(&registryv1.ServiceEndpoint{Ip: "10.0.0.1"}, registryv1.Service_PROTOCOL_HTTP),
 	}})
 	s := NewRegistrarServer(nil, snap, NewBroadcaster(slog.New(slog.DiscardHandler), nil), "127.0.0.1:0", logger, nil)
 

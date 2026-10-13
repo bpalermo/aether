@@ -9,6 +9,7 @@ import (
 
 	registryv1 "aethermesh.dev/api/aether/registry/v1"
 	"aethermesh.dev/registry/internal/etcd"
+	"aethermesh.dev/registry/registrytest"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.opentelemetry.io/contrib/bridges/otelslog"
@@ -103,7 +104,7 @@ func TestEtcdRegistry_ProtocolLogAttributeSurvivesOTelBridge(t *testing.T) {
 
 	const service = "frontend"
 	require.NoError(t, registry.RegisterEndpoint(ctx, service, registryv1.Service_PROTOCOL_TCP,
-		&registryv1.ServiceEndpoint{Ip: "10.0.1.1", ClusterName: "cluster-1", Port: 8080, Weight: 100}))
+		registrytest.Typed(&registryv1.ServiceEndpoint{Ip: "10.0.1.1", ClusterName: "cluster-1", Port: 8080, Weight: 100}, registryv1.Service_PROTOCOL_TCP)))
 
 	_, err := registry.ListEndpoints(ctx, service, registryv1.Service_PROTOCOL_TCP)
 	require.NoError(t, err)

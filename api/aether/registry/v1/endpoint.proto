@@ -96,12 +96,15 @@ message ServiceEndpoint {
 
   // port_protocols is the wire protocol of each advertised port (proposal 037).
   //
-  // A port present in `ports` but ABSENT here takes the protocol the endpoint
-  // was registered under — RegisterEndpointRequest.protocol, the etcd key
-  // segment — which is the pre-037 whole-pod classification kept as the
-  // per-port default. Writers populate it for every port they advertise;
-  // readers MUST tolerate its absence, because an endpoint written by an older
-  // agent has none and means "all my ports are the protocol of my key".
+  // REQUIRED (proposal 043). It names every port the endpoint lists (`port`,
+  // `ports`), each with a class other than UNSPECIFIED. An endpoint that does
+  // not is refused where it is written (RegisterEndpoint answers
+  // INVALID_ARGUMENT, on every backend), filtered by the registrar where it is
+  // already stored, and contributes nothing in an agent that is handed one.
+  // No reader derives a class from the protocol the endpoint was registered
+  // under any more: a class that is not stated is not guessed. (Before 043 a
+  // port absent here took the protocol of the registry key, the pre-037
+  // whole-pod classification.) Every writer since 037 populates the full map.
   //
   // The map is a property of the endpoint, not of the registry key: a pod that
   // serves both an HTTP and a raw-TCP port is registered once per distinct

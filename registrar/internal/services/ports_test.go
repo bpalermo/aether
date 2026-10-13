@@ -127,9 +127,13 @@ func TestGenerator_ServiceCarriesRealPorts(t *testing.T) {
 	), portsOf(t, g, "ns", "mixed"))
 }
 
-// TestGenerator_RowWithoutPortProtocols: a row written before port_protocols
-// existed declares its served set (or its one port) with the class of the
-// listing it was read from.
+// TestGenerator_RowWithoutPortProtocols: port_protocols is required. A row
+// without it declares NO port, whatever listing it is read from: the Service
+// of a service that has only such rows carries the two mesh ports and nothing
+// else, and a typed row beside it is the only one that counts. (Such a row
+// used to declare its served set with the class of its listing. The
+// registrar's sync filters these rows before the generator sees them; the
+// generator does not depend on that.)
 func TestGenerator_RowWithoutPortProtocols(t *testing.T) {
 	old := func(ip string, port uint32, served ...uint32) *registryv1.ServiceEndpoint {
 		return &registryv1.ServiceEndpoint{
@@ -139,16 +143,19 @@ func TestGenerator_RowWithoutPortProtocols(t *testing.T) {
 	}
 	g, _ := newGen(snapshotOf(catalog{
 		key("ns", "db"):   {listTCP: {old("10.0.0.1", 5432, 5432, 5433)}},
-		key("ns", "one"):  {listTCP: {old("10.0.0.2", 6379)}},
 		key("ns", "dns"):  {listUDP: {old("10.0.0.3", 5353)}},
 		key("ns", "http"): {listHTTP: {old("10.0.0.4", 8080, 8080, 9090)}},
+		key("ns", "both"): {listHTTP: {old("10.0.0.5", 9090, 9090), pod("ns", "10.0.0.6", 8080, classes{8080: classHTTP})}},
+		// A port the map names with no class is not declared either.
+		key("ns", "half"): {listHTTP: {pod("ns", "10.0.0.7", 8080, classes{8080: classHTTP, 9000: registryv1.PortProtocol_PORT_PROTOCOL_UNSPECIFIED})}},
 	}))
 	g.reconcile(context.Background())
 
-	assert.Equal(t, withLegacy(realPort(5432, classTCP), realPort(5433, classTCP)), portsOf(t, g, "ns", "db"))
-	assert.Equal(t, withLegacy(realPort(6379, classTCP)), portsOf(t, g, "ns", "one"))
-	assert.Equal(t, withLegacy(realPort(5353, classUDP)), portsOf(t, g, "ns", "dns"))
-	assert.Equal(t, withLegacy(realPort(8080, classHTTP), realPort(9090, classHTTP)), portsOf(t, g, "ns", "http"))
+	for _, svc := range []string{"db", "dns", "http"} {
+		assert.Equalf(t, withLegacy(), portsOf(t, g, "ns", svc), "%s: a row without port_protocols took the class of its listing", svc)
+	}
+	assert.Equal(t, withLegacy(realPort(8080, classHTTP)), portsOf(t, g, "ns", "both"))
+	assert.Equal(t, withLegacy(realPort(8080, classHTTP)), portsOf(t, g, "ns", "half"))
 }
 
 // TestGenerator_PortsAreTheUnionAndLeaveWithTheirLastEndpoint: during a rollout
@@ -556,4 +563,16 @@ func TestGenerator_ManagedServiceWithoutAnnotations(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, map[string]string{aetherlabels.AnnotationMeshService: "svc"}, svc.Annotations)
 	assert.Equal(t, withLegacy(realPort(8080, classHTTP)), svc.Spec.Ports)
+}
+
+// TestDeclaredPorts_TheListingLendsNoClass pins declaredPorts on its own: what
+// a row's port_protocols says, with a class, and nothing from the listing.
+func TestDeclaredPorts_TheListingLendsNoClass(t *testing.T) {
+	bare := &registryv1.ServiceEndpoint{Ip: "10.0.0.1", Port: 8080, Ports: []uint32{8080, 9090}}
+	half := &registryv1.ServiceEndpoint{Ip: "10.0.0.2", Port: 8080, Ports: []uint32{8080, 9090}, PortProtocols: classes{8080: classHTTP, 9000: registryv1.PortProtocol_PORT_PROTOCOL_UNSPECIFIED}}
+	for _, listing := range []registryv1.Service_Protocol{registryv1.Service_PROTOCOL_UNSPECIFIED, listHTTP, listTCP, listUDP} {
+		assert.Emptyf(t, declaredPorts(bare, listing), "listed under %s", listing)
+		assert.Equalf(t, map[uint32]registryv1.Service_Protocol{8080: listHTTP}, declaredPorts(half, listing),
+			"listed under %s: 9090 is not named and 9000 has no class", listing)
+	}
 }

@@ -386,6 +386,8 @@ func (c *SnapshotCache) SetCaptureTCPServices(services []capture.CaptureTCPServi
 
 	// Signal dependency change to trigger cluster snapshot rebuild (TCP clusters
 	// are also rebuilt from captureTCPServices) and a full snapshot push to Envoy.
+	// That refresh is also where a Service's new ports replace an HTTP entry
+	// retained for its grace period (retentionEvidence).
 	c.signalDependencyChange()
 }
 

@@ -693,11 +693,11 @@ func TestLoadClustersFromRegistry_RetainsDisappearedServices(t *testing.T) {
 	c.serviceRetentionGrace = 50 * time.Millisecond
 
 	full := map[string][]*registryv1.ServiceEndpoint{
-		"svc-a": {{Ip: "10.0.0.1"}},
-		"svc-b": {{Ip: "10.0.0.2"}},
+		"svc-a": {{Ip: "10.0.0.1", Port: 8080}},
+		"svc-b": {{Ip: "10.0.0.2", Port: 8080}},
 	}
 	partial := map[string][]*registryv1.ServiceEndpoint{
-		"svc-a": {{Ip: "10.0.0.1"}},
+		"svc-a": {{Ip: "10.0.0.1", Port: 8080}},
 	}
 	data := full
 	reg := &mockRegistry{

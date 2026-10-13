@@ -289,6 +289,11 @@ func (c *SnapshotCache) VirtualHosts() []types.Resource {
 func (c *SnapshotCache) LoadClustersFromRegistry(ctx context.Context, clusterName string, nodeName string, reg registry.Registry) error {
 	c.log.DebugContext(ctx, "generating clusters and endpoints from registry")
 
+	// Every row read below is a typed one: a row that does not say the
+	// protocol of each of its ports contributes nothing (typedRegistry).
+	reg, typed := typedRowsOf(reg)
+	defer func() { c.reportRefusedRows(ctx, typed.refused) }()
+
 	serviceEndpoints, err := reg.ListAllEndpoints(ctx, registryv1.Service_PROTOCOL_HTTP)
 	if err != nil {
 		return fmt.Errorf("failed to list endpoints from registry: %w", err)
@@ -408,7 +413,7 @@ func (c *SnapshotCache) LoadClustersFromRegistry(ctx context.Context, clusterNam
 	c.buildTCPClustersLocked(deps, tcpServiceEndpoints, in, prev, reuse)
 	c.buildUDPClustersLocked(ctx, deps, udpServiceEndpoints, in, prev, reuse)
 	c.commitRegistryReuseLocked(reuse)
-	c.retainAbsentClustersLocked(ctx, prev, deps)
+	c.retainAbsentClustersLocked(ctx, prev, deps, retentionEvidence{listed: listed, declared: declared})
 	// Every virtual host built or refreshed above came from the rule inputs
 	// read at loadRuleGen. If a newer generation exists (an event landed while
 	// the listings were being read), the next snapshot build must rebuild
@@ -797,25 +802,19 @@ type portBucket struct {
 }
 
 // listsPort reports whether an endpoint row serves port at all, in any class:
-// it is the row's declared port, one of its port list, or a port its
-// port_protocols names. A row that carries no port (nothing since proposal
-// 005 writes one) serves "port 0", the only port such a service has.
+// its port_protocols names the port, with a class. The row's port and ports
+// fields alone do not make a port served: a port with no stated class has
+// none (port_protocols is required, endpointmeta.RowProblem).
 func listsPort(endpoint *registryv1.ServiceEndpoint, port uint32) bool {
 	if reservedMeshPort(port) {
 		return false // a port of no service (reservedMeshPort)
 	}
-	if port == endpoint.GetPort() || slices.Contains(endpoint.GetPorts(), port) {
-		return true
-	}
-	_, named := endpoint.GetPortProtocols()[port]
-	return named
+	return endpoint.GetPortProtocols()[port] != registryv1.PortProtocol_PORT_PROTOCOL_UNSPECIFIED
 }
 
-// servesPortAsHTTP reports whether an endpoint read from the HTTP listing serves
-// port as HTTP: the row lists the port (listsPort), and does not declare it
-// raw TCP or UDP. A listed port its port_protocols does not name takes the
-// protocol the endpoint was listed under (the rule of a row written before
-// proposal 037), which here is HTTP.
+// servesPortAsHTTP reports whether an endpoint serves port as HTTP: its
+// port_protocols says so. A port the map does not name is not HTTP, whatever
+// listing the row was read from (it used to take the listing's class).
 //
 // A pod of the service that does not list the port is NOT a member of that
 // port's cluster, whatever class the service's other pods give the port: its
@@ -823,15 +822,7 @@ func listsPort(endpoint *registryv1.ServiceEndpoint, port uint32) bool {
 // would be answered by another port (a rollout that moves the declared port
 // from 8080 to 9090 put the new pod in the cluster of 8080).
 func servesPortAsHTTP(endpoint *registryv1.ServiceEndpoint, port uint32) bool {
-	if !listsPort(endpoint, port) {
-		return false
-	}
-	switch endpoint.GetPortProtocols()[port] {
-	case registryv1.PortProtocol_PORT_PROTOCOL_UNSPECIFIED, registryv1.PortProtocol_PORT_PROTOCOL_HTTP:
-		return true
-	default:
-		return false
-	}
+	return !reservedMeshPort(port) && endpoint.GetPortProtocols()[port] == registryv1.PortProtocol_PORT_PROTOCOL_HTTP
 }
 
 // buildHTTPEndpointBuckets builds the default CLA/epMap and per-port buckets for a
@@ -1290,7 +1281,7 @@ func coldFillUDPEndpoints(ctx context.Context, log interface {
 // retainAbsentClustersLocked re-inserts entries from prev that are no longer in
 // c.clusters but are still in the dependency set, applying the retention grace.
 // Caller must hold clusterMu.
-func (c *SnapshotCache) retainAbsentClustersLocked(ctx context.Context, prev map[string]clusterEntry, deps map[string]struct{}) {
+func (c *SnapshotCache) retainAbsentClustersLocked(ctx context.Context, prev map[string]clusterEntry, deps map[string]struct{}, evidence retentionEvidence) {
 	// Retain recently disappeared services with an empty endpoint set —
 	// but only services still IN the dependency set (a destination mid-churn
 	// can transiently empty its endpoint listing; the retained empty cluster
@@ -1331,6 +1322,11 @@ func (c *SnapshotCache) retainAbsentClustersLocked(ctx context.Context, prev map
 	// host.
 	claimed := c.claimedVhostDomainsLocked()
 	now := time.Now()
+	replaced := map[string]struct{}{}
+	defer func() {
+		c.forgetReplacedHTTPPortsLocked(replaced, evidence)
+		c.rehomeBareLoadAssignmentLocked(replaced)
+	}()
 	for name, entry := range prev {
 		if _, present := c.clusters[name]; present {
 			continue
@@ -1340,6 +1336,13 @@ func (c *SnapshotCache) retainAbsentClustersLocked(ctx context.Context, prev map
 		// per-port clusters are retained/dropped together.
 		if _, inScope := deps[entry.service]; !inScope {
 			c.log.InfoContext(ctx, "service left dependency set; dropping cluster/vhost (cold path takes over)", "cluster", name, "service", entry.service)
+			continue
+		}
+		// A REPLACEMENT is not retained: see retentionEvidence.
+		if source := evidence.replacedBy(c.servicePorts, entry); source != "" {
+			c.log.InfoContext(ctx, "HTTP cluster/vhost not retained: the service no longer declares its port as HTTP",
+				"cluster", name, "service", entry.service, "port", primaryPortOf(entry), "evidence", source)
+			replaced[entry.service] = struct{}{}
 			continue
 		}
 		if entry.absentSince.IsZero() {
@@ -1366,36 +1369,128 @@ func (c *SnapshotCache) retainAbsentClustersLocked(ctx context.Context, prev map
 			c.log.InfoContext(ctx, "service absent past grace period; pruning", "service", name)
 			continue
 		}
-		entry = c.dropUnservedVhostLocked(ctx, name, entry)
 		c.clusters[name] = c.yieldClaimedDomains(ctx, claimed, name, c.yieldHeldLoadAssignment(ctx, held, name, entry))
 	}
 }
 
-// dropUnservedVhostLocked returns a retained HTTP entry without its virtual
-// host when the service is still listed and now DECLARES the entry's port as
-// raw TCP or UDP (a service that became raw-TCP-only on the same number, a
-// port that changed class). The entry is retained for the grace period, and
-// its cluster subscribes to the bare service name, whose load assignment the
-// live raw-TCP floor now holds: a virtual host kept on it delivered HTTP
-// requests to endpoints that serve that very port as raw TCP. Without it the
-// authority is refused by name (outboundRefusalVhostsLocked), as it is once
-// the entry is pruned.
+// retentionEvidence is what a refresh knows of what each service IS now, as
+// opposed to what it was when its entries were built. It decides whether an
+// HTTP entry that left the listing is kept for the grace period or not.
 //
-// A port that no listed row declares any more is NOT such a case, and keeps
-// its virtual host: an HTTP listing that is lost while the raw-TCP one stays
-// cannot be told from a listing error, and the retention exists so that a
-// transient loss is a retriable 503 or a served request, not a refusal
-// (#1635). Caller must hold clusterMu.
-func (c *SnapshotCache) dropUnservedVhostLocked(ctx context.Context, name string, entry clusterEntry) clusterEntry {
-	if entry.vhost == nil || entry.l4Floor {
-		return entry
+// Two different things make an HTTP entry leave the listing:
+//
+//   - A REMOVAL. The HTTP rows of the service are gone and nothing says what
+//     the service is now: a pod restart of a single-replica service, a
+//     registry that has not caught up. The entry and its virtual host are
+//     kept, empty, for the grace: a request is a retriable 503 and not a
+//     refusal or an on-demand stall (#1635, #167).
+//
+//   - A REPLACEMENT. There is positive evidence of the service's shape now,
+//     and it does not declare the entry's port as HTTP: the service serves
+//     another port, or that number as raw TCP or UDP. Then nothing is kept:
+//     the entry's cluster resolves its endpoints through the bare service
+//     name, which a live entry of another class may publish, so a virtual
+//     host kept on it delivered HTTP requests to endpoints that do not serve
+//     that port as HTTP. The port is answered at once by what the evidence
+//     says: a refusal by name, like any port the service does not declare.
+//
+// The evidence, in order:
+//
+//  1. The rows this refresh lists of the service, under any protocol
+//     (listed). Each says the protocol of each of its ports (port_protocols is
+//     required), so the ports derived from them are what the service is. A
+//     port they do not serve as HTTP is replaced.
+//  2. With no row listed, the real ports of the service's generated Service
+//     (declared), when it declares any. A Service whose last endpoint left
+//     declares none, and is no evidence.
+//
+// Neither: a removal.
+type retentionEvidence struct {
+	// listed is the set of services at least one row of which is in a
+	// listing of this refresh; their derived ports are in servicePorts.
+	listed map[string]struct{}
+	// declared is declaredByService().
+	declared map[string]servicePorts
+}
+
+// replacedBy returns the evidence that replaces a retained HTTP entry, "" when
+// there is none (the entry is kept for the grace). ports is the cache's
+// servicePorts, which for a listed service holds this refresh's derivation.
+func (e retentionEvidence) replacedBy(ports map[string]servicePorts, entry clusterEntry) string {
+	if entry.l4Floor {
+		return "" // a raw-TCP or UDP floor: no virtual host, no HTTP request
 	}
-	if port := primaryPortOf(entry); port != 0 && c.servicePorts[entry.service].declaresNonHTTP(port) {
-		c.log.InfoContext(ctx, "retained entry publishes no virtual host: the service now declares its port as raw TCP or UDP",
-			"cluster", name, "service", entry.service, "port", port)
-		entry.vhost = nil
+	port := primaryPortOf(entry)
+	if port == 0 {
+		return ""
 	}
-	return entry
+	if _, ok := e.listed[entry.service]; ok {
+		if ports[entry.service].hasHTTP(port) {
+			return ""
+		}
+		return "listed endpoints"
+	}
+	if d, ok := e.declared[entry.service]; ok && d.known() && !d.hasHTTP(port) {
+		return "generated Service"
+	}
+	return ""
+}
+
+// forgetReplacedHTTPPortsLocked takes the HTTP ports the generated Service no
+// longer declares out of what is remembered of a service no row is listed of
+// (servicePorts keeps the last derivation for as long as an entry is
+// retained). The tables are built from it: left alone, a port whose entry was
+// just replaced would still be routed, to a cluster that is gone. A listed
+// service needs nothing: its ports were derived from its rows in this
+// refresh. Caller must hold clusterMu.
+func (c *SnapshotCache) forgetReplacedHTTPPortsLocked(replaced map[string]struct{}, evidence retentionEvidence) {
+	for svc := range replaced {
+		if _, ok := evidence.listed[svc]; ok {
+			continue
+		}
+		last, declared := c.servicePorts[svc], evidence.declared[svc]
+		kept := make([]uint32, 0, len(last.http))
+		for _, port := range last.http {
+			if declared.hasHTTP(port) {
+				kept = append(kept, port)
+			}
+		}
+		last.http = kept
+		if last.legacyClass == registryv1.PortProtocol_PORT_PROTOCOL_HTTP && !declared.hasHTTP(last.legacyPort) {
+			last.legacyPort, last.legacyClass = 0, registryv1.PortProtocol_PORT_PROTOCOL_UNSPECIFIED
+		}
+		if last.known() {
+			c.servicePorts[svc] = last
+		} else {
+			delete(c.servicePorts, svc)
+		}
+	}
+}
+
+// rehomeBareLoadAssignmentLocked gives the bare-name load assignment of a
+// service whose HTTP default entry was just replaced to its retained floor
+// entry, when nothing else publishes that name. A floor cluster subscribes to
+// its own copy of the bare load assignment; while the HTTP default entry held
+// the bare name the floor entry held none, so with that entry gone and the
+// floor itself retained (the service left the raw-TCP listing in the same
+// refresh) the copy had nothing to be derived from, and the floor cluster
+// subscribed to a resource that was not published. One holder per name, as
+// everywhere (#1635): the TCP floor before the UDP one, the order
+// bareServiceHolderLocked reads them in. Caller must hold clusterMu.
+func (c *SnapshotCache) rehomeBareLoadAssignmentLocked(replaced map[string]struct{}) {
+	for svc := range replaced {
+		if c.bareServiceCLALocked(svc) != nil {
+			continue
+		}
+		for _, key := range []string{proxy.TCPClusterName(svc, c.meshDomain), proxy.UDPClusterName(svc, c.meshDomain)} {
+			if entry, ok := c.clusters[key]; ok && entry.loadAssignment == nil {
+				entry.loadAssignment = proxy.NewClusterLoadAssignment(svc)
+				entry.endpoints = map[string]*endpointv3.LocalityLbEndpoints{}
+				c.clusters[key] = entry
+				break
+			}
+		}
+	}
 }
 
 // claimedVhostDomainsLocked returns the authorities the virtual hosts of the

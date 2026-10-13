@@ -74,6 +74,9 @@ type captureTCPEntry struct {
 // generation. Snapshots are versioned using timestamps and atomic counters
 // to track changes. SnapshotCache is safe for concurrent use.
 type SnapshotCache struct {
+	// refusedRows are the registry rows the last refresh did not serve
+	// (typedRegistry), by identity, with the reason. Guarded by clusterMu.
+	refusedRows map[string]string
 	cachev3.SnapshotCache
 
 	log     *slog.Logger
