@@ -4637,7 +4637,7 @@ side and this release on the other, both registry backends
   placeholder ports back on its next reconcile, and the old spellings work
   again node by node as the agents roll back (read from the code, not run).
 
-**Release order.** The change is thirteen pull requests that merge as one
+**Release order.** The change is a stack of pull requests that merge as one
 GitHub stack, in one operation, so that `main` never holds a part of it: each
 merge to `main` publishes images and a chart, and the first pull request alone
 would publish a chart with half of the addressing rule. No chart between 2.6.x
