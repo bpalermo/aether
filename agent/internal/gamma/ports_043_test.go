@@ -10,6 +10,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
+	discoveryv1 "k8s.io/api/discovery/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -193,7 +194,9 @@ func TestReconcile_ServicePortMaps(t *testing.T) {
 		corev1.ServicePort{Name: "http", Port: 80, TargetPort: intstr.FromString("http")},
 		corev1.ServicePort{Name: "alt", Port: 81, TargetPort: intstr.FromInt32(8081)},
 	)
-	// A Service no route names is not read.
+	// A Service no route names has its port map too: a Service is a port map
+	// whether or not a route exists, and a map that came and went with a
+	// route changed what a request to the Service meant when the route went.
 	bystander := userService("ns", "bystander", corev1.ServicePort{Name: "http", Port: 80, TargetPort: intstr.FromInt32(8080)})
 	// Same name, another namespace: not this route's Service.
 	impostor := userService("other", "echo-v1", corev1.ServicePort{Name: "http", Port: 80, TargetPort: intstr.FromInt32(6666)})
@@ -201,14 +204,14 @@ func TestReconcile_ServicePortMaps(t *testing.T) {
 	sink := reconcileObjects(t, hr, parent, backend, generated, named, bystander, impostor)
 
 	assert.Equal(t, map[string]map[uint32]uint32{
-		"ns/echo":    {80: 8080, 8080: 8080, 9090: 9091}, // the UDP port is not an HTTP-routable port
-		"ns/echo-v1": {80: 8080},
-		"ns/named":   {80: 0, 81: 8081}, // a NAMED targetPort resolves to nothing, and says so with 0
+		"ns/echo":       {80: 8080, 8080: 8080, 9090: 9091}, // the UDP port is not an HTTP-routable port
+		"ns/echo-v1":    {80: 8080},
+		"ns/named":      {80: 0, 81: 8081}, // a NAMED targetPort with no EndpointSlice to resolve it: 0
+		"ns/bystander":  {80: 8080},
+		"other/echo-v1": {80: 6666}, // its own key: never this route's Service
 	}, sink.portMaps)
 	assert.NotContains(t, sink.portMaps, "ns/generated", "a Service the registrar generated exposes its pods' ports; it has no map")
 	assert.NotContains(t, sink.portMaps, "ns/missing", "a Service that does not exist has no map")
-	assert.NotContains(t, sink.portMaps, "ns/bystander")
-	assert.NotContains(t, sink.portMaps, "other/echo-v1")
 
 	// The port maps reach the sink BEFORE the routes: the cache places the
 	// rules and resolves their backends through them.
@@ -221,13 +224,68 @@ func TestReconcile_ServicePortMaps(t *testing.T) {
 	assert.Equal(t, []string{"portMaps", "routes"}, order)
 }
 
-// TestReconcile_NoRoutesNoPortMaps: with no route there is nothing to read,
-// and the sink is handed an empty map, which clears what an earlier reconcile
-// set.
-func TestReconcile_NoRoutesNoPortMaps(t *testing.T) {
+// TestReconcile_PortMapsOutliveTheRoutes: a Service's port map does not depend
+// on a route naming it. With no route at all the sink still gets it, so that a
+// port-less request to a service fronted by "port: 80, targetPort: 8080" means
+// port 80 before a route exists and after the last one is deleted; and a
+// reconcile with no user Service hands the sink an empty map, which clears
+// what an earlier one set.
+func TestReconcile_PortMapsOutliveTheRoutes(t *testing.T) {
 	sink := reconcileObjects(t, userService("ns", "echo", corev1.ServicePort{Port: 80, TargetPort: intstr.FromInt32(8080)}))
+	assert.Equal(t, map[string]map[uint32]uint32{"ns/echo": {80: 8080}}, sink.portMaps)
+	assert.Contains(t, sink.calls, "portMaps")
+
+	sink = reconcileObjects(t)
 	assert.Empty(t, sink.portMaps)
 	assert.Contains(t, sink.calls, "portMaps")
+}
+
+// TestReconcile_NamedTargetPortResolvesThroughEndpointSlices: the registry
+// carries no port names, so a Service port whose targetPort is a NAME is
+// resolved from the Service's EndpointSlices, for a Service a route names.
+// Slices that disagree about the number, a name no slice carries, and a
+// Service no route names are left unresolved (0).
+func TestReconcile_NamedTargetPortResolvesThroughEndpointSlices(t *testing.T) {
+	slice := func(name, svc string, ports map[string]int32) *discoveryv1.EndpointSlice {
+		sl := &discoveryv1.EndpointSlice{
+			ObjectMeta:  metav1.ObjectMeta{Name: name, Namespace: "ns", Labels: map[string]string{discoveryv1.LabelServiceName: svc}},
+			AddressType: discoveryv1.AddressTypeIPv4,
+		}
+		for n, p := range ports {
+			sl.Ports = append(sl.Ports, discoveryv1.EndpointPort{Name: ptr(n), Port: ptr(p)})
+		}
+		return sl
+	}
+	named := func(name string) *corev1.Service {
+		return userService("ns", name,
+			corev1.ServicePort{Name: "http", Port: 80, TargetPort: intstr.FromString("web")},
+			corev1.ServicePort{Name: "admin", Port: 81, TargetPort: intstr.FromString("adm")},
+		)
+	}
+	hr := httpRoute("r1", "ns", "echo", "echo")
+	hr.Spec.Rules[0].BackendRefs = append(hr.Spec.Rules[0].BackendRefs, backendRef("split", 80))
+	objs := []client.Object{
+		hr, named("echo"), named("split"), named("unrouted"),
+		slice("echo-1", "echo", map[string]int32{"http": 8080}),
+		slice("echo-2", "echo", map[string]int32{"http": 8080}),
+		slice("split-1", "split", map[string]int32{"http": 8080, "admin": 9000}),
+		slice("split-2", "split", map[string]int32{"http": 8081, "admin": 9000}),
+		slice("unrouted-1", "unrouted", map[string]int32{"http": 8080, "admin": 9000}),
+	}
+	sink := &fakeSink{}
+	c := fake.NewClientBuilder().WithScheme(newScheme(t)).WithObjects(objs...).
+		WithStatusSubresource(&gatewayv1.HTTPRoute{}, &gatewayv1.GRPCRoute{}).Build()
+	r := &Reconciler{Client: c, APIReader: c, Sink: sink, MeshDomain: "mesh", Log: slog.New(slog.DiscardHandler), grpcRouteEnabled: true, referenceGrantEnabled: true}
+	_, err := r.Reconcile(context.Background(), reconcile.Request{})
+	require.NoError(t, err)
+
+	assert.Equal(t, map[uint32]uint32{80: 8080, 81: 0}, sink.portMaps["ns/echo"], "the name every slice agrees on; no slice carries the other")
+	assert.Equal(t, map[uint32]uint32{80: 0, 81: 9000}, sink.portMaps["ns/split"], "slices that disagree resolve nothing")
+	assert.Equal(t, map[uint32]uint32{80: 0, 81: 0}, sink.portMaps["ns/unrouted"], "a Service no route names is not looked up")
+
+	// Without a reader nothing is resolved, and nothing fails.
+	sink = reconcileObjects(t, objs...)
+	assert.Equal(t, map[uint32]uint32{80: 0, 81: 0}, sink.portMaps["ns/echo"])
 }
 
 // TestServicePortsChanged: a Service update re-projects the routes only when

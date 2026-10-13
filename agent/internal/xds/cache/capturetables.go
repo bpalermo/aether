@@ -34,16 +34,12 @@ import (
 // for all of them, which is the fix for #1682: no route in a table for port D
 // leads to a cluster of another port.
 //
-// Two tables are legacy (proposal 043, "The legacy spellings during Phases 1
-// and 2"): the mesh HTTP port (18081), and port 80 for a service that does not
-// declare it. A dial to either reaches the service's legacy target if that is
-// an HTTP port, and is refused otherwise.
-
-// legacyHTTPPorts are the two port numbers whose table exists for every mesh
-// service whether or not it declares them.
-func isLegacyHTTPPort(port uint32) bool {
-	return port == meshconst.ProxyOutboundPort || port == 80
-}
+// No port has another meaning. A dial to port 80 is port 80: served when the
+// service declares it, refused otherwise. The table of the mesh's HTTP proxy
+// port (18081) is not one of these: 18081 is not a port of any service, so
+// nothing dialled there decides, and that chain is served the LOOPBACK table,
+// where the port in Host is the port (snapshot.go,
+// BuildProxyPortCaptureRouteConfiguration).
 
 // ruleInputs is what a virtual host's routes are built from besides the
 // service's own cluster: the GAMMA rules, the service-wide chain filters and
@@ -263,21 +259,46 @@ func backendCluster(b proxy.GammaBackend, portMaps map[string]map[uint32]uint32,
 // claimed by the refusal (outboundRefusalVhostsLocked), as on the captured
 // path, and not routed to the minority.
 func (c *SnapshotCache) outboundPortVhostLocked(svc, entryName string, port uint32, isDefault bool, in ruleInputs) *routev3.VirtualHost {
-	if ports := c.servicePorts[svc]; !isDefault && ports.known() && !ports.hasHTTP(port) {
+	ports := c.servicePorts[svc]
+	if !isDefault && ports.known() && !ports.hasHTTP(port) {
 		return nil
 	}
 	rules := resolveRules(in, c.servicePorts, c.meshDomain, rulePlace{svc: svc, pod: port})
-	var vh *routev3.VirtualHost
+	fqdn := proxy.ServiceClusterName(svc, c.meshDomain)
+	name, doms := entryName, []string{entryName}
 	if isDefault {
-		fqdn := proxy.ServiceClusterName(svc, c.meshDomain)
-		vh = proxy.BuildOutboundServiceVirtualHost(fqdn, []string{fqdn, fmt.Sprintf("%s:%d", fqdn, port)}, rules)
-	} else {
-		vh = proxy.BuildOutboundServiceVirtualHost(entryName, []string{entryName}, rules)
+		// The default entry is the cluster of the port the pods declare. It
+		// is named by the service alone, and answers for that PORT: the
+		// port-less authority is not its spelling (it is port 80's, below).
+		name, doms = fqdn, []string{fmt.Sprintf("%s:%d", fqdn, port)}
+		if port == 0 {
+			// Rows that carry no port at all (nothing since proposal 005
+			// writes one): the service has one cluster and no port to spell.
+			doms = []string{fqdn}
+		}
 	}
+	// A port-less authority is port 80, and nothing else: it belongs to the
+	// virtual host of the pod port behind the Service's port 80, when that is
+	// an HTTP port of the service.
+	if pod, ok := portlessPodPort(in.portMaps, svc, ports); ok && pod == port && port != 0 {
+		doms = append(doms, fqdn)
+	}
+	vh := proxy.BuildOutboundServiceVirtualHost(name, doms, rules)
 	if ef, ok := in.chainFilters[svc]; ok {
 		proxy.ApplyServiceChainFilter(vh, &ef)
 	}
 	return vh
+}
+
+// portlessPodPort returns the pod port a PORT-LESS authority of svc reaches:
+// the one behind the Service's port 80 (through a user Service's port map, or
+// 80 itself for a generated Service), when the service serves it as HTTP. ok
+// is false when the service has no HTTP port 80: a port-less authority is
+// then refused, never read as another port. (Until chart 2.7.0 it meant "the
+// port the pods declare".)
+func portlessPodPort(portMaps map[string]map[uint32]uint32, svc string, ports servicePorts) (uint32, bool) {
+	pod, ok := podPort(portMaps, svc, 80)
+	return pod, ok && ports.hasHTTP(pod)
 }
 
 // refusalBody is the body of every 421 the mesh answers for svc: what was
@@ -466,31 +487,20 @@ func (c *SnapshotCache) appendOutboundRefusalsLocked(out []*routev3.VirtualHost,
 	if fqdn == "" {
 		return out
 	}
-	meshPort := fmt.Sprintf("%s:%d", fqdn, meshconst.ProxyOutboundPort)
-	switch {
-	case ports.legacyHTTPPort() != 0:
-		// The legacy spelling of the default cluster. The alias cluster of
-		// that name exists whenever the default one does, unless the
-		// service declares 18081 itself.
-		if _, ok := c.clusters[meshPort]; ok && !ports.hasHTTP(meshconst.ProxyOutboundPort) {
-			// It is a virtual host of the service like any other: the rules of
-			// the legacy target and the service's HTTP filters apply on it.
-			vh := proxy.BuildServiceVirtualHost(fqdn+"|legacy", meshPort, []string{meshPort},
-				resolveRules(in, c.servicePorts, c.meshDomain, rulePlace{svc: svc, pod: ports.legacyHTTPPort()}))
-			applyChainFilter(vh, in.chainFilters, svc)
-			out = append(out, vh)
+	// The port-less authority, when the service has no HTTP port 80 for it.
+	// It is refused by name: 18081 is the proxy's port, not a port of the
+	// service, and a name without a port is port 80 and nothing else.
+	if _, ok := portlessPodPort(in.portMaps, svc, ports); !ok {
+		if ports.servesHTTP() {
+			out = append(out, proxy.BuildRefusalVirtualHost(fqdn+"|port-required", []string{fqdn}, proxy.RefusalPortRequired,
+				refusalBody(fqdn, "was addressed without a port: a name without a port is port 80, which it does not serve as HTTP", ports)))
+		} else {
+			out = append(out, c.noHTTPPortVhost(fqdn+"|port-required", svc, []string{fqdn}, ports))
 		}
-	case ports.servesHTTP():
-		out = append(out, proxy.BuildRefusalVirtualHost(fqdn+"|legacy", []string{fqdn, meshPort}, proxy.RefusalPortRequired,
-			refusalBody(fqdn, "was addressed without a port, and the port its pods declare is not an HTTP port", ports)))
-	default:
-		out = append(out, c.noHTTPPortVhost(fqdn+"|legacy", svc, []string{fqdn, meshPort}, ports))
 	}
 	var notHTTP []string
 	for _, p := range append(slices.Clone(ports.tcp), ports.udp...) {
-		if p != meshconst.ProxyOutboundPort {
-			notHTTP = append(notHTTP, fmt.Sprintf("%s:%d", fqdn, p))
-		}
+		notHTTP = append(notHTTP, fmt.Sprintf("%s:%d", fqdn, p))
 	}
 	if len(notHTTP) > 0 {
 		slices.Sort(notHTTP)
@@ -973,10 +983,20 @@ func (c *SnapshotCache) captureRouteTables(ports []uint32) []types.Resource {
 	in := c.captureTableInputsFor(deps, arms)
 	out := make([]types.Resource, 0, len(ports)+1)
 	for _, p := range ports {
+		if p == meshconst.ProxyOutboundPort {
+			// The table of the proxy port is not a per-port table: it is the
+			// loopback table under another name (proxyPortCaptureTable),
+			// built with the snapshot.
+			continue
+		}
 		out = append(out, proxy.BuildCaptureRouteConfiguration(
 			proxy.CaptureHTTPRouteName(p),
 			c.captureTableVhosts(in, p),
-			proxy.BuildCaptureCatchAllVirtualHost(c.meshDomain, p, isLegacyHTTPPort(p), c.captureRedirectAll),
+			// Never a port-less authority: on a dial to port 80 it would
+			// name the cluster of the bare name, which is not port 80's. A
+			// name this node knows has its own virtual host for it
+			// (coldVhost).
+			proxy.BuildCaptureCatchAllVirtualHost(c.meshDomain, p, false, c.captureRedirectAll),
 		))
 	}
 	out = append(out, proxy.BuildCaptureRouteConfiguration(
@@ -1037,8 +1057,9 @@ func (c *SnapshotCache) appendNameVhosts(vhosts []*routev3.VirtualHost, in captu
 	case routable:
 		// A port-less Host means the port that was dialled, port 80 included.
 		vhosts = append(vhosts, c.portVhost(in, n, d, pod, own))
-	case isLegacyHTTPPort(d):
-		vhosts = c.appendLegacyVhost(vhosts, in, n, own)
+	case n.ports.known() && !n.ports.servesHTTP():
+		// HTTP to a service that serves none: say where it is reached.
+		vhosts = append(vhosts, c.noHTTPPortVhost(n.mesh+"|refused", n.svc, own, n.ports))
 	case !informed:
 		// A name this node holds no endpoint of, on a port nothing says it
 		// has. Its mesh authority may still name the port's cluster on
@@ -1054,20 +1075,28 @@ func (c *SnapshotCache) appendNameVhosts(vhosts []*routev3.VirtualHost, in captu
 
 	// A Host that names a port other than the one dialled. The dialled port
 	// decides: the request is refused, never answered by another port.
-	if informed || routable || isLegacyHTTPPort(d) {
+	if informed || routable {
 		refuse("mismatch", proxy.RefusalPortMismatch, fmt.Sprintf("was dialled on port %d with a Host header that names another port", d), domains(n.names, ":*"))
 	}
 	return vhosts
 }
 
 // coldVhost is the virtual host of a name this node knows no port of, in the
-// table of a dialled port d that is not a legacy one: the mesh authority that
-// spells d, routed to the cluster of that name ("<fqdn>:d"), which the
-// on-demand filter fetches. It carries the service's HTTP filters and the
-// rules that apply on d.
+// table of dialled port d: the mesh authority that spells d, routed to the
+// cluster of that name ("<fqdn>:d"), which the on-demand filter fetches. It
+// carries the service's HTTP filters and the rules that apply on d.
+//
+// On a dial to port 80 the port-less mesh authority is port 80 as well, and
+// is claimed here too: it names the SAME cluster, "<fqdn>:80", never the
+// cluster the bare name spells (the one of the port the pods declare). The
+// table's catch-all therefore accepts no port-less authority at all.
 func (c *SnapshotCache) coldVhost(in captureTableInputs, n meshName, d uint32) *routev3.VirtualHost {
+	doms := []string{fmt.Sprintf("%s:%d", n.mesh, d)}
+	if d == 80 {
+		doms = append(doms, n.mesh)
+	}
 	vh := proxy.BuildServiceVirtualHost(n.mesh+"|"+strconv.Itoa(int(d)), proxy.PortClusterName(n.svc, c.meshDomain, d),
-		[]string{fmt.Sprintf("%s:%d", n.mesh, d)}, resolveRules(in.rules, in.all, c.meshDomain, rulePlace{svc: n.svc, servicePort: d}))
+		doms, resolveRules(in.rules, in.all, c.meshDomain, rulePlace{svc: n.svc, servicePort: d}))
 	applyChainFilter(vh, in.rules.chainFilters, n.svc)
 	return vh
 }
@@ -1089,32 +1118,6 @@ func (c *SnapshotCache) portVhost(in captureTableInputs, n meshName, d, pod uint
 		proxy.ApplyQUICClusterSelection(vh, n.mesh, n.arms)
 	}
 	return vh
-}
-
-// appendLegacyVhost appends the virtual host that serves a LEGACY spelling of
-// the name (a dial to the mesh HTTP port, or to port 80 of a service that does
-// not declare it; proposal 043, "The legacy spellings during Phases 1 and 2").
-// It reaches the service's legacy target if that is an HTTP port, and refuses
-// otherwise.
-func (c *SnapshotCache) appendLegacyVhost(vhosts []*routev3.VirtualHost, in captureTableInputs, n meshName, doms []string) []*routev3.VirtualHost {
-	name := n.mesh + "|legacy"
-	switch {
-	case !n.ports.known() || n.ports.legacyHTTPPort() != 0:
-		// The default cluster: the legacy target's, or, for a name this node
-		// holds no endpoint of, the cluster the cold path fetches by that
-		// name.
-		vh := proxy.BuildServiceVirtualHost(name, n.mesh, doms, resolveRules(in.rules, in.all, c.meshDomain, rulePlace{svc: n.svc, pod: n.ports.legacyHTTPPort()}))
-		applyChainFilter(vh, in.rules.chainFilters, n.svc)
-		if len(n.arms) > 0 {
-			proxy.ApplyQUICClusterSelection(vh, n.mesh, n.arms)
-		}
-		return append(vhosts, vh)
-	case n.ports.servesHTTP():
-		return append(vhosts, proxy.BuildRefusalVirtualHost(name, doms, proxy.RefusalPortRequired,
-			refusalBody(n.mesh, "was addressed without one of its ports, and the port its pods declare is not an HTTP port", n.ports)))
-	default:
-		return append(vhosts, c.noHTTPPortVhost(name, n.svc, doms, n.ports))
-	}
 }
 
 // noHTTPPortVhost is the refusal of an HTTP request for a service that serves

@@ -28,8 +28,8 @@ import (
 	commonlog "aethermesh.dev/common/log"
 	"aethermesh.dev/common/serviceref"
 	corev1 "k8s.io/api/core/v1"
+	discoveryv1 "k8s.io/api/discovery/v1"
 	"k8s.io/apimachinery/pkg/api/equality"
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -77,6 +77,11 @@ type RouteSink interface {
 // all clients of that service); per-namespace consumer overrides are a follow-up.
 type Reconciler struct {
 	client.Client
+
+	// APIReader reads the API directly, without a cache. Used only to read
+	// the EndpointSlices of a route-named Service whose targetPort is a name
+	// (resolveNamedTargetPorts). Nil disables that resolution.
+	APIReader client.Reader
 
 	// Sink receives the projected per-service rules (the snapshot cache).
 	Sink RouteSink
@@ -323,9 +328,12 @@ func (r *Reconciler) projectHTTPRouteItems(
 			for _, rule := range hr.Spec.Rules {
 				gr := r.buildGammaRoute(rule, hr.Namespace, "HTTPRoute", grants, httpFilters, svcFilters)
 				refs := make([]gatewayv1.BackendObjectReference, 0, len(rule.BackendRefs))
+				plain := make([]gatewayv1.BackendRef, 0, len(rule.BackendRefs))
 				for _, b := range rule.BackendRefs {
 					refs = append(refs, b.BackendObjectReference)
+					plain = append(plain, b.BackendRef)
 				}
+				gr = withDropped(gr, plain, hr.Namespace, "HTTPRoute", grants)
 				routes[p.Key] = append(routes[p.Key], withPorts(gr, p.Port, gammaproject.BackendRefPorts(refs, hr.Namespace, "HTTPRoute", grants)))
 			}
 		}
@@ -349,13 +357,26 @@ func (r *Reconciler) projectGRPCRouteItems(
 			for _, rule := range gr.Spec.Rules {
 				projected := r.buildGammaRouteFromGRPC(rule, gr.Namespace, "GRPCRoute", grants, httpFilters, svcFilters)
 				refs := make([]gatewayv1.BackendObjectReference, 0, len(rule.BackendRefs))
+				plain := make([]gatewayv1.BackendRef, 0, len(rule.BackendRefs))
 				for _, b := range rule.BackendRefs {
 					refs = append(refs, b.BackendObjectReference)
+					plain = append(plain, b.BackendRef)
 				}
+				projected = withDropped(projected, plain, gr.Namespace, "GRPCRoute", grants)
 				routes[p.Key] = append(routes[p.Key], withPorts(projected, p.Port, gammaproject.BackendRefPorts(refs, gr.Namespace, "GRPCRoute", grants)))
 			}
 		}
 	}
+}
+
+// withDropped records on a projected rule the backendRefs the projection
+// dropped (another kind, or not permitted by a ReferenceGrant): invalid
+// backendRefs, whose share of the rule the proxy answers 500.
+func withDropped(rule proxy.GammaRoute, refs []gatewayv1.BackendRef, routeNamespace, routeKind string, grants []gatewayv1beta1.ReferenceGrant) proxy.GammaRoute {
+	n, weight := gammaproject.DroppedBackendRefs(refs, routeNamespace, routeKind, grants)
+	rule.DroppedBackends = n > 0
+	rule.DroppedBackendWeight = weight
+	return rule
 }
 
 // withPorts returns a projected rule carrying the two ports the shared
@@ -412,30 +433,95 @@ func servicePortsChanged() predicate.Predicate {
 func (r *Reconciler) servicePortMaps(ctx context.Context, routes map[string][]proxy.GammaRoute) (map[string]map[uint32]uint32, map[string]portFacts, error) {
 	out := map[string]map[uint32]uint32{}
 	facts := map[string]portFacts{}
+	named := map[string]struct{}{}
 	for _, key := range routeServiceKeys(routes) {
-		ref, ok := serviceref.ParseKey(key)
-		if !ok {
-			continue
+		named[key] = struct{}{}
+	}
+	// EVERY Service, not only the ones a route names: a Service is a port map
+	// whether or not a route exists (a port-less request to a mesh service
+	// fronted by "port: 80, targetPort: 8080" is port 80 of it), and a port
+	// map that came and went with a route changed what a request meant when
+	// the route was deleted. The list is read from the informer this
+	// reconciler already keeps for its Service watch, so it costs no API call
+	// and no memory that was not already held.
+	var services corev1.ServiceList
+	if err := r.List(ctx, &services); err != nil {
+		return nil, nil, err
+	}
+	for i := range services.Items {
+		svc := &services.Items[i]
+		key := serviceref.New(svc.Namespace, svc.Name).Key()
+		_, routed := named[key]
+		if routed {
+			facts[key] = servicePortFacts(svc)
 		}
-		svc := &corev1.Service{}
-		if err := r.Get(ctx, client.ObjectKey{Namespace: ref.Namespace, Name: ref.Name}, svc); err != nil {
-			if apierrors.IsNotFound(err) {
-				continue
-			}
-			return nil, nil, err
-		}
-		facts[key] = servicePortFacts(svc)
 		if svc.Labels[aetherlabels.LabelMeshService] == "true" {
 			continue
 		}
-		m, named := servicePortMap(svc)
-		for _, sp := range named {
-			r.Log.WarnContext(ctx, "a Service port a route can address has a named targetPort, which the mesh cannot resolve (the registry carries no port names); routes through it route nothing. Use a numeric targetPort",
-				"service", key, "port", sp.Port, "targetPort", sp.TargetPort.StrVal)
+		m, namedPorts := servicePortMap(svc)
+		if routed && len(namedPorts) > 0 {
+			r.resolveNamedTargetPorts(ctx, svc, key, m, namedPorts)
 		}
 		out[key] = m
 	}
 	return out, facts, nil
+}
+
+// resolveNamedTargetPorts fills in, in m, the pod port of every Service port
+// whose targetPort is a NAME, for a Service a route names. The registry
+// carries no port names; the cluster's own answer is in the Service's
+// EndpointSlices, whose ports carry the Service port's name and the number
+// the name resolved to on the pods behind it.
+//
+// The slices are read from the API, uncached and only for these Services: an
+// EndpointSlice informer would hold every slice of the cluster in every node
+// agent for the sake of the few Services that are both route targets and use
+// a named targetPort. The price is freshness: the answer is re-read when a
+// route or a Service changes, not when the pods behind an unchanged Service
+// start resolving the name to another number. A port that cannot be resolved
+// (no reader, no slice yet, or slices that disagree) stays 0 and is logged:
+// a backendRef to it keeps the backend's declared port, as before.
+func (r *Reconciler) resolveNamedTargetPorts(ctx context.Context, svc *corev1.Service, key string, m map[uint32]uint32, namedPorts []corev1.ServicePort) {
+	resolved := map[string]uint32{}
+	if r.APIReader != nil {
+		var slices discoveryv1.EndpointSliceList
+		err := r.APIReader.List(ctx, &slices, client.InNamespace(svc.Namespace), client.MatchingLabels{discoveryv1.LabelServiceName: svc.Name})
+		if err != nil {
+			r.Log.WarnContext(ctx, "could not read the EndpointSlices of a Service with a named targetPort; its named ports stay unresolved", "service", key, "error", err.Error())
+		}
+		resolved = namedPortNumbers(slices.Items)
+	}
+	for _, sp := range namedPorts {
+		if n := resolved[sp.Name]; n != 0 {
+			m[uint32(sp.Port)] = n
+			continue
+		}
+		r.Log.WarnContext(ctx, "a Service port a route can address has a named targetPort that could not be resolved from the Service's EndpointSlices; a backendRef to it reaches the backend's declared port. Use a numeric targetPort",
+			"service", key, "port", sp.Port, "targetPort", sp.TargetPort.StrVal)
+	}
+}
+
+// namedPortNumbers returns, per Service port name, the number the
+// EndpointSlices give it, and nothing for a name the slices disagree about.
+func namedPortNumbers(slices []discoveryv1.EndpointSlice) map[string]uint32 {
+	out := map[string]uint32{}
+	conflict := map[string]struct{}{}
+	for _, sl := range slices {
+		for _, p := range sl.Ports {
+			if p.Name == nil || p.Port == nil || (p.Protocol != nil && *p.Protocol != corev1.ProtocolTCP) {
+				continue
+			}
+			n := uint32(*p.Port)
+			if prev, ok := out[*p.Name]; ok && prev != n {
+				conflict[*p.Name] = struct{}{}
+			}
+			out[*p.Name] = n
+		}
+	}
+	for name := range conflict {
+		delete(out, name)
+	}
+	return out
 }
 
 // routeServiceKeys returns, sorted, the key of every Service the routes name:

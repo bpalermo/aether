@@ -66,17 +66,21 @@ func TestCaptureVhosts_RouteTargetRealPort(t *testing.T) {
 	assert.Contains(t, domains, "echo.team-a.aether.internal")
 	assert.Contains(t, domains, "echo.team-a.svc.cluster.local:8080")
 	assert.Contains(t, domains, "echo.team-a.aether.internal:8080")
-	assert.NotContains(t, domains, "echo.team-a.svc.cluster.local:18081", "the mesh-port spelling belongs to the table of port 18081")
-	// The mesh :18081 spellings (M1) are served by the legacy table, with the
-	// same rules.
-	legacy := findVHost(captureTable(c, 18081), "echo.team-a.svc.cluster.local:18081")
-	require.NotNil(t, legacy, "the mesh-port spelling keeps its virtual host, in the table of port 18081")
-	assert.Contains(t, legacy.GetDomains(), "echo.team-a.aether.internal:18081")
-	assert.Contains(t, legacy.GetDomains(), "echo.team-a.aether.internal")
-	assert.Equal(t, "echo-v2.team-a.aether.internal", legacy.GetRoutes()[0].GetRoute().GetCluster())
+	// 18081 is the proxy's port, not a port of the target: no table of a
+	// dialled port holds a virtual host that spells it. (Until chart 2.7.0
+	// "<name>:18081" and the port-less name on a dial to 80 were served with
+	// the same rules, as "the port the pods declare".)
+	for _, port := range []uint32{80, 8080, 9090} {
+		for _, d := range domainsOf(captureTable(c, port)) {
+			assert.NotContainsf(t, d, ":18081", "table %d", port)
+		}
+	}
 	// And a table of a port the target is not addressed on has no routing
-	// virtual host for it.
-	assert.Nil(t, findVHost(captureTable(c, 9090), "echo.team-a.svc.cluster.local"))
+	// virtual host for it: 9090, and 80, which the target does not declare.
+	for _, port := range []uint32{80, 9090} {
+		_, routed := routedCluster(c, port, "echo.team-a.svc.cluster.local")
+		assert.Falsef(t, routed, "table %d routes a name on a port it is not addressed on", port)
+	}
 
 	// The GAMMA rules must be present and path-ordered by specificity: the most
 	// specific match (/v2, a segment-boundary prefix) is first and routes to echo-v2;
@@ -166,23 +170,35 @@ func TestCaptureVhosts_SABackedRouteTargetShortNames(t *testing.T) {
 }
 
 // TestCaptureVhosts_RouteTargetNoPort verifies a route target whose parentRef
-// declares no port falls back to the M1 behavior (portless + :18081 only) — no
-// spurious :0 domain.
+// declares no port: the rule applies on every port of the parent Service, and
+// the ports are the Service's own (its port map, which the reconciler reads
+// for every Service a route names). No spurious :0 domain, and no port the
+// Service does not have: a dial to port 80 of a Service without one is not
+// read as "the port the pods declare".
 func TestCaptureVhosts_RouteTargetNoPort(t *testing.T) {
 	c := newTestCache("node-1")
 	c.SetServiceRoutes(map[string][]proxy.GammaRoute{
 		"team-a/echo": {{Backends: []proxy.GammaBackend{{Service: "team-a/echo-v1", Cluster: "echo-v1.team-a.aether.internal", Weight: 1}}}},
 	})
-	// No SetRouteTargetPorts (or empty) — the M1 path.
+	// No SetRouteTargetPorts (or empty): the parentRef names no port.
 
-	for _, port := range []uint32{80, 18081} {
+	// Nothing says the name has a port 80: nothing routes there.
+	_, routed := routedCluster(c, 80, "echo.team-a.svc.cluster.local")
+	assert.False(t, routed, "no port map, no declared port: a dial to 80 is not the port the pods declare")
+
+	// The Service maps 80 and 8080: each has the rule, in its own table.
+	c.SetServicePortMaps(map[string]map[uint32]uint32{"team-a/echo": {80: 8080, 8080: 8080}})
+	for _, port := range []uint32{80, 8080} {
 		vhosts := captureTable(c, port)
 		vh := findVHost(vhosts, "echo.team-a.svc.cluster.local")
 		require.NotNil(t, vh, "table %d", port)
+		assert.Equal(t, "echo-v1.team-a.aether.internal", vh.GetRoutes()[0].GetRoute().GetCluster(), "table %d: the rule", port)
 		for _, d := range domainsOf(vhosts) {
 			assert.NotContains(t, d, ":0", "no spurious :0 domain when the parentRef omits a port")
 		}
 	}
+	_, routed = routedCluster(c, 9090, "echo.team-a.svc.cluster.local")
+	assert.False(t, routed, "a port the Service does not have")
 }
 
 // routedCluster returns the cluster the virtual host of table port that
@@ -222,17 +238,22 @@ func TestCaptureVhosts_DemandScoped(t *testing.T) {
 	// node's dependency set.
 	require.NoError(t, c.AddPod(ctx, makeDepPod("a-1", "svc-a", "/proc/1/ns/net", "default/in-scope"), "example.org"))
 
-	vhosts := captureTable(c, 18081)
-	require.NotNil(t, findVHost(vhosts, "in-scope.default.svc.cluster.local"),
-		"in-scope authority must build a cap_http vhost")
-	assert.Nil(t, findVHost(vhosts, "off-scope.default.svc.cluster.local"),
+	// Neither service has a known port yet, so each name can only have its
+	// stand-in virtual host: the mesh authority that spells the dialled port.
+	// (The table of port 8080 here; any per-port table is scoped alike.)
+	inScope := proxy.ServiceClusterName("default/in-scope", c.meshDomain) + ":8080"
+	offScope := proxy.ServiceClusterName("default/off-scope", c.meshDomain) + ":8080"
+	vhosts := captureTable(c, 8080)
+	require.NotNil(t, findVHost(vhosts, inScope),
+		"in-scope authority must build a cap_http vhost; got %v", domainsOf(vhosts))
+	assert.Nil(t, findVHost(vhosts, offScope),
 		"off-scope authority must be excluded from cap_http (demand-scoped), even though it is a known mesh authority")
 
 	// Cold path: once off-scope is observed via ODCDS it joins the dependency set,
 	// so capture scope follows demand and its vhost now builds.
 	require.True(t, c.ObserveDependency(ctx, "default/off-scope"))
-	vhosts = captureTable(c, 18081)
-	assert.NotNil(t, findVHost(vhosts, "off-scope.default.svc.cluster.local"),
+	vhosts = captureTable(c, 8080)
+	assert.NotNil(t, findVHost(vhosts, offScope),
 		"observed (ODCDS) authority must now build a cap_http vhost — scope follows demand")
 }
 
@@ -264,6 +285,12 @@ func TestCaptureTables_StableAcrossGAMMAChurn(t *testing.T) {
 		svc: "echo-v2.gateway-conformance-mesh.svc.cluster.local",
 	})
 	c.SetCaptureTCPServices([]capture.CaptureTCPService{{ServiceName: svc, ClusterIP: "10.96.0.20"}})
+	// The user's Service that owns the name maps port 80 to the pods' 8080.
+	// That is what makes port 80 a port of "echo-v2" at all (a dial to 80 is
+	// port 80 and nothing else), and it is a fact of the SERVICE: it must be
+	// known whether or not a route names the Service, or the delete half of
+	// the churn turns every request below into a refusal.
+	c.SetServicePortMaps(map[string]map[uint32]uint32{svc: {80: 8080, 8080: 8080}})
 	// A GAMMA rule is applied (the route exists).
 	c.SetServiceRoutes(map[string][]proxy.GammaRoute{
 		svc: {{Backends: []proxy.GammaBackend{{Service: svc, Cluster: cluster, Weight: 1}}}},
@@ -318,6 +345,9 @@ func TestCaptureTables_RouteOnlyTarget(t *testing.T) {
 	c.SetServiceRoutes(map[string][]proxy.GammaRoute{
 		"team-a/echo": {{Matches: []proxy.GammaMatch{{Prefix: "/v1"}}, Backends: []proxy.GammaBackend{{Service: "team-a/echo-v1", Cluster: "echo-v1.team-a.aether.internal", Weight: 1}}}},
 	})
+	// The Service the route is parented to has port 80 (the reconciler reads
+	// the port map of every Service a route names).
+	c.SetServicePortMaps(map[string]map[uint32]uint32{"team-a/echo": {80: 8080}})
 
 	cluster, ok := routedCluster(c, 80, "echo.team-a.svc.cluster.local")
 	require.True(t, ok, "route-only target must have a virtual host")
@@ -350,6 +380,7 @@ func TestCaptureTables_FallthroughFollowsRedirectAll(t *testing.T) {
 		c.SetServiceRoutes(map[string][]proxy.GammaRoute{
 			"team-a/echo": {{Backends: []proxy.GammaBackend{{Service: "team-a/echo", Cluster: "echo.team-a.aether.internal", Weight: 1}}}},
 		})
+		c.SetServicePortMaps(map[string]map[uint32]uint32{"team-a/echo": {80: 8080}})
 		var table *routev3.RouteConfiguration
 		for _, r := range c.captureRouteTables([]uint32{80}) {
 			if rc := r.(*routev3.RouteConfiguration); rc.GetName() == "cap_http_80" {

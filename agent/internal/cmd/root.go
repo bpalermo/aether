@@ -849,6 +849,7 @@ func wireGAMMA(m ctrl.Manager, snapshotCache *cache.SnapshotCache) error {
 	}
 	gammaReconciler := &gamma.Reconciler{
 		Client:     m.GetClient(),
+		APIReader:  m.GetAPIReader(),
 		Sink:       snapshotCache,
 		MeshDomain: cfg.MeshDomain,
 		Log:        l,

@@ -259,6 +259,27 @@ func BackendRefPorts(refs []gatewayv1.BackendObjectReference, routeNamespace, ro
 	return out
 }
 
+// DroppedBackendRefs reports the backendRefs of a rule that are NOT projected
+// (backendProjected): how many there are and the weight they hold together
+// (a backendRef's weight defaults to 1). The agent answers their share of the
+// rule 500, as the Gateway API specifies for an invalid backendRef.
+func DroppedBackendRefs(refs []gatewayv1.BackendRef, routeNamespace, routeKind string, grants []gatewayv1beta1.ReferenceGrant) (n int, weight uint32) {
+	for _, ref := range refs {
+		if backendProjected(ref.BackendObjectReference, routeNamespace, routeKind, grants) {
+			continue
+		}
+		n++
+		w := int32(1)
+		if ref.Weight != nil {
+			w = *ref.Weight
+		}
+		if w > 0 {
+			weight += uint32(w)
+		}
+	}
+	return n, weight
+}
+
 func projectBackend(ref gatewayv1.BackendObjectReference, weight *int32, routeNamespace, routeKind, meshDomain string, grants []gatewayv1beta1.ReferenceGrant) *registryv1.GammaBackend {
 	if !backendProjected(ref, routeNamespace, routeKind, grants) {
 		return nil

@@ -398,8 +398,9 @@ func TestLoadClustersFromRegistry_RPCFillsColdDependency(t *testing.T) {
 
 // TestLoadClustersFromRegistry_MultiPort verifies multi-port routing (005):
 // a service whose endpoints advertise extra ports yields a default cluster
-// (dual-domain vhost, all endpoints) plus one per-port cluster whose EDS is
-// filtered to pods advertising that port (safe new-port rollout).
+// (the cluster of the port the pods declare, all endpoints, claimed by that
+// port's authority) plus one per-port cluster whose EDS is filtered to pods
+// advertising that port (safe new-port rollout).
 func TestLoadClustersFromRegistry_MultiPort(t *testing.T) {
 	c := newTestCache("node-1")
 	c.SetMeshDomain("aether.internal")
@@ -419,12 +420,15 @@ func TestLoadClustersFromRegistry_MultiPort(t *testing.T) {
 	}
 	require.NoError(t, c.LoadClustersFromRegistry(ctx, "cluster-1", "node-1", reg))
 
-	// Default cluster: dual-domain vhost, all endpoints. The "<ns>/<svc>" key
-	// renders to the FQDN authority <svc>.<ns>.<meshDomain>.
+	// Default cluster: all endpoints. The "<ns>/<svc>" key renders to the FQDN
+	// authority <svc>.<ns>.<meshDomain>, and the virtual host claims the
+	// authority that spells the port, 8080. The port-less authority is not
+	// its spelling: a name without a port is port 80, which this service does
+	// not declare (it used to mean "the port the pods declare").
 	def, ok := c.clusters["ns/svc-mp"]
 	require.True(t, ok)
 	assert.Equal(t, "svc-mp.ns.aether.internal", def.cluster.GetName())
-	assert.ElementsMatch(t, []string{"svc-mp.ns.aether.internal", "svc-mp.ns.aether.internal:8080"}, def.vhost.GetDomains())
+	assert.ElementsMatch(t, []string{"svc-mp.ns.aether.internal:8080"}, def.vhost.GetDomains())
 	assert.Len(t, def.loadAssignment.GetEndpoints(), 2, "default cluster carries all endpoints")
 	assert.Equal(t, "8080", def.sni)
 

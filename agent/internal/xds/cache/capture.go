@@ -190,7 +190,6 @@ func captureTCPService(e captureTCPEntry, meshDomain string, tcpRoutes, tlsRoute
 		HTTPPorts:     e.ports.http,
 		TCPPorts:      tcpPorts,
 		LegacyTCPPort: legacyTCP,
-		LegacyHTTP:    e.ports.legacyHTTPPort() != 0,
 		// L4 route rules (Phase 3b): override the passthrough floor chain when
 		// a TCPRoute or TLSRoute is attached to this service.
 		TCPRouteRules: tcpRoutes,

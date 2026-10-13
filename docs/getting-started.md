@@ -523,9 +523,10 @@ where the request goes.
 ```bash
 curl --proxy http://127.0.0.1:18081 http://svc-payments.payments.aether.internal:8080/orders
 
-# or for a whole process
-export HTTP_PROXY=http://127.0.0.1:18081
+# or for a whole process (curl reads the lower-case name only; set both)
+export HTTP_PROXY=http://127.0.0.1:18081 http_proxy=http://127.0.0.1:18081
 export NO_PROXY=localhost,127.0.0.1,.svc,.cluster.local   # whatever must not go to the mesh
+export no_proxy="$NO_PROXY"
 ```
 
 - It carries **HTTP to mesh names only**. A name outside the mesh answers

@@ -8,6 +8,7 @@ import (
 
 	"aethermesh.dev/agent/internal/xds/cache/snapversion"
 	"aethermesh.dev/agent/internal/xds/proxy"
+	meshconst "aethermesh.dev/common/constants/mesh"
 	"aethermesh.dev/common/telemetry"
 	"github.com/envoyproxy/go-control-plane/pkg/cache/types"
 	cachev3 "github.com/envoyproxy/go-control-plane/pkg/cache/v3"
@@ -222,6 +223,11 @@ func (c *SnapshotCache) generateSnapshot(ctx context.Context) (retErr error) {
 			// publishes, so a chain and the table it names are always in the
 			// same snapshot (captureTablePorts).
 			routes = append(routes, c.captureRouteTables(captureTablePorts(listeners, c.captureHTTPPorts()))...)
+			// And the table of the proxy port's chain: the loopback table's
+			// virtual hosts (a captured dial to :18081 is the proxy port on
+			// the captured path, and the port in Host decides there too).
+			routes = append(routes, proxy.BuildProxyPortCaptureRouteConfiguration(
+				proxy.CaptureHTTPRouteName(meshconst.ProxyOutboundPort), vhosts, c.meshDomain, c.captureRedirectAll))
 		}
 		// Unconditional: out_http is always in `routes`, so an agent with nothing
 		// to publish still hands Envoy a RouteType set its RDS subscription can

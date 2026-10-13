@@ -197,7 +197,8 @@ func TestPerPort_InvalidBackendRefAnswers500(t *testing.T) {
 			for _, at := range []struct{ table, host string }{
 				{"cap_http_8080", "httponly.demo.aether.internal:8080"},
 				{proxy.OutboundHTTPRouteName, "httponly.demo.aether.internal:8080"},
-				{proxy.OutboundHTTPRouteName, "httponly.demo.aether.internal"},
+				// The proxy port on the captured path (a dial to 18081).
+				{"cap_http_18081", "httponly.demo.aether.internal:8080"},
 			} {
 				got := a043Resolve(t, tables[at.table], at.host)
 				assert.Equalf(t, tc.want, got.status, "%s, Host %s: %+v", at.table, at.host, got)

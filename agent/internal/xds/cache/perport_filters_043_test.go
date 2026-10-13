@@ -67,6 +67,9 @@ func TestPerPort_ServiceFiltersOnEveryVirtualHost(t *testing.T) {
 				tables[rc.GetName()] = rc
 			}
 			tables[proxy.OutboundHTTPRouteName] = a043Tables(t, c)[proxy.OutboundHTTPRouteName]
+			// The table of the proxy port's chain is built with the snapshot,
+			// from the loopback table's virtual hosts.
+			tables["cap_http_18081"] = a043Tables(t, c)["cap_http_18081"]
 
 			delivering := 0
 			for tableName, table := range tables {
@@ -92,8 +95,9 @@ func TestPerPort_ServiceFiltersOnEveryVirtualHost(t *testing.T) {
 				}
 			}
 			if known {
-				// multi: 8080, 9090 captured; legacy on 80 and 18081; loopback
-				// default, :9090 and :18081. tcpfirst: 8080 captured and loopback.
+				// multi: 8080 and 9090, each in its captured table, on the
+				// loopback table and on the proxy port's. tcpfirst: 8080 in
+				// the same three.
 				assert.GreaterOrEqual(t, delivering, 9, "the walk must have seen the service's virtual hosts")
 			} else {
 				assert.GreaterOrEqual(t, delivering, 4)

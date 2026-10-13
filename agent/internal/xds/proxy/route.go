@@ -282,6 +282,26 @@ func BuildCaptureCatchAllVirtualHost(meshDomain string, port uint32, portless, r
 	return buildOnDemandCatchAllVirtualHost(regex, redirectAll)
 }
 
+// BuildProxyPortCaptureRouteConfiguration builds the route table of the
+// capture listener's chain for the mesh's HTTP proxy port (a captured dial to
+// "<anything>:18081"): the LOOPBACK table's virtual hosts under the capture
+// table's name. 18081 is not a port of any service, so nothing was dialled
+// that could decide: as on the loopback listener, the port in Host is the
+// port, and a Host that names 18081 itself is a port the service does not
+// declare. This is how a pod that is not on redirect-all, which has only the
+// mesh ports diverted, reaches a service by name.
+//
+// The floor differs from the loopback table's in one way: with passthrough
+// (redirect-all), an authority that is not a mesh name leaves through the
+// ORIGINAL_DST passthrough, as on every other capture table, instead of 404:
+// all of the pod's egress is captured, and something else may listen on 18081.
+func BuildProxyPortCaptureRouteConfiguration(name string, vhosts []*routev3.VirtualHost, meshDomain string, passthrough bool) *routev3.RouteConfiguration {
+	withCatchAll := make([]*routev3.VirtualHost, 0, len(vhosts)+1)
+	withCatchAll = append(withCatchAll, vhosts...)
+	withCatchAll = append(withCatchAll, buildOnDemandCatchAllVirtualHost(MeshAuthorityRegex(meshDomain, "(:[0-9]+)?"), passthrough))
+	return &routev3.RouteConfiguration{Name: name, VirtualHosts: withCatchAll}
+}
+
 // BuildOutboundRouteConfiguration creates a route configuration for outbound traffic.
 // It includes the provided virtual hosts plus the universal on-demand catch-all
 // virtual host (mesh-shaped authorities → ODCDS, everything else → 404). The outbound
@@ -346,6 +366,16 @@ func BuildOutboundClusterVirtualHost(clusterName string, domains []string) *rout
 // Backends are already resolved to data-plane cluster names (<backend>.<meshDomain>)
 // by the reconciler.
 type GammaRoute struct {
+	// DroppedBackends reports that the rule had backendRefs the projection
+	// dropped: another kind than a core Service, or a Service in another
+	// namespace that no ReferenceGrant permits. They are invalid backendRefs
+	// and the Gateway API gives them the same answer as any other, 500 for
+	// their share of the rule's weight (DroppedBackendWeight; weight 0 takes
+	// nothing). Until chart 2.7.0 they were dropped silently: their share went
+	// to the rule's other backends, and a rule left with none routed to its
+	// parent Service. Set by the GAMMA reconciler, not by a projector.
+	DroppedBackends      bool
+	DroppedBackendWeight uint32
 	// ParentPort is the Service port the rule's parentRef names, or 0 when the
 	// parentRef names none (proposal 043). A rule without a parent port
 	// applies on every HTTP port of the parent Service; with one, on that
@@ -602,10 +632,10 @@ func invalidBackendRefusal(rule *GammaRoute) backendRefusal {
 	if rule.Redirect != nil {
 		return backendRefusal{}
 	}
-	valid, share := splitInvalidBackends(rule.Backends)
+	valid, share := splitInvalidBackends(rule.Backends, rule.DroppedBackendWeight)
 	// No valid backendRef at all, whatever the weights: the rule has nowhere
 	// to send a request, and its parent's own cluster is not what it names.
-	all := len(rule.Backends) > 0 && len(valid) == 0
+	all := (len(rule.Backends) > 0 || rule.DroppedBackends) && len(valid) == 0
 	rule.Backends = valid
 	return backendRefusal{share: share, all: all}
 }
@@ -666,8 +696,10 @@ func invalidBackendResponse() *routev3.Route_DirectResponse {
 // requests that are answered 500. share is nil when no backend is invalid, or
 // when the invalid ones hold no weight (a backendRef with weight 0 receives
 // nothing, valid or not).
-func splitInvalidBackends(backends []GammaBackend) (valid []GammaBackend, share *corev3.RuntimeFractionalPercent) {
-	var invalid, total uint64
+func splitInvalidBackends(backends []GammaBackend, dropped uint32) (valid []GammaBackend, share *corev3.RuntimeFractionalPercent) {
+	// dropped is the weight of the backendRefs that never became a backend
+	// (GammaRoute.DroppedBackendWeight): invalid, like the ones marked here.
+	invalid, total := uint64(dropped), uint64(dropped)
 	for _, b := range backends {
 		total += uint64(b.Weight)
 		if b.Invalid {
