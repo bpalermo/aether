@@ -60,6 +60,24 @@ func (c *SnapshotCache) servicePortMapsSnapshot() map[string]map[uint32]uint32 {
 	return c.servicePortMaps
 }
 
+// bumpRuleGenLocked advances the generation of the RULE INPUTS (the GAMMA
+// rules, local and imported, the service-wide chain filters and the Service
+// port maps) when one of them changed. Caller must hold depMu.
+//
+// The loopback table's virtual hosts are stored on the cluster entries, which
+// a registry refresh builds. They carry the rule inputs as well, so an event
+// that changes only those (a route, a filter, a Service's ports) must reach
+// them without waiting for the next refresh: a snapshot built in between had
+// a capture table with the new rule and a loopback table without it, and for
+// a service-wide filter that is a request delivered with the filter skipped.
+// The snapshot build compares this generation with the one the entries'
+// virtual hosts were built at (refreshEntryVhostsLocked).
+func (c *SnapshotCache) bumpRuleGenLocked(changed bool) {
+	if changed {
+		c.ruleGen++
+	}
+}
+
 // SetServicePortMaps replaces the port maps of the Services that routes name
 // as a parent or as a backend and that the registrar did not generate: Service
 // port -> the pod port its targetPort names, 0 for a named targetPort
@@ -69,6 +87,7 @@ func (c *SnapshotCache) SetServicePortMaps(portMaps map[string]map[uint32]uint32
 	c.depMu.Lock()
 	changed := !maps.EqualFunc(c.servicePortMaps, portMaps, func(a, b map[uint32]uint32) bool { return maps.Equal(a, b) })
 	c.servicePortMaps = portMaps
+	c.bumpRuleGenLocked(changed)
 	c.bumpDepGenLocked()
 	c.depMu.Unlock()
 	if changed {
@@ -232,7 +251,12 @@ func backendCluster(b proxy.GammaBackend, portMaps map[string]map[uint32]uint32,
 	}
 	switch {
 	case !ports.known():
-		return b.Cluster, false
+		// A backend this node holds no endpoint of yet. Its port cannot be
+		// checked, but it is still the port the route names: the cluster is
+		// that port's, fetched on demand, never the cluster the bare name
+		// spells (the one of the port the backend's pods declare, which
+		// answered a route to 9090 from 8080 while the backend was unknown).
+		return proxy.PortClusterName(b.Service, meshDomain, pod), false
 	case ports.hasHTTP(pod):
 		return httpClusterForPort(b.Service, meshDomain, ports, pod), false
 	default:
@@ -260,6 +284,9 @@ func backendCluster(b proxy.GammaBackend, portMaps map[string]map[uint32]uint32,
 // path, and not routed to the minority.
 func (c *SnapshotCache) outboundPortVhostLocked(svc, entryName string, port uint32, isDefault bool, in ruleInputs) *routev3.VirtualHost {
 	ports := c.servicePorts[svc]
+	// (A retained default entry whose port the service now declares raw TCP
+	// or UDP loses its virtual host in the retention step:
+	// dropUnservedVhostLocked.)
 	if !isDefault && ports.known() && !ports.hasHTTP(port) {
 		return nil
 	}
@@ -690,6 +717,41 @@ func (c *SnapshotCache) captureTableInputs() captureTableInputs {
 	return c.captureTableInputsFor(c.dependencySetShared(), c.quicArmsByService())
 }
 
+// tableNameKeys returns the services the capture tables have a name for, and,
+// per bare (short) name, how many of the services that own Kubernetes names
+// share it.
+//
+// The bare name is a name of the service only when one namespace owns it: a
+// duplicate domain makes Envoy reject the route table, and a bare name two
+// namespaces share says nothing about which one was meant.
+//
+// A service that carries a service-wide HTTP filter is a name of the tables
+// whether or not this agent knows a Service for it (the registrar generates
+// it on a ticker after the first endpoint registers, and generates none where
+// a user's Service owns the name). Without a virtual host of its own its mesh
+// authority was routed by the catch-all, with the filter skipped. It has no
+// Kubernetes name to claim: only its mesh authority, and it does not count
+// toward a bare name's uniqueness.
+func tableNameKeys(authorities map[string]string, rules ruleInputs) (keys map[string]struct{}, bare map[string]int) {
+	bare = make(map[string]int, len(authorities)+len(rules.routes))
+	keys = make(map[string]struct{}, len(authorities)+len(rules.routes))
+	for svc := range authorities {
+		keys[svc] = struct{}{}
+	}
+	for svc := range rules.routes {
+		keys[svc] = struct{}{}
+	}
+	for svc := range keys {
+		if ref, ok := serviceref.ParseKey(svc); ok {
+			bare[ref.Name]++
+		}
+	}
+	for svc := range rules.chainFilters {
+		keys[svc] = struct{}{}
+	}
+	return keys, bare
+}
+
 // captureTableInputsFor is captureTableInputs with the two inputs the tables'
 // memo has already read: the dependency set and the east-west QUIC selection
 // arms per eligible service (proposal 038 Phase 4b; the same predicate that
@@ -713,22 +775,7 @@ func (c *SnapshotCache) captureTableInputsFor(deps map[string]struct{}, quicArms
 	in.all = c.servicePorts
 	c.clusterMu.RUnlock()
 
-	// The bare name is a name of the service only when one namespace owns it:
-	// a duplicate domain makes Envoy reject the route table, and a bare name
-	// two namespaces share says nothing about which one was meant.
-	bare := make(map[string]int, len(authorities)+len(in.rules.routes))
-	keys := make(map[string]struct{}, len(authorities)+len(in.rules.routes))
-	for svc := range authorities {
-		keys[svc] = struct{}{}
-	}
-	for svc := range in.rules.routes {
-		keys[svc] = struct{}{}
-	}
-	for svc := range keys {
-		if ref, ok := serviceref.ParseKey(svc); ok {
-			bare[ref.Name]++
-		}
-	}
+	keys, bare := tableNameKeys(authorities, in.rules)
 	in.names = make([]meshName, 0, len(keys))
 	for _, svc := range slices.Sorted(maps.Keys(keys)) {
 		// Scoped to the dependency set so a table only references clusters
@@ -753,7 +800,11 @@ func (c *SnapshotCache) captureTableInputsFor(deps map[string]struct{}, quicArms
 			arms:        quicArms[svc],
 		}
 		n.portMap, n.mapped = in.rules.portMaps[svc]
-		n.names = serviceNames(ref, fqdn, n.mesh, bare[ref.Name] == 1)
+		if _, routed := in.rules.routes[svc]; generated || routed {
+			n.names = serviceNames(ref, fqdn, n.mesh, bare[ref.Name] == 1)
+		} else {
+			n.names = []string{n.mesh}
+		}
 		in.names = append(in.names, n)
 	}
 	return in
@@ -1017,12 +1068,14 @@ func (c *SnapshotCache) captureTableVhosts(in captureTableInputs, port uint32) [
 			vhosts = c.appendNameVhosts(vhosts, in, n, port)
 			continue
 		}
-		// cap_http_other: HTTP on a port number no service declares as HTTP.
-		// A name this node knows the ports of is refused; nothing is routed.
+		// cap_http_other: HTTP on a port number no service is known to
+		// declare as HTTP. A name this node knows the ports of is refused.
 		if n.ports.known() || n.mapped {
 			vhosts = append(vhosts, proxy.BuildRefusalVirtualHost(n.mesh+"|undeclared", domains(n.names, "", ":*"), proxy.RefusalPortNotDeclared,
 				refusalBody(n.mesh, "does not declare the port that was dialled", n.ports)))
+			continue
 		}
+		vhosts = append(vhosts, c.coldOtherVhost(in, n))
 	}
 	// in.names is sorted and each name appends in a fixed order, so the
 	// table's repeated virtual_hosts field is already deterministic (#135).
@@ -1074,29 +1127,56 @@ func (c *SnapshotCache) appendNameVhosts(vhosts []*routev3.VirtualHost, in captu
 	}
 
 	// A Host that names a port other than the one dialled. The dialled port
-	// decides: the request is refused, never answered by another port.
-	if informed || routable {
-		refuse("mismatch", proxy.RefusalPortMismatch, fmt.Sprintf("was dialled on port %d with a Host header that names another port", d), domains(n.names, ":*"))
-	}
+	// decides: the request is refused, never answered by another port. That
+	// holds for a name this node knows no port of as well: what was dialled
+	// is known, and no mesh name may reach the table's fallthrough.
+	refuse("mismatch", proxy.RefusalPortMismatch, fmt.Sprintf("was dialled on port %d with a Host header that names another port", d), domains(n.names, ":*"))
 	return vhosts
 }
 
 // coldVhost is the virtual host of a name this node knows no port of, in the
-// table of dialled port d: the mesh authority that spells d, routed to the
-// cluster of that name ("<fqdn>:d"), which the on-demand filter fetches. It
-// carries the service's HTTP filters and the rules that apply on d.
+// table of dialled port d: EVERY name of the service, with ":d" and without a
+// port (on a captured dial a port-less Host means the port that was dialled),
+// routed to the cluster of that port ("<fqdn>:d"), which the on-demand filter
+// fetches. It carries the service's HTTP filters and the rules that apply on
+// d.
 //
-// On a dial to port 80 the port-less mesh authority is port 80 as well, and
-// is claimed here too: it names the SAME cluster, "<fqdn>:80", never the
-// cluster the bare name spells (the one of the port the pods declare). The
-// table's catch-all therefore accepts no port-less authority at all.
+// The names are the ones an informed service's virtual host claims in the
+// same table. Claiming only the mesh authority left the Kubernetes names of a
+// service the node held no endpoint of (the registry unreachable when the
+// agent started) to the table's fallthrough: passed through to a selectorless
+// Service's address, an immediate failure, where the request should be parked
+// until the cluster arrives.
+//
+// The cluster is always the one of the dialled port, never the one the bare
+// name spells (the cluster of the port the pods declare), also on a dial to
+// port 80. The table's catch-all therefore accepts no port-less authority.
 func (c *SnapshotCache) coldVhost(in captureTableInputs, n meshName, d uint32) *routev3.VirtualHost {
-	doms := []string{fmt.Sprintf("%s:%d", n.mesh, d)}
-	if d == 80 {
-		doms = append(doms, n.mesh)
-	}
 	vh := proxy.BuildServiceVirtualHost(n.mesh+"|"+strconv.Itoa(int(d)), proxy.PortClusterName(n.svc, c.meshDomain, d),
-		doms, resolveRules(in.rules, in.all, c.meshDomain, rulePlace{svc: n.svc, servicePort: d}))
+		domains(n.names, "", fmt.Sprintf(":%d", d)), resolveRules(in.rules, in.all, c.meshDomain, rulePlace{svc: n.svc, servicePort: d}))
+	applyChainFilter(vh, in.rules.chainFilters, n.svc)
+	return vh
+}
+
+// coldOtherVhost is the virtual host, in cap_http_other, of a name this node
+// knows no port of. That table serves the dialled ports no service is KNOWN to
+// declare as HTTP, and for such a name nothing is known: the port may well be
+// one of its HTTP ports. Its mesh authority with a port names its own cluster
+// ("<fqdn>:<port>" is both the authority and the cluster), fetched on demand,
+// from a virtual host of the service's own with its filter and the rules that
+// apply to every port.
+//
+// The table does not know which port was dialled, so nothing else of the name
+// can be given a cluster here: a Kubernetes name, and any name without a
+// port, still reach the fallthrough. They are served once a table for the
+// port exists, which it does as soon as any service is known to declare the
+// number as HTTP.
+func (c *SnapshotCache) coldOtherVhost(in captureTableInputs, n meshName) *routev3.VirtualHost {
+	everywhere, _ := coldRules(in.rules, n.svc)
+	for i := range everywhere {
+		everywhere[i].Backends = resolveBackends(everywhere[i].Backends, in.rules.portMaps, in.all, c.meshDomain)
+	}
+	vh := proxy.BuildOnDemandServiceVirtualHost(n.mesh+"|cold", []string{n.mesh + ":*"}, everywhere)
 	applyChainFilter(vh, in.rules.chainFilters, n.svc)
 	return vh
 }
@@ -1107,8 +1187,17 @@ func (c *SnapshotCache) coldVhost(in captureTableInputs, n meshName, d uint32) *
 // default cluster's routes, the per-source HTTP/3 selection.
 func (c *SnapshotCache) portVhost(in captureTableInputs, n meshName, d, pod uint32, doms []string) *routev3.VirtualHost {
 	cluster := n.mesh
-	if n.ports.known() && pod != 0 {
+	switch {
+	case pod == 0:
+		// A named targetPort that could not be resolved: nothing says which
+		// port it is, and the service's own cluster is all that can be named.
+	case n.ports.known():
 		cluster = httpClusterForPort(n.svc, c.meshDomain, n.ports, pod)
+	default:
+		// The Service says which pod port this is, and the node holds no
+		// endpoint yet: that port's cluster, fetched on demand, never the
+		// cluster the bare name spells.
+		cluster = proxy.PortClusterName(n.svc, c.meshDomain, pod)
 	}
 	vh := proxy.BuildServiceVirtualHost(n.mesh+"|"+strconv.Itoa(int(d)), cluster, doms, resolveRules(in.rules, in.all, c.meshDomain, rulePlace{svc: n.svc, servicePort: d, pod: pod}))
 	applyChainFilter(vh, in.rules.chainFilters, n.svc)

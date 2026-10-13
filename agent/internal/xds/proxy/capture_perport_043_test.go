@@ -426,14 +426,14 @@ func TestCaptureChains_NoAnyPortChainForAServiceWithHTTP(t *testing.T) {
 	assert.Empty(t, addressOnlyChains(sni))
 }
 
-// TestCaptureChains_AnyPortTwinsOnHTTPPortNumbers: the listener names every
+// TestCaptureChains_NoChainOnAnHTTPPortNumberTheServiceDoesNotDeclare: the listener names every
 // HTTP port number of the mesh, and a connection to a named port is matched
 // only among the chains naming it. While a pure-TCP service had an any-port
 // chain, that chain needed a twin on each of those numbers. The chain is gone
 // (chart 2.7.0) and so are the twins: on an HTTP port number of the mesh that
 // the service does not declare, NO chain claims its address. A client that
 // dials one gets what the address gives it there, which is nothing.
-func TestCaptureChains_AnyPortTwinsOnHTTPPortNumbers(t *testing.T) {
+func TestCaptureChains_NoChainOnAnHTTPPortNumberTheServiceDoesNotDeclare(t *testing.T) {
 	const cluster = "tcp:raw.t.aether.internal"
 	httpPorts := []uint32{80, 8080, 9000, 9100, 18081}
 	l := perPortListener(t, []CaptureTCPService{

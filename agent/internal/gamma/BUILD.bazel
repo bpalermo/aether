@@ -47,6 +47,7 @@ go_test(
         "portstatus_test.go",
         "reconciler_test.go",
         "stalestatus_test.go",
+        "watches_test.go",
     ],
     embed = [":gamma"],
     deps = [

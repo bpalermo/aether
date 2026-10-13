@@ -321,10 +321,16 @@ func ppStart(t *testing.T, hcmChain string) *ppRig {
 		},
 	}})
 
-	r := &ppRig{t: t, c: c, reg: &ppRegistry{}, port: ppFreePort(t), chain: hcmChain, backend: ln.Addr().String(), hits: hits, seen: map[string]bool{}}
+	r := &ppRig{t: t, c: c, reg: &ppRegistry{}, chain: hcmChain, backend: ln.Addr().String(), hits: hits, seen: map[string]bool{}}
 	require.NoError(t, c.LoadClustersFromRegistry(ctx, "cluster-1", ppNodeName, r.reg))
 
-	r.cp = startADSControlPlaneWithHook(t, ppTranslate(t, c, r.port, hcmChain, r.backend), func(_ int64, req *discoverygrpc.DeltaDiscoveryRequest) {
+	// The proxy starts WITHOUT the capture listener: its port is picked only
+	// once the proxy has bound its admin port. A port probed before that can
+	// be the very one the kernel then hands the admin endpoint, and the
+	// listener would fail to bind.
+	initial := ppTranslate(t, c, 1, hcmChain, r.backend)
+	delete(initial, resourcev3.ListenerType)
+	r.cp = startADSControlPlaneWithHook(t, initial, func(_ int64, req *discoverygrpc.DeltaDiscoveryRequest) {
 		if req.GetTypeUrl() != resourcev3.ClusterType {
 			return
 		}
@@ -356,7 +362,12 @@ func ppStart(t *testing.T, hcmChain string) *ppRig {
 		}
 	})
 	e := launchEnvoyOverADS(t, bin, r.cp)
+	r.mu.Lock()
+	r.port = ppFreePort(t)
+	r.mu.Unlock()
+	r.publish()
 	r.addr = e.listenerAddr(t, "capture")
+	ppAwaitListening(t, r.addr)
 	return r
 }
 

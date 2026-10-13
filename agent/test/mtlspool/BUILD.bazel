@@ -27,6 +27,7 @@ go_test(
         "perport_accept_test.go",
         "perport_live_test.go",
         "perport_proxyport_test.go",
+        "perport_second_test.go",
         "perport_tlsroute_test.go",
         "podname_namespace_1584_test.go",
         "pool_identity_test.go",

@@ -4129,6 +4129,37 @@ to the service's own cluster with the route's matches, filters and backends
 skipped. It is closed the same way: the service's virtual host that stands in
 before its cluster arrives carries its routes' rules.
 
+##### While a node holds no endpoint of a service
+
+A node learns a service's ports from the registry. Before it has (the agent
+just started and the registry was unreachable, or the service was never
+called from this node), a request for the service is **parked** while the
+proxy fetches the cluster, on a virtual host of the service's own that
+carries its service-wide filter and its routes' rules. What such a request
+can and cannot do, as built:
+
+- **A captured dial to a port number some service is known to serve as
+  HTTP**: every name of the service is claimed for that port, with the port
+  and without one, and the cluster asked for is that port's. A `Host` naming
+  another port is refused `421 port-mismatch`, as for a known service.
+- **A captured dial to a port number no service is known to serve as HTTP**
+  (always the case for every port on a node that knows nothing yet): only the
+  mesh name **with a port** is claimed, and the cluster asked for is the one
+  the `Host` names, because that table does not know which port was dialled.
+  A `Host` whose port differs from the dialled one is therefore routed by the
+  `Host`. A Kubernetes name (`<svc>.<ns>.svc.cluster.local`), and any name
+  without a port, are passed through to the address that was dialled, a
+  selectorless Service, and fail at once.
+- **The proxy port**: mesh names only; a Kubernetes name is passed through
+  (redirect-all) or answers 404.
+- A route's `backendRef` to a service the node does not know asks for the
+  cluster of the port the route names, never the backend's declared port.
+
+All of it ends when the node has the service's ports: from then on a wrong
+port is refused by name. These cold cases are scheduled to be made strict
+(a cold request is delivered only where a warm one would be) in the next
+step of the release.
+
 ##### BREAKING: `:18081` and a name without a port no longer mean "the port the pods declare"
 
 Through chart 2.6 three spellings reached the port in

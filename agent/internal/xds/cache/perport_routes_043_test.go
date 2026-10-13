@@ -493,9 +493,11 @@ func TestPerPort_EveryStateAndTransitionIsConsistent(t *testing.T) {
 	}
 }
 
-// A backend this node holds no endpoint of resolves to the projected
-// (default) cluster; when its endpoints arrive the route must lead to the
-// port the backendRef names, in both tables, without any route event.
+// A backend this node holds no endpoint of is named by the port the
+// backendRef names from the start (its cluster is fetched on demand), in both
+// tables: never by the bare name, which is the cluster of the port the
+// backend's pods declare and answered a route to 9090 from 8080 until the
+// endpoints arrived. Nothing changes when they do.
 func TestPerPort_BackendKnownLater(t *testing.T) {
 	ctx := context.Background()
 	parent := []rtpPod{{svc: "demo/parent", ip: "10.0.6.1", legacy: 8080, ports: map[uint32]registryv1.PortProtocol{8080: rtpH}}}
@@ -508,7 +510,7 @@ func TestPerPort_BackendKnownLater(t *testing.T) {
 	require.NoError(t, c.LoadClustersFromRegistry(ctx, "cluster-1", "node-1", rtpRegistry(parent)))
 	for _, table := range []string{"cap_http_8080", proxy.OutboundHTTPRouteName} {
 		got := a043Resolve(t, a043Tables(t, c)[table], "parent.demo.aether.internal:8080")
-		assert.Equal(t, "be.demo.aether.internal", got.cluster, table+": cold")
+		assert.Equal(t, "be.demo.aether.internal:9090", got.cluster, table+": cold")
 	}
 	require.NoError(t, c.LoadClustersFromRegistry(ctx, "cluster-1", "node-1", rtpRegistry(append(slices.Clone(parent), backend...))))
 	for _, table := range []string{"cap_http_8080", proxy.OutboundHTTPRouteName} {
@@ -534,8 +536,12 @@ func TestPerPort_BackendKnownLater(t *testing.T) {
 	}
 }
 
-// The captured and the loopback table give one answer for a route once the
-// refresh a route event triggers has run.
+// The captured and the loopback table give one answer for a route in the very
+// snapshot a route event produces, with NO registry refresh in between. The
+// loopback table's virtual hosts live on the cluster entries, which a refresh
+// builds; they are rebuilt when the rule inputs change as well
+// (refreshEntryVhosts). Without that the capture table had the new rule and
+// the loopback table the old one until the next refresh.
 func TestPerPort_TablesAgreeAfterARouteEventAlone(t *testing.T) {
 	ctx := context.Background()
 	services := a043Fixture()
@@ -543,15 +549,61 @@ func TestPerPort_TablesAgreeAfterARouteEventAlone(t *testing.T) {
 	c.SetServiceRoutes(map[string][]proxy.GammaRoute{
 		"demo/httponly": {{Backends: []proxy.GammaBackend{{Service: "demo/multi", Cluster: "multi.demo.aether.internal", Port: 9090, Weight: 1}}}},
 	})
-	// A route event signals a dependency change, and the refresh that follows
-	// rebuilds the loopback table's virtual hosts (they live on the cluster
-	// entries). The two tables are compared after it.
-	require.NoError(t, c.LoadClustersFromRegistry(ctx, "cluster-1", "node-1", a043Registry(services)))
+	require.NoError(t, c.generateSnapshot(ctx))
 	tables := a043Tables(t, c)
 	capGot := a043Resolve(t, tables["cap_http_8080"], "httponly.demo.aether.internal:8080")
 	outGot := a043Resolve(t, tables[proxy.OutboundHTTPRouteName], "httponly.demo.aether.internal:8080")
 	t.Logf("captured: %s; loopback: %s", capGot.cluster, outGot.cluster)
+	assert.Equal(t, "multi.demo.aether.internal:9090", capGot.cluster, "the route's backendRef")
 	assert.Equal(t, capGot.cluster, outGot.cluster, "one snapshot, one answer for the two entry paths")
+
+	// And the route going away, alone.
+	c.SetServiceRoutes(nil)
+	require.NoError(t, c.generateSnapshot(ctx))
+	tables = a043Tables(t, c)
+	for _, table := range []string{"cap_http_8080", proxy.OutboundHTTPRouteName} {
+		got := a043Resolve(t, tables[table], "httponly.demo.aether.internal:8080")
+		assert.Equal(t, "httponly.demo.aether.internal", got.cluster, "%s: the deleted route still routes", table)
+	}
+}
+
+// TestPerPort_EntryVhostsAreRebuiltOnlyWhenTheRuleInputsChange: the loopback
+// virtual hosts are stored so that a snapshot (one per pod event) does not
+// build and hash the route table again. They are rebuilt when a rule input
+// changes, and at no other time: the same objects are published until then.
+func TestPerPort_EntryVhostsAreRebuiltOnlyWhenTheRuleInputsChange(t *testing.T) {
+	ctx := context.Background()
+	services := a043Fixture()
+	c := a043Cache(t, services)
+	vhostOf := func() *routev3.VirtualHost {
+		c.clusterMu.RLock()
+		defer c.clusterMu.RUnlock()
+		return c.clusters["demo/multi"].vhost
+	}
+	require.NoError(t, c.generateSnapshot(ctx))
+	first := vhostOf()
+	require.NotNil(t, first)
+	require.NoError(t, c.generateSnapshot(ctx))
+	assert.Same(t, first, vhostOf(), "nothing changed: the stored virtual host is published again")
+	// An event that changes no rule input (an identical route set).
+	c.SetServiceRoutes(nil)
+	require.NoError(t, c.generateSnapshot(ctx))
+	assert.Same(t, first, vhostOf(), "an event that changed nothing rebuilds nothing")
+	// Each kind of rule input, changed alone.
+	for name, change := range map[string]func(){
+		"a route": func() {
+			c.SetServiceRoutes(map[string][]proxy.GammaRoute{"demo/multi": {{Matches: []proxy.GammaMatch{{Prefix: "/x"}}, HeaderMutation: rtpMark("x")}}})
+		},
+		"an imported route": func() {
+			c.SetImportedServiceRoutes(map[string][]proxy.GammaRoute{"demo/multi": {{Matches: []proxy.GammaMatch{{Prefix: "/y"}}, HeaderMutation: rtpMark("y")}}})
+		},
+		"a port map": func() { c.SetServicePortMaps(map[string]map[uint32]uint32{"demo/httponly": {80: 8080}}) },
+	} {
+		before := vhostOf()
+		change()
+		require.NoError(t, c.generateSnapshot(ctx))
+		assert.NotSamef(t, before, vhostOf(), "%s changed and the loopback virtual hosts were not rebuilt", name)
+	}
 }
 
 var _ = fmt.Sprintf

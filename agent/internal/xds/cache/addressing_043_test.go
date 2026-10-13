@@ -888,7 +888,11 @@ func TestAddressing_BackendRefPort(t *testing.T) {
 		{"an undeclared port", proxy.GammaBackend{Service: "demo/multi", Cluster: multi, Port: 7777}, nil, multi, true},
 		{"a raw-TCP port is not an HTTP backend", proxy.GammaBackend{Service: "demo/mixed", Cluster: "mixed.demo.aether.internal", Port: 9000}, nil, "mixed.demo.aether.internal", true},
 		{"the mesh HTTP port of a service whose declared port is raw TCP", proxy.GammaBackend{Service: "demo/tcpfirst", Cluster: tcpfirst, Port: 18081}, nil, tcpfirst, true},
-		{"a service this node knows no port of keeps the projected cluster", proxy.GammaBackend{Service: "demo/cold", Cluster: "cold.demo.aether.internal", Port: 9090}, nil, "cold.demo.aether.internal", false},
+		// Not the projected (bare) cluster: that is the cluster of the port
+		// the backend's pods declare, and answered a route to 9090 from it.
+		{"a service this node knows no port of is named by the port the route names", proxy.GammaBackend{Service: "demo/cold", Cluster: "cold.demo.aether.internal", Port: 9090}, nil, "cold.demo.aether.internal:9090", false},
+		{"a user Service this node knows no pod of: the pod port its Service maps the port to", proxy.GammaBackend{Service: "demo/cold", Cluster: "cold.demo.aether.internal", Port: 80}, map[string]map[uint32]uint32{"demo/cold": {80: 8080}}, "cold.demo.aether.internal:8080", false},
+		{"a user Service this node knows no pod of: a named targetPort keeps the projected cluster", proxy.GammaBackend{Service: "demo/cold", Cluster: "cold.demo.aether.internal", Port: 80}, map[string]map[uint32]uint32{"demo/cold": {80: 0}}, "cold.demo.aether.internal", false},
 		{"a user Service: its port resolves through targetPort", proxy.GammaBackend{Service: "demo/multi", Cluster: multi, Port: 80}, userMap, multi + ":9090", false},
 		{"a user Service: a named targetPort cannot be resolved or refuted and keeps the projected cluster", proxy.GammaBackend{Service: "demo/multi", Cluster: multi, Port: 81}, userMap, multi, false},
 		{"a user Service: a port it does not have, though the pods declare that number", proxy.GammaBackend{Service: "demo/multi", Cluster: multi, Port: 8080}, userMap, multi, true},

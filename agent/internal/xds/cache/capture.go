@@ -958,6 +958,9 @@ func (c *SnapshotCache) SetAuthzSidecar(timeout time.Duration, failureModeAllow 
 	// effective-routes memo (boot-time in production, but never serve a memo
 	// built under the old availability).
 	c.depMu.Lock()
+	// It also decides whether an ext_authz service filter is kept at all,
+	// which the loopback virtual hosts carry.
+	c.bumpRuleGenLocked(true)
 	c.bumpDepGenLocked()
 	c.depMu.Unlock()
 }
