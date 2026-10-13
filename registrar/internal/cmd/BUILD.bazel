@@ -57,6 +57,7 @@ go_test(
         "//common/spire",
         "//common/spire/spiretest",
         "//common/telemetry/setup",
+        "//registrar/internal/services",
         "@com_github_stretchr_testify//assert",
         "@com_github_stretchr_testify//require",
         "@io_k8s_sigs_controller_runtime//pkg/healthz",

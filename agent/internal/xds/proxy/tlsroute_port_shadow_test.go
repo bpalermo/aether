@@ -54,10 +54,10 @@ func TestTLSRouteChainsSurvivePortQualifiedFloor(t *testing.T) {
 	)
 
 	svc := CaptureTCPService{
-		ClusterName:  "tls-svc.aether-test.aether.internal",
-		ClusterIP:    clusterIP,
-		PrimaryIsTCP: true,
-		PrimaryPort:  primary,
+		ClusterName:   "tls-svc.aether-test.aether.internal",
+		ClusterIP:     clusterIP,
+		LegacyTCPPort: primary,
+		AnyPort:       true,
 		TLSRouteRules: []L4ServiceRoute{{
 			SNIHostnames: []string{sni},
 			Backends:     []L4Backend{{Service: "aether-test/tls-svc", Cluster: "tcp:tls-svc.aether-test.aether.internal", Weight: 1}},
@@ -67,7 +67,10 @@ func TestTLSRouteChainsSurvivePortQualifiedFloor(t *testing.T) {
 	tls := BuildCaptureTLSRouteFilterChains(svc, svc.TLSRouteRules, "spiffe://aether.internal/ns/t/sa/c")
 	require.NotEmpty(t, tls, "fixture produced no TLS chains; the test would be vacuous")
 
-	got := qualifyTLSChainsByClaimedPorts(svc, tls)
+	// named is what GenerateCaptureListener passes: every destination port a
+	// chain of the listener names. With this one service and no HTTP port
+	// number, that is exactly the service's own claimed ports, as before.
+	got := qualifyTLSChainsByPorts(svc, tls, namedDestinationPorts([]CaptureTCPService{svc}, nil))
 
 	// The two sanctioned raw-TCP spellings for a TCP-primary service. Before the
 	// fix BOTH of these were claimed by cap_tcp_* floor chains and the SNI chain
@@ -96,30 +99,34 @@ func TestTLSRouteChainsSurvivePortQualifiedFloor(t *testing.T) {
 // silently reopens #911 on that port.
 func TestClaimedTCPPortsCoversBothProducers(t *testing.T) {
 	t.Run("tcp-primary: mesh port and primary are claimed", func(t *testing.T) {
-		got := claimedTCPPorts(CaptureTCPService{PrimaryIsTCP: true, PrimaryPort: 9000})
+		got := claimedTCPPorts(CaptureTCPService{LegacyTCPPort: 9000, AnyPort: true})
 		assert.ElementsMatch(t, []uint32{meshconst.ProxyL4OutboundPort, 9000}, got)
 	})
 
 	t.Run("http-primary: its raw-TCP ports are claimed, the floor ports are not", func(t *testing.T) {
 		// design (d) delivers every mesh Service here, so an HTTP-primary
 		// service also emits destination_port chains — for its TCP ports only.
-		got := claimedTCPPorts(CaptureTCPService{PrimaryIsTCP: false, PrimaryPort: 8080, TCPPorts: []uint32{9000}})
+		got := claimedTCPPorts(CaptureTCPService{HTTPPorts: []uint32{8080}, TCPPorts: []uint32{9000}})
 		assert.ElementsMatch(t, []uint32{9000}, got)
 	})
 
 	t.Run("no duplicate when a declared TCP port collides with the mesh port", func(t *testing.T) {
 		got := claimedTCPPorts(CaptureTCPService{
-			PrimaryIsTCP: true,
-			PrimaryPort:  meshconst.ProxyL4OutboundPort,
-			TCPPorts:     []uint32{meshconst.ProxyL4OutboundPort},
+			LegacyTCPPort: meshconst.ProxyL4OutboundPort,
+			AnyPort:       true,
+			TCPPorts:      []uint32{meshconst.ProxyL4OutboundPort},
 		})
 		assert.Equal(t, []uint32{meshconst.ProxyL4OutboundPort}, got,
 			"a duplicated port yields two chains with the same name and Envoy rejects the listener")
 	})
 
 	t.Run("zero ports are never claimed", func(t *testing.T) {
-		got := claimedTCPPorts(CaptureTCPService{PrimaryIsTCP: true, PrimaryPort: 0})
-		assert.Equal(t, []uint32{meshconst.ProxyL4OutboundPort}, got)
+		// A zero LegacyTCPPort now means "the legacy target is not raw TCP"
+		// (proposal 043), so it claims neither itself nor the TCP mesh port;
+		// a zero among the declared ports is dropped.
+		got := claimedTCPPorts(CaptureTCPService{LegacyTCPPort: 0, TCPPorts: []uint32{0, 9000}})
+		assert.Equal(t, []uint32{9000}, got)
 		assert.NotContains(t, got, uint32(0), "port 0 would collide with the portless spelling")
+		assert.Empty(t, claimedTCPPorts(CaptureTCPService{}), "a service with no raw-TCP port claims nothing")
 	})
 }

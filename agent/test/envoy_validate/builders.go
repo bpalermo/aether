@@ -471,6 +471,13 @@ func buildNodeUDSBootstrap() (*bootstrapv3.Bootstrap, error) {
 	return newBootstrap(staticClusters, []*listenerv3.Listener{inbound, outbound}), nil
 }
 
+// fixtureLegacyTCPPort is the port the raw-TCP fixture services declare.
+const fixtureLegacyTCPPort = 6379
+
+// fixtureHTTPPorts is the smallest HTTP port set the agent ever builds a
+// capture listener with: the two legacy numbers (cache.captureHTTPPorts).
+var fixtureHTTPPorts = []uint32{80, 18081}
+
 // buildCaptureBootstrap builds the transparent-capture bootstrap config.
 func buildCaptureBootstrap() (*bootstrapv3.Bootstrap, error) {
 	pod := testPod()
@@ -483,9 +490,11 @@ func buildCaptureBootstrap() (*bootstrapv3.Bootstrap, error) {
 	tcpSvc := proxy.CaptureTCPService{
 		ClusterName: "redis." + meshDomain,
 		ClusterIP:   "10.96.1.10",
-		// TCP-primary: these fixtures exercise the TCP floor, which since
-		// proposal 037 design (d) is emitted only for a TCP-primary service.
-		PrimaryIsTCP: true,
+		// A raw-TCP legacy target with no HTTP port: these fixtures exercise
+		// the TCP floor, which is emitted only for such a service (proposals
+		// 037 and 043), on its own port, on the TCP mesh port and on any port.
+		LegacyTCPPort: fixtureLegacyTCPPort,
+		AnyPort:       true,
 	}
 	captureListener, err := proxy.GenerateCaptureListener(
 		pod,
@@ -494,6 +503,7 @@ func buildCaptureBootstrap() (*bootstrapv3.Bootstrap, error) {
 		meshDomain,
 		false, // emitStatsPod
 		[]proxy.CaptureTCPService{tcpSvc},
+		fixtureHTTPPorts,
 		true, // withPassthrough
 		nil,  // extensionFilters (escape hatch exercised in the route-target bootstrap)
 	)
@@ -645,9 +655,11 @@ func buildCaptureTCPRouteBootstrap() (*bootstrapv3.Bootstrap, error) {
 		// listener the agent never emits.
 		ClusterName: proxy.TCPClusterName(l4TCPParent, meshDomain),
 		ClusterIP:   L4TCPParentClusterIP,
-		// TCP-primary: these fixtures exercise the TCP floor, which since
-		// proposal 037 design (d) is emitted only for a TCP-primary service.
-		PrimaryIsTCP: true,
+		// A raw-TCP legacy target with no HTTP port: these fixtures exercise
+		// the TCP floor, which is emitted only for such a service (proposals
+		// 037 and 043), on its own port, on the TCP mesh port and on any port.
+		LegacyTCPPort: fixtureLegacyTCPPort,
+		AnyPort:       true,
 		TCPRouteRules: []proxy.L4ServiceRoute{{
 			Backends: []proxy.L4Backend{
 				{Service: l4TCPBackendA, Cluster: L4TCPBackendClusterA(), Weight: L4TCPWeightA},
@@ -663,6 +675,7 @@ func buildCaptureTCPRouteBootstrap() (*bootstrapv3.Bootstrap, error) {
 		meshDomain,
 		false, // emitStatsPod
 		[]proxy.CaptureTCPService{svc},
+		fixtureHTTPPorts,
 		true, // withPassthrough (redirect-all, the shipped default)
 		nil,  // extensionFilters
 	)
@@ -717,9 +730,11 @@ func buildCaptureTLSRouteBootstrap() (*bootstrapv3.Bootstrap, error) {
 	svc := proxy.CaptureTCPService{
 		ClusterName: proxy.TCPClusterName(l4TLSParent, meshDomain),
 		ClusterIP:   L4TLSParentClusterIP,
-		// TCP-primary: these fixtures exercise the TCP floor, which since
-		// proposal 037 design (d) is emitted only for a TCP-primary service.
-		PrimaryIsTCP: true,
+		// A raw-TCP legacy target with no HTTP port: these fixtures exercise
+		// the TCP floor, which is emitted only for such a service (proposals
+		// 037 and 043), on its own port, on the TCP mesh port and on any port.
+		LegacyTCPPort: fixtureLegacyTCPPort,
+		AnyPort:       true,
 		// No TCPRouteRules on purpose: the parent keeps its plain passthrough
 		// floor chain, which is the chain a non-matching SNI is DESIGNED to
 		// reach. Adding a TCPRoute here would hide that half of the shape.
@@ -746,6 +761,7 @@ func buildCaptureTLSRouteBootstrap() (*bootstrapv3.Bootstrap, error) {
 		meshDomain,
 		false, // emitStatsPod
 		[]proxy.CaptureTCPService{svc},
+		fixtureHTTPPorts,
 		true, // withPassthrough
 		nil,  // extensionFilters
 	)
@@ -1074,15 +1090,12 @@ func buildCaptureRouteTargetBootstrap() (*bootstrapv3.Bootstrap, error) {
 		fmt.Sprintf("%s:%d", targetMesh, realPort),
 	}
 	vhost := proxy.BuildOutboundServiceVirtualHost(targetMesh, domains, rules)
-	// Known-target safety net (the RDS-reload-race fix): the redirect-all catch-all
-	// pins the route target's non-mesh dial spellings (any port) to its mesh cluster
-	// so a captured request never leaks to the passthrough while this vhost rebuilds.
-	// Validating it here proves Envoy ACCEPTS the extra :authority safe_regex route.
-	knownTargets := []proxy.KnownTargetRoute{{
-		AuthorityRegex: `^(echo|echo\.team-a|echo\.team-a\.svc|echo\.team-a\.svc\.cluster\.local)(:[0-9]+)?$`,
-		Cluster:        targetMesh,
-	}}
-	routeCfg := proxy.BuildCaptureRouteConfiguration([]*routev3.VirtualHost{vhost}, meshDomain, true, knownTargets...)
+	// The table of dialled port realPort, with its own catch-all: a mesh
+	// authority that spells exactly that port may name its cluster on demand,
+	// everything else falls to the passthrough. Validating it here proves Envoy
+	// ACCEPTS the per-table :authority safe_regex route.
+	routeCfg := proxy.BuildCaptureRouteConfiguration(proxy.CaptureHTTPRouteName(realPort), []*routev3.VirtualHost{vhost},
+		proxy.BuildCaptureCatchAllVirtualHost(meshDomain, realPort, false, true))
 
 	hcm := &http_connection_managerv3.HttpConnectionManager{
 		StatPrefix: "cap_http_validate",

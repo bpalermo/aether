@@ -26,6 +26,7 @@ go_library(
     srcs = [
         "accesslog_fields.go",
         "builders.go",
+        "perport.go",
     ],
     importpath = "aethermesh.dev/agent/test/envoy_validate",
     # The xDS cache's tests put a snapshot the cache generated through
@@ -92,6 +93,7 @@ go_test(
         "identity_test.go",
         "idle_timeout_test.go",
         "l4_observability_test.go",
+        "perport_test.go",
         "podname_stats_1584_test.go",
         "podname_stats_1636_test.go",
         "stats_sink_resource_test.go",

@@ -212,6 +212,7 @@ func TestEnvoyValidate(t *testing.T) {
 		{"node_uds_bootstrap.json", NodeUDSBootstrapJSON},
 		{"capture_bootstrap.json", CaptureBootstrapJSON},
 		{"capture_route_target_bootstrap.json", CaptureRouteTargetBootstrapJSON},
+		{"capture_perport_bootstrap.json", CapturePerPortBootstrapJSON},
 		{"outbound_zero_vhost_route_bootstrap.json", OutboundZeroVhostRouteBootstrapJSON},
 		{"capture_tcproute_bootstrap.json", CaptureTCPRouteBootstrapJSON},
 		{"capture_tlsroute_bootstrap.json", CaptureTLSRouteBootstrapJSON},
@@ -642,9 +643,10 @@ func TestCaptureTCPRouteDrainCollapsesToSingleCluster(t *testing.T) {
 	svc := proxy.CaptureTCPService{
 		ClusterName: "tcp:l4-front.default.mesh.local",
 		ClusterIP:   L4TCPParentClusterIP,
-		// TCP-primary: these fixtures exercise the TCP floor, which since
-		// proposal 037 design (d) is emitted only for a TCP-primary service.
-		PrimaryIsTCP: true,
+		// A raw-TCP legacy target: these fixtures exercise the TCP floor,
+		// which is emitted only for such a service (proposals 037 and 043).
+		LegacyTCPPort: fixtureLegacyTCPPort,
+		AnyPort:       true,
 	}
 	rules := []proxy.L4ServiceRoute{{
 		Backends: []proxy.L4Backend{

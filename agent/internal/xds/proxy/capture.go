@@ -3,6 +3,9 @@ package proxy
 import (
 	"fmt"
 	"net"
+	"slices"
+	"strconv"
+	"strings"
 	"time"
 
 	tcp_proxyv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/network/tcp_proxy/v3"
@@ -23,10 +26,49 @@ import (
 	"google.golang.org/protobuf/types/known/wrapperspb"
 )
 
-// CaptureHTTPRouteName is the RDS route configuration the per-pod transparent-capture
-// listeners use (proposal 018, Phase 3a). It maps cluster.local authorities (the
-// generated mesh-Service names) to the registry-backed service clusters.
-const CaptureHTTPRouteName = "cap_http"
+// The capture listener's HTTP chains and their route tables (proposal 043,
+// "The chains of a capture listener"). The port a client DIALLED selects the
+// chain, and with it the route table; the Host header only names the service.
+//
+//   - cap_http_<P>, one per HTTP port number P in the mesh: destination port P,
+//     cleartext, sniffed HTTP. Its table holds a virtual host for every service
+//     that serves HTTP on P, so a request can only reach port P.
+//   - cap_http_other: cleartext sniffed HTTP on a port number no chain names.
+//     Its table refuses mesh names and passes everything else through.
+//
+// One chain routed on Host cannot work: Envoy's filter-chain match does not
+// backtrack, so a port number that ANY service declares as raw TCP (a
+// "/32 + destination_port" chain) is lost to a port-less HTTP chain for every
+// service on the listener, and the request leaves through the passthrough.
+const (
+	// CaptureHTTPRoutePrefix prefixes both the chain and the route-table name
+	// of an HTTP port: cap_http_<P>.
+	CaptureHTTPRoutePrefix = "cap_http_"
+	// CaptureHTTPOtherRouteName is the chain and the route table for HTTP on
+	// a port number that has no chain of its own.
+	CaptureHTTPOtherRouteName = "cap_http_other"
+)
+
+// CaptureHTTPRouteName returns the chain and route-table name of HTTP port
+// number port on the capture listener: cap_http_<port>.
+func CaptureHTTPRouteName(port uint32) string {
+	return fmt.Sprintf("%s%d", CaptureHTTPRoutePrefix, port)
+}
+
+// CaptureHTTPRoutePort is the inverse of CaptureHTTPRouteName: the port a
+// chain or route-table name stands for, and false for any other name
+// (cap_http_other included).
+func CaptureHTTPRoutePort(name string) (uint32, bool) {
+	rest, ok := strings.CutPrefix(name, CaptureHTTPRoutePrefix)
+	if !ok {
+		return 0, false
+	}
+	p, err := strconv.ParseUint(rest, 10, 16)
+	if err != nil || p == 0 {
+		return 0, false
+	}
+	return uint32(p), true
+}
 
 const (
 	listenerFilterOriginalDstName   = "envoy.filters.listener.original_dst"
@@ -55,33 +97,35 @@ type CaptureTCPService struct {
 	// When non-empty, per-SNI filter chains (server_names match) are inserted
 	// BEFORE the per-ClusterIP TCP floor chain on the capture listener.
 	TLSRouteRules []L4ServiceRoute
-	// TCPPorts are the service's NON-PRIMARY raw-TCP application ports, derived
-	// from its endpoints' port_protocols (proposal 037). Each gets its own
-	// destination_port-qualified chain, so a client dialing <VIP>:<p> reaches
-	// that port rather than whatever the portless floor forwards to.
-	//
-	// The primary port is deliberately absent: it is what the portless floor
-	// chain already reaches, and duplicating it would add a chain that changes
-	// nothing. Empty for every service that serves one TCP port, which is every
-	// TCP service that existed before proposal 037.
+	// HTTPPorts are the port numbers the service declares as HTTP. No chain is
+	// built from them here (the listener's cap_http_<P> chains are per port
+	// NUMBER, not per service); they say which named ports a per-address chain
+	// of this service must stay off, so that the service's own HTTP still
+	// reaches the HTTP chain (qualifyTLSChainsByPorts).
+	HTTPPorts []uint32
+	// TCPPorts are the service's raw-TCP application ports other than its
+	// legacy target, derived from its endpoints' port_protocols (proposals 037
+	// and 043). Each gets its own destination_port-qualified chain to its own
+	// cluster, tcp:<fqdn>:<p>, so a client dialing <VIP>:<p> reaches that port.
 	TCPPorts []uint32
-	// PrimaryIsTCP reports whether the service's PRIMARY port is raw TCP. It
-	// gates the PORTLESS /32 floor chain and nothing else (proposal 037 design
-	// (d)).
+	// LegacyTCPPort is the service's legacy target (the port its pods declare
+	// in endpoint.aether.io/port) when that port is raw TCP, and zero
+	// otherwise. It is one more declared raw-TCP port: it gets a chain on its
+	// own number, and on the TCP mesh port (:18082), which is the legacy
+	// spelling of it (proposal 043, "The legacy spellings during Phases 1 and
+	// 2"). Both forward to the floor cluster, tcp:<fqdn>.
 	//
-	// Every mesh Service with a routable VIP is delivered here now, not only
-	// the non-HTTP ones, because an HTTP-primary service can still serve
-	// raw-TCP ports. But it must NOT get the portless chain: a per-IP match
-	// outranks the HCM catch-all's application_protocols match and would
-	// swallow the VIP's HTTP traffic. Its TCP ports get
-	// destination_port-qualified chains instead, which Envoy evaluates ahead of
-	// prefix_ranges and therefore leave HTTP alone.
-	PrimaryIsTCP bool
-	// PrimaryPort is the service's primary application port, used to give the
-	// TCP-primary floor a destination_port-qualified spelling of its own
-	// (proposal 037). Zero when unknown, in which case that spelling is
-	// omitted and the any-port shim still serves it.
-	PrimaryPort uint32
+	// No service-level protocol is read to set it: the cache derives it from
+	// the registry endpoints, never from the mesh Service's annotation.
+	LegacyTCPPort uint32
+	// AnyPort asks for the portless any-port chain (cap_tcp_anyport_<cluster>):
+	// every port of the VIP that no chain names reaches the legacy target. Set
+	// only for a service whose legacy target is raw TCP and which declares NO
+	// HTTP port. On a service with an HTTP port a per-address chain would
+	// outrank the HTTP chains for the address and forward HTTP to the raw-TCP
+	// port as bytes (measured in the review of #1672 on the kubernetes
+	// backend).
+	AnyPort bool
 }
 
 // CaptureListenerName returns the per-pod transparent-capture listener name.
@@ -115,7 +159,13 @@ func CaptureListenerName(cniPod *cniv1.CNIPod) string {
 // stamped into filter state next to the netns on every chain that originates
 // mesh traffic (see SourceIdentityCertMapperFilterStateKey). "" reproduces the
 // pre-#815 shape exactly.
-func GenerateCaptureListener(cniPod *cniv1.CNIPod, sourceSpiffeID string, capturePort uint32, meshDomain string, emitStatsPod bool, tcpServices []CaptureTCPService, withPassthrough bool, extensionFilters []*http_connection_managerv3.HttpFilter) (*listenerv3.Listener, error) {
+//
+// httpPorts are the HTTP port numbers of the mesh (proposal 043): the listener
+// gets one cap_http_<P> chain per entry, plus cap_http_other. The caller must
+// publish a route table of the same name for every one of them in the same
+// snapshot; a chain naming a table the snapshot does not carry leaves the
+// listener warming (#817).
+func GenerateCaptureListener(cniPod *cniv1.CNIPod, sourceSpiffeID string, capturePort uint32, meshDomain string, emitStatsPod bool, tcpServices []CaptureTCPService, httpPorts []uint32, withPassthrough bool, extensionFilters []*http_connection_managerv3.HttpFilter) (*listenerv3.Listener, error) {
 	if cniPod == nil {
 		return nil, fmt.Errorf("pod is required")
 	}
@@ -136,31 +186,13 @@ func GenerateCaptureListener(cniPod *cniv1.CNIPod, sourceSpiffeID string, captur
 	// gave the floor chains a destination_port, that wrong mechanism stopped
 	// predicting the outcome. TLSRoute silently lost both mesh spellings and
 	// nothing failed (#911). Reason in tiers, never in list position.
-	chains := make([]*listenerv3.FilterChain, 0, len(tcpServices)*2+1)
-	for _, svc := range tcpServices {
-		// TLSRoute SNI chains, qualified onto every port something else
-		// claims (#911) so they win on tier 3 instead of losing on tier 1.
-		tlsChains := BuildCaptureTLSRouteFilterChains(svc, svc.TLSRouteRules, sourceSpiffeID)
-		chains = append(chains, qualifyTLSChainsByClaimedPorts(svc, tlsChains)...)
-		// Per-port chains for the service's non-primary TCP ports (proposal
-		// 037). Listed before the portless floor for readability only —
-		// Envoy orders by match specificity, not by position, and
-		// destination_port is its first tier.
-		for _, p := range svc.TCPPorts {
-			if pc := buildCaptureTCPPortFilterChain(svc, p, sourceSpiffeID); pc != nil {
-				chains = append(chains, pc)
-			}
-		}
-		// A TCP-primary service's floor, in three parts (proposal 037).
-		//
-		// An HTTP-primary service gets NONE of these: a portless /32 chain
-		// would intercept the VIP's HTTP traffic before the HCM chain could see
-		// it (design (d)). Its raw-TCP ports are served by the
-		// destination_port-qualified chains above.
-		if svc.PrimaryIsTCP {
-			chains = append(chains, tcpPrimaryFloorChains(svc, sourceSpiffeID)...)
-		}
-	}
+	httpPorts = normalizeHTTPPorts(httpPorts)
+	// Every destination port some chain of THIS listener names. The match
+	// does not backtrack: a connection to a named port is matched only among
+	// the chains that name it, so a chain that must also serve that port for
+	// its own address needs a copy qualified onto it (#911).
+	named := namedDestinationPorts(tcpServices, httpPorts)
+	chains := captureTCPChains(tcpServices, sourceSpiffeID, httpPorts, named)
 	// Scoped mode only: catch raw TCP to the TCP mesh port that no service
 	// chain claimed, before the HCM catch-all fabricates an HTTP 400 for it
 	// (proposal 037; the #460 shape). Redirect-all has the passthrough ->
@@ -176,7 +208,7 @@ func GenerateCaptureListener(cniPod *cniv1.CNIPod, sourceSpiffeID string, captur
 	// below and is NOT logged: it is every non-mesh egress connection, the
 	// volume the log must not carry.
 	attachL4AccessLog(chains, cniPod.GetName(), cniPod.GetNamespace())
-	chains = append(chains, buildCaptureHTTPFilterChain(cniPod, sourceSpiffeID, meshDomain, emitStatsPod, withPassthrough, extensionFilters))
+	chains = append(chains, buildCaptureHTTPFilterChains(cniPod, sourceSpiffeID, meshDomain, emitStatsPod, withPassthrough, extensionFilters, httpPorts)...)
 
 	l := &listenerv3.Listener{
 		Name: CaptureListenerName(cniPod),
@@ -268,6 +300,37 @@ func GenerateCaptureListener(cniPod *cniv1.CNIPod, sourceSpiffeID string, captur
 	return l, nil
 }
 
+// captureTCPChains builds every service's raw-TCP and TLSRoute chains of a
+// capture listener. named is every destination port a chain of the listener
+// names (namedDestinationPorts).
+func captureTCPChains(tcpServices []CaptureTCPService, sourceSpiffeID string, httpPorts, named []uint32) []*listenerv3.FilterChain {
+	chains := make([]*listenerv3.FilterChain, 0, len(tcpServices)*2+len(httpPorts)+1)
+	for _, svc := range tcpServices {
+		// TLSRoute SNI chains, qualified onto every named port (#911) so they
+		// win on tier 3 instead of losing on tier 1.
+		tlsChains := BuildCaptureTLSRouteFilterChains(svc, svc.TLSRouteRules, sourceSpiffeID)
+		chains = append(chains, qualifyTLSChainsByPorts(svc, tlsChains, named)...)
+		// One chain per raw-TCP port other than the legacy target (proposal
+		// 037), each to its own cluster.
+		for _, p := range svc.TCPPorts {
+			if p == svc.LegacyTCPPort || p == meshconst.ProxyL4OutboundPort {
+				continue // the legacy chains below own both numbers
+			}
+			if pc := buildCaptureTCPPortFilterChain(svc, p, sourceSpiffeID); pc != nil {
+				chains = append(chains, pc)
+			}
+		}
+		// A raw-TCP legacy target: its own port, the TCP mesh port and, for
+		// a service with no HTTP port, the any-port chain (proposal 043,
+		// "The legacy spellings during Phases 1 and 2"). A service whose
+		// legacy target is HTTP gets NONE of these.
+		if svc.LegacyTCPPort != 0 {
+			chains = append(chains, legacyTCPChains(svc, sourceSpiffeID, httpPorts)...)
+		}
+	}
+	return chains
+}
+
 // buildCaptureListenerFilters: recover the original destination, then sniff HTTP and TLS.
 // original_dst must run first (recovers SO_ORIGINAL_DST before any inspection);
 // http_inspector and tls_inspector detect the application protocol on the captured stream.
@@ -354,29 +417,77 @@ func buildCaptureTCPFloorFilterChain(svc CaptureTCPService, sourceSpiffeID strin
 	}
 }
 
-// buildCaptureHTTPFilterChain mirrors the outbound HTTP chain but serves the capture
-// route table (cluster.local authorities) over RDS. Same readiness/subset/on-demand/
-// stats filters and per-source mTLS egress path.
+// normalizeHTTPPorts returns ports sorted, de-duplicated and without the
+// values that cannot be an HTTP chain's destination port: 0, anything above
+// 65535, and the TCP mesh port, whose number the raw-TCP legacy chains and the
+// scoped-mode blackhole chain match on.
+func normalizeHTTPPorts(ports []uint32) []uint32 {
+	out := make([]uint32, 0, len(ports))
+	for _, p := range ports {
+		if p == 0 || p > 65535 || p == meshconst.ProxyL4OutboundPort {
+			continue
+		}
+		out = append(out, p)
+	}
+	slices.Sort(out)
+	return slices.Compact(out)
+}
+
+// namedDestinationPorts returns, sorted, every destination port a chain of a
+// capture listener built from these inputs names: the HTTP port numbers, each
+// service's raw-TCP ports, and the TCP mesh port when any service has a
+// raw-TCP legacy target.
+func namedDestinationPorts(tcpServices []CaptureTCPService, httpPorts []uint32) []uint32 {
+	named := append([]uint32(nil), httpPorts...)
+	for _, svc := range tcpServices {
+		named = append(named, claimedTCPPorts(svc)...)
+	}
+	slices.Sort(named)
+	return slices.Compact(named)
+}
+
+// buildCaptureHTTPFilterChains builds the listener's HTTP chains: one
+// cap_http_<P> per HTTP port number, and cap_http_other for HTTP on any port
+// number without a chain (proposal 043, "The chains of a capture listener").
 //
-// scopeToCleartext (redirect-all / withPassthrough, proposal 022 M2a): match the
-// chain on transport_protocol="raw_buffer" AND the http_inspector-detected HTTP
-// application protocols, so it catches ONLY cleartext HTTP —
+// Each mirrors the outbound HTTP chain (same readiness/subset/on-demand/stats
+// filters, same per-source mTLS egress path) and differs from its siblings in
+// two things only: the destination port it matches and the route table it
+// serves over RDS, which carries the same name as the chain.
+//
+// scopeToCleartext (redirect-all / withPassthrough, proposal 022 M2a): match
+// on transport_protocol="raw_buffer" AND the http_inspector-detected HTTP
+// application protocols, so the chains catch ONLY cleartext HTTP --
 //   - TLS egress (external HTTPS, kube-apiserver): tls_inspector marks it
-//     transport_protocol="tls" → no match → DefaultFilterChain ORIGINAL_DST
-//     passthrough. (Matching application_protocol ALONE would not exclude TLS —
-//     a TLS ClientHello's ALPN h2/http/1.1 looks like HTTP — hence the combined
-//     match; on a raw_buffer stream the application protocol comes from
-//     http_inspector, not ALPN.)
+//     transport_protocol="tls" -> no match -> DefaultFilterChain ORIGINAL_DST
+//     passthrough. (Matching application_protocol ALONE would not exclude TLS
+//     -- a TLS ClientHello's ALPN h2/http/1.1 looks like HTTP -- hence the
+//     combined match; on a raw_buffer stream the application protocol comes
+//     from http_inspector, not ALPN.)
 //   - Cleartext NON-HTTP (raw TCP to a non-mesh destination): http_inspector
-//     detects no HTTP → no match → passthrough to the original destination.
-//     Without the application_protocols constraint this chain swallowed such
-//     streams and answered a fake "HTTP/1.1 400 Bad Request" (#460 e2e finding).
-//     Raw TCP to a TCP MESH service is unaffected: its per-VIP floor chain
-//     matches on destination IP, which beats any protocol match.
+//     detects no HTTP -> no match -> passthrough to the original destination.
+//     Without the application_protocols constraint the chain swallowed such
+//     streams and answered a fake "HTTP/1.1 400 Bad Request" (#460).
+//     Raw TCP to a declared raw-TCP port of a mesh service is unaffected: its
+//     "/32 + destination_port" chain is matched on the address, which is
+//     decided before any protocol.
 //
-// In scoped (non-redirect-all) mode the chain stays a catch-all: only mesh
-// ClusterIPs are captured (all cleartext HTTP) and there is no passthrough fallback.
-func buildCaptureHTTPFilterChain(cniPod *cniv1.CNIPod, sourceSpiffeID, meshDomain string, emitStatsPod bool, scopeToCleartext bool, extensionFilters []*http_connection_managerv3.HttpFilter) *listenerv3.FilterChain {
+// In scoped (non-redirect-all) mode, which only unit tests build, the chains
+// match on the destination port alone and cap_http_other is the catch-all.
+func buildCaptureHTTPFilterChains(cniPod *cniv1.CNIPod, sourceSpiffeID, meshDomain string, emitStatsPod bool, scopeToCleartext bool, extensionFilters []*http_connection_managerv3.HttpFilter, httpPorts []uint32) []*listenerv3.FilterChain {
+	chains := make([]*listenerv3.FilterChain, 0, len(httpPorts)+1)
+	for _, p := range httpPorts {
+		chains = append(chains, buildCaptureHTTPFilterChain(cniPod, sourceSpiffeID, meshDomain, emitStatsPod, scopeToCleartext, extensionFilters, CaptureHTTPRouteName(p), p))
+	}
+	return append(chains, buildCaptureHTTPFilterChain(cniPod, sourceSpiffeID, meshDomain, emitStatsPod, scopeToCleartext, extensionFilters, CaptureHTTPOtherRouteName, 0))
+}
+
+// buildCaptureHTTPFilterChain builds ONE of the listener's HTTP chains. name
+// is both the chain's name and its RDS route table; port is the destination
+// port it matches, 0 for cap_http_other.
+func buildCaptureHTTPFilterChain(cniPod *cniv1.CNIPod, sourceSpiffeID, meshDomain string, emitStatsPod bool, scopeToCleartext bool, extensionFilters []*http_connection_managerv3.HttpFilter, name string, port uint32) *listenerv3.FilterChain {
+	// One stat prefix for every chain: the HTTP stats of a pod's captured
+	// traffic stay one family whatever port was dialled.
 	hcm := buildHTTPConnectionManager("capture_http", ReporterSource, cniPod.GetName(), cniPod.GetNamespace(), nil, appFacingIdleTimeout)
 
 	prefix := []*http_connection_managerv3.HttpFilter{
@@ -394,26 +505,31 @@ func buildCaptureHTTPFilterChain(cniPod *cniv1.CNIPod, sourceSpiffeID, meshDomai
 
 	hcm.RouteSpecifier = &http_connection_managerv3.HttpConnectionManager_Rds{
 		Rds: &http_connection_managerv3.Rds{
-			RouteConfigName: CaptureHTTPRouteName,
+			RouteConfigName: name,
 			ConfigSource:    config.XDSConfigSourceADS(),
 		},
 	}
 
 	fc := &listenerv3.FilterChain{
-		Name: fmt.Sprintf("capture_%s", PodResourceKey(cniPod)),
+		Name: name,
 		Filters: append(
 			BuildSourceFilterStates(sourceSpiffeID),
 			buildHTTPConnectionManagerFilter(hcm),
 		),
 	}
+	match := &listenerv3.FilterChainMatch{}
+	if port != 0 {
+		match.DestinationPort = wrapperspb.UInt32(port)
+	}
 	if scopeToCleartext {
 		// raw_buffer = cleartext (tls_inspector marks TLS "tls") + detected HTTP
 		// (http_inspector). TLS egress AND cleartext non-HTTP both miss this chain
 		// and fall to the passthrough DefaultFilterChain (see the func comment).
-		fc.FilterChainMatch = &listenerv3.FilterChainMatch{
-			TransportProtocol:    "raw_buffer",
-			ApplicationProtocols: []string{"http/1.0", "http/1.1", "h2c"},
-		}
+		match.TransportProtocol = "raw_buffer"
+		match.ApplicationProtocols = []string{"http/1.0", "http/1.1", "h2c"}
+	}
+	if port != 0 || scopeToCleartext {
+		fc.FilterChainMatch = match
 	}
 	return fc
 }
@@ -451,35 +567,23 @@ func BuildCapturePassthroughFilterChain() *listenerv3.FilterChain {
 	}
 }
 
-// BuildCaptureRouteConfiguration builds the transparent-capture route table: the
-// given cluster.local authority -> service-cluster virtual hosts (built by the agent
-// from the generated mesh Services, scoped to the node dependency set), plus the
-// same on-demand catch-all the outbound listener uses. A captured request for a mesh
-// authority (<svc>.<meshDomain>) with no scoped vhost — a cold or off-node service —
-// then resolves via ODCDS (proposal 004 cold path) instead of a dead 404.
+// BuildCaptureRouteConfiguration builds ONE of the capture listener's route
+// tables: name is the table's (cap_http_<P> or cap_http_other), vhosts the
+// virtual hosts the agent built for it from the mesh Services and the registry
+// endpoints, and catchAll the table's own lowest-priority "*" virtual host
+// (BuildCaptureCatchAllVirtualHost).
 //
-// When redirectAll is true (proposal 022 redirect-all capture), the catch-all's final
-// fallthrough — a non-mesh authority in no dependency set, e.g. a real Kubernetes
-// Service name a client dials with no HTTPRoute/upstream declaration — routes to the
-// ORIGINAL_DST passthrough instead of 404'ing, so plain Service-to-Service
-// reachability is preserved (the passthrough_original_dst cluster is only emitted in
-// this mode). With scoped capture (redirectAll false) the catch-all keeps its hard
-// 404: only mesh VIPs are captured, so a non-mesh authority is genuinely foreign.
-// knownTargets pins each known in-scope mesh authority's non-mesh dial spellings
-// to its cluster on the redirect-all catch-all, so a captured request to a known
-// service never leaks to the ORIGINAL_DST passthrough (kube-proxy) while its
-// dedicated cap_http vhost is mid-rebuild. Ignored when redirectAll is false (no
-// passthrough to shadow a target).
-//
-// Like the outbound table this is emitted unconditionally, catch-all and all,
+// Like the outbound table it is emitted unconditionally, catch-all and all,
 // and it owns its virtual_hosts slice rather than appending onto the caller's
 // (see BuildOutboundRouteConfiguration).
-func BuildCaptureRouteConfiguration(vhosts []*routev3.VirtualHost, meshDomain string, redirectAll bool, knownTargets ...KnownTargetRoute) *routev3.RouteConfiguration {
+func BuildCaptureRouteConfiguration(name string, vhosts []*routev3.VirtualHost, catchAll *routev3.VirtualHost) *routev3.RouteConfiguration {
 	all := make([]*routev3.VirtualHost, 0, len(vhosts)+1)
 	all = append(all, vhosts...)
-	all = append(all, buildOnDemandCatchAllVirtualHost(meshDomain, redirectAll, knownTargets...))
+	if catchAll != nil {
+		all = append(all, catchAll)
+	}
 	return &routev3.RouteConfiguration{
-		Name:         CaptureHTTPRouteName,
+		Name:         name,
 		VirtualHosts: all,
 	}
 }
@@ -511,13 +615,15 @@ func BuildCaptureTCPBlackholeFilterChain(sourceSpiffeID string) *listenerv3.Filt
 }
 
 // qualifyChainByPort returns a copy of src renamed, and matched additionally on
-// destination_port when port is non-zero (proposal 037).
+// destination_port when port is non-zero (proposal 037). When statPrefix is
+// not empty the copy's tcp_proxy reports under it; otherwise it keeps the
+// prefix src has.
 //
 // Cloning rather than mutating: the caller builds one chain and derives several
 // spellings from it, and the TCPRoute-weighted and passthrough shapes must stay
 // identical across them. Sharing the proto would make a later edit to one
 // spelling silently change the others.
-func qualifyChainByPort(src *listenerv3.FilterChain, port uint32, name string) *listenerv3.FilterChain {
+func qualifyChainByPort(src *listenerv3.FilterChain, port uint32, name, statPrefix string) *listenerv3.FilterChain {
 	out, _ := proto.Clone(src).(*listenerv3.FilterChain)
 	out.Name = name
 	if out.FilterChainMatch == nil {
@@ -526,14 +632,17 @@ func qualifyChainByPort(src *listenerv3.FilterChain, port uint32, name string) *
 	if port != 0 {
 		out.FilterChainMatch.DestinationPort = wrapperspb.UInt32(port)
 	}
-	// The tcp_proxy stat prefix follows the chain name, so each spelling is
-	// counted separately -- which is what makes the shim's usage measurable.
+	if statPrefix == "" {
+		return out
+	}
+	// A spelling that is counted separately gets its own tcp_proxy stat
+	// prefix -- which is what makes the any-port chain's usage measurable.
 	for _, f := range out.GetFilters() {
 		tc := &tcp_proxyv3.TcpProxy{}
 		if f.GetTypedConfig() == nil || f.GetTypedConfig().UnmarshalTo(tc) != nil {
 			continue
 		}
-		tc.StatPrefix = name
+		tc.StatPrefix = statPrefix
 		if any, err := anypb.New(tc); err == nil {
 			f.ConfigType = &listenerv3.Filter_TypedConfig{TypedConfig: any}
 		}
@@ -541,31 +650,9 @@ func qualifyChainByPort(src *listenerv3.FilterChain, port uint32, name string) *
 	return out
 }
 
-// tcpPrimaryFloorChains returns a TCP-primary service's floor chains: the
-// supported destination_port spellings, and the portless any-port deprecation
-// shim (proposal 037).
-//
-// The spellings that survive Phase 4 are the well-known TCP mesh port and the
-// service's own primary port. Each is a copy of the same floor chain --
-// passthrough or TCPRoute-weighted -- so they cannot drift from one another.
-//
-// The shim is last and portless: any OTHER port to this VIP still reaches the
-// floor, which is what a pure-TCP service does today. Being the least specific
-// chain, it catches only what no destination_port chain claimed -- exactly the
-// traffic Phase 4 proposes to stop serving.
-//
-// Its own stat prefix is the whole point. Phase 4 is gated on
-// tcp.cap_tcp_anyport_<svc>.downstream_cx_total reading zero across a full
-// release; sharing a prefix with the supported spellings would make that
-// evidence unobtainable and the removal a guess.
 // claimedTCPPorts returns every port for which this service emits a
-// destination_port-qualified filter chain, i.e. every port on which an
-// unqualified chain for the same ClusterIP would lose (proposal 037).
-//
-// Both producers are represented: buildCaptureTCPPortFilterChain covers the
-// non-primary raw-TCP ports of ANY service (design (d) delivers every mesh
-// Service here, not just the TCP-primary ones), and tcpPrimaryFloorChains adds
-// the TCP mesh port and the primary port for a TCP-primary service.
+// destination_port-qualified raw-TCP chain (proposals 037 and 043): its raw-TCP
+// ports, and for a raw-TCP legacy target that port and the TCP mesh port.
 func claimedTCPPorts(svc CaptureTCPService) []uint32 {
 	seen := make(map[uint32]struct{}, len(svc.TCPPorts)+2)
 	ports := make([]uint32, 0, len(svc.TCPPorts)+2)
@@ -582,56 +669,100 @@ func claimedTCPPorts(svc CaptureTCPService) []uint32 {
 	for _, p := range svc.TCPPorts {
 		add(p)
 	}
-	if svc.PrimaryIsTCP {
+	if svc.LegacyTCPPort != 0 {
 		add(meshconst.ProxyL4OutboundPort)
-		add(svc.PrimaryPort)
+		add(svc.LegacyTCPPort)
 	}
 	return ports
 }
 
-// qualifyTLSChainsByClaimedPorts gives each SNI chain a destination_port-matched
-// twin for every port a floor or per-port chain claims (#911).
+// qualifyTLSChainsByPorts gives each SNI chain a destination_port-matched twin
+// for every port in named, the ports some chain of the listener names (#911).
 //
-// Envoy resolves destination_port FIRST and server_names third. An SNI chain
-// matching only prefix_ranges + server_names therefore loses outright to a
-// port-qualified floor chain — it never reaches the tier where its SNI would
-// win. Proposal 037 introduced those qualified chains and, from that moment, a
-// TLSRoute on a TCP-primary service was Accepted, generated correct-looking
-// config, and was inert on both :18082 and the primary port.
+// Envoy resolves destination_port FIRST and server_names third, and does not
+// backtrack. An SNI chain matching only prefix_ranges + server_names is
+// therefore never considered for a connection to a port that ANY chain names:
+// it never reaches the tier where its SNI would win. Proposal 037 introduced
+// port-qualified chains and, from that moment, a TLSRoute on a TCP-primary
+// service was Accepted, generated correct-looking config, and was inert on
+// both :18082 and the primary port. Proposal 043 names every HTTP port number
+// of the mesh, so the twins cover those too.
 //
-// Qualifying the SNI chain onto the same port makes the two tie on tiers 1 and
+// Qualifying the SNI chain onto the port makes the chains tie on tiers 1 and
 // 2, so tier 3 decides and the chain carrying server_names wins. No ordering
 // hack and no special case: the fix is to let Envoy's own precedence apply.
 //
-// The unqualified chains are RETAINED — they still serve every port nothing
-// claims, which is the only spelling that worked before this fix.
-func qualifyTLSChainsByClaimedPorts(svc CaptureTCPService, tlsChains []*listenerv3.FilterChain) []*listenerv3.FilterChain {
-	ports := claimedTCPPorts(svc)
-	if len(tlsChains) == 0 || len(ports) == 0 {
+// A port the service itself declares as HTTP gets NO twin. A twin would claim
+// the service's address on that port, and the address is decided before the
+// protocol: the service's own cleartext HTTP would match the address, fail
+// the SNI, and leave through the passthrough instead of reaching cap_http_<P>.
+//
+// The unqualified chains are RETAINED: they still serve every port nothing
+// names.
+func qualifyTLSChainsByPorts(svc CaptureTCPService, tlsChains []*listenerv3.FilterChain, named []uint32) []*listenerv3.FilterChain {
+	if len(tlsChains) == 0 || len(named) == 0 {
 		return tlsChains
 	}
-	out := make([]*listenerv3.FilterChain, 0, len(tlsChains)*(len(ports)+1))
+	out := make([]*listenerv3.FilterChain, 0, len(tlsChains)*(len(named)+1))
 	out = append(out, tlsChains...)
-	for _, p := range ports {
+	for _, p := range named {
+		if slices.Contains(svc.HTTPPorts, p) {
+			continue
+		}
 		for _, c := range tlsChains {
-			out = append(out, qualifyChainByPort(c, p, fmt.Sprintf("%s_p%d", c.GetName(), p)))
+			name := fmt.Sprintf("%s_p%d", c.GetName(), p)
+			out = append(out, qualifyChainByPort(c, p, name, name))
 		}
 	}
 	return out
 }
 
-func tcpPrimaryFloorChains(svc CaptureTCPService, sourceSpiffeID string) []*listenerv3.FilterChain {
+// legacyTCPChains returns the chains of a service whose legacy target is raw
+// TCP (proposal 043, "The legacy spellings during Phases 1 and 2"): the TCP
+// mesh port and the legacy target's own port, and for a service with no HTTP
+// port the portless any-port chain.
+//
+// Each is a copy of the same floor chain -- passthrough or TCPRoute-weighted
+// -- so they cannot drift from one another.
+//
+// The any-port chain is portless: any OTHER port of this VIP still reaches
+// the legacy target, which is what a pure-TCP service has always done. Being
+// the least specific chain, it catches only what no destination_port chain
+// claimed. Since the listener names every HTTP port number of the mesh, and a
+// connection to a named port is matched only among the chains naming it, the
+// any-port chain gets a twin on each of those numbers; without them a client
+// of a pure-TCP service that dials, say, :8080 would have stopped being served
+// the day some other service declared 8080 as HTTP.
+//
+// Its own stat prefix is the whole point, and the twins share it: the chain's
+// removal is gated on tcp.cap_tcp_anyport_<svc>.downstream_cx_total reading
+// zero across a full release, and that counter has to see every port.
+func legacyTCPChains(svc CaptureTCPService, sourceSpiffeID string, httpPorts []uint32) []*listenerv3.FilterChain {
 	tc := BuildCaptureTCPRouteFilterChain(svc, svc.TCPRouteRules, sourceSpiffeID)
 	if tc == nil {
 		return nil
 	}
 	var out []*listenerv3.FilterChain
-	for _, p := range []uint32{meshconst.ProxyL4OutboundPort, svc.PrimaryPort} {
-		if p != 0 {
-			out = append(out, qualifyChainByPort(tc, p, fmt.Sprintf("cap_tcp_%s_%d", svc.ClusterName, p)))
-		}
+	claimed := []uint32{meshconst.ProxyL4OutboundPort}
+	if svc.LegacyTCPPort != meshconst.ProxyL4OutboundPort {
+		claimed = append(claimed, svc.LegacyTCPPort)
 	}
-	return append(out, qualifyChainByPort(tc, 0, "cap_tcp_anyport_"+svc.ClusterName))
+	for _, p := range claimed {
+		name := fmt.Sprintf("cap_tcp_%s_%d", svc.ClusterName, p)
+		out = append(out, qualifyChainByPort(tc, p, name, name))
+	}
+	if !svc.AnyPort {
+		return out
+	}
+	anyPort := "cap_tcp_anyport_" + svc.ClusterName
+	out = append(out, qualifyChainByPort(tc, 0, anyPort, anyPort))
+	for _, p := range httpPorts {
+		if slices.Contains(claimed, p) || slices.Contains(svc.TCPPorts, p) {
+			continue
+		}
+		out = append(out, qualifyChainByPort(tc, p, fmt.Sprintf("%s_p%d", anyPort, p), anyPort))
+	}
+	return out
 }
 
 // attachL4AccessLog sets the L4 access log (buildL4AccessLog) on every

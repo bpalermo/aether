@@ -475,6 +475,9 @@ func TestRegistryRefreshMemoSplit(t *testing.T) {
 	hits, hashed := memoSplit(s0, s1)
 	t.Logf("no-change refresh: memo=%d hashed=%d", hits, hashed)
 	assert.Greater(t, hits, 1000)
+	// The capture route tables are not among them: there is one per HTTP port
+	// number (proposal 043), kept between snapshots while their inputs are
+	// unchanged (captureRouteTables).
 	assert.LessOrEqual(t, hashed, 6, "only the per-snapshot builds are re-hashed")
 
 	// Moving the perturbation from svc-000 to svc-007 changes two services.

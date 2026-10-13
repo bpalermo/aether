@@ -646,8 +646,8 @@ func pinFixture(t *testing.T, nodeIdentityServed bool) (*SnapshotCache, *recorde
 		"demo/nons": "nons.demo.svc.cluster.local",
 	})
 	c.SetCaptureTCPServices([]capture.CaptureTCPService{
-		{ServiceName: "demo/db", ClusterIP: "10.96.0.30", PrimaryIsTCP: true},
-		{ServiceName: "demo/rawnons", ClusterIP: "10.96.0.31", PrimaryIsTCP: true},
+		{ServiceName: "demo/db", ClusterIP: "10.96.0.30"},
+		{ServiceName: "demo/rawnons", ClusterIP: "10.96.0.31"},
 	})
 	declareDeps(c, "demo/web", "demo/nons", "demo/db", "demo/rawnons", "demo/dns")
 	require.NoError(t, c.LoadClustersFromRegistry(ctx, "cluster-1", "node-1", reg))

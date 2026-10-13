@@ -1,14 +1,12 @@
 package cache
 
 import (
-	"fmt"
 	"reflect"
 	"testing"
 	"time"
 
 	"aethermesh.dev/agent/internal/xds/proxy"
 	meshconst "aethermesh.dev/common/constants/mesh"
-	"aethermesh.dev/common/serviceref"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -51,40 +49,9 @@ func referenceStripUnavailableExtensions(authzSidecar bool, rules []proxy.GammaR
 	return out
 }
 
-// referenceRouteTargetDomains replicates the pre-#540 inline domain build
-// (capture.go routeTargetDomains as run per snapshot).
-func referenceRouteTargetDomains(svc, fqdn, mesh string, bareNameCount map[string]int, ports []uint32) []string {
-	baseNames := []string{fqdn, mesh}
-	if ref, ok := serviceref.ParseKey(svc); ok {
-		baseNames = append(baseNames, ref.Name+"."+ref.Namespace, ref.Name+"."+ref.Namespace+".svc")
-		if bareNameCount[ref.Name] == 1 {
-			baseNames = append(baseNames, ref.Name)
-		}
-	}
-	domains := make([]string, 0, len(baseNames)*2)
-	for _, n := range baseNames {
-		domains = append(domains, n, fmt.Sprintf("%s:%d", n, meshconst.ProxyOutboundPort))
-	}
-	for _, p := range ports {
-		if p == 0 || p == meshconst.ProxyOutboundPort {
-			continue
-		}
-		for _, n := range baseNames {
-			domains = append(domains, fmt.Sprintf("%s:%d", n, p))
-		}
-	}
-	return domains
-}
-
 // routesMemoPointer returns the identity of the memoized effective-routes map.
 func routesMemoPointer(c *SnapshotCache) uintptr {
 	return reflect.ValueOf(c.serviceRoutesSnapshot()).Pointer()
-}
-
-// domainsMemoPointer returns the identity of the memoized route-domains map.
-func domainsMemoPointer(c *SnapshotCache) uintptr {
-	_, d := c.serviceRoutesAndDomainsSnapshot()
-	return reflect.ValueOf(d).Pointer()
 }
 
 func extFilterRoutes(target, backend string, filters ...proxy.ExtensionFilter) map[string][]proxy.GammaRoute {
@@ -186,20 +153,34 @@ func TestServiceRoutesMemo_CacheHitAndInvalidation(t *testing.T) {
 	assert.Contains(t, c.serviceRoutesSnapshot(), "team-b/other", "SetServiceRoutes must invalidate")
 }
 
-// TestRouteTargetDomainsMemo_EquivalentToInline asserts the memoized domain
-// lists are byte-identical (same domains, same order) to the old per-snapshot
-// inline computation across the representative shapes: SA-backed target with
-// real ports, route-only target, bare-name collision across namespaces, and
-// the port-0 / mesh-port skip rules.
+// namesOf returns the port-less names the capture tables answer for svc, nil
+// when the tables do not know the service.
+func namesOf(c *SnapshotCache, svc string) []string {
+	for _, n := range c.captureTableInputs().names {
+		if n.svc == svc {
+			return n.names
+		}
+	}
+	return nil
+}
+
+// TestRouteTargetDomainsMemo_EquivalentToInline holds the NAMES a route target
+// is addressed by across the representative shapes: an SA-backed target, a
+// route-only target, and a bare-name collision across namespaces.
+//
+// It used to compare a memoized domain list, ports folded in, with an inline
+// reference (#540). Since proposal 043 a table is per dialled port, so the
+// names carry no port (the table adds its own) and are computed per build; what
+// this test still holds is which names exist and in what order.
 func TestRouteTargetDomainsMemo_EquivalentToInline(t *testing.T) {
 	c := newTestCache("node-1")
 	routes := map[string][]proxy.GammaRoute{
-		// SA-backed (mesh authority exists) with real Service ports, bare name
-		// "echo" shared with team-b (collision → no bare domain).
+		// SA-backed (mesh authority exists), bare name "echo" shared with
+		// team-b (collision → no bare name).
 		"team-a/echo": {{Backends: []proxy.GammaBackend{{Service: "team-a/echo-v1", Cluster: "a.test", Weight: 1}}}},
 		// Route-only target (no authority; fqdn derived from the key).
 		"team-b/echo": {{Backends: []proxy.GammaBackend{{Service: "team-b/echo-v2", Cluster: "b.test", Weight: 1}}}},
-		// Unique bare name → bare domain emitted; no ports registered.
+		// Unique bare name → bare name emitted.
 		"team-c/solo": {{Backends: []proxy.GammaBackend{{Service: "team-c/solo-v1", Cluster: "c.test", Weight: 1}}}},
 	}
 	c.SetServiceRoutes(routes)
@@ -207,85 +188,71 @@ func TestRouteTargetDomainsMemo_EquivalentToInline(t *testing.T) {
 		"team-a/echo": "echo.team-a.svc.cluster.local",
 	})
 	c.SetRouteTargetPorts(map[string][]uint32{
-		"team-a/echo": {80, 8080, 0, meshconst.ProxyOutboundPort}, // 0 and the mesh port must be skipped
+		"team-a/echo": {80, 8080, 0, meshconst.ProxyOutboundPort},
 		"team-b/echo": {9000},
 	})
 
-	// The old inline computation counted bare names over route targets in the
-	// dependency set; every route target is unconditionally in the set, so this
-	// mirrors the pre-#540 count exactly.
-	bareNameCount := map[string]int{"echo": 2, "solo": 1}
-	want := map[string][]string{
-		"team-a/echo": referenceRouteTargetDomains("team-a/echo", "echo.team-a.svc.cluster.local",
-			proxy.ServiceClusterName("team-a/echo", c.meshDomain), bareNameCount, []uint32{80, 8080, 0, meshconst.ProxyOutboundPort}),
-		"team-b/echo": referenceRouteTargetDomains("team-b/echo", "echo.team-b.svc.cluster.local",
-			proxy.ServiceClusterName("team-b/echo", c.meshDomain), bareNameCount, []uint32{9000}),
-		"team-c/solo": referenceRouteTargetDomains("team-c/solo", "solo.team-c.svc.cluster.local",
-			proxy.ServiceClusterName("team-c/solo", c.meshDomain), bareNameCount, nil),
+	assert.Equal(t, []string{"echo.team-a.svc.cluster.local", proxy.ServiceClusterName("team-a/echo", c.meshDomain), "echo.team-a", "echo.team-a.svc"},
+		namesOf(c, "team-a/echo"), "a bare name two namespaces share is nobody's name")
+	assert.Equal(t, []string{"echo.team-b.svc.cluster.local", proxy.ServiceClusterName("team-b/echo", c.meshDomain), "echo.team-b", "echo.team-b.svc"},
+		namesOf(c, "team-b/echo"), "a route-only target derives its cluster.local name from the key")
+	assert.Equal(t, []string{"solo.team-c.svc.cluster.local", proxy.ServiceClusterName("team-c/solo", c.meshDomain), "solo.team-c", "solo.team-c.svc", "solo"},
+		namesOf(c, "team-c/solo"), "a unique bare name is a name of the service")
+
+	// The ports fold into every spelling, in the table of each port, and
+	// nowhere else; port 0 names no table.
+	assert.Contains(t, domainsOf(captureTable(c, 8080)), "echo.team-a:8080", "real Service port folds into every spelling")
+	assert.NotContains(t, domainsOf(captureTable(c, 80)), "echo.team-a:8080")
+	assert.NotContains(t, c.captureHTTPPorts(), uint32(0), "port 0 is skipped")
+	assert.Contains(t, c.captureHTTPPorts(), uint32(9000), "a route target's parentRef port is a port of the mesh")
+	for _, port := range c.captureHTTPPorts() {
+		for _, d := range domainsOf(captureTable(c, port)) {
+			assert.NotContains(t, d, ":0")
+		}
 	}
-
-	gotRoutes, gotDomains := c.serviceRoutesAndDomainsSnapshot()
-	assert.Equal(t, want, gotDomains, "cached domains must be byte-identical (content and order) to the inline computation")
-	assert.Len(t, gotRoutes, 3, "the routes returned with the domains come from the same generation")
-
-	// Spot-check the collision guard and port folding directly.
-	assert.NotContains(t, gotDomains["team-a/echo"], "echo", "colliding bare name must not be emitted")
-	assert.Contains(t, gotDomains["team-c/solo"], "solo", "unique bare name is emitted")
-	assert.Contains(t, gotDomains["team-a/echo"], "echo.team-a:8080", "real Service port folds into every spelling")
-	assert.NotContains(t, gotDomains["team-a/echo"], "echo.team-a.svc.cluster.local:0", "port 0 is skipped")
 }
 
-// TestRouteTargetDomainsMemo_CacheHitAndInvalidation asserts repeated snapshots
-// without mutation serve the memoized map, that each input mutator (routes,
-// route-target ports, capture authorities) rebuilds it, and that a
-// content-equal authority replacement does NOT invalidate.
+// TestRouteTargetDomainsMemo_CacheHitAndInvalidation asserts each input
+// mutator (routes, route-target ports, capture authorities) is seen by the
+// next build of the tables. There is no memo to hit any more: the tables are
+// rebuilt from the current inputs on every snapshot.
 func TestRouteTargetDomainsMemo_CacheHitAndInvalidation(t *testing.T) {
 	c := newTestCache("node-1")
 	c.SetServiceRoutes(map[string][]proxy.GammaRoute{
 		"team-a/echo": {{Backends: []proxy.GammaBackend{{Service: "team-a/echo-v1", Cluster: "a.test", Weight: 1}}}},
 	})
 	c.SetCaptureAuthorities(map[string]string{"team-a/echo": "echo.team-a.svc.cluster.local"})
+	assert.NotContains(t, c.captureHTTPPorts(), uint32(9090))
 
-	p1 := domainsMemoPointer(c)
-	p2 := domainsMemoPointer(c)
-	assert.Equal(t, p1, p2, "no mutation: the memoized map must be served")
-
-	// SetRouteTargetPorts must invalidate; the new port shows up.
+	// SetRouteTargetPorts: the new port shows up, as a table and in it.
 	c.SetRouteTargetPorts(map[string][]uint32{"team-a/echo": {9090}})
-	p3 := domainsMemoPointer(c)
-	assert.NotEqual(t, p2, p3, "SetRouteTargetPorts must invalidate")
-	_, domains := c.serviceRoutesAndDomainsSnapshot()
-	assert.Contains(t, domains["team-a/echo"], "echo.team-a.svc.cluster.local:9090")
+	assert.Contains(t, c.captureHTTPPorts(), uint32(9090))
+	assert.Contains(t, domainsOf(captureTable(c, 9090)), "echo.team-a.svc.cluster.local:9090")
 
-	// A content-equal authority replacement must NOT invalidate.
-	c.SetCaptureAuthorities(map[string]string{"team-a/echo": "echo.team-a.svc.cluster.local"})
-	assert.Equal(t, p3, domainsMemoPointer(c), "content-equal authorities must not rebuild")
-
-	// An authority CHANGE must invalidate; the new fqdn shows up.
+	// An authority CHANGE: the new fqdn shows up and the old one is gone.
 	c.SetCaptureAuthorities(map[string]string{"team-a/echo": "echo.renamed.svc.cluster.local"})
-	p4 := domainsMemoPointer(c)
-	assert.NotEqual(t, p3, p4, "SetCaptureAuthorities change must invalidate")
-	_, domains = c.serviceRoutesAndDomainsSnapshot()
-	assert.Contains(t, domains["team-a/echo"], "echo.renamed.svc.cluster.local")
+	assert.Contains(t, namesOf(c, "team-a/echo"), "echo.renamed.svc.cluster.local")
+	assert.NotContains(t, namesOf(c, "team-a/echo"), "echo.team-a.svc.cluster.local")
 
-	// A route mutation must invalidate; the new target gets a domain list.
+	// A route mutation: the new target gets its names.
 	c.SetServiceRoutes(map[string][]proxy.GammaRoute{
 		"team-a/echo":  {{Backends: []proxy.GammaBackend{{Service: "team-a/echo-v1", Cluster: "a.test", Weight: 1}}}},
 		"team-b/fresh": {{Backends: []proxy.GammaBackend{{Service: "team-b/fresh-v1", Cluster: "f.test", Weight: 1}}}},
 	})
-	_, domains = c.serviceRoutesAndDomainsSnapshot()
-	assert.Contains(t, domains, "team-b/fresh", "route mutation must rebuild the domain set")
-	assert.Contains(t, domains["team-b/fresh"], "fresh.team-b.svc.cluster.local", "route-only target derives its fqdn from the key")
+	assert.Contains(t, namesOf(c, "team-b/fresh"), "fresh.team-b.svc.cluster.local", "route-only target derives its fqdn from the key")
 }
 
-// TestRouteTargetDomainsMemo_UnparseableKeySkipped mirrors the pre-#540
-// captureVhosts behavior: a route target whose key is not "<ns>/<svc>" gets no
-// derived authority and no domain entry (and therefore no vhost).
+// TestRouteTargetDomainsMemo_UnparseableKeySkipped: a route target whose key is
+// not "<ns>/<svc>" gets no derived authority, no names and therefore no vhost.
 func TestRouteTargetDomainsMemo_UnparseableKeySkipped(t *testing.T) {
 	c := newTestCache("node-1")
 	c.SetServiceRoutes(map[string][]proxy.GammaRoute{
 		"not-a-key": {{Backends: []proxy.GammaBackend{{Service: "team-a/echo-v1", Cluster: "a.test", Weight: 1}}}},
 	})
-	_, domains := c.serviceRoutesAndDomainsSnapshot()
-	assert.NotContains(t, domains, "not-a-key")
+	assert.Nil(t, namesOf(c, "not-a-key"))
+	for _, port := range append(c.captureHTTPPorts(), 0) {
+		for _, vh := range captureTable(c, port) {
+			assert.NotContains(t, vh.GetName(), "not-a-key")
+		}
+	}
 }

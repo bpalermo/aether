@@ -73,6 +73,9 @@ func (c *SnapshotCache) generateSnapshot(ctx context.Context) (retErr error) {
 	// And for the UDP capture listener, whose bindable backend depends on the
 	// cluster cache the registry fills asynchronously (#873).
 	c.reconcileUDPCaptureListeners()
+	// And for the HTTP chains: one per HTTP port number of the mesh, a set
+	// that the Services, the registry and the routes each move (proposal 043).
+	c.reconcileCaptureHTTPPorts()
 
 	// Who owns each per-pod listener, and the netns → identity index, for the
 	// identity-binding lines this build logs once the snapshot is set (#1621).
@@ -186,7 +189,7 @@ func (c *SnapshotCache) generateSnapshot(ctx context.Context) (retErr error) {
 			resources[resourcev3.RouteType] = []types.Resource{proxy.BuildEdgeRouteConfiguration(c.virtualHostVhosts())}
 		}
 	} else {
-		routes := make([]types.Resource, 0, 2)
+		routes := make([]types.Resource, 0, 8)
 		// ALWAYS emitted, zero vhosts included — exactly as the edge and capture
 		// route configs are. It used to be conditional on len(vhosts) > 0, which
 		// made an agent with nothing to publish (a local-only start, see
@@ -209,18 +212,16 @@ func (c *SnapshotCache) generateSnapshot(ctx context.Context) (retErr error) {
 		// the zero-vhost table a working one: mesh-shaped authorities reach their
 		// cluster through ODCDS rather than a dead 404.
 		routes = append(routes, proxy.BuildOutboundRouteConfiguration(vhosts, c.meshDomain))
-		// Transparent capture (proposal 018, Phase 3a): the cap_http table the per-pod
-		// capture listeners reference over RDS. Always emitted when capture is on (it
-		// carries the on-demand catch-all) so the listeners' RDS resolves even with no
-		// in-scope authorities yet, and cold/off-node services recover via ODCDS.
+		// Transparent capture (proposal 018, Phase 3a): the route tables the per-pod
+		// capture listeners reference over RDS. Always emitted when capture is on (each
+		// carries its catch-all) so the listeners' RDS resolves even with no
+		// in-scope authorities yet.
 		if c.captureEnabled {
-			// captureKnownTargets pins every in-scope mesh authority to its cluster on
-			// the redirect-all catch-all (no-op when redirect-all is off), so a captured
-			// request to a known service never leaks to the ORIGINAL_DST passthrough
-			// while its dedicated cap_http vhost is mid-rebuild across a GAMMA churn.
-			routes = append(routes, proxy.BuildCaptureRouteConfiguration(
-				c.captureVhosts(), c.meshDomain, c.captureRedirectAll, c.captureKnownTargets()...,
-			))
+			// One table per HTTP port number, and cap_http_other (proposal
+			// 043). The set is read off the capture listeners THIS snapshot
+			// publishes, so a chain and the table it names are always in the
+			// same snapshot (captureTablePorts).
+			routes = append(routes, c.captureRouteTables(captureTablePorts(listeners, c.captureHTTPPorts()))...)
 		}
 		// Unconditional: out_http is always in `routes`, so an agent with nothing
 		// to publish still hands Envoy a RouteType set its RDS subscription can

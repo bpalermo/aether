@@ -16,6 +16,20 @@ const (
 	ppTCP  = registryv1.PortProtocol_PORT_PROTOCOL_TCP
 )
 
+// chainTCPPorts returns, per service, the raw-TCP ports that get a per-port
+// chain and cluster of their own: every declared raw-TCP port but the legacy
+// target (which is reached by the floor). It goes through the production
+// derivation and the listener input built from it.
+func chainTCPPorts(in map[string][]*registryv1.ServiceEndpoint) map[string][]uint32 {
+	out := map[string][]uint32{}
+	for svc, ports := range deriveAllServicePorts(nil, in, nil) {
+		if in, ok := captureTCPService(captureTCPEntry{serviceName: svc, clusterIP: "10.96.0.1", ports: ports}, "mesh.test", nil, nil); ok && len(in.TCPPorts) > 0 {
+			out[svc] = in.TCPPorts
+		}
+	}
+	return out
+}
+
 // TestDeriveTCPPorts covers the map the capture chains are built from
 // (proposal 037). Classification comes from the ENDPOINTS, not from the mesh
 // Service's app-protocol annotation — the annotation is the registrar's
@@ -35,14 +49,14 @@ func TestDeriveTCPPorts(t *testing.T) {
 			want: map[string][]uint32{},
 		},
 		{
-			name: "the PRIMARY TCP port is excluded: the portless floor already reaches it",
+			name: "the legacy target's TCP port is excluded: the floor already reaches it",
 			in: map[string][]*registryv1.ServiceEndpoint{
 				"ns/tcp-only": {epWithPorts("10.0.0.1", 9000, map[uint32]registryv1.PortProtocol{9000: ppTCP})},
 			},
 			want: map[string][]uint32{},
 		},
 		{
-			name: "a non-primary TCP port is derived",
+			name: "a TCP port other than the legacy target is derived",
 			in: map[string][]*registryv1.ServiceEndpoint{
 				"ns/mixed": {epWithPorts("10.0.0.1", 8080, map[uint32]registryv1.PortProtocol{8080: ppHTTP, 9000: ppTCP})},
 			},
@@ -74,7 +88,7 @@ func TestDeriveTCPPorts(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			assert.Equal(t, tt.want, deriveTCPPorts(tt.in))
+			assert.Equal(t, tt.want, chainTCPPorts(tt.in))
 		})
 	}
 }
@@ -104,17 +118,19 @@ func TestDeriveTCPPortsIsStableUnderEndpointChurn(t *testing.T) {
 		},
 	}
 
-	assert.Equal(t, deriveTCPPorts(before), deriveTCPPorts(after),
+	assert.Equal(t, chainTCPPorts(before), chainTCPPorts(after),
 		"endpoint churn must not change the derived port set, or every pod ADD/DEL drains capture listeners")
 
-	entriesBefore := []captureTCPEntry{{serviceName: "ns/mixed", clusterIP: "10.96.0.1", tcpPorts: deriveTCPPorts(before)["ns/mixed"]}}
-	entriesAfter := []captureTCPEntry{{serviceName: "ns/mixed", clusterIP: "10.96.0.1", tcpPorts: deriveTCPPorts(after)["ns/mixed"]}}
+	entriesBefore := []captureTCPEntry{{serviceName: "ns/mixed", clusterIP: "10.96.0.1", ports: deriveAllServicePorts(before, before, nil)["ns/mixed"]}}
+	entriesAfter := []captureTCPEntry{{serviceName: "ns/mixed", clusterIP: "10.96.0.1", ports: deriveAllServicePorts(after, after, nil)["ns/mixed"]}}
 	assert.True(t, equalTCPEntries(entriesBefore, entriesAfter),
 		"the change detector must agree, or the stability above buys nothing")
 
 	// ...and a REAL change must still be detected, or the comparison is
 	// decoration: a port set that can never differ would never regenerate.
-	entriesNewPort := []captureTCPEntry{{serviceName: "ns/mixed", clusterIP: "10.96.0.1", tcpPorts: []uint32{5432, 9000}}}
+	withNewPort := entriesBefore[0].ports
+	withNewPort.tcp = []uint32{5432, 9000}
+	entriesNewPort := []captureTCPEntry{{serviceName: "ns/mixed", clusterIP: "10.96.0.1", ports: withNewPort}}
 	assert.False(t, equalTCPEntries(entriesBefore, entriesNewPort),
 		"adding a declared TCP port MUST regenerate the listeners")
 }

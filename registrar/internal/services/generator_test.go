@@ -54,20 +54,23 @@ func TestGenerator_CreatesSelectorlessMeshService(t *testing.T) {
 	assert.Equal(t, "svc-1", svc.Annotations[aetherlabels.AnnotationMeshService])
 	assert.Equal(t, "8080", svc.Annotations[aetherlabels.AnnotationMeshPort])
 	assert.Empty(t, svc.Spec.Selector, "selectorless: no EndpointSlices, endpoints stay in the registry")
-	// Four ports (proposal 037): the two mesh spellings plus the two
+	// Four legacy ports (proposal 037): the two mesh spellings plus the two
 	// scheme-default ports. The Service is selectorless and holds no endpoints,
 	// so 80/443 carry no data path — they exist so an UNCAPTURED scheme-default
-	// dial hits a kube-proxy REJECT and fails fast, instead of hanging.
+	// dial hits a kube-proxy REJECT and fails fast, instead of hanging. Beside
+	// them, the service's real port (proposal 043): the seeded row declares 8080
+	// in the HTTP listing.
 	byName := map[string]int32{}
 	for _, p := range svc.Spec.Ports {
 		byName[p.Name] = p.Port
 		assert.Equal(t, corev1.ProtocolTCP, p.Protocol, "port %q", p.Name)
 	}
 	assert.Equal(t, map[string]int32{
-		"mesh":     18081,
-		"mesh-tcp": 18082,
-		"http":     80,
-		"https":    443,
+		"mesh":      18081,
+		"mesh-tcp":  18082,
+		"http":      80,
+		"https":     443,
+		"p8080-tcp": 8080,
 	}, byName)
 }
 
@@ -99,13 +102,13 @@ func TestGenerator_ConvergesPortsOnExistingService(t *testing.T) {
 
 	svc, err := get(t, c, "aether-test", "svc-1")
 	require.NoError(t, err)
-	require.Len(t, svc.Spec.Ports, 4, "the pre-037 Service must gain the new ports, not keep its single one")
+	require.Len(t, svc.Spec.Ports, 5, "the pre-037 Service must gain the new ports, not keep its single one")
 
-	names := make([]string, 0, 4)
+	names := make([]string, 0, 5)
 	for _, p := range svc.Spec.Ports {
 		names = append(names, p.Name)
 	}
-	assert.ElementsMatch(t, []string{"mesh", "mesh-tcp", "http", "https"}, names)
+	assert.ElementsMatch(t, []string{"mesh", "mesh-tcp", "http", "https", "p8080-tcp"}, names)
 }
 
 func TestGenerator_PrunesStale(t *testing.T) {
@@ -225,14 +228,21 @@ func TestGenerator_EmitsUDPMeshService(t *testing.T) {
 	assert.Equal(t, AppProtocolUDP, svc.Annotations[aetherlabels.AnnotationMeshAppProtocol],
 		"PROTOCOL_UDP services must be annotated as udp, not coerced to http")
 
-	// The ServicePorts stay TCP at the Kubernetes level on purpose: the UDP floor
-	// reaches backends at their application port through the pod-local nftables
-	// redirect, never through kube-proxy. A "mesh-udp" ServicePort would imply a
-	// kube-proxy UDP path that does not exist.
+	// The four legacy ServicePorts stay TCP at the Kubernetes level: they name a
+	// spelling, and there is no "mesh-udp" one. The service's REAL port is a UDP
+	// ServicePort since proposal 043: the Service says what the service serves.
+	udp := 0
 	for _, p := range svc.Spec.Ports {
-		assert.Equal(t, corev1.ProtocolTCP, p.Protocol,
-			"port %q: the mesh protocol is an annotation axis, not a ServicePort protocol", p.Name)
+		if p.Name == "p9001-udp" {
+			udp++
+			assert.Equal(t, corev1.ProtocolUDP, p.Protocol)
+			assert.Equal(t, int32(9001), p.Port)
+			assert.Nil(t, p.AppProtocol, "a UDP port has no appProtocol")
+			continue
+		}
+		assert.Equal(t, corev1.ProtocolTCP, p.Protocol, "legacy port %q", p.Name)
 	}
+	assert.Equal(t, 1, udp, "the declared UDP port is on the Service once")
 }
 
 // TestProtocolAppProtocolIsTotal guards the map the generator uses to label each

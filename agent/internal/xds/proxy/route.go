@@ -132,64 +132,42 @@ func baseRetryPolicy() *routev3.RetryPolicy {
 // name translation anywhere.
 const onDemandClusterHeader = ":authority"
 
-// KnownTargetRoute pins a known in-scope mesh service's non-mesh dial spellings
-// (its cluster.local short names and FQDN, optionally with a port) to the
-// service's data-plane cluster. The redirect-all capture catch-all emits one
-// such route per in-scope mesh authority BEFORE the passthrough fallthrough so a
-// captured request to a service the mesh KNOWS ABOUT can never be shadowed by the
-// ORIGINAL_DST passthrough — even during the brief window where the service's
-// dedicated cap_http vhost is being rebuilt (a GAMMA HTTPRoute add/delete clears
-// and re-populates serviceRoutes between two reconciles; an in-flight captured
-// request landing in that window used to miss the dedicated vhost and fall to the
-// passthrough → kube-proxy → GAMMA features silently dropped). Because the
-// catch-all routes are derived from the STABLE mesh-authority set
-// (captureAuthorities ∩ dependency set, independent of HTTPRoute lifecycle), the
-// request still reaches the correct backend cluster (mTLS, in-mesh) rather than
-// leaking to kube-proxy. The dedicated vhost remains the precedence path when
-// present (it carries the GAMMA filters); this is the safety net that fails into
-// the mesh, never out of it.
-type KnownTargetRoute struct {
-	// AuthorityRegex is an RE2 pattern over all of the service's non-mesh dial
-	// spellings (bare name, <name>.<ns>, <name>.<ns>.svc, cluster.local FQDN) with
-	// an optional ":port" suffix. Port-agnostic by construction so it matches a
-	// dial on any real Service port without the control plane needing to track it.
-	AuthorityRegex string
-	// Cluster is the service's data-plane cluster (<svc>.<meshDomain>) the matched
-	// authority routes to.
-	Cluster string
+// MeshAuthorityRegex is the RE2 pattern of a mesh authority,
+// <svc>.<ns>.<meshDomain> (two labels before the mesh domain, 020 Part 1),
+// followed by portSuffix: a pattern for what may follow the name, e.g.
+// "(:[0-9]+)?" for any port or none, ":8080" for exactly that port.
+func MeshAuthorityRegex(meshDomain, portSuffix string) string {
+	return "^[a-z0-9-]+\\.[a-z0-9-]+\\." + regexp.QuoteMeta(meshDomain) + portSuffix + "$"
 }
 
-// buildOnDemandCatchAllVirtualHost builds the lowest-priority outbound virtual
-// host (domain "*"). With the authority port retained (strip_any_host_port
-// off, for FQDN:port routing), a scoped catch-all "*.<meshDomain>" can't match
-// host:port, so the catch-all is universal and splits by an :authority regex:
-// a mesh-shaped authority (<svc>.<meshDomain> with an optional :port) routes to
-// the cluster named by the authority — the on_demand filter fetches it via
-// ODCDS (proposal 004 cold path); anything else (foreign domains, typos)
-// 404s immediately. This keeps instant foreign-404 determinism (spike-verified,
-// Envoy 1.38) while supporting FQDN:port (proposal 005). Nonexistent in-domain
-// services/ports fail when the ODCDS timeout expires.
+// buildOnDemandCatchAllVirtualHost builds the lowest-priority virtual host
+// (domain "*") of a route table. With the authority port retained
+// (strip_any_host_port off, for FQDN:port routing), a scoped catch-all
+// "*.<meshDomain>" can't match host:port, so the catch-all is universal and
+// splits by an :authority regex: an authority matching onDemandAuthorityRegex
+// routes to the cluster named by the authority -- the on_demand filter fetches
+// it via ODCDS (proposal 004 cold path); anything else falls through. This
+// keeps instant foreign-404 determinism (spike-verified, Envoy 1.38) while
+// supporting FQDN:port (proposal 005). Nonexistent in-domain services/ports
+// fail when the ODCDS timeout expires.
 //
-// knownTargets is consulted only in redirect-all (passthrough) mode: each pins a
-// known in-scope service's non-mesh authority spellings to its cluster so the
-// passthrough never shadows a service the mesh knows about (see KnownTargetRoute).
-func buildOnDemandCatchAllVirtualHost(meshDomain string, passthrough bool, knownTargets ...KnownTargetRoute) *routev3.VirtualHost {
-	// 020 Part 1: mesh authorities are <svc>.<ns>.<meshDomain> (two labels before the
-	// mesh domain), with an optional :port. Cold/off-node services that miss the
-	// scoped vhost fall here and resolve via ODCDS (ClusterHeader=:authority).
-	meshAuthorityRegex := "^[a-z0-9-]+\\.[a-z0-9-]+\\." + regexp.QuoteMeta(meshDomain) + "(:[0-9]+)?$"
-	// Final fallthrough for a non-mesh authority. Normally a hard 404 (foreign egress,
-	// typos). But with redirect-all capture (proposal 022) ALL of the pod's egress is
-	// intercepted — including requests to real Kubernetes Service names
-	// (<svc>.<ns>.svc.cluster.local / a bare ClusterIP) that carry no mesh authority
-	// and are in no node dependency set (a client dialing a Service with no
-	// HTTPRoute/upstream declaration). A 404 there breaks plain Service-to-Service
-	// reachability, so route those to the ORIGINAL_DST passthrough (the original
-	// pre-REDIRECT destination, reached in plain HTTP), symmetric with the L4
-	// cap_passthrough default chain. The capture HCM's set_filter_state filter
-	// preserves the original destination for the ORIGINAL_DST cluster. Without
-	// redirect-all (scoped capture / outbound) the 404 is kept — there is no
-	// passthrough cluster to route to.
+// onDemandAuthorityRegex decides which authorities may NAME a cluster. The
+// outbound (loopback) table accepts any mesh authority, with or without a
+// port, because there the Host header is the only address there is. A capture
+// table for port P accepts only "<name>:P" (and the legacy tables the
+// port-less form): the client dialled P, so no authority may select a cluster
+// of another port (proposal 043, "The addressing rule"; #1682 was a route here
+// that accepted any port and sent it to the default cluster). Empty means no
+// on-demand route at all.
+//
+// The final fallthrough for an authority nothing claimed is a hard 404, or,
+// with passthrough (redirect-all capture, proposal 022), the ORIGINAL_DST
+// passthrough: ALL of the pod's egress is intercepted there, including
+// requests to Kubernetes Services that are not in the mesh, and a 404 would
+// break plain Service-to-Service reachability. A name that IS a mesh service
+// never reaches the fallthrough: every table carries a virtual host for it,
+// one that routes or one that refuses.
+func buildOnDemandCatchAllVirtualHost(onDemandAuthorityRegex string, passthrough bool) *routev3.VirtualHost {
 	fallthrough_ := &routev3.Route{
 		Match: &routev3.RouteMatch{PathSpecifier: &routev3.RouteMatch_Prefix{Prefix: "/"}},
 		Action: &routev3.Route_DirectResponse{
@@ -221,7 +199,9 @@ func buildOnDemandCatchAllVirtualHost(meshDomain string, passthrough bool, known
 				DirectResponse: &routev3.DirectResponseAction{Status: 200},
 			},
 		},
-		stripOutcomeHeader(&routev3.Route{
+	}
+	if onDemandAuthorityRegex != "" {
+		routes = append(routes, stripOutcomeHeader(&routev3.Route{
 			Match: &routev3.RouteMatch{
 				PathSpecifier: &routev3.RouteMatch_Prefix{Prefix: "/"},
 				Headers: []*routev3.HeaderMatcher{
@@ -230,7 +210,7 @@ func buildOnDemandCatchAllVirtualHost(meshDomain string, passthrough bool, known
 						HeaderMatchSpecifier: &routev3.HeaderMatcher_StringMatch{
 							StringMatch: &matcherv3.StringMatcher{
 								MatchPattern: &matcherv3.StringMatcher_SafeRegex{
-									SafeRegex: &matcherv3.RegexMatcher{Regex: meshAuthorityRegex},
+									SafeRegex: &matcherv3.RegexMatcher{Regex: onDemandAuthorityRegex},
 								},
 							},
 						},
@@ -245,45 +225,6 @@ func buildOnDemandCatchAllVirtualHost(meshDomain string, passthrough bool, known
 					RetryPolicy: outboundRetryPolicy(),
 				},
 			},
-		}),
-	}
-	// Known-target safety net (redirect-all only): a captured request whose
-	// authority is a known in-scope mesh service — under any of its non-mesh
-	// cluster.local spellings, on any port — routes to that service's cluster
-	// rather than falling to the passthrough. This holds even while the service's
-	// dedicated cap_http vhost is being rebuilt across a GAMMA HTTPRoute add/delete
-	// (the dedicated vhost, when present, wins on host-match precedence and carries
-	// the GAMMA filters; this catch-all entry is the floor that keeps a known
-	// target in the mesh instead of leaking to kube-proxy). Disjoint authorities,
-	// so route order among them is irrelevant; all precede the passthrough. Only
-	// meaningful in redirect-all mode — without a passthrough there is nothing to
-	// shadow and the catch-all keeps its hard 404.
-	for _, kt := range knownTargets {
-		if !passthrough || kt.AuthorityRegex == "" || kt.Cluster == "" {
-			continue
-		}
-		routes = append(routes, stripOutcomeHeader(&routev3.Route{
-			Match: &routev3.RouteMatch{
-				PathSpecifier: &routev3.RouteMatch_Prefix{Prefix: "/"},
-				Headers: []*routev3.HeaderMatcher{
-					{
-						Name: ":authority",
-						HeaderMatchSpecifier: &routev3.HeaderMatcher_StringMatch{
-							StringMatch: &matcherv3.StringMatcher{
-								MatchPattern: &matcherv3.StringMatcher_SafeRegex{
-									SafeRegex: &matcherv3.RegexMatcher{Regex: kt.AuthorityRegex},
-								},
-							},
-						},
-					},
-				},
-			},
-			Action: &routev3.Route_Route{
-				Route: &routev3.RouteAction{
-					ClusterSpecifier: &routev3.RouteAction_Cluster{Cluster: kt.Cluster},
-					RetryPolicy:      outboundRetryPolicy(),
-				},
-			},
 		}))
 	}
 	routes = append(routes, fallthrough_)
@@ -292,6 +233,32 @@ func buildOnDemandCatchAllVirtualHost(meshDomain string, passthrough bool, known
 		Domains: []string{"*"},
 		Routes:  routes,
 	}
+}
+
+// BuildCaptureCatchAllVirtualHost builds the "*" virtual host of ONE capture
+// route table (proposal 043).
+//
+//   - port is the table's dialled port, 0 for cap_http_other. A mesh authority
+//     that spells exactly that port may still name its cluster on demand (the
+//     cold path of a service this node holds no endpoint of yet).
+//   - portless additionally lets a port-less mesh authority name its cluster:
+//     the two legacy tables (the mesh HTTP port, and port 80), where a
+//     port-less name is the legacy spelling of the service's default cluster.
+//   - redirectAll selects the fallthrough: the ORIGINAL_DST passthrough, or a
+//     hard 404 in scoped capture.
+//
+// cap_http_other gets no on-demand route: no cluster can be named by a port
+// number that no service declares as HTTP.
+func BuildCaptureCatchAllVirtualHost(meshDomain string, port uint32, portless, redirectAll bool) *routev3.VirtualHost {
+	regex := ""
+	if port != 0 {
+		suffix := fmt.Sprintf(":%d", port)
+		if portless {
+			suffix = "(" + suffix + ")?"
+		}
+		regex = MeshAuthorityRegex(meshDomain, suffix)
+	}
+	return buildOnDemandCatchAllVirtualHost(regex, redirectAll)
 }
 
 // BuildOutboundRouteConfiguration creates a route configuration for outbound traffic.
@@ -315,7 +282,7 @@ func buildOnDemandCatchAllVirtualHost(meshDomain string, passthrough bool, known
 func BuildOutboundRouteConfiguration(vhosts []*routev3.VirtualHost, meshDomain string) *routev3.RouteConfiguration {
 	all := make([]*routev3.VirtualHost, 0, len(vhosts)+1)
 	all = append(all, vhosts...)
-	all = append(all, buildOnDemandCatchAllVirtualHost(meshDomain, false))
+	all = append(all, buildOnDemandCatchAllVirtualHost(MeshAuthorityRegex(meshDomain, "(:[0-9]+)?"), false))
 	return &routev3.RouteConfiguration{
 		Name:         OutboundHTTPRouteName,
 		VirtualHosts: all,
@@ -358,6 +325,13 @@ func BuildOutboundClusterVirtualHost(clusterName string, domains []string) *rout
 // Backends are already resolved to data-plane cluster names (<backend>.<meshDomain>)
 // by the reconciler.
 type GammaRoute struct {
+	// ParentPort is the Service port the rule's parentRef names, or 0 when the
+	// parentRef names none (proposal 043). A rule without a parent port
+	// applies on every HTTP port of the parent Service; with one, on that
+	// port only. It is the PARENT SERVICE's port: for a Service the registrar
+	// generated that is the pod's port, for a user Service it is resolved
+	// through the Service's port map before the rule is placed.
+	ParentPort     uint32
 	Matches        []GammaMatch
 	Backends       []GammaBackend
 	Timeout        *durationpb.Duration
@@ -450,10 +424,18 @@ type GammaHeaderMatch struct {
 
 // GammaBackend is one weighted backend of a route: the resolved data-plane Cluster
 // the route forwards to, plus the bare Service name (for the dependency set).
+//
+// Port is the backendRef's port, a port of the backend SERVICE, or 0 when the
+// producer of the rule did not carry one (a rule imported from a peer cluster,
+// proposal 026). The cache resolves it through the backend's port map to the
+// cluster of that pod port before the route is built; Cluster as projected is
+// the backend's default cluster and is what a backend with no usable port
+// keeps.
 type GammaBackend struct {
 	Service string
 	Cluster string
 	Weight  uint32
+	Port    uint32
 }
 
 // GammaHeaderMutation describes the header modifications carried by one
@@ -492,9 +474,25 @@ type GammaHeaderKV struct {
 // backend cluster. Rules with a URLRewrite field apply host/path rewriting on the
 // RouteAction before forwarding to the backend.
 func BuildOutboundServiceVirtualHost(name string, domains []string, rules []GammaRoute) *routev3.VirtualHost {
+	return BuildServiceVirtualHost(name, name, domains, rules)
+}
+
+// BuildServiceVirtualHost is BuildOutboundServiceVirtualHost with the virtual
+// host's name and its own cluster given separately: name identifies the
+// virtual host within its route table, cluster is where a request that no rule
+// sends elsewhere goes. A per-port table has several virtual hosts for one
+// service (one per port and name family), and a service's port P is served by
+// the cluster of that port, not by a cluster named after the virtual host.
+func BuildServiceVirtualHost(name, cluster string, domains []string, rules []GammaRoute) *routev3.VirtualHost {
 	if len(rules) == 0 {
-		return BuildOutboundClusterVirtualHost(name, domains)
+		vh := BuildOutboundClusterVirtualHost(cluster, domains)
+		vh.Name = name
+		return vh
 	}
+	return buildRuleVirtualHost(name, cluster, domains, rules)
+}
+
+func buildRuleVirtualHost(vhostName, name string, domains []string, rules []GammaRoute) *routev3.VirtualHost {
 	// One route per (rule, match). Gateway API mandates that routes be evaluated by
 	// match SPECIFICITY, not document order: a longer/exact path (and tie-broken by
 	// header-match count) wins over a shorter one regardless of where it appears in
@@ -525,7 +523,7 @@ func BuildOutboundServiceVirtualHost(name string, domains []string, rules []Gamm
 			RetryPolicy:      outboundRetryPolicy(),
 		}},
 	}))
-	return &routev3.VirtualHost{Name: name, Domains: domains, Routes: routes}
+	return &routev3.VirtualHost{Name: vhostName, Domains: domains, Routes: routes}
 }
 
 // scoredRoute pairs an Envoy route with its Gateway API specificity key for sorting.
@@ -840,12 +838,35 @@ func applyURLRewrite(ra *routev3.RouteAction, rw *GammaURLRewrite, matchPrefix s
 }
 
 // NoHTTPPortErrorHeader is the response header naming why a mesh HTTP request
-// was refused: the authority resolves to a service that serves no HTTP port.
+// was refused with 421 (see the Refusal constants).
 const NoHTTPPortErrorHeader = "x-aether-error"
 
-// BuildNoHTTPPortVirtualHost returns a cap_http virtual host whose every route
-// answers 421 Misdirected Request, for a service in scope that serves NO HTTP
-// port (proposal 037).
+// The values of the x-aether-error response header: why the mesh refused an
+// HTTP request for a service it knows (proposal 043, "The rule, per entry
+// path"). Every refusal is an immediate 421 Misdirected Request with a body
+// that lists the service's ports, and never a passthrough: passing an HTTP
+// request for a known mesh service to the cluster's own routing fails open.
+const (
+	// RefusalNoHTTPPort: the service serves no HTTP port at all (proposal 037).
+	RefusalNoHTTPPort = "no-http-port"
+	// RefusalPortMismatch: the Host header names a port other than the one
+	// the client dialled. The dialled port decides; a request is never
+	// answered by a port the client did not connect to.
+	RefusalPortMismatch = "port-mismatch"
+	// RefusalPortNotHTTP: the port named is a port of the service, and is
+	// declared raw TCP or UDP.
+	RefusalPortNotHTTP = "port-not-http"
+	// RefusalPortNotDeclared: the service declares no such port.
+	RefusalPortNotDeclared = "port-not-declared"
+	// RefusalPortRequired: the address names no port (a port-less name, or
+	// the mesh HTTP port) and the service's legacy target, the only thing
+	// such an address ever meant, is not an HTTP port.
+	RefusalPortRequired = "port-required"
+)
+
+// BuildNoHTTPPortVirtualHost returns a virtual host whose every route answers
+// 421 Misdirected Request, for a service in scope that serves NO HTTP port
+// (proposal 037).
 //
 // Without it the request gets a 503 with cluster_not_found in
 // %RESPONSE_CODE_DETAILS%: deterministic, but indistinguishable from a cluster
@@ -866,6 +887,17 @@ func BuildNoHTTPPortVirtualHost(name string, domains []string, tcpSpellings stri
 	body := fmt.Sprintf(
 		"aether: %s serves no HTTP port. Reach it over TCP instead: %s\n",
 		name, tcpSpellings)
+	return BuildRefusalVirtualHost(name, domains, RefusalNoHTTPPort, body)
+}
+
+// BuildRefusalVirtualHost returns a virtual host whose every route answers
+// 421 Misdirected Request with reason in the x-aether-error response header
+// and body as the response body. name identifies the virtual host within its
+// route table.
+//
+// A direct response: it is answered by the proxy at once, it reaches no
+// cluster, and it cannot be retried into a different answer.
+func BuildRefusalVirtualHost(name string, domains []string, reason, body string) *routev3.VirtualHost {
 	return &routev3.VirtualHost{
 		Name:    name,
 		Domains: domains,
@@ -882,7 +914,7 @@ func BuildNoHTTPPortVirtualHost(name string, domains []string, tcpSpellings stri
 			ResponseHeadersToAdd: []*corev3.HeaderValueOption{{
 				Header: &corev3.HeaderValue{
 					Key:   NoHTTPPortErrorHeader,
-					Value: "no-http-port",
+					Value: reason,
 				},
 			}},
 		}},

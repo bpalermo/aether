@@ -423,8 +423,13 @@ func TestCallerRoutesMatchAndRemoveTheOutcome(t *testing.T) {
 		BuildOutboundClusterVirtualHost("api.shop.mesh.local", []string{"api.shop.mesh.local"}),
 		gamma,
 	}, "mesh.local")
-	capture := BuildCaptureRouteConfiguration(nil, "mesh.local", true,
-		KnownTargetRoute{AuthorityRegex: `^api(\.shop)?(:[0-9]+)?$`, Cluster: "api.shop.mesh.local"})
+	// A capture table as the cache builds one: the service's virtual host
+	// (with rules, so every route shape is in it) and the table's catch-all.
+	capture := BuildCaptureRouteConfiguration(CaptureHTTPRouteName(8080), []*routev3.VirtualHost{
+		BuildServiceVirtualHost("api.shop.mesh.local|8080", "api.shop.mesh.local:8080", []string{"api.shop", "api.shop:8080"}, []GammaRoute{
+			{Matches: []GammaMatch{{Prefix: "/v1"}}, Backends: []GammaBackend{{Cluster: "v1.shop.mesh.local:8080", Weight: 1}}},
+		}),
+	}, BuildCaptureCatchAllVirtualHost("mesh.local", 8080, false, true))
 
 	for name, rc := range map[string]*routev3.RouteConfiguration{"out_http": outbound, "cap_http": capture} {
 		routes := retryRoutes(rc.GetVirtualHosts())
@@ -448,10 +453,12 @@ func TestCallerRoutesMatchAndRemoveTheOutcome(t *testing.T) {
 			}
 		}
 	}
-	// The retry-carrying routes this table is known to have: the on-demand
-	// route plus the known target (cap_http), and on out_http the cluster
-	// vhost, three GAMMA matches, the GAMMA catch-all and the on-demand route.
-	assert.Len(t, retryRoutes(capture.GetVirtualHosts()), 2)
+	// The retry-carrying routes each table is known to have: on the capture
+	// table the service's rule, its own default route and the on-demand route
+	// (the known-target route it had went with proposal 043); on out_http the
+	// cluster vhost, three GAMMA matches, the GAMMA catch-all and the
+	// on-demand route.
+	assert.Len(t, retryRoutes(capture.GetVirtualHosts()), 3)
 	assert.Len(t, retryRoutes(outbound.GetVirtualHosts()), 6)
 
 	// A rule's own removals are kept, and its matches do not share one slice.

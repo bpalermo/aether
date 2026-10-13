@@ -15,6 +15,7 @@ import (
 	"aethermesh.dev/registry"
 	"aethermesh.dev/registry/etcdtest"
 	"aethermesh.dev/registry/internal/etcd"
+	"aethermesh.dev/registry/registrytest"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	tcetcd "github.com/testcontainers/testcontainers-go/modules/etcd"
@@ -729,4 +730,87 @@ func TestEtcdRegistry_ListAllEndpointsRevisioned(t *testing.T) {
 	require.NoError(t, err)
 	assert.Len(t, http["ns/web"], 2)
 	assert.NotContains(t, http, "ns/db")
+}
+
+// TestEtcdRegistry_PerPortProtocolContract runs the cross-backend per-port
+// contract (registrytest.RequirePerPortProtocols) against this backend, the way
+// the kubernetes backend's unit tests do.
+//
+// A pod that serves an HTTP port and a raw-TCP port is written once per class
+// by the registering agent, with the same row under each key. Both listings
+// must hand that row back unchanged, beside single-class services and a row
+// written before port_protocols existed.
+func TestEtcdRegistry_PerPortProtocolContract(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping integration test")
+	}
+
+	ctx := context.Background()
+	reg := setupRegistry(ctx, t)
+
+	const (
+		classHTTP = registryv1.PortProtocol_PORT_PROTOCOL_HTTP
+		classTCP  = registryv1.PortProtocol_PORT_PROTOCOL_TCP
+		classUDP  = registryv1.PortProtocol_PORT_PROTOCOL_UDP
+	)
+	mixed := func(ip string) *registryv1.ServiceEndpoint {
+		return &registryv1.ServiceEndpoint{
+			Ip: ip, ClusterName: "cluster-1", Port: 8080, Ports: []uint32{8080, 9000},
+			PortProtocols: map[uint32]registryv1.PortProtocol{8080: classHTTP, 9000: classTCP},
+		}
+	}
+	writes := []struct {
+		service  string
+		protocol registryv1.Service_Protocol
+		endpoint *registryv1.ServiceEndpoint
+	}{
+		{"ns/mixed", registryv1.Service_PROTOCOL_HTTP, mixed("10.0.1.1")},
+		{"ns/mixed", registryv1.Service_PROTOCOL_TCP, mixed("10.0.1.1")},
+		{"ns/mixed", registryv1.Service_PROTOCOL_HTTP, mixed("10.0.1.2")},
+		{"ns/mixed", registryv1.Service_PROTOCOL_TCP, mixed("10.0.1.2")},
+		{"ns/web", registryv1.Service_PROTOCOL_HTTP, &registryv1.ServiceEndpoint{
+			Ip: "10.0.2.1", ClusterName: "cluster-1", Port: 8080, Ports: []uint32{8080},
+			PortProtocols: map[uint32]registryv1.PortProtocol{8080: classHTTP},
+		}},
+		{"ns/dns", registryv1.Service_PROTOCOL_UDP, &registryv1.ServiceEndpoint{
+			Ip: "10.0.3.1", ClusterName: "cluster-1", Port: 5353, Ports: []uint32{5353},
+			PortProtocols: map[uint32]registryv1.PortProtocol{5353: classUDP},
+		}},
+		// A row from before port_protocols existed: exempt from "serves a port
+		// of its listing", and still one row.
+		{"ns/old", registryv1.Service_PROTOCOL_TCP, &registryv1.ServiceEndpoint{
+			Ip: "10.0.4.1", ClusterName: "cluster-1", Port: 5432,
+		}},
+	}
+	for _, w := range writes {
+		require.NoError(t, reg.RegisterEndpoint(ctx, w.service, w.protocol, w.endpoint))
+	}
+
+	listings := map[registryv1.Service_Protocol]map[string][]*registryv1.ServiceEndpoint{}
+	for _, protocol := range registry.ServedProtocols {
+		all, err := reg.ListAllEndpoints(ctx, protocol)
+		require.NoError(t, err)
+		listings[protocol] = all
+		registrytest.RequireNamespaceQualifiedKeys(t, all)
+	}
+	// Not vacuous: the mixed service is in two listings, with both pods.
+	require.Len(t, listings[registryv1.Service_PROTOCOL_HTTP]["ns/mixed"], 2)
+	require.Len(t, listings[registryv1.Service_PROTOCOL_TCP]["ns/mixed"], 2)
+	require.Len(t, listings[registryv1.Service_PROTOCOL_UDP], 1)
+	registrytest.RequirePerPortProtocols(t, listings)
+
+	// The single read the registrar's sync uses must satisfy it too.
+	state, _, err := reg.ListAllEndpointsRevisioned(ctx, registry.ServedProtocols)
+	require.NoError(t, err)
+	revisioned := map[registryv1.Service_Protocol]map[string][]*registryv1.ServiceEndpoint{}
+	for service, byProtocol := range state {
+		for protocol, eps := range byProtocol {
+			if revisioned[protocol] == nil {
+				revisioned[protocol] = map[string][]*registryv1.ServiceEndpoint{}
+			}
+			revisioned[protocol][service] = eps
+		}
+	}
+	require.Len(t, revisioned[registryv1.Service_PROTOCOL_TCP]["ns/mixed"], 2)
+	registrytest.RequirePerPortProtocols(t, revisioned)
 }

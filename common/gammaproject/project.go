@@ -219,19 +219,51 @@ func projectGRPCBackends(refs []gatewayv1.GRPCBackendRef, routeNamespace, routeK
 	return out
 }
 
-func projectBackend(ref gatewayv1.BackendObjectReference, weight *int32, routeNamespace, routeKind, meshDomain string, grants []gatewayv1beta1.ReferenceGrant) *registryv1.GammaBackend {
+// backendProjected reports whether a backendRef is projected into the data
+// plane at all: a core-group Service that the route may reference. It is the
+// one predicate projectBackend and BackendRefPorts share, so the two cannot
+// disagree about which refs are kept.
+func backendProjected(ref gatewayv1.BackendObjectReference, routeNamespace, routeKind string, grants []gatewayv1beta1.ReferenceGrant) bool {
 	if ref.Group != nil && string(*ref.Group) != "" {
-		return nil
+		return false
 	}
 	if ref.Kind != nil && string(*ref.Kind) != "Service" {
+		return false
+	}
+	// Drop ungranted cross-namespace backends (RefNotPermitted): removed from the data
+	// plane, but the rest of the route still applies.
+	return referencegrant.BackendPermitted(ref.Namespace, routeNamespace, routeKind, string(ref.Name), grants)
+}
+
+// BackendRefPorts returns the port of every backendRef that is projected, in
+// the order the projected rule's backends carry them: element i belongs to the
+// rule's backend i. 0 for a ref that names no port.
+//
+// The projected GammaBackend proto does not carry the port (it gains the field
+// with the cross-cluster projection, proposal 043 Phase 2). The node agent
+// needs it now, for the routes of its own cluster: a backendRef names a port of
+// the backend Service, and until it was read every backend was the service's
+// default cluster (proposal 043, fact 1, row 11).
+func BackendRefPorts(refs []gatewayv1.BackendObjectReference, routeNamespace, routeKind string, grants []gatewayv1beta1.ReferenceGrant) []uint32 {
+	out := make([]uint32, 0, len(refs))
+	for _, ref := range refs {
+		if !backendProjected(ref, routeNamespace, routeKind, grants) {
+			continue
+		}
+		var port uint32
+		if ref.Port != nil {
+			port = uint32(*ref.Port)
+		}
+		out = append(out, port)
+	}
+	return out
+}
+
+func projectBackend(ref gatewayv1.BackendObjectReference, weight *int32, routeNamespace, routeKind, meshDomain string, grants []gatewayv1beta1.ReferenceGrant) *registryv1.GammaBackend {
+	if !backendProjected(ref, routeNamespace, routeKind, grants) {
 		return nil
 	}
 	name := string(ref.Name)
-	// Drop ungranted cross-namespace backends (RefNotPermitted): removed from the data
-	// plane, but the rest of the route still applies.
-	if !referencegrant.BackendPermitted(ref.Namespace, routeNamespace, routeKind, name, grants) {
-		return nil
-	}
 	w := uint32(1)
 	if weight != nil {
 		w = uint32(*weight)

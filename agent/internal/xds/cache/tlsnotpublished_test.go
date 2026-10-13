@@ -213,7 +213,7 @@ func TestUnpublishedTCPFloorIsNotTheValidationGap(t *testing.T) {
 
 	// demo/rawnons leaves the capture TCP set: its floor is no longer published.
 	c.SetCaptureTCPServices([]capture.CaptureTCPService{
-		{ServiceName: "demo/db", ClusterIP: "10.96.0.30", PrimaryIsTCP: true},
+		{ServiceName: "demo/db", ClusterIP: "10.96.0.30"},
 	})
 	rec.reset()
 	require.NoError(t, c.generateSnapshot(ctx))
@@ -244,8 +244,8 @@ func TestUnpublishedTCPFloorIsNotTheValidationGap(t *testing.T) {
 
 	// It is captured again: the snapshot that publishes the floor says so.
 	c.SetCaptureTCPServices([]capture.CaptureTCPService{
-		{ServiceName: "demo/db", ClusterIP: "10.96.0.30", PrimaryIsTCP: true},
-		{ServiceName: "demo/rawnons", ClusterIP: "10.96.0.31", PrimaryIsTCP: true},
+		{ServiceName: "demo/db", ClusterIP: "10.96.0.30"},
+		{ServiceName: "demo/rawnons", ClusterIP: "10.96.0.31"},
 	})
 	rec.reset()
 	require.NoError(t, c.generateSnapshot(ctx))

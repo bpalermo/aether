@@ -2214,7 +2214,7 @@ func TestAckedPinGaugeKeepsAFloorWhoseRemovalWasRejected(t *testing.T) {
 	// cluster map, pinned, and their clusters leave the snapshot.
 	floor := proxy.TCPClusterName("demo/db", c.meshDomain)
 	require.Contains(t, p.accepted, floor, "fixture: the proxy holds the floor cluster")
-	c.SetCaptureTCPServices([]capture.CaptureTCPService{{ServiceName: "demo/rawnons", ClusterIP: "10.96.0.31", PrimaryIsTCP: true}})
+	c.SetCaptureTCPServices([]capture.CaptureTCPService{{ServiceName: "demo/rawnons", ClusterIP: "10.96.0.31"}})
 	require.NoError(t, c.generateSnapshot(ctx))
 	require.NotContains(t, clusterVersions(t, c), floor, "fixture: the entry has no cluster in the newest snapshot")
 	c.clusterMu.RLock()

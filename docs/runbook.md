@@ -3979,6 +3979,116 @@ draining` carries `successorWaitBudget`: it is a positive duration, never `0s`.
 Measured: the renders and the template tests
 (`bazel test //charts/aether:all`), and a unit test that holds the chart's 15 s
 to the supervisor's two constants. Not run on a cluster.
+#### Chart 2.7.0: a port is typed by its own declaration, and the dialled port decides (proposal 043, Phase 1; #1672, #1682)
+
+Nothing to set and nothing removed. No value, flag or CRD changes, and every
+address that reached an application on 2.6 reaches the same one on 2.7. What
+changes is what the mesh does with an address that was answered by the WRONG
+port, and how the node proxy's capture listener is laid out.
+
+##### What is fixed
+
+- **A service with a raw-TCP port and an HTTP port works both ways round, on
+  both registry backends.** A pod that declares `endpoint.aether.io/port: "9000"`,
+  `protocol: tcp`, `ports: "9000,8080=h1"` had no raw-TCP path at all (#1672),
+  and on the `kubernetes` backend the mirror shape (`ports: "8080,9000=tcp"`)
+  had a capture chain for `:9000` with no cluster behind it. Each port is now
+  typed by its own declaration, read from the registry's endpoints. Nothing
+  reads a protocol for the service as a whole.
+- **A Kubernetes name with a port reaches that port (#1682).**
+  `http://<svc>.<ns>.svc.cluster.local:9090/` and `http://<svc>.<ns>:9090/`
+  were answered by the port the pods declare in `endpoint.aether.io/port`,
+  whatever port was dialled, with a 200.
+- **A port-less `Host` on a dialled port means that port.**
+  `curl -H 'Host: <name>' http://<name>:9090/` was answered by the declared
+  port too.
+- **HTTP on a port number that another service declares as raw TCP stays in
+  the mesh.** One service declaring `9000=tcp` sent every other service's HTTP
+  on port 9000 through the passthrough, outside the mesh.
+- **A route applies to every port of its parent Service, and a `backendRef`
+  port is read.** An HTTPRoute whose `parentRef` names no port applied to the
+  port-less name only, and its `backendRef.port` was ignored (every backend was
+  the backend's declared port).
+
+##### The four refusals
+
+An HTTP request that names a mesh service and no HTTP port of it is answered by
+the calling pod's proxy, at once, with `421 Misdirected Request`. The response
+header `x-aether-error` says why and the body lists the service's ports:
+
+| `x-aether-error` | Means | Before |
+|---|---|---|
+| `port-mismatch` | the `Host` header names a port other than the one the client connected to | routed by `Host`: answered by a port the client did not dial |
+| `port-not-declared` | the service declares no such port | a 503 after the 2 s on-demand timeout (mesh name), or the declared port's answer (Kubernetes name) |
+| `port-not-http` | the port is declared raw TCP or UDP | a 502 or 503 from an h2 cluster in front of a port that does not speak HTTP |
+| `port-required` | `:18081` or the bare name, and the port the pods declare is not an HTTP port | 502 |
+
+`no-http-port` (a service with no HTTP port at all) is unchanged.
+
+To find clients that now see one, look in the proxy's HTTP access log for
+responses with status 421. The case to look for is a proxy or a sidecar inside a pod that forwards
+requests with their original `Host` to a different port.
+
+##### What else a client can notice
+
+- **A bare service name that two namespaces share** (`http://<svc>/` where
+  `<svc>` exists in two namespaces) is no longer answered by the mesh. The
+  node proxy's tables are shared by every pod of the node and cannot tell
+  which namespace was meant; it used to pick one, and half the time the wrong
+  one. The request is passed to the cluster's own routing, which refuses it.
+  Use `<svc>.<ns>`.
+- **A `backendRef` whose port is not an HTTP port of the backend** routes to
+  nothing (503), where it used to reach the backend's declared port. `18081`,
+  and `80` for a backend that does not declare it, keep meaning the declared
+  port.
+
+##### The generated Service
+
+`kubectl get svc` on a generated mesh Service now shows what the service
+serves: one port per declared port, named `p<port>-<tcp|udp>`, with
+`appProtocol` `http` or `tcp`, beside the four it always had (`mesh` 18081,
+`mesh-tcp` 18082, `http` 80, `https` 443). A declared port that is one of those
+four numbers replaces the placeholder. Nothing in the mesh reads these ports.
+
+`aether.io/app-protocol` and `aether.io/port` on the Service are **frozen**:
+the registrar stamps what a 2.6 registrar would have stamped, for 2.6 agents.
+No 2.7 component reads them. They are not deprecated by this chart (proposal
+043 deprecates them in chart 2.8.0 and removes them in 2.9.0).
+
+##### The proxy's configuration grows
+
+The capture listener of every pod has one HTTP filter chain per HTTP port
+number in the mesh (`cap_http_<port>`), plus `cap_http_other`, where it had one
+(`capture_<pod>`); and the node has one route table of the same name per chain,
+where it had `cap_http`. The count follows the number of distinct HTTP port
+NUMBERS (always including 80 and 18081), not the number of services. For 200
+services on three HTTP port numbers, 20 raw-TCP ports and 50 pods on a node:
+26 chains per pod listener (the passthrough default included) where there were
+22, 5 HTTP connection managers per pod where there was 1, 6 route tables per
+node where there were 2. A service whose only ports are raw TCP costs more
+than it did: its any-port chain has a copy on every HTTP port number.
+
+A dashboard, an alert or a query that names the route table `cap_http` or the
+filter chain `capture_<pod>` (the access log's `filter_chain_name`) needs the
+new names. The HTTP stat prefix (`capture_http`) is unchanged.
+
+##### During the roll, and rolling back
+
+Nothing breaks across versions; the order does not matter.
+
+- **A 2.6 agent behind a 2.7 registrar** sees the same annotations and extra
+  Service ports it does not read. On the `kubernetes` backend it also finds a
+  mixed pod in both listings, which gives it the cluster its `:9000` chain
+  lacked.
+- **A 2.7 agent behind a 2.6 registrar** needs nothing from the Service but its
+  address. On the `kubernetes` backend the mixed shapes stay as broken as on
+  2.6 until the registrar is 2.7 (it is the registrar's listing that changed).
+- **A 2.7 source and a 2.6 destination, or the reverse:** the hop between
+  proxies is unchanged. A 2.7 destination also accepts its declared raw-TCP
+  port by name (an `in_tcp_<pod>_<port>` chain where it had an HTTP one that
+  could not work); no source sends that yet.
+- **Rollback** to 2.6.x: the 2.6 registrar removes the extra Service ports on
+  its next reconcile.
 
 #### The prober chart (#1372, #1373, #1374)
 

@@ -22,7 +22,7 @@ import (
 func TestBuildCaptureTCPPortFilterChain(t *testing.T) {
 	svc := CaptureTCPService{
 		ClusterName: "tcp:mixed.aether-test.aether.internal",
-		ClusterIP:   "10.96.0.60", PrimaryIsTCP: true,
+		ClusterIP:   "10.96.0.60", LegacyTCPPort: 9000, AnyPort: true,
 	}
 
 	fc := buildCaptureTCPPortFilterChain(svc, 9000, "spiffe://example.org/ns/default/sa/client")
@@ -46,7 +46,7 @@ func TestBuildCaptureTCPPortFilterChain(t *testing.T) {
 }
 
 func TestBuildCaptureTCPPortFilterChain_Rejects(t *testing.T) {
-	good := CaptureTCPService{ClusterName: "tcp:svc.ns.aether.internal", ClusterIP: "10.96.0.60", PrimaryIsTCP: true}
+	good := CaptureTCPService{ClusterName: "tcp:svc.ns.aether.internal", ClusterIP: "10.96.0.60", LegacyTCPPort: 9000, AnyPort: true}
 	tests := []struct {
 		name string
 		svc  CaptureTCPService
@@ -54,7 +54,7 @@ func TestBuildCaptureTCPPortFilterChain_Rejects(t *testing.T) {
 	}{
 		{name: "no ClusterIP", svc: CaptureTCPService{ClusterName: good.ClusterName}, port: 9000},
 		{name: "no ClusterName", svc: CaptureTCPService{ClusterIP: good.ClusterIP}, port: 9000},
-		{name: "unparseable ClusterIP", svc: CaptureTCPService{ClusterName: good.ClusterName, ClusterIP: "not-an-ip", PrimaryIsTCP: true}, port: 9000},
+		{name: "unparseable ClusterIP", svc: CaptureTCPService{ClusterName: good.ClusterName, ClusterIP: "not-an-ip", LegacyTCPPort: 9000, AnyPort: true}, port: 9000},
 		{name: "port zero", svc: good, port: 0},
 		{name: "port out of range", svc: good, port: 70000},
 	}
@@ -83,14 +83,15 @@ func TestGenerateCaptureListener_HTTPPrimaryGetsNoPortlessChain(t *testing.T) {
 	pod := &cniv1.CNIPod{Name: "p1", NetworkNamespace: "/var/run/netns/p1"}
 
 	svcs := []CaptureTCPService{{
-		ClusterName:  "tcp:mixed.aether-test.aether.internal",
-		ClusterIP:    "10.96.1.30",
-		TCPPorts:     []uint32{9000},
-		PrimaryIsTCP: false, // HTTP primary
+		ClusterName: "tcp:mixed.aether-test.aether.internal",
+		ClusterIP:   "10.96.1.30",
+		HTTPPorts:   []uint32{8080},
+		TCPPorts:    []uint32{9000},
+		// LegacyTCPPort zero: the legacy target is HTTP.
 	}}
 
 	l, err := GenerateCaptureListener(pod, "spiffe://aether.internal/ns/default/sa/test",
-		15001, "aether.internal", false, svcs, true, nil)
+		15001, "aether.internal", false, svcs, nil, true, nil)
 	require.NoError(t, err)
 
 	var portless, perPort int
@@ -119,13 +120,13 @@ func TestGenerateCaptureListener_TCPPrimaryKeepsPortlessChain(t *testing.T) {
 	pod := &cniv1.CNIPod{Name: "p1", NetworkNamespace: "/var/run/netns/p1"}
 
 	svcs := []CaptureTCPService{{
-		ClusterName:  "tcp:echo-tcp.aether-test.aether.internal",
-		ClusterIP:    "10.96.1.40",
-		PrimaryIsTCP: true,
+		ClusterName:   "tcp:echo-tcp.aether-test.aether.internal",
+		ClusterIP:     "10.96.1.40",
+		LegacyTCPPort: 9000, AnyPort: true,
 	}}
 
 	l, err := GenerateCaptureListener(pod, "spiffe://aether.internal/ns/default/sa/test",
-		15001, "aether.internal", false, svcs, true, nil)
+		15001, "aether.internal", false, svcs, nil, true, nil)
 	require.NoError(t, err)
 
 	var portless int
@@ -152,14 +153,14 @@ func TestGenerateCaptureListener_TCPPrimaryKeepsPortlessChain(t *testing.T) {
 func TestAnyPortShimIsCountedSeparately(t *testing.T) {
 	pod := &cniv1.CNIPod{Name: "p1", NetworkNamespace: "/var/run/netns/p1"}
 	svcs := []CaptureTCPService{{
-		ClusterName:  "tcp:echo-tcp.aether-test.aether.internal",
-		ClusterIP:    "10.96.1.50",
-		PrimaryIsTCP: true,
-		PrimaryPort:  9000,
+		ClusterName:   "tcp:echo-tcp.aether-test.aether.internal",
+		ClusterIP:     "10.96.1.50",
+		LegacyTCPPort: 9000,
+		AnyPort:       true,
 	}}
 
 	l, err := GenerateCaptureListener(pod, "spiffe://aether.internal/ns/default/sa/test",
-		15001, "aether.internal", false, svcs, true, nil)
+		15001, "aether.internal", false, svcs, nil, true, nil)
 	require.NoError(t, err)
 
 	prefixes := map[string]uint32{} // stat prefix -> destination_port (0 = portless)

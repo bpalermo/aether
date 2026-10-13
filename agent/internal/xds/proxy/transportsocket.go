@@ -392,7 +392,15 @@ func EdgeUpstreamTransportSocket(tlsCertificateSecretName string, validationCont
 // established that the SNI must be empty for the floor — a non-empty SNI would
 // hit the destination's per-port HCM chain instead of the floor default.
 func EdgeUpstreamTCPTransportSocket(tlsCertificateSecretName string, validationContextName string, sanURIs []string) *corev3.TransportSocket {
-	return upstreamTransportSocket(tlsCertificateSecretName, validationContextName, sanURIs, "" /* no SNI */, config.SDSConfigSourceFromCluster(SpireAgentSDSClusterName), nil, "" /* no ALPN */)
+	return EdgeUpstreamTCPPortTransportSocket(tlsCertificateSecretName, validationContextName, sanURIs, "")
+}
+
+// EdgeUpstreamTCPPortTransportSocket is EdgeUpstreamTCPTransportSocket for a
+// per-port raw-TCP cluster (tcp:<fqdn>:<port>): still no ALPN, and the port as
+// SNI, which is how the destination inbound selects that port's tcp_proxy
+// chain (proposal 037). An empty sni is the floor's shape.
+func EdgeUpstreamTCPPortTransportSocket(tlsCertificateSecretName string, validationContextName string, sanURIs []string, sni string) *corev3.TransportSocket {
+	return upstreamTransportSocket(tlsCertificateSecretName, validationContextName, sanURIs, sni, config.SDSConfigSourceFromCluster(SpireAgentSDSClusterName), nil, "" /* no ALPN */)
 }
 
 // upstreamTransportSocket builds an upstream TLS context. With no alpnOverride the

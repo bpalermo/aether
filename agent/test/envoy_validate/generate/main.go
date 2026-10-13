@@ -36,6 +36,7 @@ func main() {
 		{"node_uds_bootstrap.json", envoy_validate.NodeUDSBootstrapJSON},
 		{"capture_bootstrap.json", envoy_validate.CaptureBootstrapJSON},
 		{"capture_route_target_bootstrap.json", envoy_validate.CaptureRouteTargetBootstrapJSON},
+		{"capture_perport_bootstrap.json", envoy_validate.CapturePerPortBootstrapJSON},
 		{"capture_tcproute_bootstrap.json", envoy_validate.CaptureTCPRouteBootstrapJSON},
 		{"capture_tlsroute_bootstrap.json", envoy_validate.CaptureTLSRouteBootstrapJSON},
 		{"capture_udp_bootstrap.json", envoy_validate.CaptureUDPBootstrapJSON},

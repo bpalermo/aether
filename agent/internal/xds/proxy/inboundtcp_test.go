@@ -76,18 +76,32 @@ func TestInboundChains_TCPPortReplacesHCM(t *testing.T) {
 	}
 }
 
-// TestInboundChains_PrimaryTCPPortKeepsTheFloor: the primary port must NOT get
-// an SNI chain. It is what the default floor chain already serves, reached by a
-// no-SNI mesh connection (#306) — and a chain for it would be dead config.
+// TestInboundChains_PrimaryTCPPortKeepsTheFloor: a raw-TCP declared port keeps
+// the default floor chain, which is what a no-SNI mesh connection reaches
+// (#306) and what every source still sends.
+//
+// Until proposal 043 it was asserted here that the declared port gets NO SNI
+// chain of its own, "dead config". It was not dead, it was wrong: the port's
+// SNI chain existed anyway and was an HCM in front of a port that does not
+// speak HTTP. Phase 1 gives every port an explicit chain of its own class, the
+// declared one included, so that sources can name it by SNI in a later chart
+// without the destination changing again.
 func TestInboundChains_PrimaryTCPPortKeepsTheFloor(t *testing.T) {
 	pod := podWithPorts("8080")
 	pod.Annotations[aetherannotations.AnnotationEndpointProtocol] = "tcp"
 
 	chains := buildInboundFilterChains(pod, "c", "v", "example.org", false, nil, nil)
 
-	assert.Nil(t, chainByName(chains, "in_tcp_aether-test_app-0_8080"),
-		"the primary port is served by the default floor chain, not an SNI chain")
 	require.NotNil(t, chainByName(chains, "in_tcp_aether-test_app-0"), "the default floor chain must still be there")
+	own := chainByName(chains, "in_tcp_aether-test_app-0_8080")
+	require.NotNil(t, own, "the declared raw-TCP port has an SNI chain of its own (proposal 043, Phase 1)")
+	assert.Equal(t, []string{"8080"}, own.GetFilterChainMatch().GetServerNames())
+	for _, c := range chains {
+		if sn := c.GetFilterChainMatch().GetServerNames(); len(sn) == 1 && sn[0] == "8080" {
+			assert.Equal(t, "envoy.filters.network.tcp_proxy", c.GetFilters()[len(c.GetFilters())-1].GetName(),
+				"chain %s: a raw-TCP port must not sit behind an HCM", c.GetName())
+		}
+	}
 }
 
 // TestInboundChains_MalformedAnnotationKeepsHTTP: a bad suffix must not strand

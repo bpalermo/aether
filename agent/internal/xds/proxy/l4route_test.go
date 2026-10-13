@@ -35,7 +35,7 @@ func unmarshalTCPProxy(t *testing.T, f *listenerv3.Filter) *tcp_proxyv3.TcpProxy
 func TestBuildCaptureTCPRouteFilterChain_Passthrough(t *testing.T) {
 	svc := CaptureTCPService{
 		ClusterName: "tcp:svc-a.aether.internal",
-		ClusterIP:   "10.0.0.10", PrimaryIsTCP: true,
+		ClusterIP:   "10.0.0.10", LegacyTCPPort: 9000, AnyPort: true,
 	}
 	chain := BuildCaptureTCPRouteFilterChain(svc, nil, "spiffe://aether.internal/ns/default/sa/test")
 	require.NotNil(t, chain)
@@ -54,7 +54,7 @@ func TestBuildCaptureTCPRouteFilterChain_Passthrough(t *testing.T) {
 func TestBuildCaptureTCPRouteFilterChain_SingleBackend(t *testing.T) {
 	svc := CaptureTCPService{
 		ClusterName: "tcp:svc-a.aether.internal",
-		ClusterIP:   "10.0.0.10", PrimaryIsTCP: true,
+		ClusterIP:   "10.0.0.10", LegacyTCPPort: 9000, AnyPort: true,
 	}
 	rules := []L4ServiceRoute{
 		{Backends: []L4Backend{{Service: "svc-a", Cluster: "tcp:svc-a.aether.internal", Weight: 1}}},
@@ -71,7 +71,7 @@ func TestBuildCaptureTCPRouteFilterChain_SingleBackend(t *testing.T) {
 func TestBuildCaptureTCPRouteFilterChain_WeightedBackends(t *testing.T) {
 	svc := CaptureTCPService{
 		ClusterName: "tcp:svc-b.aether.internal",
-		ClusterIP:   "10.0.0.20", PrimaryIsTCP: true,
+		ClusterIP:   "10.0.0.20", LegacyTCPPort: 9000, AnyPort: true,
 	}
 	rules := []L4ServiceRoute{
 		{Backends: []L4Backend{
@@ -103,7 +103,7 @@ func TestBuildCaptureTCPRouteFilterChain_WeightedBackends(t *testing.T) {
 // remaining backend collapses to the TcpProxy_Cluster form and gets 100% traffic.
 // (029/Phase-3b M4 e2e bug: 0→1 made drain == equal-weight.)
 func TestBuildCaptureTCPRouteFilterChain_ZeroWeightDrain(t *testing.T) {
-	svc := CaptureTCPService{ClusterName: "tcp:svc-b.aether.internal", ClusterIP: "10.0.0.20", PrimaryIsTCP: true}
+	svc := CaptureTCPService{ClusterName: "tcp:svc-b.aether.internal", ClusterIP: "10.0.0.20", LegacyTCPPort: 9000, AnyPort: true}
 	rules := []L4ServiceRoute{
 		{Backends: []L4Backend{
 			{Service: "svc-b-v1", Cluster: "tcp:svc-b-v1.aether.internal", Weight: 0}, // drained
@@ -122,7 +122,7 @@ func TestBuildCaptureTCPRouteFilterChain_ZeroWeightDrain(t *testing.T) {
 // valid cluster → the chain falls back to the passthrough floor (never a
 // normalized-to-1 accidental route).
 func TestBuildCaptureTCPRouteFilterChain_AllDrained(t *testing.T) {
-	svc := CaptureTCPService{ClusterName: "tcp:svc-b.aether.internal", ClusterIP: "10.0.0.20", PrimaryIsTCP: true}
+	svc := CaptureTCPService{ClusterName: "tcp:svc-b.aether.internal", ClusterIP: "10.0.0.20", LegacyTCPPort: 9000, AnyPort: true}
 	rules := []L4ServiceRoute{
 		{Backends: []L4Backend{
 			{Service: "svc-b-v1", Cluster: "tcp:svc-b-v1.aether.internal", Weight: 0},
@@ -143,7 +143,7 @@ func TestBuildCaptureTCPRouteFilterChain_AllDrained(t *testing.T) {
 func TestBuildCaptureTCPRouteFilterChain_DuplicateClustersWeightMerged(t *testing.T) {
 	svc := CaptureTCPService{
 		ClusterName: "tcp:svc-c.aether.internal",
-		ClusterIP:   "10.0.0.30", PrimaryIsTCP: true,
+		ClusterIP:   "10.0.0.30", LegacyTCPPort: 9000, AnyPort: true,
 	}
 	rules := []L4ServiceRoute{
 		{Backends: []L4Backend{
@@ -170,7 +170,7 @@ func TestBuildCaptureTCPRouteFilterChain_DuplicateClustersWeightMerged(t *testin
 
 // TestBuildCaptureTCPRouteFilterChain_InvalidIP returns nil for invalid IP.
 func TestBuildCaptureTCPRouteFilterChain_InvalidIP(t *testing.T) {
-	svc := CaptureTCPService{ClusterName: "tcp:svc-x.aether.internal", ClusterIP: "not-an-ip", PrimaryIsTCP: true}
+	svc := CaptureTCPService{ClusterName: "tcp:svc-x.aether.internal", ClusterIP: "not-an-ip", LegacyTCPPort: 9000, AnyPort: true}
 	chain := BuildCaptureTCPRouteFilterChain(svc, nil, "spiffe://aether.internal/ns/default/sa/test")
 	assert.Nil(t, chain)
 }
@@ -180,7 +180,7 @@ func TestBuildCaptureTCPRouteFilterChain_InvalidIP(t *testing.T) {
 func TestBuildCaptureTLSRouteFilterChains_Basic(t *testing.T) {
 	svc := CaptureTCPService{
 		ClusterName: "tcp:svc-d.aether.internal",
-		ClusterIP:   "10.0.1.10", PrimaryIsTCP: true,
+		ClusterIP:   "10.0.1.10", LegacyTCPPort: 9000, AnyPort: true,
 	}
 	rules := []L4ServiceRoute{
 		{
@@ -221,7 +221,7 @@ func TestBuildCaptureTLSRouteFilterChains_Basic(t *testing.T) {
 // TestBuildCaptureTLSRouteFilterChains_EmptyRuleSkipped verifies that rules with
 // no SNI hostnames or no backends are skipped without panicking.
 func TestBuildCaptureTLSRouteFilterChains_EmptyRuleSkipped(t *testing.T) {
-	svc := CaptureTCPService{ClusterName: "tcp:svc-e.aether.internal", ClusterIP: "10.0.1.20", PrimaryIsTCP: true}
+	svc := CaptureTCPService{ClusterName: "tcp:svc-e.aether.internal", ClusterIP: "10.0.1.20", LegacyTCPPort: 9000, AnyPort: true}
 	rules := []L4ServiceRoute{
 		{SNIHostnames: []string{}, Backends: []L4Backend{{Cluster: "tcp:svc-e.aether.internal", Weight: 1}}},
 		{SNIHostnames: []string{"x.example.com"}, Backends: nil},

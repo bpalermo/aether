@@ -204,7 +204,7 @@ func equalServiceRoutes(a, b map[string][]proxy.GammaRoute) bool {
 }
 
 func equalGammaRoute(a, b proxy.GammaRoute) bool {
-	if len(a.Matches) != len(b.Matches) || len(a.Backends) != len(b.Backends) {
+	if len(a.Matches) != len(b.Matches) || len(a.Backends) != len(b.Backends) || a.ParentPort != b.ParentPort {
 		return false
 	}
 	if timeoutNanos(a) != timeoutNanos(b) {

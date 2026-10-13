@@ -34,7 +34,7 @@ once; every suite is its own job on its own runner, against those images.
 | `uds-csi` | `uds-csi.sh` | 1 | proposal 039: the CSI node plugin on its own |
 | `authz` | `authz.sh` | 1 | proposal 027: ext_authz decisions, sidecar ordering, policy reload |
 | `l4-routes` | `l4routes.sh` | 1 + etcd | TCPRoute, TLSRoute, UDPRoute on the capture path |
-| `multiprotocol` | `multiprotocol.sh` | 1 + etcd | proposal 037: HTTP and raw TCP on one pod, each port reaching its own listener |
+| `multiprotocol` | `multiprotocol.sh` | 1, once per registry backend (`etcd` with its container, `kubernetes`) | proposals 037 and 043 Phase 1: several ports on one service (HTTP and raw TCP in both orders, several HTTP ports, port 80), each reached by its own number on every name of the service, captured and through the loopback listener; a mismatched, non-HTTP or undeclared port refused with a `421` that names why |
 | `eastwest-quic` | `eastwest-quic.sh` | 1 | proposal 038: per-source HTTP/3 between pods |
 | `first-install` | `first-install.sh` | 1, under Helm 3 and Helm 4 | the documented first install and its upgrades |
 
@@ -65,11 +65,21 @@ A suite's header says what each assertion proves and how to see it fail. Two
 have a red half that CI does not run:
 
 - `MP_MIXED_PORTS=8080 e2e/multiprotocol.sh up && e2e/multiprotocol.sh verify`:
-  the mixed workload without its `=tcp` port. `M4` fails.
+  the mixed workload without its `=tcp` port. `M4` fails, and with it the
+  other legs that need port 9000 of that workload to be raw TCP.
 - `CONFIG_IMPORT=off e2e/multicluster_config.sh up && e2e/multicluster_config.sh verify`:
   the importing cluster without `agent.importConfig`. `C2` fails.
 
 `eastwest-quic.sh` has one too (`QUIC_DNS_SANS=off`).
+
+`multiprotocol.sh` runs on either registry backend
+(`MP_REGISTRY_BACKEND=etcd`, the default, or `kubernetes`, which starts no
+etcd; CI runs both) and has three switches for a red run. A failed assertion
+normally ends the run and prints the cluster's state;
+`MP_KEEP_GOING=1 e2e/multiprotocol.sh verify` runs every leg, prints a
+`LEG RESULT DETAIL` table and exits non-zero if any failed. `MP_LEGS="A5 A7"`
+runs a subset, and `MP_TIMEOUT=<seconds>` caps how long a leg waits for an
+answer to converge, which is what each failing assertion costs.
 
 ## Adding a suite
 

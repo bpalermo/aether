@@ -108,10 +108,21 @@ type fakeSink struct {
 	ports          map[string][]uint32
 	chainFilters   map[string]proxy.ExtensionFilter
 	inboundFilters map[string]proxy.ExtensionFilter
+	portMaps       map[string]map[uint32]uint32
+	// calls records the order the sink's setters were called in.
+	calls []string
 }
 
-func (f *fakeSink) SetServiceRoutes(r map[string][]proxy.GammaRoute) { f.routes = r }
-func (f *fakeSink) SetRouteTargetPorts(p map[string][]uint32)        { f.ports = p }
+func (f *fakeSink) SetServiceRoutes(r map[string][]proxy.GammaRoute) {
+	f.routes = r
+	f.calls = append(f.calls, "routes")
+}
+
+func (f *fakeSink) SetServicePortMaps(m map[string]map[uint32]uint32) {
+	f.portMaps = m
+	f.calls = append(f.calls, "portMaps")
+}
+func (f *fakeSink) SetRouteTargetPorts(p map[string][]uint32) { f.ports = p }
 func (f *fakeSink) SetServiceChainFilters(c map[string]proxy.ExtensionFilter) {
 	f.chainFilters = c
 }
