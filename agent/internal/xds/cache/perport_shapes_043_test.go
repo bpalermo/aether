@@ -231,7 +231,7 @@ func TestPerPort_HostileShapes_NoDuplicateDomainOrChain(t *testing.T) {
 // "<name>:18081". Port 80 is one of them only for a service that declares it:
 // for any other it is not the service's port, a twin stands there, and
 // cleartext HTTP to it is no longer answered by the mesh at all (until chart
-// 2.7.0 it reached the port the pods declare).
+// 3.0.0 it reached the port the pods declare).
 func TestPerPort_TLSRouteTwinLeavesTheServicesHTTPPorts(t *testing.T) {
 	services := a043Fixture()
 	c := a043Cache(t, services)
@@ -274,7 +274,7 @@ func TestPerPort_TLSRouteTwinLeavesTheServicesHTTPPorts(t *testing.T) {
 // service is reached on its declared port and on :18082, and a connection to
 // any other port of its address selects no chain of ANY service: it takes the
 // listener's default, the passthrough to the address that was dialled. Until
-// chart 2.7.0 a port-less any-port chain delivered every such connection to
+// chart 3.0.0 a port-less any-port chain delivered every such connection to
 // the declared port.
 func TestPerPort_RawTCPServiceIsReachedOnItsDeclaredPortsOnly(t *testing.T) {
 	services := a043Fixture()

@@ -34,7 +34,7 @@ func TestPerPortFixtureIsNotVacuous(t *testing.T) {
 	assert.True(t, chains["cap_tcp_tcp:pp-tcpfirst.default."+meshDomain+"_9000"])
 	// The raw-TCP-only service is reached on its own port and on the TCP
 	// mesh port, and on nothing else: no any-port chain, and no twin of one
-	// on an HTTP port number (removed in chart 2.7.0).
+	// on an HTTP port number (removed in chart 3.0.0).
 	var tcpOnly []string
 	for name := range chains {
 		assert.NotContains(t, name, "cap_tcp_anyport_")

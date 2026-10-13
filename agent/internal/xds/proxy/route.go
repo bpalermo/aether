@@ -429,7 +429,7 @@ type GammaRoute struct {
 	// namespace that no ReferenceGrant permits. They are invalid backendRefs
 	// and the Gateway API gives them the same answer as any other, 500 for
 	// their share of the rule's weight (DroppedBackendWeight; weight 0 takes
-	// nothing). Until chart 2.7.0 they were dropped silently: their share went
+	// nothing). Until chart 3.0.0 they were dropped silently: their share went
 	// to the rule's other backends, and a rule left with none routed to its
 	// parent Service. Set by the GAMMA reconciler, not by a projector.
 	DroppedBackends      bool

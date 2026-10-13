@@ -154,7 +154,7 @@ func TestCaptureReprojectionKeepsDeclaredPortChains(t *testing.T) {
 
 	t.Run("there is no any-port chain, before or after a re-projection", func(t *testing.T) {
 		// The any-port chain (cap_tcp_anyport_<cluster>) was removed in
-		// chart 2.7.0: a raw-TCP service is reached on the ports it declares
+		// chart 3.0.0: a raw-TCP service is reached on the ports it declares
 		// and on :18082. A re-projection must not bring it back.
 		c, reg := newReprojectCache(t)
 		projectEchoTCP(t, c)

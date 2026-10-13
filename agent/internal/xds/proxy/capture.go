@@ -117,7 +117,7 @@ type CaptureTCPService struct {
 	//
 	// Those two are the only ports a raw-TCP legacy target is reached on.
 	// There is no port-less "any port of the address" chain any more (it was
-	// cap_tcp_anyport_<cluster>, removed in chart 2.7.0): a connection to a
+	// cap_tcp_anyport_<cluster>, removed in chart 3.0.0): a connection to a
 	// port the service does not declare is not the service's.
 	//
 	// No service-level protocol is read to set it: the cache derives it from
@@ -733,7 +733,7 @@ func qualifyTLSChainsByPorts(svc CaptureTCPService, tlsChains []*listenerv3.Filt
 // Each is a copy of the same floor chain -- passthrough or TCPRoute-weighted
 // -- so they cannot drift from one another.
 //
-// Until chart 2.7.0 a service with no HTTP port also had a port-less chain,
+// Until chart 3.0.0 a service with no HTTP port also had a port-less chain,
 // cap_tcp_anyport_<cluster>, on which ANY other port of its address reached
 // the legacy target. It is gone: a raw-TCP service is reached on the ports it
 // declares. A connection to another port of its address matches no chain of

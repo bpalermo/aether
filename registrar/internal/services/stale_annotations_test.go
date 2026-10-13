@@ -1,7 +1,7 @@
 package services
 
 // The generated mesh Service says what the service serves with its PORTS, and
-// with nothing else. Through chart 2.7.0 it also carried aether.io/app-protocol
+// with nothing else. Through chart 2.6 it also carried aether.io/app-protocol
 // and aether.io/port, one protocol and one port for the whole service, which a
 // chart 2.6 agent read to choose a capture chain. Nothing reads them, the
 // generator no longer writes them, and it removes them from the Services it
@@ -42,7 +42,7 @@ func TestGenerator_NewServiceCarriesNoServiceLevelProtocol(t *testing.T) {
 }
 
 // TestGenerator_RemovesStaleAnnotationsOnce: a Service the generator owns that
-// still carries the annotations of an older registrar (chart 2.6, or 2.7.0)
+// still carries the annotations of an older registrar (chart 2.6)
 // loses them on the next reconcile, with exactly one Update, and is not
 // written again. Each annotation is removed on its own too, and everything
 // else on the Service is kept: aether.io/service, an annotation someone else

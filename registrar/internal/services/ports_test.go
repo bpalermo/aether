@@ -469,7 +469,7 @@ func TestGenerator_ConvergesTargetPortAndAppProtocol(t *testing.T) {
 		{"a real port with another targetPort", mutate(func(p []corev1.ServicePort) { p[3].TargetPort = intstr.FromInt32(9001) })},
 		{"a real port with a named targetPort", mutate(func(p []corev1.ServicePort) { p[3].TargetPort = intstr.FromString("9000") })},
 		{"a mesh port with another targetPort", mutate(func(p []corev1.ServicePort) { p[1].TargetPort = intstr.FromInt32(8080) })},
-		// A Service a chart 2.7.0 registrar wrote: the two scheme-default
+		// A Service a chart 2.6 registrar wrote: the two scheme-default
 		// placeholders are drift now, and go.
 		{"the scheme-default placeholders of an older registrar", append(mutate(func([]corev1.ServicePort) {}), legacyPort("http", 80), legacyPort("https", 443))},
 	}

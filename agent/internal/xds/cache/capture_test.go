@@ -73,7 +73,7 @@ func TestCaptureVhosts_RouteTargetRealPort(t *testing.T) {
 	assert.Contains(t, domains, "echo.team-a.svc.cluster.local:8080")
 	assert.Contains(t, domains, "echo.team-a.aether.internal:8080")
 	// 18081 is the proxy's port, not a port of the target: no table of a
-	// dialled port holds a virtual host that spells it. (Until chart 2.7.0
+	// dialled port holds a virtual host that spells it. (Until chart 3.0.0
 	// "<name>:18081" and the port-less name on a dial to 80 were served with
 	// the same rules, as "the port the pods declare".)
 	for _, port := range []uint32{80, 8080, 9090} {

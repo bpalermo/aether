@@ -1,11 +1,13 @@
 # Proposal 043: A mesh service is addressed by its real ports, and nothing else
 
-**Status:** Accepted 2026-10-11 — by the owner, with all twelve decisions taken
-as recommended (see *Decisions*). Phase 1 is built (chart 2.7.0; what it
-measured against this document is under *Phase 1 as built*). Planned: Phase 2
-in 2.8.0, Phase 3 in 2.9.0, Phase 4 in 2.10.0. The facts
-were read from `main` at `2a132053`; the measurements were made on the pinned
-proxy outside any cluster.
+**Status:** Accepted 2026-10-11 by the owner, with all twelve decisions taken
+as recommended (see *Decisions*), and built as **one breaking release, chart
+3.0.0** (decided 2026-10-12). The four phases this document planned over
+charts 2.7 to 2.10 were collapsed: see *The release* for what shipped, what the
+plan had that did not, and *Rulings after acceptance* for the decisions taken
+while it was built, which hold over the older text. The facts were read from
+`main` at `2a132053`; the measurements were made on the pinned proxy outside
+any cluster.
 **Resolves:** #1672. The defect reported there is the per-service primary
 itself; the owner decided to remove it, not to patch it. The acceptance of
 this proposal closes the issue: the phases below are the work, and Phase 1 is
@@ -886,12 +888,63 @@ to an endpoint whose row does not declare that port as HTTP, grace or not.
   replace an entry on the Service's older word, until the Service catches up.
   Not measured; the window is the registrar's reconcile lag.
 
-## Phases
+**2026-10-12: a mesh service fronted by a user-owned Service is not a
+captured mesh name.** Left as it is. The registrar generates a Service only
+for a name no other Service owns; a dial to a user's Service is a dial to an
+address the node does not capture as the mesh's, and leaves through the
+passthrough. The mesh name and the proxy port reach such a service through the
+mesh, by the user Service's port map. No code change; the runbook states it as
+a known limit.
 
-Chart versions follow the compatibility window (`AGENTS.md`, *Compatibility
-window*): the chart is 2.6.1 today; a thing deprecated in a published 2.8.x
-chart may be removed in 2.9.0 and not before. Each phase ships alone and can be
-rolled back to the chart before it.
+**2026-10-12: the release is chart 3.0.0.** The removals are made without a
+deprecation release, which the compatibility window allows only across a major
+version. The 2.7.x numbers the work carried while it was built were never
+published.
+
+## The release
+
+One release, chart **3.0.0**, built as a stack of pull requests that merges as
+one. `main` never holds a part of it: every merge to `main` publishes images
+and a chart, so the first pull request alone would have published half of the
+addressing rule.
+
+What shipped, against the plan below:
+
+| Planned | Shipped in 3.0.0 |
+|---|---|
+| Phase 1: per-port truth on both backends; the dialled port decides; the four refusals | yes |
+| Phase 2: a deprecation release with a counter per legacy spelling | **not built.** The spellings are removed outright; the runbook says how to find their clients on 2.6.x from the access log and the any-port chain's counter |
+| Phase 2: the prober, the e2e suites, `udsecho` and the docs moved to real ports | yes (prober chart 1.1.0) |
+| Phase 3: `<name>:18081` and a name without a port no longer mean "the port the pods declare" | yes. **18081 stays, permanently, as the HTTP proxy port**: a client that connects to it is asked, by `Host`, for a service and a port. No cluster is named for it and no pod may declare it |
+| Phase 3: the any-port chain; `aether.io/app-protocol` and `aether.io/port`; the `http`/`https` placeholder ports | removed |
+| Phase 3: `:18082` for raw TCP, the Service's `mesh` and `mesh-tcp` ports, the floor cluster | **kept.** A raw-TCP service is reached on its declared ports and on `:18082` |
+| Phase 3: scoped capture removed | **kept** |
+| Phase 2/3: UDP through `EndpointSlice`s, the per-pod UDP listener removed | **not built**; UDP is as in 2.6 |
+| Phase 2: per-port QUIC twins; a `port` on `GammaBackend` and on the config projection | **not built.** An imported rule carries no port (the runbook says what that means while a node holds no endpoint) |
+| Phase 4: the receiver-side forms kept for older sources removed | **not done**: nothing on the receiving side was removed |
+
+Decided while it was built, each under *Rulings after acceptance*: a name
+without a namespace is the caller's namespace's, and is not a mesh name where
+that namespace has no mesh service of it; a cold request is strict; 18081 and
+18082 are a port of no service; `port_protocols` is required; a retained HTTP
+virtual host is replaced on evidence; a user-owned Service is left as it is.
+
+- **Harness contract:** version 4 (the any-port chain's stat entry removed).
+- **Skew:** 2.6 with 3.0 in one cluster is not a supported pair, and the
+  upgrade is not hitless. What each mix does was measured on kind with 2.6.2
+  images on one side, both backends, and is in the runbook ("During the roll,
+  and rolling back").
+- **Conformance**, Gateway API v1.6.3, on the heads of the stack as each was
+  finished: MESH-HTTP 7 passed, 0 failed; GATEWAY-HTTP 36 passed, 0 failed,
+  and 10 passed, 0 failed (the two gateway runs), read from the job logs of
+  the dispatched runs.
+- **Not run:** the 8-hour soak the plan gated Phase 3 on.
+
+## Phases as planned (superseded by *The release*)
+
+Kept as the record of what was accepted on 2026-10-11. The chart numbers are
+the plan's: none of 2.7.0 to 2.10.0 was published. Where this text and *The
+release* or a ruling differ, they hold.
 
 ### Phase 1 (chart 2.7.0): per-port truth, no client-visible change
 
@@ -1260,7 +1313,7 @@ was not chosen is kept in one clause.
 
 ## Phase 1 as built
 
-Added with the Phase 1 pull request (chart 2.7.0). What was built is the phase
+Added with the first pull request of the stack (then numbered chart 2.7.0; released in 3.0.0). What was built is the phase
 above. This section records where a measurement or the code contradicted this
 document, what was decided in each case and by whom it still has to be
 confirmed, and what the phase did not do. The text above is otherwise as

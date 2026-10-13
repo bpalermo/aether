@@ -3979,12 +3979,35 @@ draining` carries `successorWaitBudget`: it is a positive duration, never `0s`.
 Measured: the renders and the template tests
 (`bazel test //charts/aether:all`), and a unit test that holds the chart's 15 s
 to the supervisor's two constants. Not run on a cluster.
-#### Chart 2.7.0: a port is typed by its own declaration, and the dialled port decides (proposal 043, Phase 1; #1672, #1682)
+#### Chart 3.0.0: a port is typed by its own declaration, and the dialled port decides (proposal 043; #1672, #1682)
 
-Nothing to set and nothing removed. No value, flag or CRD changes, and every
-address that reached an application on 2.6 reaches the same one on 2.7. What
-changes is what the mesh does with an address that was answered by the WRONG
-port, and how the node proxy's capture listener is laid out.
+**A breaking release, and the reason for the major version.** A service is
+reached on the ports its pods declare, by their numbers, and on nothing else.
+The spellings that meant "the port the pods declare" are gone (`<name>:18081`,
+a name without a port, `<name>:18082`), a name without a namespace is the
+caller's namespace's, a pod cannot declare the mesh's own two ports, and a
+registry row must say the protocol of each of its ports. Each has a section
+below headed BREAKING, with what to look for on 2.6.x before upgrading.
+
+No chart value, flag or CRD changes. `18081` stays, permanently, as the
+mesh's HTTP proxy port (`curl --proxy http://127.0.0.1:18081`), where the
+`Host` header says which service and which port.
+
+- Chart 2.7.x was never published: 3.0.0 follows 2.6.x.
+- The upgrade is not hitless across versions, by decision. See "During the
+  roll, and rolling back" before scheduling it.
+- Deploy prober chart 1.1.0 first (its section follows this one).
+
+**What the major version changes for the compatibility window.** "One
+release" stays one minor of the `aether` chart (`charts/README.md`,
+"Compatibility window"), and nothing here was deprecated in a published 2.x
+chart first: the removals are made in a major version instead, which is what a
+major version is for, and this section is their announcement. From 3.0.0 the
+window is counted in 3.x minors as before: something deprecated in 3.0.x may
+go in 3.1.0. The skew the project designs and tests for is still two adjacent
+minors; 2.6 with 3.0 in one cluster is NOT such a pair, and what it does is
+measured below instead of promised. The harness contract's version (4) and
+the `prober`, `udsecho` and `crds` charts are unchanged by the number.
 
 ##### What is fixed
 
@@ -4061,8 +4084,9 @@ requests with their original `Host` to a different port.
     Service start resolving the name to another number. A name it cannot
     resolve (no slice yet, or slices that disagree) is logged, and a
     `backendRef` to it keeps reaching the backend's declared port. A numeric
-    `targetPort` has none of this. The agent's ClusterRole gains `list` and
-    `get` on `endpointslices` for it.
+    `targetPort` has none of this. The agent's ClusterRole gains `list`,
+    `get` and `watch` on `endpointslices` for it (the watch holds the slices'
+    metadata only).
   - A `backendRef` of another kind than a Service, or to a Service in another
     namespace with no `ReferenceGrant`, is invalid in the same way: its share
     is answered **500** (the status already said `InvalidKind` or
@@ -4147,7 +4171,7 @@ the name is unique in the cluster.
 
 | Request | Through chart 2.6 | Now |
 |---|---|---|
-| `Host: echo:8080`, the caller's namespace has a mesh service `echo` | `echo` if exactly one namespace had one; refused otherwise since 2.7 | the caller's namespace's `echo` |
+| `Host: echo:8080`, the caller's namespace has a mesh service `echo` | `echo` if exactly one namespace had one | the caller's namespace's `echo` |
 | the same, and another namespace gains an `echo` | every caller of the short name lost it | nothing changes for the existing callers |
 | `Host: echo:8080`, the caller's namespace has no MESH service `echo`, another has | that other namespace's `echo` | not a mesh name for this caller: handled like any destination that is not the mesh's (below). Never the other namespace's `echo` |
 
@@ -4245,6 +4269,17 @@ registry and the agent watches.
   this chart the generated Service carries its ports and the state does not
   occur.
 
+- **Known limit, by decision (2026-10-12): a mesh service fronted by a Service
+  of yours is not a captured mesh name.** The registrar generates a Service
+  for a registered service only when no other Service owns the name. When one
+  of yours does, a dial to it is a dial to your Service's ClusterIP, which the
+  node does not capture as a mesh address: the connection leaves through the
+  passthrough to kube-proxy and reaches the pods from outside the mesh (no
+  mTLS between proxies on that hop, no route rule, no service-wide filter).
+  The mesh name (`<svc>.<ns>.<mesh-domain>`) and the proxy port still reach it
+  through the mesh, by your Service's port map (the table above). To have the
+  Kubernetes name captured, let the registrar own the Service: delete yours.
+
 - An authority that names `18081` or `18082` is never offered on demand, for a
   name the node knows nothing of either: `421 port-not-declared`, at once. No
   cluster is named for those ports (the `<fqdn>:18081` alias cluster of chart
@@ -4298,7 +4333,7 @@ port-less `http://<name>/` (a dial to port 80), and a `Host` without a port,
 or with `:18081`, sent to `127.0.0.1:18081`. None of them does any more. A
 service is addressed on a port it declares.
 
-| What the client sends | Chart 2.6 | Chart 2.7.0 |
+| What the client sends | Chart 2.6 | Chart 3.0.0 |
 |---|---|---|
 | `http://<name>:<declared port>/` | that port | that port (unchanged) |
 | `http://<name>/` (dials 80), the service declares 80 | the port in `endpoint.aether.io/port` | port 80 |
@@ -4497,7 +4532,7 @@ Service, and the registrar **removes** them from every generated Service on
 its first reconcile. They carried a protocol and a port for the service as a
 whole, which no longer exists: each port is typed by its own `appProtocol`.
 A chart 2.6 agent reads `aether.io/app-protocol` to choose a service's
-capture chain; behind a 2.7 registrar it finds none and treats every service
+capture chain; behind a 3.0 registrar it finds none and treats every service
 as HTTP. That is one of the reasons this upgrade is not hitless across
 versions (see "During the roll").
 
@@ -4527,7 +4562,7 @@ mixed. What each mix does, measured on kind with chart 2.6.2 images on one
 side and this release on the other, both registry backends
 (`e2e/README.md`, "Version skew with multiprotocol.sh"):
 
-- **2.6 agents behind the 2.7 registrar** (every node not yet rolled; the
+- **2.6 agents behind the 3.0 registrar** (every node not yet rolled; the
   window of a normal helm upgrade). The generated Services have lost
   `aether.io/app-protocol`, which a 2.6 agent reads to choose a service's
   capture chain: it takes every service for HTTP.
@@ -4537,15 +4572,15 @@ side and this release on the other, both registry backends
     service answers 502 or 503 where it was refused by name.
   - HTTP services answer exactly as on 2.6, old spellings included: the
     addressing is the source agent's, and it is still 2.6.
-- **2.7 agents behind a 2.6 registrar** (only if the registrar is held back).
+- **3.0 agents behind a 2.6 registrar** (only if the registrar is held back).
   - On `etcd` every data-plane check passes; only the generated Service still
     has its 2.6 shape (placeholders and annotations, no real ports).
   - On `kubernetes` the services whose pods serve both HTTP and raw TCP are
-    half-served until the registrar is 2.7: its listing puts such a pod under
+    half-served until the registrar is 3.0: its listing puts such a pod under
     one protocol only, so the other class's ports are refused
     (`421 no-http-port` or `port-not-declared`) or get no reply.
-- **A client on a 2.7 node** is held to the new addressing from the moment its
-  node's agent is 2.7, whatever version the destination's node runs: the
+- **A client on a 3.0 node** is held to the new addressing from the moment its
+  node's agent is 3.0, whatever version the destination's node runs: the
   refusals are decided by the source proxy.
 - **Registry rows across the mix.** Every 2.x agent writes rows with
   `port_protocols`, so a not-yet-rolled agent's registrations are accepted by
@@ -4555,12 +4590,18 @@ side and this release on the other, both registry backends
   registrar still hands it (see "a registry row must say the protocol of each
   of its ports"). Read from the code and unit-tested per component; no mixed
   cluster was built with such a row in it.
-- **A 2.7 source and a 2.6 destination, or the reverse:** the hop between
+- **A 3.0 source and a 2.6 destination, or the reverse:** the hop between
   proxies is unchanged (not measured separately: both cells above mix
   versions only between agents and registrar, on one node).
 - **Rollback** to 2.6.x: the 2.6 registrar stamps the annotations and the
   placeholder ports back on its next reconcile, and the old spellings work
   again node by node as the agents roll back (read from the code, not run).
+
+**Release order.** The change is thirteen pull requests that merge as one
+GitHub stack, in one operation, so that `main` never holds a part of it: each
+merge to `main` publishes images and a chart, and the first pull request alone
+would publish a chart with half of the addressing rule. No chart between 2.6.x
+and 3.0.0 exists.
 
 Do it in a maintenance window, clients moved first (see the two BREAKING
 sections above and "Prober chart 1.1.0"), and expect raw-TCP services to be
@@ -4568,10 +4609,10 @@ unreachable from not-yet-rolled nodes for the duration of the agent roll.
 
 #### Prober chart 1.1.0: targets name a declared port (proposal 043)
 
-Deploy prober chart **1.1.0 before** `aether` chart 2.7.0. It works against
+Deploy prober chart **1.1.0 before** `aether` chart 3.0.0. It works against
 2.6 (a declared port has always been addressable), and the prober of chart
-1.0.x cannot probe a 2.7.0 mesh: it addressed its targets as `<name>:18081`
-and with a port-less `Host`, which 2.7.0 no longer reads as "the port the pods
+1.0.x cannot probe a 3.0.0 mesh: it addressed its targets as `<name>:18081`
+and with a port-less `Host`, which 3.0.0 no longer reads as "the port the pods
 declare".
 
 | Tier | Dials | What a failure isolates |
@@ -4583,7 +4624,7 @@ declare".
 No tier loses coverage. What changes in **your values**:
 
 - `probe.reachabilityTargets`: write `<svc>.<ns>:<port>`. An entry without a
-  port sends a port-less `Host`, which on 2.7.0 is port 80 and nothing else.
+  port sends a port-less `Host`, which on 3.0.0 is port 80 and nothing else.
 - `probe.meshDNSTargets`: write `<fqdn>:<port>`. No port is appended any more
   (the default was 18081); an entry without one dials 80. The chart's default
   targets name `echo.aether-test` on **8080**: check that against the port

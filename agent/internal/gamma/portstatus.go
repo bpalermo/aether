@@ -44,7 +44,7 @@ type portFacts struct {
 // generatedPortName matches the name the registrar gives a REAL port of a
 // generated mesh Service, "p<port>-tcp" or "p<port>-udp". Its other ports
 // (mesh, mesh-tcp, http, https) are fixed placeholders, not ports the service
-// serves: until chart 2.7.0 a route that named 18081 or 80 was read as "the
+// serves: until chart 3.0.0 a route that named 18081 or 80 was read as "the
 // port the pods declare".
 var generatedPortName = regexp.MustCompile(`^p[0-9]+-(tcp|udp)$`)
 

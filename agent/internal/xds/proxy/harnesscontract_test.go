@@ -94,7 +94,7 @@ func diffStrings(want, got []string) (onlyWant, onlyGot []string) {
 
 // TestExternalHarnessContract_AnyPortStat held the any-port shim's stat prefix
 // to the external-harness contract until version 3. Version 4 removed the
-// entry together with the chain (chart 2.7.0), and what the test holds now is
+// entry together with the chain (chart 3.0.0), and what the test holds now is
 // the removal: the contract has no Envoy stat entry, and no chain of a capture
 // listener the real generator built counts under the prefix a version-3
 // harness reads. A harness reading it sees no series, and the contract's
