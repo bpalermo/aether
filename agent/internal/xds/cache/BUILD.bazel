@@ -161,6 +161,7 @@ cache_go_test(
         "perport_sixth_backend_043_test.go",
         "perport_sixth_walk_043_test.go",
         "perport_skew_043_test.go",
+        "perport_tenth_043_test.go",
         "perport_third_043_test.go",
         "perport_third_gaps_043_test.go",
         "perport_third_imported_043_test.go",

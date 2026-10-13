@@ -183,6 +183,20 @@ And a clean run is not evidence of absence: the detector only reports
 interleavings a test actually produced, so a race between two goroutines no test
 runs concurrently stays invisible no matter how often you run it.
 
+**What CI's `race` job runs how often.** Impacted tests run once under the
+detector, and the tests of the concurrency-heavy packages (the list is in
+`.github/workflows/ci.yaml`) run three times. One target of such a package is
+the exception and runs **once**: `//agent/internal/xds/cache:cache_walk_test`,
+the fifteen seeded random walks of proposal 043. They are single-goroutine and
+deterministic for a seed, so a second and a third run repeat the first step
+for step; they are nine tenths of that package's test time, and at three runs
+they had brought the job to 54 of its 60 minutes. Three runs was the figure
+until then, and is still the figure for everything else in the package
+(`cache_test`, the interleaving tests among them). The split is one macro call
+in the package's BUILD file (`cache_go_test`, `defs.bzl`): a new walk is added
+to the list there, and a `--test_filter` that names a walk goes to
+`cache_walk_test`.
+
 ### The external-harness contract
 
 A harness outside this repository (one that rolls the mesh's workloads, reads
@@ -4205,7 +4219,14 @@ requests with their original `Host` to a different port.
       port is `421 port-not-declared` too. Every one of these 421s says why
       in its body, on every table: `Its Service's port 8000 has a targetPort
       that is a name the Service's EndpointSlices do not resolve yet: it is
-      refused until they do.`
+      refused until they do.` That holds for every refusal the name gets
+      while one of its Service's ports is unresolved, whatever the refusal is
+      for: `port-required` for the name without a port, `port-not-http`,
+      `port-mismatch`, and `no-http-port`. The last one says, for a name the
+      node knows no port of at all (a filter or a route and the port map
+      alone), `<name> has no port it can be addressed on yet` and not "serves
+      no HTTP port. Reach it over TCP instead", which it said until this was
+      fixed.
 
     **Whose names are resolved.** Every Service of yours the node's proxy
     can reach a mesh service through: one a route names, one a service-wide
@@ -4215,9 +4236,19 @@ requests with their original `Host` to a different port.
     `targetPort: <name>`, which is the common way to write a Service, then
     had no port at all on the proxy port: `421`, "Its ports: none", on every
     spelling and for as long as the Service existed, with nothing logged.) A
-    Service that fronts nothing of the mesh on the node is not read. The cost
-    is one EndpointSlice list per reconcile for each such Service that has a
-    named `targetPort`, and none for any other.
+    Service that fronts nothing of the mesh on the node is not read.
+
+    **What it costs.** The agent keeps, per Service, what the Service's
+    EndpointSlices said, and lists them again only for the Service a slice
+    event was seen for: **one list per slice event, of that Service**, not one
+    per concerned Service. (Read anew on every reconcile it was the latter:
+    with 200 such Services, 200 lists on every node for each pod of any of
+    them starting or stopping.) Everything is read once when the agent
+    starts. A kept answer is dropped, and the Service read again, when the
+    Service's named ports change, when the Service object is replaced, when
+    the Service has not been one of the concerned ones in between, and when
+    the answer is ten minutes old: that last is the bound on a slice change
+    the agent was never told of, and the agent wakes itself for it.
 
     Through chart 2.6, and the first builds of this one, such a reference
     was served by the port the pods declare in `endpoint.aether.io/port`: a
@@ -4249,13 +4280,17 @@ requests with their original `Host` to a different port.
     `watch` on `endpointslices` for this; the slices themselves are read
     from the API for those Services only and are not cached.
 
-    **When the API server cannot be read.** A reconcile that cannot list a
-    Service's EndpointSlices refuses that Service's named ports and fails;
-    the controller runs it again with a back-off that starts at 5 ms and is
-    capped at **30 s** (controller-runtime's default grows to 1000 s). So
-    after an API outage the ports are routed again within 30 s of the API
-    answering, and during it they are refused, not served from an older
-    answer. The same cap holds for a status write that fails.
+    **When the API server cannot be read.** A reconcile that has to list a
+    Service's EndpointSlices (a slice event of it, a change of its named
+    ports, the ten-minute re-read) and cannot refuses THAT Service's named
+    ports, not served from the older answer, and fails; the other Services
+    keep their answers and stay routed. The controller runs the reconcile
+    again with a back-off that starts at 5 ms and is capped at **30 s**
+    (controller-runtime's default grows to 1000 s), and the retry reads only
+    what failed. So a Service whose slices changed during an API outage is
+    refused until the API answers, and routed again within 30 s of that; a
+    Service nothing happened to is not touched by the outage. The same cap
+    holds for a status write that fails.
   - A `backendRef` of another kind than a Service, or to a Service in another
     namespace with no `ReferenceGrant`, is invalid in the same way: its share
     is answered **500** (the status already said `InvalidKind` or

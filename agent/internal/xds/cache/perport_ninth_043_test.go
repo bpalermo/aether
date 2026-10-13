@@ -7,6 +7,7 @@ import (
 	"context"
 	"log/slog"
 	"testing"
+	"time"
 
 	"aethermesh.dev/agent/internal/gamma"
 	"aethermesh.dev/agent/internal/xds/proxy"
@@ -105,7 +106,8 @@ func TestPerPort_AnUnroutedServiceWithANamedTargetPortIsAddressedByItsMeshName(t
 		}}).Build()
 	c := a043Cache(t, nil)
 	c.SetStaticDependencies([]string{"demo/web"})
-	rec := &gamma.Reconciler{Client: cl, APIReader: cl, Sink: c, PodPorts: c, MeshDomain: a043Mesh, Log: slog.New(slog.DiscardHandler)}
+	now := time.Unix(1_700_000_000, 0)
+	rec := &gamma.Reconciler{Client: cl, APIReader: cl, Sink: c, PodPorts: c, MeshDomain: a043Mesh, Log: slog.New(slog.DiscardHandler), Now: func() time.Time { return now }}
 	changed := false
 	c.OnPodPortsChanged(func() { changed = true })
 	reconcileOnce := func() {
@@ -131,6 +133,9 @@ func TestPerPort_AnUnroutedServiceWithANamedTargetPortIsAddressedByItsMeshName(t
 	// The slice goes (the Service scaled to nothing): unresolved, refused, and
 	// the refusal says why on the proxy port too, not "Its ports: none" alone.
 	require.NoError(t, cl.Delete(ctx, slice))
+	// The slice's event is the watch's business (gamma's own tests); here
+	// the kept answer is simply too old to be used again.
+	now = now.Add(11 * time.Minute)
 	reconcileOnce()
 	require.NoError(t, c.generateSnapshot(ctx))
 	tables = a043Tables(t, c)
