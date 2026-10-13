@@ -938,10 +938,13 @@ service once, by one function, from the registry rows it holds (the class
 most pods declare where they disagree; a row whose port map names a port it
 does not list is refused). Every route table of the node is built from that
 value: the loopback table, the proxy-port table, the table of each dialled
-port. A refresh that forgets a service's ports rebuilds what was built from
-them in the same snapshot. The route's status is computed from the same value,
-handed out by the cache, and is judged again when the value changes, by an
-event, not on a timer.
+port. A virtual host is marked as built from a given state of the rules and
+of the ports only by the code that built it, entry by entry: a refresh that
+carries an entry over (a retained one), or that forgets a service's ports
+after building, does not vouch for it, and the next snapshot rebuilds it. The
+route's status is computed from the same value, handed out by the cache, and
+is judged again when the value changes, by an event, not on a timer; a status
+write that fails is retried.
 
 A route has one status and every node's agent writes it. Each condition is a
 function of facts, computed anew on every reconcile; nothing a status said
@@ -952,21 +955,37 @@ route, is recorded in the route's own status (a condition of type
 `gateway.aether.io/PodPortsJudged` on aether's parent entry), which is the
 one place every agent reads. A node that holds the pods writes its own
 verdict; a node that does not computes its conditions from the recorded one,
-a True like a False. So a node that knows beats one that does not, two that
-know agree, a False goes when its cause does, and an unchanged route reaches
-a status that no node writes again. A service with no Service object yet is
-judged the same way, by the ports its pods declare. Two things this does not
-claim: for a generated Service the status follows the Service's ports, which
-trail the rows by one registrar write; and while two nodes hold different
-rows of one service (a registry update in flight) each writes what it holds,
-until the rows are the same.
+a True like a False. So a node that knows beats one that does not, a False
+goes when its cause does, and nodes that hold the same rows (or none) reach a
+status that none of them writes again. A service whose Service says nothing
+of its ports (no Service object yet, or a generated one with no real port) is
+judged the same way, by the ports its pods declare.
+
+Writers that do NOT compute the same status cannot settle, and are bounded
+instead: two nodes that hold different rows of one service (a registry update
+in flight), and an agent of the chart before during the roll. An agent that
+finds its own entry overwritten with something else writes it back once at
+once and then no sooner than 5 s, 10 s, 20 s ... up to 5 minutes after its
+previous write (per route and per node: at most 5 writes in the first minute,
+at most one every 5 minutes from about ten minutes on), and the last word is
+that of the agent whose turn comes last, which is an agent of this chart once
+the other stops. One thing is not claimed: for a generated Service that
+carries ports the status follows the Service, which trails the rows by one
+registrar write.
 
 **2026-10-13: a filter does not turn a working call into a refusal, on any
-spelling.** A dial to a user-owned Service's address and port with the
-service's mesh name in `Host`, on a port number no mesh service serves as
-HTTP, passed through before a service-wide filter was attached and passes
-through after it. The table of such a port number does not refuse a name it
-has by its mesh authority alone.
+spelling or table.** A mesh service whose Kubernetes names a Service of the
+user's owns, and that no route names, is in a node's tables by its mesh
+authority alone, because something (a service-wide filter) applies to it. On
+the table of a captured dial an authority that names it is never refused. The
+request is a mesh delivery, with the service's filters, where the port that
+was dialled is a port of the user's Service that owns the name or the port
+number the service's own pods serve as HTTP, and `Host` names that port or
+none. In every other case it leaves to the address that was dialled, as it
+did before the filter existed: another port number, or a `Host` that names
+another port than the one dialled. It is never fetched on demand without the
+filter. The proxy port and the loopback listener are not a captured dial to
+another address, and refuse there as for any service.
 
 ### Behaviour awaiting an owner ruling
 

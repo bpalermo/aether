@@ -848,22 +848,36 @@ func wireGAMMA(m ctrl.Manager, snapshotCache *cache.SnapshotCache) error {
 	if err := configapisv1.AddToScheme(m.GetScheme()); err != nil {
 		return fmt.Errorf("register config.aether.io scheme: %w", err)
 	}
-	gammaReconciler := &gamma.Reconciler{
-		Client:    m.GetClient(),
-		APIReader: m.GetAPIReader(),
-		// The class of a pod port for a route's status is the cache's own
-		// answer, the one its tables are built from: no registry read. The
-		// cache says when that answer changed, and the status is judged again.
-		PodPorts:        snapshotCache,
-		PodPortsChanged: podPortsEvents(snapshotCache),
-		Sink:            snapshotCache,
-		MeshDomain:      cfg.MeshDomain,
-		Log:             l,
-	}
+	gammaReconciler := newGammaReconciler(m.GetClient(), m.GetAPIReader(), snapshotCache, cfg.MeshDomain)
 	if err := gammaReconciler.SetupWithManager(m); err != nil {
 		return fmt.Errorf("failed to set up GAMMA reconciler: %w", err)
 	}
 	return nil
+}
+
+// gammaCache is what the GAMMA reconciler is given of the snapshot cache.
+type gammaCache interface {
+	gamma.RouteSink
+	gamma.PodPorts
+	OnPodPortsChanged(func())
+}
+
+// newGammaReconciler builds the GAMMA reconciler over the node's snapshot
+// cache. The cache is its sink; it is also what answers, for a route's status,
+// what the pods of a service declare (the class its own tables are built from:
+// no registry read), and what says when that answer changed. The last is the
+// only thing that makes the reconciler judge a status again when no API object
+// changed, so a reconciler built without it leaves "Not checked" for good.
+func newGammaReconciler(cl client.Client, reader client.Reader, c gammaCache, meshDomain string) *gamma.Reconciler {
+	return &gamma.Reconciler{
+		Client:          cl,
+		APIReader:       reader,
+		PodPorts:        c,
+		PodPortsChanged: podPortsEvents(c),
+		Sink:            c,
+		MeshDomain:      meshDomain,
+		Log:             l,
+	}
 }
 
 // podPortsEvents returns a channel that carries an event whenever the cache

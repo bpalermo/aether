@@ -2,9 +2,40 @@ package cmd
 
 import (
 	"testing"
+
+	"aethermesh.dev/agent/internal/gamma"
 )
 
 type hookHolder struct{ fn func() }
+
+// fakeGammaCache is a snapshot cache as the GAMMA reconciler sees it.
+type fakeGammaCache struct {
+	gamma.RouteSink
+	gamma.PodPorts
+	hookHolder
+}
+
+// TestNewGammaReconciler_IsGivenTheCachesEvents: the reconciler the agent
+// runs is built over the cache in every role, the events included.
+func TestNewGammaReconciler_IsGivenTheCachesEvents(t *testing.T) {
+	c := &fakeGammaCache{}
+	r := newGammaReconciler(nil, nil, c, "mesh.example")
+	if r.Sink != gamma.RouteSink(c) || r.PodPorts != gamma.PodPorts(c) {
+		t.Fatal("the reconciler's sink and its pod-port answers are not the cache")
+	}
+	if r.MeshDomain != "mesh.example" {
+		t.Fatalf("mesh domain %q", r.MeshDomain)
+	}
+	if r.PodPortsChanged == nil || c.fn == nil {
+		t.Fatal("the reconciler is not given the cache's pod-port events: nothing would make it judge a status again when no API object changed")
+	}
+	c.fn()
+	select {
+	case <-r.PodPortsChanged:
+	default:
+		t.Fatal("the cache said its pods' ports changed and the reconciler's channel carries no event")
+	}
+}
 
 func (h *hookHolder) OnPodPortsChanged(fn func()) { h.fn = fn }
 

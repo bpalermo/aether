@@ -1,7 +1,9 @@
 package gatewaystatus
 
 import (
+	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -158,5 +160,38 @@ func TestRemoveRouteParentCondition(t *testing.T) {
 	}
 	if _, changed := RemoveRouteParentCondition(parents, MeshControllerName, ref("c"), "Accepted"); changed {
 		t.Fatal("no entry for that parentRef: not a change")
+	}
+}
+
+// TestClampMessage: a condition message longer than the API server accepts
+// fails the whole status update, every condition of the route with it. It is
+// cut, at a character boundary, and says so; a message that fits is untouched.
+func TestClampMessage(t *testing.T) {
+	short := strings.Repeat("a", MaxConditionMessage)
+	if ClampMessage(short) != short {
+		t.Fatal("a message of exactly the cap was changed")
+	}
+	long := strings.Repeat("€", MaxConditionMessage) // three bytes each: the cut does not fall on a boundary
+	got := ClampMessage(long)
+	if len(got) > MaxConditionMessage {
+		t.Fatalf("clamped to %d bytes, the cap is %d", len(got), MaxConditionMessage)
+	}
+	if !utf8.ValidString(got) {
+		t.Fatal("cut inside a character")
+	}
+	if !strings.HasSuffix(got, " ... (truncated)") || !strings.HasPrefix(got, "€€") {
+		t.Fatalf("clamped message is %q...%q", got[:8], got[len(got)-20:])
+	}
+
+	// The merge is where every route status is written from.
+	parents, changed := MergeRouteParentStatus(nil, MeshControllerName, gatewayParentRef("gw"), 1,
+		Condition{Type: "ResolvedRefs", Status: metav1.ConditionTrue, Reason: "ResolvedRefs", Message: long})
+	if !changed || len(parents[0].Conditions[0].Message) > MaxConditionMessage {
+		t.Fatalf("the merge wrote a message of %d bytes", len(parents[0].Conditions[0].Message))
+	}
+	// And it is stable: the same too-long message again is not a change.
+	if _, changed := MergeRouteParentStatus(parents, MeshControllerName, gatewayParentRef("gw"), 1,
+		Condition{Type: "ResolvedRefs", Status: metav1.ConditionTrue, Reason: "ResolvedRefs", Message: long}); changed {
+		t.Fatal("the same message, clamped the same, was written again")
 	}
 }

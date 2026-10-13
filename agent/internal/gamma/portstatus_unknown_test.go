@@ -24,7 +24,7 @@ func TestStatus_GeneratedServiceWithoutRealPortsIsNotJudged(t *testing.T) {
 	svc := generatedService("multi", nil)
 	svc.Spec.Ports = append(svc.Spec.Ports, corev1.ServicePort{Name: "https", Port: 443, TargetPort: intstr.FromInt32(443)})
 	f := servicePortFacts(svc)
-	require.True(t, f.unknown)
+	require.True(t, f.absent)
 	facts := map[string]portFacts{"ns/multi": f}
 	port := gatewayv1.PortNumber(8080)
 
@@ -36,7 +36,7 @@ func TestStatus_GeneratedServiceWithoutRealPortsIsNotJudged(t *testing.T) {
 	h := "http"
 	svc.Spec.Ports = append(svc.Spec.Ports, corev1.ServicePort{Name: "p9090-tcp", Port: 9090, AppProtocol: &h})
 	facts["ns/multi"] = servicePortFacts(svc)
-	require.False(t, facts["ns/multi"].unknown)
+	require.False(t, facts["ns/multi"].absent)
 	ok, _, _ = backendPortProblem(facts, "ns", []gatewayv1.BackendObjectReference{{Name: "multi", Port: &port}})
 	assert.False(t, ok, "8080 is not a port of a Service that carries its real ports")
 }

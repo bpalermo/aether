@@ -377,3 +377,28 @@ func CheckRow(ep *registryv1.ServiceEndpoint) error {
 	}
 	return nil
 }
+
+// ElectPortClass picks the one class a port number of a service has when its
+// endpoints declare it with several (a rollout that retypes a port): the class
+// most endpoints declare, ties to HTTP, then raw TCP, then UDP. votes is, per
+// class, how many endpoints declare the port with it; the answer reads only
+// the counts, so it does not depend on the order the endpoints were listed in.
+// PORT_PROTOCOL_UNSPECIFIED when there is no vote.
+//
+// It is ONE function because two components elect: the registrar, for the
+// ports of the Service it generates, and the node agent, for its route tables
+// and chains. A route's status reads the first and the proxy the second, and
+// for the same rows they must not differ.
+func ElectPortClass(votes map[registryv1.PortProtocol]int) registryv1.PortProtocol {
+	winner, best := registryv1.PortProtocol_PORT_PROTOCOL_UNSPECIFIED, 0
+	for _, class := range []registryv1.PortProtocol{
+		registryv1.PortProtocol_PORT_PROTOCOL_HTTP,
+		registryv1.PortProtocol_PORT_PROTOCOL_TCP,
+		registryv1.PortProtocol_PORT_PROTOCOL_UDP,
+	} {
+		if votes[class] > best {
+			winner, best = class, votes[class]
+		}
+	}
+	return winner
+}

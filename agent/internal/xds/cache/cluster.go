@@ -404,6 +404,8 @@ func (c *SnapshotCache) LoadClustersFromRegistry(ctx context.Context, clusterNam
 		}
 	}
 	c.servicePorts = ports
+	// The ports the passes below judge every rule by.
+	builtWith := maps.Clone(ports)
 	// Rebuild the cluster set so this method is idempotent and safe to call
 	// repeatedly (on registry changes, not just at startup). Services that
 	// disappeared from the listing are NOT dropped immediately: pod churn can
@@ -427,26 +429,27 @@ func (c *SnapshotCache) LoadClustersFromRegistry(ctx context.Context, clusterNam
 	c.buildUDPClustersLocked(ctx, deps, udpServiceEndpoints, in, prev, reuse)
 	c.commitRegistryReuseLocked(reuse)
 	c.retainAbsentClustersLocked(ctx, prev, deps, retentionEvidence{listed: listed, declared: declared})
-	// Every virtual host built or refreshed above came from the rule inputs
-	// read at loadRuleGen. If a newer generation exists (an event landed while
-	// the listings were being read), the next snapshot build must rebuild
-	// them: say which generation they are at, never leave a newer one standing.
-	c.vhostRuleGen = loadRuleGen
-	remembered := len(c.servicePorts)
 	c.pruneServicePortsLocked(listed)
-	if len(c.servicePorts) != remembered {
-		// The entries' virtual hosts above were built while the ports of a
-		// service this refresh has now forgotten were still known (a service
-		// whose grace ran out, or one reset to its generated Service: both go
-		// in the retention step, after the passes). A rule of ANOTHER service
-		// whose backendRef names it was judged by those ports: the loopback
-		// table answered 500 where the capture tables of the same snapshot
-		// and a node that starts now route the reference, or routed it to
-		// the bare cluster where they answer 500. The next snapshot build
-		// rebuilds the virtual hosts from what is known now.
-		c.vhostRuleGen = loadRuleGen - 1
-	}
 	c.noteServicePortsLocked(prevPorts)
+	// Say what the virtual hosts built above were built from, on the entries
+	// that were built and on no other (stampBuiltVhostsLocked). The rule
+	// inputs were read at loadRuleGen: if a newer generation exists (an event
+	// landed while the listings were being read) the stamp is already old and
+	// the next snapshot build rebuilds them.
+	//
+	// The ports are those of this refresh only when it forgot none after
+	// building. It forgets, after the passes, the ports of a service whose
+	// grace ran out and of one reset to its generated Service; a rule of
+	// ANOTHER service whose backendRef names it was judged by them, and the
+	// loopback table answered 500 where the capture tables of the same
+	// snapshot and a node that starts now route the reference, or routed it
+	// to the bare cluster where they answer 500. Those virtual hosts get no
+	// stamp at all, and the next snapshot build rebuilds them.
+	stamp := vhostStamp{}
+	if maps.EqualFunc(builtWith, c.servicePorts, sameServicePorts) {
+		stamp = vhostStamp{rules: loadRuleGen, ports: c.servicePortsGen, built: true}
+	}
+	c.stampBuiltVhostsLocked(stamp)
 	conflicts := c.servicePortConflictsLocked()
 	derived := make(map[string]servicePorts, len(c.servicePorts))
 	for svc, p := range c.servicePorts {
@@ -612,14 +615,15 @@ func (c *SnapshotCache) refreshReusedVhostsLocked(names []string, serviceName st
 // decision.
 func (c *SnapshotCache) refreshEntryVhosts(ruleGen uint64, rules ruleInputs) {
 	c.clusterMu.RLock()
-	current := c.vhostRuleGen == ruleGen
+	current := c.vhostsBuiltAtLocked(vhostStamp{rules: ruleGen, ports: c.servicePortsGen, built: true})
 	c.clusterMu.RUnlock()
 	if current {
 		return
 	}
 	c.clusterMu.Lock()
 	defer c.clusterMu.Unlock()
-	if c.vhostRuleGen == ruleGen {
+	want := vhostStamp{rules: ruleGen, ports: c.servicePortsGen, built: true}
+	if c.vhostsBuiltAtLocked(want) {
 		return
 	}
 	rules.ports = effectivePorts(c.servicePorts, rules.declared)
@@ -641,6 +645,7 @@ func (c *SnapshotCache) refreshEntryVhosts(ruleGen uint64, rules ruleInputs) {
 			continue
 		}
 		e.vhost = c.outboundPortVhostLocked(e.service, name, primaryPortOf(e), name == e.service, rules)
+		e.vhostAt = want
 		c.clusters[name] = e
 		for _, d := range e.vhost.GetDomains() {
 			claimed[d] = e.service
@@ -650,9 +655,66 @@ func (c *SnapshotCache) refreshEntryVhosts(ruleGen uint64, rules ruleInputs) {
 	for _, name := range retained {
 		e := c.clusters[name]
 		e.vhost = c.outboundPortVhostLocked(e.service, name, primaryPortOf(e), name == e.service, rules)
+		e.vhostAt = want
 		c.clusters[name] = c.yieldClaimedDomains(context.Background(), claimed, name, e)
 	}
-	c.vhostRuleGen = ruleGen
+}
+
+// vhostStamp names the inputs a cluster entry's loopback virtual host was
+// built from: the generation of the rule inputs (ruleGen: the rules, the
+// service-wide filters, the port maps, what the generated Services declare)
+// and the generation of the ports derived from the registry rows
+// (servicePortsGen), by which every rule's backendRef is judged. built is
+// false for a virtual host nothing vouches for; such a stamp equals no stamp
+// a snapshot build asks for.
+//
+// It is per ENTRY because not every entry is rebuilt by every refresh. A
+// registry refresh rebuilds the virtual hosts of the services it lists and
+// carries a retained entry over as it was. While there was one generation for
+// the whole cache, the refresh set it and thereby vouched for the retained
+// entries too: a filter or a route attached while the refresh ran, a port map
+// that changed and a backend whose ports changed never reached a retained
+// entry's virtual host, for as long as it was retained (a service-wide filter
+// skipped on the loopback listener and the proxy port; a backendRef still
+// delivered to a target the Service no longer names). A stamp can only be
+// written next to the build it describes, so "marked current without being
+// rebuilt" is not something the code can say.
+type vhostStamp struct {
+	rules uint64
+	ports uint64
+	built bool
+}
+
+// sameServicePorts reports whether two derivations of a service's ports are
+// the same, the disagreements among its pods included.
+func sameServicePorts(a, b servicePorts) bool {
+	return a.equal(b) && slices.Equal(a.conflicts, b.conflicts)
+}
+
+// stampBuiltVhostsLocked records stamp on the entries whose virtual host the
+// registry refresh that is running built: the ones of a service it listed. A
+// retained entry (absentSince set) was carried over from an earlier refresh
+// with the virtual host it had, and keeps the stamp it had. Caller must hold
+// clusterMu, after the retention step.
+func (c *SnapshotCache) stampBuiltVhostsLocked(stamp vhostStamp) {
+	for name, e := range c.clusters {
+		if e.vhost == nil || !e.absentSince.IsZero() {
+			continue
+		}
+		e.vhostAt = stamp
+		c.clusters[name] = e
+	}
+}
+
+// vhostsBuiltAtLocked reports whether every loopback virtual host the cache
+// publishes was built from the inputs want names. Caller must hold clusterMu.
+func (c *SnapshotCache) vhostsBuiltAtLocked(want vhostStamp) bool {
+	for _, e := range c.clusters {
+		if e.vhost != nil && !e.l4Floor && e.vhostAt != want {
+			return false
+		}
+	}
+	return true
 }
 
 // buildHTTPServiceEntryLocked builds the cluster entries for one service in the

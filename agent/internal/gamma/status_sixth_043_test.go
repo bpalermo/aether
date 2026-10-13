@@ -405,8 +405,8 @@ func TestStatus_AServiceWithNoServiceObjectIsJudgedByItsPods(t *testing.T) {
 		contains string
 	}{
 		"the pods declare the port HTTP":    {map[uint32]registryv1.PortProtocol{8080: ppHTTP}, metav1.ConditionTrue, string(gatewayv1.RouteReasonResolvedRefs), "All backend references resolved"},
-		"the pods declare the port raw TCP": {map[uint32]registryv1.PortProtocol{8080: ppTCP}, metav1.ConditionFalse, string(gatewayv1.RouteReasonUnsupportedProtocol), "port 8080 is not an HTTP port (as its registered pods declare it; the Service does not exist yet)"},
-		"no pod declares the port":          {map[uint32]registryv1.PortProtocol{9090: ppHTTP}, metav1.ConditionFalse, string(gatewayv1.RouteReasonBackendNotFound), "the Service does not exist yet, and no registered pod of the service declares port 8080"},
+		"the pods declare the port raw TCP": {map[uint32]registryv1.PortProtocol{8080: ppTCP}, metav1.ConditionFalse, string(gatewayv1.RouteReasonUnsupportedProtocol), "port 8080 is not an HTTP port (as its registered pods declare it; the Service says nothing of its ports yet)"},
+		"no pod declares the port":          {map[uint32]registryv1.PortProtocol{9090: ppHTTP}, metav1.ConditionFalse, string(gatewayv1.RouteReasonBackendNotFound), "says nothing of its ports yet (it does not exist, or carries none), and no registered pod of the service declares port 8080"},
 		"this node holds no pod of it":      {nil, metav1.ConditionTrue, string(gatewayv1.RouteReasonResolvedRefs), "All backend references resolved"},
 	} {
 		t.Run(name, func(t *testing.T) {

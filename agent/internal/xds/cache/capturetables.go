@@ -394,9 +394,37 @@ func portlessPodPort(portMaps map[string]map[uint32]uint32, svc string, ports se
 }
 
 // refusalBody is the body of every 421 the mesh answers for svc: what was
-// wrong, and the ports the service does declare.
+// wrong, and the ports the service can be addressed on (portsAsAddressed).
 func refusalBody(fqdn, what string, ports servicePorts) string {
 	return fmt.Sprintf("aether: %s %s. Its ports: %s. Address it as %s:<port>.\n", fqdn, what, ports.describe(), fqdn)
+}
+
+// portsAsAddressed returns the ports a refusal's body lists: the ports an
+// authority can NAME, which are the ones the refusal was judged by. For a
+// name a Service of the user's owns those are the SERVICE's ports, each with
+// the class of the pod port behind it; a Service port whose pod port the pods
+// do not declare is not one. The body used to list the pods' ports there:
+// "<name>:8080 declares no such port. Its ports: 8080 (http)", for a Service
+// that maps 8000 to the pods' 8080.
+func portsAsAddressed(portMap map[uint32]uint32, mapped bool, ports servicePorts) servicePorts {
+	if !mapped {
+		return ports
+	}
+	var out servicePorts
+	for sp, pod := range portMap {
+		switch {
+		case ports.hasHTTP(pod):
+			out.http = append(out.http, sp)
+		case slices.Contains(ports.tcp, pod):
+			out.tcp = append(out.tcp, sp)
+		case slices.Contains(ports.udp, pod):
+			out.udp = append(out.udp, sp)
+		}
+	}
+	slices.Sort(out.http)
+	slices.Sort(out.tcp)
+	slices.Sort(out.udp)
+	return out
 }
 
 // outboundRefusalVhostsLocked returns the out_http (loopback) virtual hosts
@@ -716,13 +744,15 @@ func (c *SnapshotCache) appendOutboundRefusalsLocked(out []*routev3.VirtualHost,
 	if fqdn == "" {
 		return out
 	}
+	portMap, mapped := in.portMaps[svc]
+	named := portsAsAddressed(portMap, mapped, ports)
 	// The port-less authority, when the service has no HTTP port 80 for it.
 	// It is refused by name: 18081 is the proxy's port, not a port of the
 	// service, and a name without a port is port 80 and nothing else.
 	if _, ok := portlessPodPort(in.portMaps, svc, ports); !ok {
 		if ports.servesHTTP() {
 			out = append(out, proxy.BuildRefusalVirtualHost(fqdn+"|port-required", []string{fqdn}, proxy.RefusalPortRequired,
-				refusalBody(fqdn, "was addressed without a port: a name without a port is port 80, which it does not serve as HTTP", ports)))
+				refusalBody(fqdn, "was addressed without a port: a name without a port is port 80, which it does not serve as HTTP", named)))
 		} else {
 			out = append(out, c.noHTTPPortVhost(fqdn+"|port-required", svc, []string{fqdn}, ports))
 		}
@@ -742,10 +772,10 @@ func (c *SnapshotCache) appendOutboundRefusalsLocked(out []*routev3.VirtualHost,
 	if len(notHTTP) > 0 {
 		slices.Sort(notHTTP)
 		out = append(out, proxy.BuildRefusalVirtualHost(fqdn+"|not-http", notHTTP, proxy.RefusalPortNotHTTP,
-			refusalBody(fqdn, "does not serve HTTP on that port", ports)))
+			refusalBody(fqdn, "does not serve HTTP on that port", named)))
 	}
 	return append(out, proxy.BuildRefusalVirtualHost(fqdn+"|undeclared", []string{fqdn + ":*"}, proxy.RefusalPortNotDeclared,
-		refusalBody(fqdn, "declares no such port", ports)))
+		refusalBody(fqdn, "declares no such port", named)))
 }
 
 // tcpSpellings returns the raw-TCP addresses of a service that serves no HTTP
@@ -801,9 +831,7 @@ func (c *SnapshotCache) pruneServicePortsLocked(listed map[string]struct{}) {
 // change that did not advance it would leave them stale. Caller must hold
 // clusterMu, after pruneServicePortsLocked.
 func (c *SnapshotCache) noteServicePortsLocked(prev map[string]servicePorts) {
-	same := maps.EqualFunc(prev, c.servicePorts, func(a, b servicePorts) bool {
-		return a.equal(b) && slices.Equal(a.conflicts, b.conflicts)
-	})
+	same := maps.EqualFunc(prev, c.servicePorts, sameServicePorts)
 	if !same {
 		c.servicePortsGen++
 		if c.podPortsChanged != nil {
@@ -1322,12 +1350,11 @@ func (c *SnapshotCache) captureTableVhosts(in captureTableInputs, port uint32) [
 		// with the mesh name in Host, which had passed through, into a 421.
 		// This table has no on-demand route, so what is not claimed here
 		// leaves as any name that is not the mesh's does, to the address that
-		// was dialled. (In the table of a port number that HAS a chain the
-		// name keeps its virtual hosts: an unclaimed mesh authority there
-		// would be fetched on demand without the service's filter.)
+		// was dialled. (The table of a port number that HAS a chain has an
+		// on-demand route, and says so itself: appendMeshOnlyVhosts.)
 		if (n.ports.known() || n.mapped) && !n.meshOnly() {
 			vhosts = append(vhosts, proxy.BuildRefusalVirtualHost(n.mesh+"|undeclared", domains(n.names, "", ":*"), proxy.RefusalPortNotDeclared,
-				refusalBody(n.mesh, "does not declare the port that was dialled", n.ports)))
+				refusalBody(n.mesh, "does not declare the port that was dialled", portsAsAddressed(n.portMap, n.mapped, n.ports))))
 			continue
 		}
 		// A name nothing is known of (no endpoint held, no Service with
@@ -1343,8 +1370,11 @@ func (c *SnapshotCache) captureTableVhosts(in captureTableInputs, port uint32) [
 // appendNameVhosts appends the virtual hosts of ONE name in the table of
 // dialled port d (never 0). See the table at the top of the file.
 func (c *SnapshotCache) appendNameVhosts(vhosts []*routev3.VirtualHost, in captureTableInputs, n meshName, d uint32) []*routev3.VirtualHost {
+	if n.meshOnly() {
+		return c.appendMeshOnlyVhosts(vhosts, in, n, d)
+	}
 	refuse := func(kind, reason, what string, doms []string) {
-		vhosts = append(vhosts, proxy.BuildRefusalVirtualHost(n.mesh+"|"+kind, doms, reason, refusalBody(n.mesh, what, n.ports)))
+		vhosts = append(vhosts, proxy.BuildRefusalVirtualHost(n.mesh+"|"+kind, doms, reason, refusalBody(n.mesh, what, portsAsAddressed(n.portMap, n.mapped, n.ports))))
 	}
 	// What this node can say about the name's ports. Without it (a service it
 	// holds no endpoint of, a route target that is only a name) there is
@@ -1389,6 +1419,57 @@ func (c *SnapshotCache) appendNameVhosts(vhosts []*routev3.VirtualHost, in captu
 	// holds for a name this node knows no port of as well: what was dialled
 	// is known, and no mesh name may reach the table's fallthrough.
 	refuse("mismatch", proxy.RefusalPortMismatch, fmt.Sprintf("was dialled on port %d with a Host header that names another port", d), domains(n.names, ":*"))
+	return vhosts
+}
+
+// appendMeshOnlyVhosts appends the virtual hosts, in the table of dialled port
+// d, of a name the table has by its mesh authority alone (meshName.meshOnly):
+// a mesh service whose Kubernetes names a Service of the user's owns and that
+// no route names. The node has it in its tables because something applies to
+// it, typically a service-wide filter.
+//
+// Such a service is reached by a captured dial only at an address that is not
+// the mesh's (the user's Service, or another Service that selects the same
+// pods), so what the dial meant was decided before any filter existed, and a
+// filter must not turn a call that worked into a refusal. On this table an
+// authority that names the service is therefore NEVER refused, and it is one
+// of two things:
+//
+//   - a mesh delivery, WITH the service's filters and rules, where the port
+//     that was dialled is one the node can route: a port of the user's
+//     Service (by its port map), or a port number the service's own pods
+//     declare as HTTP, with a Host that names that port or none. Before the
+//     filter this was fetched on demand by the catch-all;
+//   - what the table's catch-all does for a name that is not the mesh's, for
+//     every other spelling: it leaves to the address that was dialled.
+//
+// What it must never be is fetched on demand WITHOUT the filter. The
+// catch-all of a table with a chain offers on demand exactly one spelling of
+// a mesh name, "<mesh name>:<the port of the table>", and lets every other
+// one (no port, another port) fall through to the address that was dialled.
+// So that one spelling is the one that must be claimed here: by a virtual
+// host that carries the filter, or by one that reaches no mesh cluster
+// (BuildFallthroughVirtualHost). Nothing else of the name is claimed, and it
+// leaves as it did before the node held the service. A service the node knows
+// no port of is offered on demand from a virtual host of its own, with the
+// filter (coldVhost).
+func (c *SnapshotCache) appendMeshOnlyVhosts(vhosts []*routev3.VirtualHost, in captureTableInputs, n meshName, d uint32) []*routev3.VirtualHost {
+	own := domains(n.names, "", fmt.Sprintf(":%d", d))
+	pod, declared := n.servicePortFor(d)
+	switch {
+	case declared && (pod == 0 || !n.ports.known() || n.ports.hasHTTP(pod)):
+		// A port of the user's Service (or, with no port map, a declared
+		// port): routed as in any other table.
+		vhosts = append(vhosts, c.portVhost(in, n, d, pod, own))
+	case n.ports.hasHTTP(d):
+		// The port number the pods themselves serve HTTP on, dialled at an
+		// address the port map does not describe.
+		vhosts = append(vhosts, c.portVhost(in, n, d, d, own))
+	case !n.ports.known():
+		vhosts = append(vhosts, c.coldVhost(in, n, d))
+	default:
+		vhosts = append(vhosts, proxy.BuildFallthroughVirtualHost(n.mesh+"|dialled", own, c.captureRedirectAll))
+	}
 	return vhosts
 }
 

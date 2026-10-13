@@ -40,8 +40,12 @@ import (
 //   - two nodes with knowledge agree, because they read the same rows;
 //   - a node never writes "not checked" over a verdict, and never keeps a
 //     verdict about anything but that port;
-//   - for any set of nodes, an unchanged route reaches a status every one of
-//     them would write, after which none writes.
+//   - nodes that hold the same rows of a service, and nodes that hold none,
+//     reach a status every one of them would write, after which none writes.
+//
+// Nodes that hold DIFFERENT rows of one service do not agree, and neither
+// does an agent of the chart before; those are bounded, not settled
+// (contest.go).
 //
 // A verdict whose pods are all gone stays (no node can judge the port any
 // more, and what was said of it is still the last thing known) until a node
@@ -71,13 +75,29 @@ func judgementKey(service string, port, pod uint32) string {
 // encodeJudgements renders verdicts for the condition's message: one
 // "key=verdict" per port, sorted, so that two nodes with the same verdicts
 // write the same bytes.
+//
+// A condition's message has a cap (gatewaystatus.MaxConditionMessage), and a
+// longer one fails the whole status update. A route can name some 250 ports,
+// with names of up to 63 characters each way: the record of such a route can
+// pass it. Whole verdicts are then left out from the END of the sorted list,
+// the same ones on every node. A port whose verdict is left out is one a node
+// that holds no pod of the Service cannot read: it says "Not checked" of it,
+// and the node that holds the pods writes its own status back at the bounded
+// rate of a contested status (contest.go).
 func encodeJudgements(j map[string]string) string {
 	parts := make([]string, 0, len(j))
 	for k, v := range j {
 		parts = append(parts, k+"="+v)
 	}
 	slices.Sort(parts)
-	return strings.Join(parts, ", ")
+	size, fit := 0, len(parts)
+	for i, part := range parts {
+		if size += len(part) + len(", "); size-len(", ") > gatewaystatus.MaxConditionMessage {
+			fit = i
+			break
+		}
+	}
+	return strings.Join(parts[:fit], ", ")
 }
 
 // decodeJudgements is the inverse. Anything that is not "key=verdict" with a

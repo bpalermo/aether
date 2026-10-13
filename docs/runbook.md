@@ -4090,9 +4090,11 @@ requests with their original `Host` to a different port.
     declares is `BackendNotFound`; both are answered 500. Where pods disagree
     about the port, both go by what most pods declare. A `parentRef` to such
     a port is judged the same way and is `Accepted=False`. The same holds for
-    a service that has **no Service object yet** (pods can register before
-    the registrar has generated their Service): a reference to it is judged
-    by the ports its pods declare, in the tables and in the status alike.
+    a service whose Service **says nothing of its ports yet**: it has no
+    Service object (pods can register before the registrar has generated
+    it), or a generated one that carries no real port. A reference to it is
+    judged by the ports its pods declare, in the tables and in the status
+    alike.
   - **Every node's agent writes the one status of a route**, and the nodes do
     not all hold the pods of a Service of yours. Each condition is computed
     again on every reconcile, from what the agent reads itself: the route,
@@ -4112,11 +4114,41 @@ requests with their original `Host` to a different port.
     else. A port nobody has judged is "Not checked" (and answered by no 500
     anywhere). The condition is always `True`; it is a record, not a verdict
     on the route, and it is absent when the route names no such port.
-    Two nodes that hold the pods read the same rows and agree, so an
-    unchanged route's status settles after at most a write or two per node
-    and is then written by nobody. A verdict whose pods have all gone stays
-    until a node holds a pod of the Service again or the route's spec
-    changes.
+    Nodes that hold the same rows of the Service compute the same status,
+    and so does a node that holds none: such a set settles after at most a
+    write or two per node. A verdict whose pods have all gone stays until a
+    node holds a pod of the Service again or the route's spec changes.
+  - **Known limit: two writers that do not agree.** Two nodes that hold
+    *different* rows of one service (a registry update one of them has not
+    received) each judge by their own tables, and neither takes the other's
+    verdict. So does an agent of chart 2.6 during the roll, which writes
+    `Accepted=True` always and `ResolvedRefs` from the `ReferenceGrant`s
+    alone (see "During the roll"). They cannot settle while they differ, and
+    every write of one is an event for the other. An agent of this chart
+    that finds its own entry overwritten with something else writes it back
+    **once at once, then no sooner than 5 s, 10 s, 20 s, 40 s, 80 s, 160 s
+    and from there 5 minutes after its previous write**: per route and per
+    node, at most 5 writes in the first minute of a disagreement and at most
+    one every 5 minutes from about ten minutes on. Until the writers agree
+    the status alternates between their texts at that rate; when the other
+    stops (the rows arrive, the roll completes), the next write of an agent
+    that holds the current rows stands. The count starts again when what the
+    agent wants to write changes (the route's generation, its own verdict)
+    or after ten quiet minutes.
+  - **A status write that fails is retried.** A timeout or an error of the
+    API server fails the agent's reconcile, which the controller runs again
+    with its usual back-off; it logs `failed to write route status`. (It
+    used to be logged and dropped: the status then stayed as it was, `True`
+    while the proxy answered 500, until some other event came by.) A
+    conflict is not retried that way: the route changed, and that change is
+    itself an event.
+  - **A condition's message is at most 32768 characters**, or the API server
+    refuses the whole status. A route can name some 250 ports of Services
+    with long names in a long namespace, and both the "Not checked" message
+    and the record can pass that. A message is cut and ends in
+    `... (truncated)`; the record leaves whole verdicts out from the end of
+    its sorted list, the same on every node. A node that holds no pod of a
+    Service whose verdict was left out says "Not checked" of it.
   - The status is judged again **when what a node's tables are built from
     changes**: the agent's cache tells its route reconciler whenever a
     registry refresh changed the ports of any service (first held, dropped,
@@ -4345,16 +4377,30 @@ registry and the agent watches.
   A service-wide HTTP filter that targets such a Service changes none of this:
   it is in force on the mesh name and on the proxy port, and the Service's
   Kubernetes names, the name without a namespace included, still pass through
-  to the Service unfiltered. So does a dial to the Service's own address and
-  port with the **mesh name** in `Host` (`curl -H 'Host: <svc>.<ns>.<mesh-domain>:8000'
-  http://<svc>:8000/`), on a port number no mesh service serves as HTTP: it
-  passed through before the filter, and attaching a filter does not turn a
-  call that worked into a refusal. (For a while it did: `421
-  port-not-declared`, from the moment the filter made the node hold the
-  service.) On a port number some mesh service does serve as HTTP, that
-  request is the mesh's and is routed with the filter. An HTTPRoute that
-  names the Service does make its Kubernetes names the mesh's, by the
-  Service's port map.
+  to the Service unfiltered. An HTTPRoute that names the Service does make
+  its Kubernetes names the mesh's, by the Service's port map.
+
+  **A captured dial with the mesh name in `Host`** (`curl -H 'Host:
+  <svc>.<ns>.<mesh-domain>' http://<some Service of yours>:<port>/`, to your
+  Service or to any other Service that selects the same pods) is never
+  refused for such a service, with or without a filter: attaching a filter
+  does not turn a call that worked into a `421`. It is one of two things,
+  decided by the port that was dialled:
+
+  | Dialled port | `Host` | What happens |
+  |---|---|---|
+  | a port of your Service that owns the name (through its port map), or the port number the service's own pods serve as HTTP | the mesh name with that port, or with no port | delivered **through the mesh, with the service's filters** (before a filter existed the proxy fetched the cluster on demand; a filter that denies the caller answers its own `403`) |
+  | any other port number | any spelling of the mesh name | leaves to the address that was dialled, as it did before the filter |
+  | any | the mesh name with a port other than the one dialled | leaves to the address that was dialled |
+
+  It is never delivered through the mesh *without* the filter. (Through the
+  first builds of this chart the filter made the node hold the service, and
+  the last two rows, and the first on the pods' own port, became `421
+  port-not-declared` or `421 port-mismatch`.) The proxy port and the loopback
+  listener are not such a dial: there a port the service cannot be addressed
+  on is refused as for any service, and the body lists the ports of your
+  Service ("Its ports: 8000 (http)"), the ones an authority can name, not the
+  pods'.
 
 - An authority that names `18081` or `18082` is never offered on demand, for a
   name the node knows nothing of either: `421 port-not-declared`, at once. No
@@ -4693,6 +4739,24 @@ of those is marked below where it comes up.
     half-served until the registrar is 3.0: its listing puts such a pod under
     one protocol only, so the other class's ports are refused
     (`421 no-http-port` or `port-not-declared`) or get no reply.
+- **A route's status alternates while both versions run.** Every node's
+  agent writes the status of every Service-parented route. A 2.6 agent writes
+  `Accepted=True` always and `ResolvedRefs` from the `ReferenceGrant`s alone;
+  a 3.0 agent also says `False` for a port that is not an HTTP port of its
+  Service, and adds the `gateway.aether.io/PodPortsJudged` condition. For a
+  route the two judge alike nothing happens. For a route 3.0 finds a fault
+  with, each overwrites the other. The 2.6 agent answers every write at once;
+  the 3.0 agent writes back at a bounded rate (once at once, then no sooner
+  than 5 s, 10 s, 20 s ... up to 5 minutes after its previous write: at most
+  5 writes of one route by one node in the first minute, then fewer), so the
+  status of such a route shows the old agents' text most of the time and the
+  new agents' briefly, until the last 2.6 agent is gone; the next write of a
+  3.0 agent then stands. **A roll that stalls leaves it so** for as long as
+  it is stalled: read the status of a route from a 3.0 agent's point of view
+  only once the roll has completed. Measured on kind before the bound
+  existed: 450 rewrites of one route in 20 s. With it: the unit test
+  `TestStatus_AContestedStatusIsWrittenAtABoundedRate` holds the schedule;
+  the mixed pair was not re-run on kind.
 - **A client on a 3.0 node** is held to the new addressing from the moment its
   node's agent is 3.0, whatever version the destination's node runs: the
   refusals are decided by the source proxy.

@@ -94,6 +94,7 @@ go_test(
     deps = [
         "//agent/internal/cni/server",
         "//agent/internal/cniconflist",
+        "//agent/internal/gamma",
         "//agent/internal/node",
         "//agent/internal/ownership",
         "//agent/internal/xds/config",

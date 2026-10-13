@@ -11,10 +11,13 @@ package gamma
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"log/slog"
 	"maps"
 	"slices"
 	"strings"
+	"time"
 
 	"aethermesh.dev/agent/internal/gatewaystatus"
 	"aethermesh.dev/agent/internal/xds/proxy"
@@ -30,6 +33,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	discoveryv1 "k8s.io/api/discovery/v1"
 	"k8s.io/apimachinery/pkg/api/equality"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -103,6 +107,14 @@ type Reconciler struct {
 	// (the escape hatch is inert) — so a missing/not-yet-installed CRD degrades
 	// gracefully instead of crashing the manager on a failed informer sync.
 	httpFilterEnabled bool
+	// Now is the clock of the status writer's back-off; nil is time.Now.
+	Now func() time.Time
+
+	// contested remembers, per route, what this agent last wanted its status
+	// to be and when it wrote it, to hold back when another writer keeps
+	// overwriting it (contest.go).
+	contested contestLedger
+
 	// grpcRouteEnabled / referenceGrantEnabled likewise gate the optional Gateway API
 	// types on CRD presence (proposal 031): a partial Gateway API install degrades the
 	// affected feature with a warning instead of wedging the manager.
@@ -238,9 +250,30 @@ func (r *Reconciler) Reconcile(ctx context.Context, _ reconcile.Request) (reconc
 	// Accepted + ResolvedRefs RouteParentStatus per Service parentRef. Status write
 	// failures are logged but don't fail the reconcile (the data plane is already
 	// projected); the next reconcile retries.
-	r.writeHTTPRouteStatuses(ctx, httpList, grants, facts)
-	r.writeGRPCRouteStatuses(ctx, grpcList, grants, facts)
-	return reconcile.Result{}, nil
+	//
+	// A status write that fails is an error of the reconcile, which is then
+	// run again (a conflict aside: the route changed, and that is an event).
+	// The status is judged on events and on nothing else, so a failed write
+	// that was only logged left the status as it was, True while the tables
+	// answered 500, until some other event came by. And a status another
+	// writer keeps overwriting is written again later, not at once: the
+	// reconcile asks to be run when the earliest of those is due.
+	seen := map[string]struct{}{}
+	wait, err := r.writeHTTPRouteStatuses(ctx, httpList, grants, facts, seen)
+	grpcWait, grpcErr := r.writeGRPCRouteStatuses(ctx, grpcList, grants, facts, seen)
+	r.contested.keep(seen)
+	if err := errors.Join(err, grpcErr); err != nil {
+		return reconcile.Result{}, err
+	}
+	return reconcile.Result{RequeueAfter: soonest(wait, grpcWait)}, nil
+}
+
+// soonest returns the shorter of two waits, where zero is "none".
+func soonest(a, b time.Duration) time.Duration {
+	if a == 0 || (b != 0 && b < a) {
+		return b
+	}
+	return a
 }
 
 // listGammaResources lists HTTPRoutes, GRPCRoutes, and ReferenceGrants (all CRD-gated).
@@ -488,30 +521,45 @@ func (r *Reconciler) servicePortMaps(ctx context.Context, routes map[string][]pr
 		svc := &services.Items[i]
 		key := serviceref.New(svc.Namespace, svc.Name).Key()
 		_, routed := named[key]
-		if routed {
-			facts[key] = servicePortFacts(svc)
+		if m, user := r.servicePortMapAndFacts(ctx, svc, key, routed, facts); user {
+			out[key] = m
 		}
-		if svc.Labels[aetherlabels.LabelMeshService] == "true" {
-			continue
-		}
-		m, namedPorts := servicePortMap(svc)
-		if routed && len(namedPorts) > 0 {
-			r.resolveNamedTargetPorts(ctx, svc, key, m, namedPorts)
-		}
-		if routed {
-			facts[key] = r.withPods(ctx, key, facts[key], m)
-		}
-		out[key] = m
 	}
 	// A service a route names that has no Service object: pods can register
 	// before the registrar has generated their Service. The data plane judges
-	// a reference to it by the pods' own ports, so the status does too.
+	// a reference to it by the pods' own ports, so the status does too
+	// (portFacts.absent).
 	for key := range named {
 		if _, exists := facts[key]; !exists {
 			facts[key] = r.withPods(ctx, key, portFacts{absent: true, ports: map[uint32]bool{}}, nil)
 		}
 	}
 	return out, facts, nil
+}
+
+// servicePortMapAndFacts returns the port map of one Service when it is a
+// user's (user), and records in facts, for a Service a route names (routed),
+// what it says of its ports.
+func (r *Reconciler) servicePortMapAndFacts(ctx context.Context, svc *corev1.Service, key string, routed bool, facts map[string]portFacts) (m map[uint32]uint32, user bool) {
+	if routed {
+		facts[key] = servicePortFacts(svc)
+	}
+	if svc.Labels[aetherlabels.LabelMeshService] == "true" {
+		if routed && facts[key].absent {
+			// A generated Service with no real port says nothing: the
+			// pods' own ports are all there is, for the tables and here.
+			facts[key] = r.withPods(ctx, key, facts[key], nil)
+		}
+		return nil, false
+	}
+	m, namedPorts := servicePortMap(svc)
+	if routed && len(namedPorts) > 0 {
+		r.resolveNamedTargetPorts(ctx, svc, key, m, namedPorts)
+	}
+	if routed {
+		facts[key] = r.withPods(ctx, key, facts[key], m)
+	}
+	return m, true
 }
 
 // withPods returns the facts of a service only its pods can speak for (a
@@ -652,26 +700,48 @@ func buildRouteTargetPorts(portSets map[string]map[uint32]struct{}) map[string][
 	return routeTargetPorts
 }
 
-// writeHTTPRouteStatuses publishes Gateway API status for every Service-parented HTTPRoute.
-func (r *Reconciler) writeHTTPRouteStatuses(ctx context.Context, httpList *gatewayv1.HTTPRouteList, grants []gatewayv1beta1.ReferenceGrant, facts map[string]portFacts) {
+// writeHTTPRouteStatuses publishes Gateway API status for every Service-parented
+// HTTPRoute. It returns how long until a status it held back is due (zero:
+// none), and the writes that failed.
+func (r *Reconciler) writeHTTPRouteStatuses(ctx context.Context, httpList *gatewayv1.HTTPRouteList, grants []gatewayv1beta1.ReferenceGrant, facts map[string]portFacts, seen map[string]struct{}) (time.Duration, error) {
+	var wait time.Duration
+	var errs []error
 	for i := range httpList.Items {
 		hr := &httpList.Items[i]
 		in := routeStatusInputs{kind: "HTTPRoute", parentRefs: hr.Spec.ParentRefs, backendRefs: httpBackendRefs(hr.Spec.Rules), grants: grants, facts: facts}
-		if err := r.writeRouteStatus(ctx, hr, &hr.Status.RouteStatus, in); err != nil {
-			r.Log.WarnContext(ctx, "failed to write HTTPRoute status", "route", hr.Name, "namespace", hr.Namespace, "error", err.Error())
-		}
+		w, err := r.writeRouteStatus(ctx, hr, &hr.Status.RouteStatus, in, seen)
+		wait = soonest(wait, w)
+		errs = append(errs, r.statusWriteError(ctx, in.kind, hr, err))
 	}
+	return wait, errors.Join(errs...)
 }
 
-// writeGRPCRouteStatuses publishes Gateway API status for every Service-parented GRPCRoute.
-func (r *Reconciler) writeGRPCRouteStatuses(ctx context.Context, grpcList *gatewayv1.GRPCRouteList, grants []gatewayv1beta1.ReferenceGrant, facts map[string]portFacts) {
+// writeGRPCRouteStatuses is writeHTTPRouteStatuses for GRPCRoutes.
+func (r *Reconciler) writeGRPCRouteStatuses(ctx context.Context, grpcList *gatewayv1.GRPCRouteList, grants []gatewayv1beta1.ReferenceGrant, facts map[string]portFacts, seen map[string]struct{}) (time.Duration, error) {
+	var wait time.Duration
+	var errs []error
 	for i := range grpcList.Items {
 		gr := &grpcList.Items[i]
 		in := routeStatusInputs{kind: "GRPCRoute", parentRefs: gr.Spec.ParentRefs, backendRefs: grpcBackendRefs(gr.Spec.Rules), grants: grants, facts: facts}
-		if err := r.writeRouteStatus(ctx, gr, &gr.Status.RouteStatus, in); err != nil {
-			r.Log.WarnContext(ctx, "failed to write GRPCRoute status", "route", gr.Name, "namespace", gr.Namespace, "error", err.Error())
-		}
+		w, err := r.writeRouteStatus(ctx, gr, &gr.Status.RouteStatus, in, seen)
+		wait = soonest(wait, w)
+		errs = append(errs, r.statusWriteError(ctx, in.kind, gr, err))
 	}
+	return wait, errors.Join(errs...)
+}
+
+// statusWriteError logs a failed status write and returns it as the
+// reconcile's error, except a conflict (and a route that is gone): the route
+// changed under the write, which is an event the reconciler is run for.
+func (r *Reconciler) statusWriteError(ctx context.Context, kind string, obj client.Object, err error) error {
+	if err == nil {
+		return nil
+	}
+	r.Log.WarnContext(ctx, "failed to write route status", "kind", kind, "route", obj.GetName(), "namespace", obj.GetNamespace(), "error", err.Error())
+	if apierrors.IsConflict(err) || apierrors.IsNotFound(err) {
+		return nil
+	}
+	return fmt.Errorf("write the status of %s %s/%s: %w", kind, obj.GetNamespace(), obj.GetName(), err)
 }
 
 // routeStatusInputs is what one route's status is computed from.
@@ -695,7 +765,7 @@ type routeStatusInputs struct {
 // Services and the pod-port verdicts (judged.go): nothing of what the status
 // said before is kept, except those verdicts, for the ports this node cannot
 // judge.
-func (r *Reconciler) writeRouteStatus(ctx context.Context, obj client.Object, status *gatewayv1.RouteStatus, in routeStatusInputs) error {
+func (r *Reconciler) writeRouteStatus(ctx context.Context, obj client.Object, status *gatewayv1.RouteStatus, in routeStatusInputs, seen map[string]struct{}) (time.Duration, error) {
 	generation := obj.GetGeneration()
 	parents := status.Parents
 	facts, record := judgedFacts(in.facts, priorJudgements(parents, generation),
@@ -705,6 +775,7 @@ func (r *Reconciler) writeRouteStatus(ctx context.Context, obj client.Object, st
 
 	changed := false
 	var written []gatewayv1.ParentReference
+	want := newWanted(generation)
 	for _, p := range in.parentRefs {
 		if p.Group != nil && string(*p.Group) != "" {
 			continue
@@ -720,17 +791,28 @@ func (r *Reconciler) writeRouteStatus(ctx context.Context, obj client.Object, st
 		} else {
 			parents, removed = gatewaystatus.RemoveRouteParentCondition(parents, gatewaystatus.MeshControllerName, p, JudgedConditionType)
 		}
+		want.add(p, conditions)
 		parents, upd = gatewaystatus.MergeRouteParentStatus(parents, gatewaystatus.MeshControllerName, p, generation, conditions...)
 		changed = changed || upd || removed
 	}
 	// The mesh's entry of a parentRef the route no longer names (an edited
 	// port, a removed parent) goes with it.
 	parents, pruned := gatewaystatus.PruneRouteParentStatus(parents, gatewaystatus.MeshControllerName, written)
+	key := in.kind + "/" + obj.GetNamespace() + "/" + obj.GetName()
+	seen[key] = struct{}{}
 	if !changed && !pruned {
-		return nil
+		return 0, nil
+	}
+	now := r.now()
+	if wait := r.contested.holdBack(key, want.String(), now); wait > 0 {
+		return wait, nil
 	}
 	status.Parents = parents
-	return r.Status().Update(ctx, obj)
+	if err := r.Status().Update(ctx, obj); err != nil {
+		return 0, err
+	}
+	r.contested.wrote(key, want.String(), now)
+	return 0, nil
 }
 
 // acceptedCondition is the Accepted condition of one Service parentRef.

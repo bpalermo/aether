@@ -163,7 +163,13 @@
 #                  in force on the mesh name: 403 on the loopback listener
 #                  and through the proxy port from the captured client)
 #                  changes neither, nor a dial to the Service's port with
-#                  the mesh name in Host
+#                  the mesh name in Host. Two more Services of the user's
+#                  select the same pods, on a port number another mesh
+#                  service serves as HTTP (9090) and on the pods' own
+#                  (8080): with the mesh name in Host, the first passes
+#                  through as before the filter, and the second, which was a
+#                  mesh delivery before it, is one WITH the filter (403).
+#                  None is refused 421
 #   T1  replaced   mp-move serves HTTP on 8080, then is redeployed serving
 #                  raw TCP on 9000 only. Host mp-move:8080 on loopback is
 #                  refused (421 port-not-declared) within T1_WINDOW of the
@@ -305,6 +311,10 @@ MOVE_NAME="mp-move"
 OWN_NAME="mp-own"
 OWN_MARKER="own8080"
 OWN_SERVICE_PORT=8000
+# Two more Services of the user's that select mp-own's pods: on a port number
+# another mesh service declares as HTTP, and on the port the pods serve.
+OWN_ALT_SERVICE="mp-own-alt"
+OWN_POD_SERVICE="mp-own-pod"
 OWN_FILTER="mp-own-deny"
 MOVE_MARKER_HTTP="move8080"
 MOVE_MARKER_TCP="movetcp"
@@ -912,6 +922,8 @@ deploy_workloads() {
 	# The user's Service first: the registrar generates a Service only for a
 	# name no other Service owns.
 	deploy_user_service "$OWN_NAME" "$OWN_SERVICE_PORT" "$HTTP_PORT"
+	deploy_user_service "$OWN_ALT_SERVICE" "$ALT_PORT" "$HTTP_PORT" "$OWN_NAME"
+	deploy_user_service "$OWN_POD_SERVICE" "$HTTP_PORT" "$HTTP_PORT" "$OWN_NAME"
 	deploy_workload "$OWN_NAME" "$HTTP_PORT" http "$HTTP_PORT" "http:$HTTP_PORT:$OWN_MARKER"
 	deploy_workload "$MOVE_NAME" "$HTTP_PORT" http "$HTTP_PORT" "http:$HTTP_PORT:$MOVE_MARKER_HTTP" "tcp:$TCP_PORT:$MOVE_MARKER_TCP"
 	deploy_client client "$upstreams"
@@ -941,16 +953,16 @@ deploy_workloads() {
 	ok "workloads deployed"
 }
 
-# deploy_user_service NAME PORT TARGET — a Service of the user's, NAME, in
-# TEST_NS, whose PORT targets pod port TARGET of the pods labelled app=NAME
-# (the pods deploy_workload NAME makes, which are mesh pods).
+# deploy_user_service NAME PORT TARGET [APP] — a Service of the user's, NAME,
+# in TEST_NS, whose PORT targets pod port TARGET of the pods labelled app=APP
+# (default NAME: the pods deploy_workload NAME makes, which are mesh pods).
 deploy_user_service() {
 	kc apply -f - >/dev/null <<YAML || die "user Service $1 apply failed"
 apiVersion: v1
 kind: Service
 metadata: {name: $1, namespace: $TEST_NS}
 spec:
-  selector: {app: $1}
+  selector: {app: ${4:-$1}}
   ports: [{name: http, port: $2, targetPort: $3}]
 YAML
 }
@@ -2229,6 +2241,13 @@ leg_V1() {
 # port-not-declared, while "<name>.<ns>" still passed through; and then the
 # mesh name in Host on a dial to the Service's port was, which this leg read
 # as its proof that the filter had arrived.)
+# u1_dial WANT AUTHORITY HOST WHEN MEANING: a captured dial to AUTHORITY (a
+# Service of the user's that selects mp-own's pods) with Host HOST.
+u1_dial() {
+	expect "captured dial to $2 with Host $3, $4" "$1" "$A_TIMEOUT" "$A_PROBES" "$5" \
+		http_tokens client "http://$2/" "$3"
+}
+
 leg_U1() {
 	local short="$OWN_NAME:$OWN_SERVICE_PORT" two="$OWN_NAME.$TEST_NS:$OWN_SERVICE_PORT" meaning mesh
 	mesh="$(mesh_name "$OWN_NAME"):$OWN_SERVICE_PORT"
@@ -2245,6 +2264,16 @@ leg_U1() {
 		"control: the table of the dialled port claims the service's mesh name before any filter exists" \
 		http_tokens client "http://$short/" "$mesh"
 	proxied "$OWN_MARKER" client "$mesh" "control, no filter: the mesh name reaches the service through the proxy port from the captured client"
+	# The same pods behind two more Services of the user's, dialled with the
+	# mesh name in Host: on a port number another mesh service serves as HTTP
+	# (the table of that port has an on-demand route), and on the pods' own.
+	local alt="$OWN_ALT_SERVICE:$ALT_PORT" own_pod="$OWN_POD_SERVICE:$HTTP_PORT" bare pod_host
+	bare="$(mesh_name "$OWN_NAME")"
+	pod_host="$bare:$HTTP_PORT"
+	u1_dial "$OWN_MARKER" "$alt" "$bare" "no filter" "control: the dial does not reach the pods through the user's Service before any filter exists"
+	u1_dial "$OWN_MARKER" "$alt" "$pod_host" "no filter" "control: the dial does not reach the pods through the user's Service before any filter exists"
+	u1_dial "$OWN_MARKER" "$own_pod" "$pod_host" "no filter" "control: the dial does not reach the pods before any filter exists"
+	u1_dial "$OWN_MARKER" "$own_pod" "$bare" "no filter" "control: the dial does not reach the pods before any filter exists"
 
 	kc apply -f - >/dev/null <<YAML || die "U1: the HTTPFilter was not accepted"
 apiVersion: config.aether.io/v1
@@ -2278,6 +2307,21 @@ YAML
 		http_tokens client "http://$short/" "$mesh"
 	captured "$OWN_MARKER" "$short" "" "with the filter: $meaning"
 	captured "$OWN_MARKER" "$two" "" "with the filter: $meaning"
+	# A port number another mesh service serves as HTTP: not a port of this
+	# service, so the dial goes where it went before the filter, to the
+	# address that was dialled. (It was 421 port-not-declared, and 421
+	# port-mismatch with the pods' port in Host.)
+	meaning="HTTP421 is the filter having made the mesh refuse a call that passed through to the user's Service before it; HTTP403 would be the call taken into the mesh on a port the service does not have"
+	u1_dial "$OWN_MARKER" "$alt" "$bare" "with the filter" "$meaning"
+	u1_dial "$OWN_MARKER" "$alt" "$pod_host" "with the filter" "$meaning"
+	# The pods' own port, with a Host that names it or no port: that was a
+	# mesh delivery before the filter (fetched on demand), and it is one with
+	# the filter now. The filter denies every caller, so it answers 403:
+	# refused by the policy the user attached, not by the mesh's addressing
+	# (421), and never delivered without the filter.
+	meaning="HTTP421 is the mesh refusing the name by its addressing; '$OWN_MARKER' is the request delivered without the service-wide filter"
+	u1_dial "HTTP403" "$own_pod" "$pod_host" "with the filter" "$meaning"
+	u1_dial "HTTP403" "$own_pod" "$bare" "with the filter" "$meaning"
 
 	kc -n "$TEST_NS" delete httpfilters.config.aether.io "$OWN_FILTER" --ignore-not-found --wait=true >/dev/null 2>&1 || true
 	loopback "$OWN_MARKER" "$(mesh_name "$OWN_NAME"):$OWN_SERVICE_PORT" "the HTTPFilter was deleted and is still in force"

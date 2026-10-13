@@ -47,20 +47,18 @@ type portFacts struct {
 	// holds no row of the service.
 	classes map[uint32]registryv1.PortProtocol
 	held    bool
-	// absent: no Service object of this name exists (pods can register
-	// before the registrar has generated their Service). The data plane then
+	// absent: the Service says nothing of the service's ports. Either no
+	// Service object of this name exists (pods can register before the
+	// registrar has generated their Service), or it is a generated one that
+	// carries no real port at all, as a registrar of chart 2.6 writes it and
+	// as one is between its creation and the first port. The data plane then
 	// has the pods' own ports and nothing else, so ports holds only what was
 	// judged from them (judgedFacts), and a port that is not in it is not
 	// spoken for.
 	absent bool
-	// undeclared: a USER Service's port (key) whose pod port (value) no
-	// registered pod of the service declares. The data plane answers 500 for
-	// a backendRef to it.
+	// undeclared: a port (key) whose pod port (value) no registered pod of
+	// the service declares. The data plane answers 500 for a backendRef to it.
 	undeclared map[uint32]uint32
-	// unknown: a generated Service that carries no real port at all, as a
-	// registrar of chart 2.6 writes it. Nothing is known of the service's
-	// ports from it (the data plane reads the registry), so nothing is said.
-	unknown bool
 }
 
 // generatedPortName matches the name the registrar gives a REAL port of a
@@ -94,13 +92,13 @@ func servicePortFacts(svc *corev1.Service) portFacts {
 		}
 		f.ports[uint32(sp.Port)] = tcp && sp.AppProtocol != nil && *sp.AppProtocol == "http"
 	}
-	f.unknown = generated && len(f.ports) == 0
+	f.absent = generated && len(f.ports) == 0
 	return f
 }
 
 func (f portFacts) describe() string {
 	if f.absent {
-		return "as its registered pods declare it; the Service does not exist yet"
+		return "as its registered pods declare it; the Service says nothing of its ports yet"
 	}
 	if len(f.ports) == 0 {
 		return "it has no port"
@@ -174,7 +172,7 @@ func parentPortProblem(facts map[string]portFacts, p gatewayv1.ParentReference, 
 		ns = string(*p.Namespace)
 	}
 	f, known := facts[serviceref.New(ns, string(p.Name)).Key()]
-	if !known || f.unknown {
+	if !known {
 		return ""
 	}
 	port := uint32(*p.Port)
@@ -183,7 +181,7 @@ func parentPortProblem(facts map[string]portFacts, p gatewayv1.ParentReference, 
 	case portMissing:
 		return fmt.Sprintf("Service %s/%s has no port %d (%s); the route is attached to nothing", ns, p.Name, port, f.describe())
 	case portUndeclaredNoService:
-		return fmt.Sprintf("Service %s/%s does not exist yet, and no registered pod of the service declares port %d (endpoint.aether.io/ports); the route is attached to nothing", ns, p.Name, port)
+		return fmt.Sprintf("Service %s/%s says nothing of its ports yet (it does not exist, or carries none), and no registered pod of the service declares port %d (endpoint.aether.io/ports); the route is attached to nothing", ns, p.Name, port)
 	case portUndeclared:
 		return fmt.Sprintf("port %d of Service %s/%s targets pod port %d, which no registered pod of the service declares (endpoint.aether.io/ports); the route is attached to nothing", port, ns, p.Name, pod)
 	case portNotHTTP:
@@ -207,7 +205,7 @@ func backendPortProblem(facts map[string]portFacts, routeNamespace string, refs 
 			ns = routeNamespace
 		}
 		f, known := facts[serviceref.New(ns, string(ref.Name)).Key()]
-		if !known || f.unknown {
+		if !known {
 			continue
 		}
 		if reason, message := f.backendProblem(ns, string(ref.Name), uint32(*ref.Port)); reason != "" {
@@ -229,7 +227,7 @@ func (f portFacts) backendProblem(ns, name string, port uint32) (reason, message
 			fmt.Sprintf("backendRef %s/%s: the Service has no port %d (%s)", ns, name, port, f.describe()) + answered
 	case portUndeclaredNoService:
 		return string(gatewayv1.RouteReasonBackendNotFound),
-			fmt.Sprintf("backendRef %s/%s: the Service does not exist yet, and no registered pod of the service declares port %d (endpoint.aether.io/ports)", ns, name, port) + answered
+			fmt.Sprintf("backendRef %s/%s: the Service says nothing of its ports yet (it does not exist, or carries none), and no registered pod of the service declares port %d (endpoint.aether.io/ports)", ns, name, port) + answered
 	case portUndeclared:
 		return string(gatewayv1.RouteReasonBackendNotFound),
 			fmt.Sprintf("backendRef %s/%s: port %d of the Service targets pod port %d, which no registered pod of the service declares (endpoint.aether.io/ports)", ns, name, port, pod) + answered

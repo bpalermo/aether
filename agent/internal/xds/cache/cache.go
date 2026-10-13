@@ -220,10 +220,6 @@ type SnapshotCache struct {
 	// podPortsChanged, when set, is called (clusterMu held) each time
 	// servicePortsGen advances: OnPodPortsChanged.
 	podPortsChanged func()
-	// vhostRuleGen is the rule-input generation (ruleGen) the cluster
-	// entries' loopback virtual hosts were last built at
-	// (refreshEntryVhosts). Guarded by clusterMu.
-	vhostRuleGen uint64
 	// captureTables keeps the capture route tables between snapshots
 	// (captureRouteTables). Guarded by snapshotMu.
 	captureTables captureTablesMemo
@@ -741,6 +737,11 @@ type clusterEntry struct {
 	loadAssignment *endpointv3.ClusterLoadAssignment
 	endpoints      map[string]*endpointv3.LocalityLbEndpoints // keyed by IP, for granular add/remove
 	vhost          *routev3.VirtualHost
+	// vhostAt says which inputs vhost was built from (vhostStamp). It is
+	// written by the two places that build a virtual host, for the entries
+	// they built, and by nothing else: an entry that was carried over (a
+	// retained one) keeps the stamp of the build that made its virtual host.
+	vhostAt vhostStamp
 	// sanNamespaces is the sorted union of the service's endpoints'
 	// Kubernetes namespaces. At snapshot time it renders the expected server
 	// SPIFFE IDs (spiffe://<td>/ns/<ns>/sa/<service>) pinned on the cluster's
