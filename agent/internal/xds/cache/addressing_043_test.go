@@ -731,25 +731,32 @@ func TestAddressing_BackendRefPort(t *testing.T) {
 		backend  proxy.GammaBackend
 		portMaps map[string]map[uint32]uint32
 		want     string
+		invalid  bool
 	}{
-		{"a declared HTTP port", proxy.GammaBackend{Service: "demo/multi", Cluster: multi, Port: 9090}, nil, multi + ":9090"},
-		{"the legacy target's port is the default cluster", proxy.GammaBackend{Service: "demo/multi", Cluster: multi, Port: 8080}, nil, multi},
-		{"no port: the projected cluster", proxy.GammaBackend{Service: "demo/multi", Cluster: multi}, nil, multi},
-		{"the mesh HTTP port: the legacy spelling", proxy.GammaBackend{Service: "demo/multi", Cluster: multi, Port: 18081}, nil, multi},
-		{"port 80 of a service that does not declare it: the legacy spelling", proxy.GammaBackend{Service: "demo/multi", Cluster: multi, Port: 80}, nil, multi},
-		{"port 80 of a service that declares it", proxy.GammaBackend{Service: "demo/eighty", Cluster: "eighty.demo.aether.internal", Port: 80}, nil, "eighty.demo.aether.internal:80"},
-		{"an undeclared port names a cluster that does not exist", proxy.GammaBackend{Service: "demo/multi", Cluster: multi, Port: 7777}, nil, multi + ":7777"},
-		{"a raw-TCP port is not an HTTP backend", proxy.GammaBackend{Service: "demo/mixed", Cluster: "mixed.demo.aether.internal", Port: 9000}, nil, "mixed.demo.aether.internal:9000"},
-		{"the legacy spelling of a service whose legacy target is raw TCP names nothing", proxy.GammaBackend{Service: "demo/tcpfirst", Cluster: tcpfirst, Port: 18081}, nil, tcpfirst + ":18081"},
-		{"a service this node knows no port of keeps the projected cluster", proxy.GammaBackend{Service: "demo/cold", Cluster: "cold.demo.aether.internal", Port: 9090}, nil, "cold.demo.aether.internal"},
-		{"a user Service: its port resolves through targetPort", proxy.GammaBackend{Service: "demo/multi", Cluster: multi, Port: 80}, userMap, multi + ":9090"},
-		{"a user Service: a named targetPort cannot be resolved and keeps the projected cluster", proxy.GammaBackend{Service: "demo/multi", Cluster: multi, Port: 81}, userMap, multi},
-		{"a user Service: a port it does not have keeps the projected cluster, never the pods' port of that number", proxy.GammaBackend{Service: "demo/multi", Cluster: multi, Port: 8080}, userMap, multi},
-		{"a user Service: a targetPort the pods do not declare", proxy.GammaBackend{Service: "demo/multi", Cluster: multi, Port: 443}, userMap, multi + ":8443"},
+		{"a declared HTTP port", proxy.GammaBackend{Service: "demo/multi", Cluster: multi, Port: 9090}, nil, multi + ":9090", false},
+		{"the legacy target's port is the default cluster", proxy.GammaBackend{Service: "demo/multi", Cluster: multi, Port: 8080}, nil, multi, false},
+		{"no port: the projected cluster", proxy.GammaBackend{Service: "demo/multi", Cluster: multi}, nil, multi, false},
+		{"port 80 of a service that declares it", proxy.GammaBackend{Service: "demo/eighty", Cluster: "eighty.demo.aether.internal", Port: 80}, nil, "eighty.demo.aether.internal:80", false},
+		// No legacy meaning: neither number is a port of the service.
+		{"the mesh HTTP port is not a port of the service", proxy.GammaBackend{Service: "demo/multi", Cluster: multi, Port: 18081}, nil, multi, true},
+		{"port 80 of a service that does not declare it", proxy.GammaBackend{Service: "demo/multi", Cluster: multi, Port: 80}, nil, multi, true},
+		{"an undeclared port", proxy.GammaBackend{Service: "demo/multi", Cluster: multi, Port: 7777}, nil, multi, true},
+		{"a raw-TCP port is not an HTTP backend", proxy.GammaBackend{Service: "demo/mixed", Cluster: "mixed.demo.aether.internal", Port: 9000}, nil, "mixed.demo.aether.internal", true},
+		{"the mesh HTTP port of a service whose declared port is raw TCP", proxy.GammaBackend{Service: "demo/tcpfirst", Cluster: tcpfirst, Port: 18081}, nil, tcpfirst, true},
+		{"a service this node knows no port of keeps the projected cluster", proxy.GammaBackend{Service: "demo/cold", Cluster: "cold.demo.aether.internal", Port: 9090}, nil, "cold.demo.aether.internal", false},
+		{"a user Service: its port resolves through targetPort", proxy.GammaBackend{Service: "demo/multi", Cluster: multi, Port: 80}, userMap, multi + ":9090", false},
+		{"a user Service: a named targetPort cannot be resolved or refuted and keeps the projected cluster", proxy.GammaBackend{Service: "demo/multi", Cluster: multi, Port: 81}, userMap, multi, false},
+		{"a user Service: a port it does not have, though the pods declare that number", proxy.GammaBackend{Service: "demo/multi", Cluster: multi, Port: 8080}, userMap, multi, true},
+		{"a user Service: a targetPort the pods do not declare", proxy.GammaBackend{Service: "demo/multi", Cluster: multi, Port: 443}, userMap, multi, true},
+		{"a user Service this node knows no pod of: a port it does not have is invalid already", proxy.GammaBackend{Service: "demo/cold", Cluster: "cold.demo.aether.internal", Port: 9090}, map[string]map[uint32]uint32{"demo/cold": {80: 8080}}, "cold.demo.aether.internal", true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			assert.Equal(t, tc.want, backendCluster(tc.backend, tc.portMaps, all, a043Mesh))
+			cluster, invalid := backendCluster(tc.backend, tc.portMaps, all, a043Mesh)
+			assert.Equal(t, tc.invalid, invalid, "invalid")
+			if !invalid {
+				assert.Equal(t, tc.want, cluster)
+			}
 		})
 	}
 

@@ -4043,10 +4043,47 @@ requests with their original `Host` to a different port.
   `endpoint.aether.io/port`. A service that does not declare 80 is unchanged.
   Only a service whose pods declare both 80 and another declared port can
   see a different answer; address the other port by its number.
-- **A `backendRef` whose port is not an HTTP port of the backend** routes to
-  nothing (503), where it used to reach the backend's declared port. `18081`,
-  and `80` for a backend that does not declare it, keep meaning the declared
-  port.
+- **A route's ports are real ports** (BREAKING for a route that names one
+  that is not). A `parentRef.port` and a `backendRef.port` name a port the
+  Service really has: for a generated mesh Service the ports its pods declare,
+  for your own Service its `spec.ports`. `18081`, and `80` on a service that
+  does not declare it, are not ports of a service; through chart 2.6 a route
+  that named one was read as "the port the pods declare", and any other wrong
+  `backendRef` port fell back to that port too.
+  - A `backendRef` to a port the Service does not have, or to one that is not
+    HTTP, is invalid: its share of the rule's traffic (by weight) is answered
+    **500**, as the Gateway API specifies, and the route's status says
+    `ResolvedRefs=False` with `BackendNotFound` or `UnsupportedProtocol`.
+  - A `parentRef` to such a port attaches the route to **nothing**: the
+    service answers as if the route did not exist, and the status says
+    `Accepted=False` with `NoMatchingParent`.
+  - A Service port whose `targetPort` is a **name** cannot be checked (the
+    registry carries no port names): a `backendRef` to it keeps reaching the
+    backend's declared port, and the agent logs it. Use a numeric
+    `targetPort`.
+
+  **Before upgrading**, list the routes that name `18081` or `80` (review each
+  `80` against what the Service declares):
+
+  ```bash
+  kubectl get httproutes,grpcroutes -A -o json | jq -r '
+    .items[] | . as $r
+    | ([.spec.parentRefs[]? | select((.kind // "Gateway") == "Service") | {where: "parentRef", name, port}]
+       + [.spec.rules[]?.backendRefs[]? | {where: "backendRef", name, port}])[]
+    | select(.port == 18081 or .port == 80)
+    | "\($r.kind) \($r.metadata.namespace)/\($r.metadata.name): \(.where) \(.name):\(.port)"'
+  ```
+
+  **After upgrading**, the status names every route the mesh refused a port
+  of:
+
+  ```bash
+  kubectl get httproutes,grpcroutes -A -o json | jq -r '
+    .items[] | . as $r | .status.parents[]?
+    | select(.controllerName == "gateway.aether.io/mesh")
+    | .conditions[] | select(.status == "False")
+    | "\($r.kind) \($r.metadata.namespace)/\($r.metadata.name): \(.type)=\(.reason): \(.message)"'
+  ```
 
 ##### Fixed: requests that skipped a service-wide HTTP filter
 
@@ -4070,10 +4107,11 @@ node holds its cluster. If a service relied on such a filter for
 authorization on 2.6 or earlier, requests of these two shapes were not
 authorized by it; its own access log (not the filter's) shows them.
 
-Not closed: a Gateway API route's own filters and matches (an `HTTPRoute`
-parented to the service) are still not applied to that first, parked request
-on the loopback path. The request is delivered to the service's default
-backend as if the route did not exist yet.
+The same held for a Gateway API route's own rules (an `HTTPRoute` parented to
+the service): that first, parked request on the loopback path was delivered
+to the service's own cluster with the route's matches, filters and backends
+skipped. It is closed the same way: the service's virtual host that stands in
+before its cluster arrives carries its routes' rules.
 
 ##### BREAKING: a raw-TCP service is reached on its declared ports only
 

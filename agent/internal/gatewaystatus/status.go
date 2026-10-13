@@ -132,6 +132,35 @@ func MergeConditions(
 	return result, changed
 }
 
+// PruneRouteParentStatus removes the controller-owned entries whose parentRef
+// is none of current: the parentRefs the controller would write an entry for
+// now. A parentRef that was edited or removed leaves its entry behind (the
+// merge is an upsert keyed by the parentRef), and that entry is a verdict
+// about a parent the route no longer names. Entries of other controllers are
+// never touched. It returns the new slice and whether anything was removed.
+func PruneRouteParentStatus(
+	parents []gatewayv1.RouteParentStatus,
+	controllerName gatewayv1.GatewayController,
+	current []gatewayv1.ParentReference,
+) (result []gatewayv1.RouteParentStatus, changed bool) {
+	result = make([]gatewayv1.RouteParentStatus, 0, len(parents))
+	for _, entry := range parents {
+		keep := entry.ControllerName != controllerName
+		for i := 0; !keep && i < len(current); i++ {
+			keep = parentRefEqual(entry.ParentRef, current[i])
+		}
+		if keep {
+			result = append(result, entry)
+		} else {
+			changed = true
+		}
+	}
+	if !changed {
+		return parents, false
+	}
+	return result, true
+}
+
 // parentRefEqual reports whether two parentRefs identify the same parent. We
 // always write back the same parentRef we read from the spec, so comparing the
 // dereferenced fields (with their zero-value defaults) suffices.

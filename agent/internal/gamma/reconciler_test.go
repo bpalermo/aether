@@ -161,7 +161,12 @@ func httpRoute(name, ns, svcParent, backend string) *gatewayv1.HTTPRoute {
 // Accepted=True + ResolvedRefs=True written to its RouteParentStatus.
 func TestReconcile_WritesAcceptedResolved(t *testing.T) {
 	hr := httpRoute("r1", "ns", "svc-1", "svc-1")
-	backend := &corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: "svc-1", Namespace: "ns"}}
+	// The Service has the port the backendRef names (8080): a backendRef to a
+	// port the Service does not have is not resolved (portstatus_test.go).
+	backend := &corev1.Service{
+		ObjectMeta: metav1.ObjectMeta{Name: "svc-1", Namespace: "ns"},
+		Spec:       corev1.ServiceSpec{Ports: []corev1.ServicePort{{Port: 8080}}},
+	}
 	c := fake.NewClientBuilder().WithScheme(newScheme(t)).
 		WithObjects(hr, backend).
 		WithStatusSubresource(&gatewayv1.HTTPRoute{}).

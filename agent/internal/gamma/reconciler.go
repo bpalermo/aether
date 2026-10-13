@@ -26,7 +26,6 @@ import (
 	"aethermesh.dev/common/ctrlqueue"
 	"aethermesh.dev/common/gammaproject"
 	commonlog "aethermesh.dev/common/log"
-	"aethermesh.dev/common/referencegrant"
 	"aethermesh.dev/common/serviceref"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/equality"
@@ -179,7 +178,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, _ reconcile.Request) (reconc
 
 	routes, portSets := r.projectAllRoutes(httpList, grpcList, grants, httpFilters, specs)
 	routeTargetPorts := buildRouteTargetPorts(portSets)
-	portMaps, err := r.servicePortMaps(ctx, routes)
+	portMaps, facts, err := r.servicePortMaps(ctx, routes)
 	if err != nil {
 		return reconcile.Result{}, err
 	}
@@ -198,8 +197,8 @@ func (r *Reconciler) Reconcile(ctx context.Context, _ reconcile.Request) (reconc
 	// Accepted + ResolvedRefs RouteParentStatus per Service parentRef. Status write
 	// failures are logged but don't fail the reconcile (the data plane is already
 	// projected); the next reconcile retries.
-	r.writeHTTPRouteStatuses(ctx, httpList, grants)
-	r.writeGRPCRouteStatuses(ctx, grpcList, grants)
+	r.writeHTTPRouteStatuses(ctx, httpList, grants, facts)
+	r.writeGRPCRouteStatuses(ctx, grpcList, grants, facts)
 	return reconcile.Result{}, nil
 }
 
@@ -406,8 +405,13 @@ func servicePortsChanged() predicate.Predicate {
 // Service port (the API server's own default). A NAMED targetPort cannot be
 // resolved, because the registry carries no port names: it maps to 0, the
 // routes through it route nothing, and it is said here.
-func (r *Reconciler) servicePortMaps(ctx context.Context, routes map[string][]proxy.GammaRoute) (map[string]map[uint32]uint32, error) {
+//
+// It also returns, for every such Service that exists (generated or not),
+// what the Service says about its real ports: the facts a route's status is
+// judged by (portstatus.go).
+func (r *Reconciler) servicePortMaps(ctx context.Context, routes map[string][]proxy.GammaRoute) (map[string]map[uint32]uint32, map[string]portFacts, error) {
 	out := map[string]map[uint32]uint32{}
+	facts := map[string]portFacts{}
 	for _, key := range routeServiceKeys(routes) {
 		ref, ok := serviceref.ParseKey(key)
 		if !ok {
@@ -418,8 +422,9 @@ func (r *Reconciler) servicePortMaps(ctx context.Context, routes map[string][]pr
 			if apierrors.IsNotFound(err) {
 				continue
 			}
-			return nil, err
+			return nil, nil, err
 		}
+		facts[key] = servicePortFacts(svc)
 		if svc.Labels[aetherlabels.LabelMeshService] == "true" {
 			continue
 		}
@@ -430,7 +435,7 @@ func (r *Reconciler) servicePortMaps(ctx context.Context, routes map[string][]pr
 		}
 		out[key] = m
 	}
-	return out, nil
+	return out, facts, nil
 }
 
 // routeServiceKeys returns, sorted, the key of every Service the routes name:
@@ -497,42 +502,46 @@ func buildRouteTargetPorts(portSets map[string]map[uint32]struct{}) map[string][
 }
 
 // writeHTTPRouteStatuses publishes Gateway API status for every Service-parented HTTPRoute.
-func (r *Reconciler) writeHTTPRouteStatuses(ctx context.Context, httpList *gatewayv1.HTTPRouteList, grants []gatewayv1beta1.ReferenceGrant) {
+func (r *Reconciler) writeHTTPRouteStatuses(ctx context.Context, httpList *gatewayv1.HTTPRouteList, grants []gatewayv1beta1.ReferenceGrant, facts map[string]portFacts) {
 	for i := range httpList.Items {
 		hr := &httpList.Items[i]
-		resolved, reason, msg := referencegrant.ResolveBackends(hr.Namespace, "HTTPRoute", httpBackendRefs(hr.Spec.Rules), grants)
-		if err := r.writeRouteStatus(ctx, hr, hr.Generation, &hr.Status.RouteStatus, hr.Spec.ParentRefs, resolved, reason, msg); err != nil {
+		resolved, reason, msg := resolveRefs(facts, hr.Namespace, "HTTPRoute", httpBackendRefs(hr.Spec.Rules), grants)
+		if err := r.writeRouteStatus(ctx, hr, hr.Generation, &hr.Status.RouteStatus, hr.Spec.ParentRefs, facts, resolved, reason, msg); err != nil {
 			r.Log.WarnContext(ctx, "failed to write HTTPRoute status", "route", hr.Name, "namespace", hr.Namespace, "error", err.Error())
 		}
 	}
 }
 
 // writeGRPCRouteStatuses publishes Gateway API status for every Service-parented GRPCRoute.
-func (r *Reconciler) writeGRPCRouteStatuses(ctx context.Context, grpcList *gatewayv1.GRPCRouteList, grants []gatewayv1beta1.ReferenceGrant) {
+func (r *Reconciler) writeGRPCRouteStatuses(ctx context.Context, grpcList *gatewayv1.GRPCRouteList, grants []gatewayv1beta1.ReferenceGrant, facts map[string]portFacts) {
 	for i := range grpcList.Items {
 		gr := &grpcList.Items[i]
-		resolved, reason, msg := referencegrant.ResolveBackends(gr.Namespace, "GRPCRoute", grpcBackendRefs(gr.Spec.Rules), grants)
-		if err := r.writeRouteStatus(ctx, gr, gr.Generation, &gr.Status.RouteStatus, gr.Spec.ParentRefs, resolved, reason, msg); err != nil {
+		resolved, reason, msg := resolveRefs(facts, gr.Namespace, "GRPCRoute", grpcBackendRefs(gr.Spec.Rules), grants)
+		if err := r.writeRouteStatus(ctx, gr, gr.Generation, &gr.Status.RouteStatus, gr.Spec.ParentRefs, facts, resolved, reason, msg); err != nil {
 			r.Log.WarnContext(ctx, "failed to write GRPCRoute status", "route", gr.Name, "namespace", gr.Namespace, "error", err.Error())
 		}
 	}
 }
 
 // writeRouteStatus upserts our (mesh controller) RouteParentStatus for each
-// Service parentRef of the route, setting Accepted=True (we processed it) and
-// ResolvedRefs per the backend check. It preserves status entries owned by other
-// controllers and only issues a status update when something changed.
+// Service parentRef of the route, setting Accepted (True when we attached it;
+// False with NoMatchingParent when the parentRef names a port that is not an
+// HTTP port of the Service, in which case the route is attached to nothing)
+// and ResolvedRefs per the backend check. It preserves status entries owned by
+// other controllers and only issues a status update when something changed.
 func (r *Reconciler) writeRouteStatus(
 	ctx context.Context,
 	obj client.Object,
 	generation int64,
 	status *gatewayv1.RouteStatus,
 	parentRefs []gatewayv1.ParentReference,
+	facts map[string]portFacts,
 	backendsResolved bool,
 	resolvedReason, resolvedMsg string,
 ) error {
 	parents := status.Parents
 	changed := false
+	var written []gatewayv1.ParentReference
 	for _, p := range parentRefs {
 		if p.Group != nil && string(*p.Group) != "" {
 			continue
@@ -540,12 +549,19 @@ func (r *Reconciler) writeRouteStatus(
 		if p.Kind == nil || string(*p.Kind) != "Service" {
 			continue
 		}
-		conds := []gatewaystatus.Condition{{
+		written = append(written, p)
+		accepted := gatewaystatus.Condition{
 			Type:    string(gatewayv1.RouteConditionAccepted),
 			Status:  metav1.ConditionTrue,
 			Reason:  string(gatewayv1.RouteReasonAccepted),
 			Message: "Route accepted by the aether mesh",
-		}}
+		}
+		if problem := parentPortProblem(facts, p, obj.GetNamespace()); problem != "" {
+			accepted.Status = metav1.ConditionFalse
+			accepted.Reason = string(gatewayv1.RouteReasonNoMatchingParent)
+			accepted.Message = problem
+		}
+		conds := []gatewaystatus.Condition{accepted}
 		resolvedStatus := metav1.ConditionTrue
 		if !backendsResolved {
 			resolvedStatus = metav1.ConditionFalse
@@ -560,7 +576,10 @@ func (r *Reconciler) writeRouteStatus(
 		parents, upd = gatewaystatus.MergeRouteParentStatus(parents, gatewaystatus.MeshControllerName, p, generation, conds...)
 		changed = changed || upd
 	}
-	if !changed {
+	// The mesh's entry of a parentRef the route no longer names (an edited
+	// port, a removed parent) goes with it.
+	parents, pruned := gatewaystatus.PruneRouteParentStatus(parents, gatewaystatus.MeshControllerName, written)
+	if !changed && !pruned {
 		return nil
 	}
 	status.Parents = parents

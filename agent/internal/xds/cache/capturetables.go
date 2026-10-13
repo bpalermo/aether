@@ -109,17 +109,19 @@ type rulePlace struct {
 // 043, "The model", 6): a rule whose parentRef names no port applies on every
 // port of the Service, one that names a port on that port only.
 //
-// The parentRef's port is a port of the SERVICE:
+// The parentRef's port is a REAL port of the SERVICE, and nothing else:
 //
 //   - the Service port the table answers for, whatever its targetPort is (a
 //     named targetPort cannot be resolved to a pod port, and the rule still
 //     belongs to the port it names);
 //   - a user Service's port, through its port map;
-//   - a generated Service's port, which is the pod's. Its two legacy numbers
-//     are ports of it too and lead to the legacy target: the mesh HTTP port
-//     always, and 80 unless the pods declare 80 themselves. A parentRef that
-//     names one of them attached its rule to nothing, where a backendRef that
-//     names one resolves to the default cluster.
+//   - a generated Service's port, which is the pod's.
+//
+// A parentRef that names any other number attaches its rule to NOTHING. That
+// includes the mesh HTTP port (18081) and a port 80 the pods do not declare:
+// neither is a port of the service, and until chart 2.7.0 both were read as
+// "the port the pods declare". The GAMMA reconciler reports such a parentRef
+// in the route's status (Accepted=False, NoMatchingParent).
 //
 // A rule IMPORTED from a peer cluster (proposal 026) carries no port at all:
 // the projection has no field for one yet. It was authored for some port of
@@ -127,10 +129,8 @@ type rulePlace struct {
 // before the tables were per port, on the legacy target's virtual hosts, and
 // is never spread over the service's other ports.
 func ruleApplies(rule proxy.GammaRoute, portMaps map[string]map[uint32]uint32, ports servicePorts, at rulePlace) bool {
-	legacy := ports.legacyHTTPPort()
-	onLegacyTarget := at.pod == 0 || at.pod == legacy
 	if rule.Imported {
-		return onLegacyTarget
+		return at.pod == 0 || at.pod == ports.legacyHTTPPort()
 	}
 	if rule.ParentPort == 0 || (at.servicePort != 0 && rule.ParentPort == at.servicePort) {
 		return true
@@ -144,13 +144,7 @@ func ruleApplies(rule proxy.GammaRoute, portMaps map[string]map[uint32]uint32, p
 		resolved, ok := podPort(portMaps, at.svc, rule.ParentPort)
 		return ok && resolved == at.pod
 	}
-	if rule.ParentPort == at.pod {
-		return true
-	}
-	if rule.ParentPort == meshconst.ProxyOutboundPort || (rule.ParentPort == 80 && !ports.hasHTTP(80)) {
-		return at.pod == legacy
-	}
-	return false
+	return rule.ParentPort == at.pod
 }
 
 // httpClusterForPort returns the cluster that serves pod port port of svc as
@@ -167,20 +161,23 @@ func httpClusterForPort(svc, meshDomain string, ports servicePorts, port uint32)
 // (ruleApplies), with every backendRef port resolved to the cluster of that
 // port.
 //
-// A backendRef names a port of the backend SERVICE (proposal 043, "The model",
-// 6). Until this change the port was not read at all and every backend was the
-// backend's default cluster, so a route to port 9090 of a two-port service
-// delivered to its other port and answered 200.
+// A backendRef names a REAL port of the backend SERVICE (proposal 043, "The
+// model", 6), and it is held to that:
 //
 //   - the port resolves to an HTTP port of the backend: that port's cluster;
-//   - the backend is not known on this node (no endpoint held yet), or the
-//     rule carries no port (imported from a peer, proposal 026): the cluster
-//     the projector named, the backend's default cluster, as before;
-//   - the mesh HTTP port, or port 80 of a generated Service that does not
-//     declare it: the legacy spelling of the backend, its default cluster;
-//   - anything else names no HTTP port of the backend. The route points at
-//     "<fqdn>:<port>", a cluster that does not exist, and the request fails
-//     where it used to be delivered to a port nobody asked for.
+//   - the rule carries no port (imported from a peer, proposal 026), or the
+//     backend is not known on this node (no endpoint held yet) and nothing
+//     says the port is wrong: the cluster the projector named, as before;
+//   - a user Service's port whose targetPort is a NAME: the registry carries
+//     no port names, so it cannot be resolved or refuted; the cluster the
+//     projector named, as before, and the reconciler says so;
+//   - anything else names no HTTP port of the backend: a port the Service
+//     does not have (the mesh HTTP port 18081 and an undeclared 80 are two
+//     such numbers; until chart 2.7.0 they meant "the port the pods
+//     declare"), or one that is not HTTP. The backend is INVALID: its share
+//     of the rule is answered 500, as the Gateway API specifies, never
+//     delivered to another port. The reconciler reports it in the route's
+//     status (ResolvedRefs=False).
 //
 // The input is shared and read-only; a rule whose backends change is copied.
 func resolveRules(in ruleInputs, all map[string]servicePorts, meshDomain string, at rulePlace) []proxy.GammaRoute {
@@ -202,14 +199,14 @@ func resolveRules(in ruleInputs, all map[string]servicePorts, meshDomain string,
 func resolveBackends(backends []proxy.GammaBackend, portMaps map[string]map[uint32]uint32, all map[string]servicePorts, meshDomain string) []proxy.GammaBackend {
 	var out []proxy.GammaBackend
 	for i, b := range backends {
-		cluster := backendCluster(b, portMaps, all, meshDomain)
-		if cluster == b.Cluster {
+		cluster, invalid := backendCluster(b, portMaps, all, meshDomain)
+		if cluster == b.Cluster && invalid == b.Invalid {
 			continue
 		}
 		if out == nil {
 			out = slices.Clone(backends)
 		}
-		out[i].Cluster = cluster
+		out[i].Cluster, out[i].Invalid = cluster, invalid
 	}
 	if out == nil {
 		return backends
@@ -217,28 +214,34 @@ func resolveBackends(backends []proxy.GammaBackend, portMaps map[string]map[uint
 	return out
 }
 
-func backendCluster(b proxy.GammaBackend, portMaps map[string]map[uint32]uint32, all map[string]servicePorts, meshDomain string) string {
+// backendCluster resolves one backendRef (resolveRules): the cluster of the
+// port it names, and whether it is invalid.
+func backendCluster(b proxy.GammaBackend, portMaps map[string]map[uint32]uint32, all map[string]servicePorts, meshDomain string) (cluster string, invalid bool) {
+	if b.Port == 0 {
+		return b.Cluster, false
+	}
 	ports := all[b.Service]
-	if b.Port == 0 || !ports.known() {
-		return b.Cluster
+	pod := b.Port
+	if m, mapped := portMaps[b.Service]; mapped {
+		target, has := m[b.Port]
+		switch {
+		case !has:
+			// The Service has no such port, whatever its pods declare.
+			return b.Cluster, true
+		case target == 0:
+			// A named targetPort.
+			return b.Cluster, false
+		}
+		pod = target
 	}
-	pod, ok := podPort(portMaps, b.Service, b.Port)
-	if !ok {
-		// A user Service whose targetPort is a name, or that has no such
-		// port. The port cannot be resolved to a pod port, so the backend
-		// keeps the cluster it had before backendRef ports were read: the
-		// projected one. (Rendering "<fqdn>:<Service port>" here named a
-		// cluster of ANOTHER port whenever the pods declare that number.)
-		// The reconciler reports a named targetPort.
-		return b.Cluster
+	switch {
+	case !ports.known():
+		return b.Cluster, false
+	case ports.hasHTTP(pod):
+		return httpClusterForPort(b.Service, meshDomain, ports, pod), false
+	default:
+		return b.Cluster, true
 	}
-	if ports.hasHTTP(pod) {
-		return httpClusterForPort(b.Service, meshDomain, ports, pod)
-	}
-	if _, mapped := portMaps[b.Service]; !mapped && isLegacyHTTPPort(pod) && ports.legacyHTTPPort() != 0 {
-		return proxy.ServiceClusterName(b.Service, meshDomain)
-	}
-	return proxy.PortClusterName(b.Service, meshDomain, pod)
 }
 
 // outboundPortVhostLocked builds the out_http (loopback) virtual host of one
@@ -320,36 +323,105 @@ func (c *SnapshotCache) outboundRefusalVhostsLocked(in ruleInputs) []*routev3.Vi
 }
 
 // outboundColdVhostsLocked returns the out_http virtual hosts of the services
-// that carry a service-wide HTTP filter and that this node holds no cluster
-// of. Caller must hold clusterMu.
+// that carry a service-wide HTTP filter or route rules and that this node
+// holds no cluster of. Caller must hold clusterMu.
 //
 // Such a service is reached on the loopback path through the on-demand route:
 // the request is parked, the cluster is fetched, the request resumes. On the
 // catch-all's route it resumed WITHOUT the service's filter, which only the
 // service's own virtual host enables (an ext_authz filter is one: the first
-// request to a service from a node was not authorized). So the service gets a
-// virtual host of its own before its cluster does, with the same on-demand
-// route and the filter. Once the node holds the cluster, the entry's virtual
-// hosts and the refusals replace it.
+// request to a service from a node was not authorized), and without its
+// routes' matches, filters and backends (it reached the service's own
+// cluster as if no HTTPRoute existed). The filter and the rules are known
+// here whether or not the node holds an endpoint: they come from the API. So
+// the service gets virtual hosts of its own before its cluster does, on the
+// same on-demand route, with both. Once the node holds the cluster, the
+// entry's virtual hosts and the refusals replace them.
+//
+// The service's ports are not known yet, so the rules are placed by what the
+// rules themselves say: a rule whose parentRef names no port applies to every
+// authority of the service ("<fqdn>" and "<fqdn>:*"); a rule whose parentRef
+// names a port applies to the authority of the pod port behind it, which gets
+// a virtual host of its own with the port-less rules as well (an exact
+// authority is matched before the wildcard). A parentRef port that cannot be
+// resolved (a named targetPort, or no such Service port) places its rule
+// nowhere, here as on the service's real virtual hosts.
 func (c *SnapshotCache) outboundColdVhostsLocked(in ruleInputs) []*routev3.VirtualHost {
-	if c.edge || len(in.chainFilters) == 0 {
+	if c.edge || (len(in.chainFilters) == 0 && len(in.routes) == 0) {
 		return nil
 	}
 	routed := make(map[string]struct{}, len(c.clusters))
 	for _, entry := range c.clusters {
 		routed[entry.service] = struct{}{}
 	}
-	var out []*routev3.VirtualHost
+	cold := map[string]struct{}{}
 	for svc := range in.chainFilters {
-		fqdn := proxy.ServiceClusterName(svc, c.meshDomain)
-		if _, ok := routed[svc]; ok || fqdn == "" {
-			continue
+		cold[svc] = struct{}{}
+	}
+	for svc, rules := range in.routes {
+		if len(rules) > 0 {
+			cold[svc] = struct{}{}
 		}
-		vh := proxy.BuildOnDemandServiceVirtualHost(fqdn+"|cold", []string{fqdn, fqdn + ":*"})
+	}
+	var out []*routev3.VirtualHost
+	for svc := range cold {
+		if _, ok := routed[svc]; !ok {
+			out = c.appendColdVhostsLocked(out, in, svc)
+		}
+	}
+	return c.dropClaimedDomainsLocked(out)
+}
+
+// appendColdVhostsLocked appends ONE service's stand-in virtual hosts
+// (outboundColdVhostsLocked). Caller must hold clusterMu.
+func (c *SnapshotCache) appendColdVhostsLocked(out []*routev3.VirtualHost, in ruleInputs, svc string) []*routev3.VirtualHost {
+	fqdn := proxy.ServiceClusterName(svc, c.meshDomain)
+	if fqdn == "" {
+		return out
+	}
+	add := func(name string, domains []string, rules []proxy.GammaRoute) {
+		for i := range rules {
+			rules[i].Backends = resolveBackends(rules[i].Backends, in.portMaps, c.servicePorts, c.meshDomain)
+		}
+		vh := proxy.BuildOnDemandServiceVirtualHost(name, domains, rules)
 		applyChainFilter(vh, in.chainFilters, svc)
 		out = append(out, vh)
 	}
-	return c.dropClaimedDomainsLocked(out)
+	everywhere, byPod := coldRules(in, svc)
+	add(fqdn+"|cold", []string{fqdn, fqdn + ":*"}, everywhere)
+	for pod, rules := range byPod {
+		add(fmt.Sprintf("%s|cold|%d", fqdn, pod), []string{fmt.Sprintf("%s:%d", fqdn, pod)}, rules)
+	}
+	return out
+}
+
+// coldRules splits the rules of a service this node holds no cluster of
+// (outboundColdVhostsLocked): the ones that apply to every authority of the
+// service, and, per pod port a port-specific rule resolves to, the rules of
+// that port's authority (the port-less ones included, in the route's order).
+// Every returned slice is a copy.
+func coldRules(in ruleInputs, svc string) (everywhere []proxy.GammaRoute, byPod map[uint32][]proxy.GammaRoute) {
+	rules := in.routes[svc]
+	pods := map[uint32]struct{}{}
+	for _, rule := range rules {
+		if rule.ParentPort == 0 {
+			everywhere = append(everywhere, rule)
+			continue
+		}
+		if pod, ok := podPort(in.portMaps, svc, rule.ParentPort); ok {
+			pods[pod] = struct{}{}
+		}
+	}
+	byPod = make(map[uint32][]proxy.GammaRoute, len(pods))
+	for pod := range pods {
+		for _, rule := range rules {
+			resolved, ok := podPort(in.portMaps, svc, rule.ParentPort)
+			if rule.ParentPort == 0 || (ok && resolved == pod) {
+				byPod[pod] = append(byPod[pod], rule)
+			}
+		}
+	}
+	return everywhere, byPod
 }
 
 // dropClaimedDomainsLocked removes from the refusing virtual hosts every

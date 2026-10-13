@@ -56,11 +56,16 @@ import (
 )
 
 const (
-	ppSvc        = "demo/multi"
-	ppMesh       = "multi.demo.aether.internal"
-	ppHeader     = "x-chain-filter"
-	ppNodeName   = "node-1"
-	ppNodeSpiffe = "spiffe://aether.internal/ns/aether-system/sa/aether-agent"
+	ppSvc    = "demo/multi"
+	ppMesh   = "multi.demo.aether.internal"
+	ppHeader = "x-chain-filter"
+	// ppRuleHeader is the response header the service's HTTPRoute rule adds.
+	ppRuleHeader = "x-route-rule"
+	// ppInvalidPath is matched by a rule whose only backendRef names a port
+	// the backend does not have.
+	ppInvalidPath = "/invalid-backend"
+	ppNodeName    = "node-1"
+	ppNodeSpiffe  = "spiffe://aether.internal/ns/aether-system/sa/aether-agent"
 )
 
 // ppRegistry lists nothing until armed, then one pod of demo/multi serving
@@ -205,6 +210,7 @@ func ppTranslate(t *testing.T, c *cache.SnapshotCache, port uint32, hcmChain, ba
 type ppResult struct {
 	status int
 	filter bool
+	rule   bool
 	body   string
 	took   time.Duration
 	err    error
@@ -214,12 +220,14 @@ func (r ppResult) String() string {
 	if r.err != nil {
 		return "error: " + r.err.Error()
 	}
-	return fmt.Sprintf("status=%d chain-filter-ran=%v took=%s body=%q", r.status, r.filter, r.took.Round(time.Millisecond), r.body)
+	return fmt.Sprintf("status=%d chain-filter-ran=%v route-rule-applied=%v took=%s body=%q", r.status, r.filter, r.rule, r.took.Round(time.Millisecond), r.body)
 }
 
-func ppGet(addr, host string) ppResult {
+func ppGet(addr, host string) ppResult { return ppGetPath(addr, host, "/") }
+
+func ppGetPath(addr, host, path string) ppResult {
 	start := time.Now()
-	req, _ := http.NewRequest(http.MethodGet, "http://"+addr+"/", nil)
+	req, _ := http.NewRequest(http.MethodGet, "http://"+addr+path, nil)
 	req.Host = host
 	tr := &http.Transport{DisableKeepAlives: true}
 	defer tr.CloseIdleConnections()
@@ -229,7 +237,7 @@ func ppGet(addr, host string) ppResult {
 	}
 	defer resp.Body.Close()
 	b, _ := io.ReadAll(resp.Body)
-	return ppResult{status: resp.StatusCode, filter: resp.Header.Get(ppHeader) != "", body: strings.TrimSpace(string(b)), took: time.Since(start)}
+	return ppResult{status: resp.StatusCode, filter: resp.Header.Get(ppHeader) != "", rule: resp.Header.Get(ppRuleHeader) != "", body: strings.TrimSpace(string(b)), took: time.Since(start)}
 }
 
 // ppRun starts the agent's cache with NO endpoint listed, the proxy, and the
@@ -300,6 +308,18 @@ func ppStart(t *testing.T, hcmChain string) *ppRig {
 	}})
 	require.NoError(t, err)
 	c.SetServiceChainFilters(map[string]proxy.ExtensionFilter{ppSvc: {Name: "envoy.filters.http.header_mutation", Config: perRoute}})
+	// The service's HTTPRoute: a rule on every port that marks the response,
+	// and one whose only backendRef names a port its Service does not have.
+	c.SetServiceRoutes(map[string][]proxy.GammaRoute{ppSvc: {
+		{
+			Matches:  []proxy.GammaMatch{{Prefix: ppInvalidPath}},
+			Backends: []proxy.GammaBackend{{Service: "demo/other", Cluster: "other.demo.aether.internal", Port: 7777, Weight: 1}},
+		},
+		{
+			Matches:        []proxy.GammaMatch{{Prefix: "/"}},
+			HeaderMutation: &proxy.GammaHeaderMutation{AddResponse: []proxy.GammaHeaderKV{{Name: ppRuleHeader, Value: "on"}}},
+		},
+	}})
 
 	r := &ppRig{t: t, c: c, reg: &ppRegistry{}, port: ppFreePort(t), chain: hcmChain, backend: ln.Addr().String(), hits: hits, seen: map[string]bool{}}
 	require.NoError(t, c.LoadClustersFromRegistry(ctx, "cluster-1", ppNodeName, r.reg))

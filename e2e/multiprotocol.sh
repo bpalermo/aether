@@ -128,6 +128,15 @@
 # A raw-TCP service is reached on the ports it declares (chart 2.7.0 removes
 # the chain that sent ANY port of such a service to its declared port):
 #
+#   R1  routes     an HTTPRoute on mp-httponly whose backendRef names a port
+#                  mp-multi does not have (7777, 18081, 80): ResolvedRefs is
+#                  False/BackendNotFound and the request is answered 500,
+#                  captured and loopback
+#   R2  routes     an HTTPRoute whose parentRef names a port mp-httponly does
+#                  not have (18081, 80, 7777): Accepted is
+#                  False/NoMatchingParent and mp-httponly answers for itself
+#   R3  routes     a valid and an invalid backendRef of equal weight: over 60
+#                  requests only the valid port's marker and 500 are seen
 #   W1  captured   mp-tcponly: raw TCP to <mesh name>:9000 and to :18082
 #                  -> onlytcp
 #   W2  captured   mp-tcponly: raw TCP to :7777 (a port it listens on and does
@@ -281,7 +290,7 @@ AGENT_GROUP=(agent mesh-dns proxy-supervisor cni-install uds-csi)
 REGISTRAR_GROUP=(registrar controller)
 # Red-run aids (see "A RED RUN" in the header). CI sets none of them.
 ALL_LEGS=(M0 M1 M2 M3 M4 M5 M6 M7 X1 X2 X3 X4 X5 X6 A1 A2 A3 A4 A5 A6 A7 A8 A9 A10 A11 A12
-	W1 W2 W3 P1 P2 P3 P4 P5)
+	W1 W2 W3 P1 P2 P3 P4 P5 R1 R2 R3)
 # P3 (a captured dial to :18081 routed by its Host port alone) is not in the
 # default run yet: a dial to 18081 with another Host port is still refused as
 # port-mismatch. It joins the default with the change that makes 18081 the
@@ -315,6 +324,11 @@ ETCD_NAME="${ETCD_NAME:-aether-multiprotocol-etcd}"
 . "$REPO_ROOT/e2e/etcd-image.sh"
 # The HTTPRoute of leg A4 and the response header it adds.
 A4_ROUTE="mp-a4"
+# The routes of the R legs, and aether's controller name in a route's status.
+R_BACKEND_ROUTE="mp-r-backend"
+R_PARENT_ROUTE="mp-r-parent"
+R_WEIGHTED_ROUTE="mp-r-weighted"
+MESH_CONTROLLER="gateway.aether.io/mesh"
 A4_HEADER_VALUE="a4"
 
 # WORKLOADS are the six that serve HTTP on at least one declared port: the
@@ -1699,6 +1713,168 @@ leg_A12() {
 	note "mp-tcpfirst, whose legacy target is raw TCP: its HTTP spellings are refused (X4) and :$MESH_TCP_PORT reaches it (X1)"
 	shared tcpfirst_refused check_tcpfirst_refused
 	shared tcpfirst_meshtcp check_tcpfirst_meshtcp
+}
+
+# --- a route's ports are real ports ---------------------------------------------
+#
+# A parentRef and a backendRef name a REAL port of a Service. One that does not
+# is not given another meaning (until chart 2.7.0, 18081 and an undeclared 80
+# meant "the port the pods declare", and any other wrong port fell back to the
+# backend's declared port): the data plane refuses, and the route's status says
+# why, under aether's own controller name.
+
+# route_condition ROUTE TYPE — "<status>/<reason>" of aether's condition TYPE
+# on the route's first parent status that aether owns, "" when there is none.
+route_condition() {
+	kc -n "$TEST_NS" get httproutes.gateway.networking.k8s.io "$1" \
+		-o jsonpath="{range .status.parents[?(@.controllerName==\"$MESH_CONTROLLER\")]}{range .conditions[?(@.type==\"$2\")]}{.status}/{.reason}{end}{end}" 2>/dev/null
+}
+
+# expect_condition ROUTE TYPE WANT MEANING — poll until the condition is WANT.
+expect_condition() {
+	local route="$1" type="$2" want="$3" meaning="$4" got="" deadline
+	deadline=$(($(date +%s) + ${MP_TIMEOUT:-90}))
+	while :; do
+		got="$(route_condition "$route" "$type")"
+		[ "$got" = "$want" ] && break
+		[ "$(date +%s)" -ge "$deadline" ] && break
+		sleep 2
+	done
+	if [ "$got" = "$want" ]; then
+		passed "HTTPRoute $route: $type is $want"
+	else
+		fail "HTTPRoute $route: $type is '${got:-absent}', want $want" "$meaning"
+	fi
+}
+
+remove_route() {
+	kc -n "$TEST_NS" delete httproutes.gateway.networking.k8s.io "$1" --ignore-not-found --wait=true >/dev/null 2>&1 || true
+}
+
+# apply_backend_route NAME PARENT PORT... — an HTTPRoute on PARENT whose rule
+# sends everything to mp-multi on each PORT given as "<port>[=<weight>]".
+apply_backend_route() {
+	local name="$1" parent="$2" refs="" spec port weight
+	shift 2
+	for spec in "$@"; do
+		port="${spec%%=*}"
+		weight=1
+		case "$spec" in *=*) weight="${spec#*=}" ;; esac
+		refs+="        - {group: \"\", kind: Service, name: mp-multi, port: $port, weight: $weight}"$'\n'
+	done
+	kc apply -f - >/dev/null <<YAML
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata: {name: $name, namespace: $TEST_NS}
+spec:
+  parentRefs:
+    - {group: "", kind: Service, name: $parent}
+  rules:
+    - backendRefs:
+$refs
+YAML
+}
+
+# R1 — a backendRef to a port the backend does not have: ResolvedRefs=False
+# with BackendNotFound, and every request the rule takes is answered 500 on
+# both paths. Three wrong ports: one nothing declares, the mesh HTTP port, and
+# port 80 of a service that does not declare it. Then the route is removed and
+# the parent answers for itself again.
+leg_R1() {
+	log "R1 an HTTPRoute whose backendRef names a port mp-multi does not have: status says so, and the request is answered 500"
+	local name port
+	name="$(mesh_name mp-httponly)"
+	for port in "$UNDECLARED_PORT" "$MESH_HTTP_PORT" "$LOW_PORT"; do
+		if ! apply_backend_route "$R_BACKEND_ROUTE" mp-httponly "$port"; then
+			fail "the HTTPRoute $R_BACKEND_ROUTE (backendRef port $port) was not accepted by the API server"
+			continue
+		fi
+		expect_condition "$R_BACKEND_ROUTE" ResolvedRefs "False/BackendNotFound" \
+			"'True/ResolvedRefs' is the status not reading the backendRef's port (backendRef port $port)"
+		captured "HTTP500" "$name:$HTTP_PORT" "" \
+			"backendRef port $port: '$(marker mp-multi "$HTTP_PORT")' is the request delivered to the port mp-multi's pods declare, which the route never named; 'HTTP503' is a cluster that does not exist"
+		loopback "HTTP500" "$name:$HTTP_PORT" \
+			"backendRef port $port, on the loopback listener: a marker is the request delivered to a port the route never named"
+	done
+	remove_route "$R_BACKEND_ROUTE"
+	captured "$(marker mp-httponly "$HTTP_PORT")" "$name:$HTTP_PORT" "" "the HTTPRoute was deleted and its 500 is still answered"
+	loopback "$(marker mp-httponly "$HTTP_PORT")" "$name:$HTTP_PORT" "the HTTPRoute was deleted and its 500 is still answered"
+}
+
+# R2 — a parentRef to a port the parent does not have attaches the route to
+# nothing: Accepted=False with NoMatchingParent, and the parent answers for
+# itself on every path, as if the route did not exist. The route's backendRef
+# is a real port of ANOTHER service, so a route that did attach would move the
+# request there.
+leg_R2() {
+	log "R2 an HTTPRoute whose parentRef names a port mp-httponly does not have: status says so, and the route is attached to nothing"
+	local name port own
+	name="$(mesh_name mp-httponly)"
+	own="$(marker mp-httponly "$HTTP_PORT")"
+	for port in "$MESH_HTTP_PORT" "$LOW_PORT" "$UNDECLARED_PORT"; do
+		if ! kc apply -f - >/dev/null <<YAML
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata: {name: $R_PARENT_ROUTE, namespace: $TEST_NS}
+spec:
+  parentRefs:
+    - {group: "", kind: Service, name: mp-httponly, port: $port}
+  rules:
+    - backendRefs:
+        - {group: "", kind: Service, name: mp-multi, port: $ALT_PORT}
+YAML
+		then
+			fail "the HTTPRoute $R_PARENT_ROUTE (parentRef port $port) was not accepted by the API server"
+			continue
+		fi
+		expect_condition "$R_PARENT_ROUTE" Accepted "False/NoMatchingParent" \
+			"'True/Accepted' is the status not reading the parentRef's port (parentRef port $port)"
+		captured "$own" "$name:$HTTP_PORT" "" \
+			"parentRef port $port: '$(marker mp-multi "$ALT_PORT")' is the route applied to a port its parentRef did not name"
+		captured "$own" "$name:$MESH_HTTP_PORT" "" \
+			"parentRef port $port, dial :$MESH_HTTP_PORT: '$(marker mp-multi "$ALT_PORT")' is $port read as 'the port the pods declare'"
+		captured "$own" "$name" "" \
+			"parentRef port $port, port-less dial: '$(marker mp-multi "$ALT_PORT")' is $port read as 'the port the pods declare'"
+		loopback "$own" "$name:$HTTP_PORT" \
+			"parentRef port $port, loopback: '$(marker mp-multi "$ALT_PORT")' is the route applied to a port its parentRef did not name"
+		loopback "$own" "$name" \
+			"parentRef port $port, loopback, port-less: '$(marker mp-multi "$ALT_PORT")' is $port read as 'the port the pods declare'"
+	done
+	remove_route "$R_PARENT_ROUTE"
+}
+
+# R3 — a rule with one valid and one invalid backendRef of equal weight: the
+# invalid one's share is answered 500 and the rest reaches the valid port; no
+# request is delivered anywhere else. Counted over 60 requests: both answers
+# must be seen, and nothing but those two.
+leg_R3() {
+	log "R3 an HTTPRoute with a valid and an invalid backendRef of equal weight: half the requests are answered 500, the rest by the valid port"
+	local name hist good bad other
+	name="$(mesh_name mp-httponly)"
+	if ! apply_backend_route "$R_WEIGHTED_ROUTE" mp-httponly "$ALT_PORT=1" "$UNDECLARED_PORT=1"; then
+		fail "the HTTPRoute $R_WEIGHTED_ROUTE was not accepted by the API server"
+		return 0
+	fi
+	expect_condition "$R_WEIGHTED_ROUTE" ResolvedRefs "False/BackendNotFound" "one of the two backendRefs names a port mp-multi does not have"
+	# Wait until the rule is in force: the valid backend's marker is seen.
+	local deadline=$(($(date +%s) + ${MP_TIMEOUT:-90}))
+	while [ "$(date +%s)" -lt "$deadline" ]; do
+		http_tokens client "http://$name:$HTTP_PORT/" "" 6 | grep -q "^$(marker mp-multi "$ALT_PORT")$" && break
+		sleep 2
+	done
+	hist="$(http_tokens client "http://$name:$HTTP_PORT/" "" 60 | sort | uniq -c | awk '{printf "%s=%s ", $2, $1}')"
+	good="$(printf '%s' "$hist" | tr ' ' '\n' | awk -F= -v m="$(marker mp-multi "$ALT_PORT")" '$1==m{print $2}')"
+	bad="$(printf '%s' "$hist" | tr ' ' '\n' | awk -F= '$1=="HTTP500"{print $2}')"
+	other=$((60 - ${good:-0} - ${bad:-0}))
+	note "R3 answers over 60 requests: $hist"
+	if [ "${good:-0}" -ge 10 ] && [ "${bad:-0}" -ge 10 ] && [ "$other" -eq 0 ]; then
+		passed "captured $name:$HTTP_PORT: ${good} answered by mp-multi:$ALT_PORT, ${bad} answered 500, nothing else"
+	else
+		fail "captured $name:$HTTP_PORT over 60 requests: $hist" \
+			"want only '$(marker mp-multi "$ALT_PORT")' and 'HTTP500', at least 10 of each (the weights are equal); any other token is a request delivered to a port the route did not name"
+	fi
+	remove_route "$R_WEIGHTED_ROUTE"
+	captured "$(marker mp-httponly "$HTTP_PORT")" "$name:$HTTP_PORT" "" "the HTTPRoute was deleted and is still in force"
 }
 
 # --- a raw-TCP service is reached on the ports it declares ---------------------
