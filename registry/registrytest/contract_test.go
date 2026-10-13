@@ -91,7 +91,7 @@ func TestRequirePerPortProtocols(t *testing.T) {
 			in: listings{
 				listHTTP: {
 					"ns/a": {row("10.0.0.1", 8080, []uint32{8080}, classes{8080: classHTTP})},
-					"ns/c": {{Ip: "10.0.0.3", ClusterName: "east", Port: 8080, PortProtocols: classes{8080: classHTTP, 9000: classTCP}}},
+					"ns/c": {{Ip: "10.0.0.3", ClusterName: "east", Port: 8080, PortProtocols: classes{8080: classHTTP}}},
 				},
 				listTCP: {
 					"ns/b": {row("10.0.0.1", 9000, []uint32{9000}, classes{9000: classTCP})},
@@ -155,13 +155,106 @@ func TestRequirePerPortProtocols(t *testing.T) {
 		{
 			name: "one bad pod among good ones is the only one reported",
 			in: listings{
-				listHTTP: {"ns/mixed": {mixed("10.0.0.1"), mixed("10.0.0.2")}},
+				listHTTP: {"ns/mixed": {
+					mixed("10.0.0.1"), mixed("10.0.0.2"),
+					row("10.0.0.3", 8080, []uint32{8080}, classes{8080: classHTTP}),
+				}},
 				listTCP: {"ns/mixed": {
-					mixed("10.0.0.1"),
+					mixed("10.0.0.1"), mixed("10.0.0.2"),
 					row("10.0.0.3", 8080, []uint32{8080}, classes{8080: classHTTP}),
 				}},
 			},
 			want: []string{`endpoint 10.0.0.3 is listed under PROTOCOL_TCP`},
+		},
+		{
+			// The listing of a backend that files a pod under its pod-level
+			// protocol alone (#1672 on the kubernetes backend): every row it
+			// returns is right, and the pod has no raw-TCP cluster.
+			name: "a mixed pod missing from the listing of its second class",
+			in: listings{
+				listHTTP: {"ns/mixed": {mixed("10.0.0.1")}},
+				listTCP:  {},
+				listUDP:  {},
+			},
+			want: []string{`service "ns/mixed" endpoint 10.0.0.1 declares a PROTOCOL_TCP port and is missing from the PROTOCOL_TCP listing`},
+		},
+		{
+			name: "a mixed pod missing from the listing of its declared port's class",
+			in: listings{
+				listHTTP: {"ns/other": {row("10.0.0.9", 8080, []uint32{8080}, classes{8080: classHTTP})}},
+				listTCP:  {"ns/mixed": {mixed("10.0.0.1")}},
+			},
+			want: []string{`service "ns/mixed" endpoint 10.0.0.1 declares a PROTOCOL_HTTP port and is missing from the PROTOCOL_HTTP listing`},
+		},
+		{
+			name: "a pod of three classes in one listing is reported once per missing listing",
+			in: listings{
+				listHTTP: {},
+				listTCP:  {"ns/all": {row("10.0.0.1", 9000, nil, classes{8080: classHTTP, 9000: classTCP, 5353: classUDP, 5354: classUDP})}},
+				listUDP:  {},
+			},
+			want: []string{
+				`declares a PROTOCOL_HTTP port and is missing from the PROTOCOL_HTTP listing`,
+				`declares a PROTOCOL_UDP port and is missing from the PROTOCOL_UDP listing`,
+			},
+		},
+		{
+			name: "one of two mixed pods missing from the second listing is the only one reported",
+			in: listings{
+				listHTTP: {"ns/mixed": {mixed("10.0.0.1"), mixed("10.0.0.2")}},
+				listTCP:  {"ns/mixed": {mixed("10.0.0.2")}},
+			},
+			want: []string{`endpoint 10.0.0.1 declares a PROTOCOL_TCP port and is missing from the PROTOCOL_TCP listing`},
+		},
+		{
+			// The same address in another service, or another cluster, does
+			// not stand in for the missing row.
+			name: "the missing row is not found under another service or cluster",
+			in: listings{
+				listHTTP: {"ns/mixed": {mixed("10.0.0.1")}},
+				listTCP: {
+					"ns/other": {mixed("10.0.0.1")},
+					"ns/mixed": {{Ip: "10.0.0.1", ClusterName: "west", Port: 9000, PortProtocols: classes{9000: classTCP}}},
+				},
+			},
+			want: []string{
+				`service "ns/mixed" endpoint 10.0.0.1 declares a PROTOCOL_TCP port and is missing from the PROTOCOL_TCP listing`,
+				`service "ns/other" endpoint 10.0.0.1 declares a PROTOCOL_HTTP port and is missing from the PROTOCOL_HTTP listing`,
+			},
+		},
+		{
+			// Completeness is checked among the protocols the caller listed:
+			// a caller that did not list TCP has said nothing about it.
+			name: "a mixed pod when the caller did not pass its second listing",
+			in: listings{
+				listHTTP: {"ns/mixed": {mixed("10.0.0.1")}},
+				listUDP:  {},
+			},
+		},
+		{
+			name: "a row written before port_protocols existed is exempt from completeness",
+			in: listings{
+				listHTTP: {},
+				listTCP:  {"ns/old": {row("10.0.0.1", 5432, []uint32{5432, 8080}, nil)}},
+				listUDP:  {},
+			},
+		},
+		{
+			// A port with no class names no listing, even when the caller
+			// passes a listing under the zero protocol.
+			name: "a port of an unspecified class asks for no listing",
+			in: listings{
+				registryv1.Service_PROTOCOL_UNSPECIFIED: {},
+				listHTTP:                                {"ns/web": {row("10.0.0.1", 8080, nil, classes{8080: classHTTP, 9000: registryv1.PortProtocol_PORT_PROTOCOL_UNSPECIFIED})}},
+			},
+		},
+		{
+			name: "a pod in all three listings",
+			in: listings{
+				listHTTP: {"ns/all": {row("10.0.0.1", 8080, nil, classes{8080: classHTTP, 9000: classTCP, 5353: classUDP})}},
+				listTCP:  {"ns/all": {row("10.0.0.1", 8080, nil, classes{8080: classHTTP, 9000: classTCP, 5353: classUDP})}},
+				listUDP:  {"ns/all": {row("10.0.0.1", 8080, nil, classes{8080: classHTTP, 9000: classTCP, 5353: classUDP})}},
+			},
 		},
 	}
 	for _, tt := range tests {

@@ -106,6 +106,9 @@ func (c *SnapshotCache) clustersEndpointsVhostsAndPinsInto(buf []entryClass, mtl
 	c.derived.rotate()
 	quic.aliasCLA = c.derived.aliasCLA
 	quic.twinCluster = c.derived.twinCluster
+	// What the out_http virtual hosts built here carry besides a cluster,
+	// read before clusterMu like the fan-out inputs.
+	rules := ruleInputs{routes: c.serviceRoutesSnapshot(), chainFilters: c.serviceChainFiltersSnapshot(), portMaps: c.servicePortMapsSnapshot()}
 
 	c.clusterMu.RLock()
 	defer c.clusterMu.RUnlock()
@@ -144,7 +147,7 @@ func (c *SnapshotCache) clustersEndpointsVhostsAndPinsInto(buf []entryClass, mtl
 	}
 	// The authorities out_http refuses by name (proposal 043): a mesh service
 	// addressed on a port it does not serve as HTTP.
-	vhosts = append(vhosts, c.outboundRefusalVhostsLocked()...)
+	vhosts = append(vhosts, c.outboundRefusalVhostsLocked(rules)...)
 	c.noteQUICFanout(quicClusters, len(quic.pairs), len(quic.identities), len(quic.awaitingCert))
 	sortResourcesByName(clusters)
 	sortResourcesByName(clas)
@@ -740,18 +743,16 @@ func buildHTTPEndpointBuckets(serviceName string, endpoints []*registryv1.Servic
 
 	for _, endpoint := range endpoints {
 		lbEp := proxy.ServiceLocalityLbEndpointFromRegistryEndpoint(endpoint, localRegion, localZone, waypoint)
-		defaultCla.Endpoints = append(defaultCla.Endpoints, lbEp)
-		defaultEpMap[endpoint.GetIp()] = lbEp
-
-		served := endpoint.GetPorts()
-		if len(served) == 0 {
-			served = []uint32{endpoint.GetPort()}
+		// The default cluster is the cluster of the legacy target, an HTTP
+		// port: a pod that declares that number as raw TCP (pods of one
+		// service that disagree) is not a member of it.
+		if servesPortAsHTTP(endpoint, defaultPort) {
+			defaultCla.Endpoints = append(defaultCla.Endpoints, lbEp)
+			defaultEpMap[endpoint.GetIp()] = lbEp
 		}
-		for _, p := range served {
-			if defaultIsHTTP && p == defaultPort {
-				continue
-			}
-			if !servesPortAsHTTP(endpoint, p) {
+
+		for _, p := range servedPortNumbers(endpoint) {
+			if (defaultIsHTTP && p == defaultPort) || !servesPortAsHTTP(endpoint, p) {
 				continue
 			}
 			b := buckets[p]
@@ -767,6 +768,15 @@ func buildHTTPEndpointBuckets(serviceName string, endpoints []*registryv1.Servic
 	// re-sync with an unchanged endpoint set never hashes as an EDS change.
 	proxy.SortLocalityLbEndpoints(defaultCla.Endpoints)
 	return defaultCla, defaultEpMap, buckets
+}
+
+// servedPortNumbers returns the ports an endpoint row lists, or its single
+// declared port for a row that lists none.
+func servedPortNumbers(endpoint *registryv1.ServiceEndpoint) []uint32 {
+	if served := endpoint.GetPorts(); len(served) != 0 {
+		return served
+	}
+	return []uint32{endpoint.GetPort()}
 }
 
 // endpointSANNamespaces derives the sorted SAN namespace list from the endpoints'

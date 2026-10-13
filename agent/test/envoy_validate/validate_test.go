@@ -646,7 +646,6 @@ func TestCaptureTCPRouteDrainCollapsesToSingleCluster(t *testing.T) {
 		// A raw-TCP legacy target: these fixtures exercise the TCP floor,
 		// which is emitted only for such a service (proposals 037 and 043).
 		LegacyTCPPort: fixtureLegacyTCPPort,
-		AnyPort:       true,
 	}
 	rules := []proxy.L4ServiceRoute{{
 		Backends: []proxy.L4Backend{

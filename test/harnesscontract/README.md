@@ -3,9 +3,9 @@
 [`external-harness.yaml`](./external-harness.yaml) lists what a harness
 outside this repository may read from a deployed mesh: metric names, their
 labels and the closed sets of label values, the fields of a log line, the
-fields of the proxy's HTTP access log a harness reads, an Envoy stat prefix,
-the annotations and ports a workload manifest names, and the chart objects a
-harness rolls or reads.
+fields of the proxy's HTTP access log a harness reads, the annotations and
+ports a workload manifest names, and the chart objects a harness rolls or
+reads. (Until version 3 it also listed one Envoy stat prefix; see "Versions".)
 
 A harness that lives in this repository changes in the same pull request as
 the code it reads. One that lives elsewhere does not, and the first sign of a
@@ -122,6 +122,7 @@ one.
 
 | `version` | Change | What a harness has to change |
 |---|---|---|
+| 4 | The entry `envoy.capture.anyport_downstream_cx` is removed. Chart 2.7.0 removes the any-port chain of the capture listener (`cap_tcp_anyport_<cluster>`): a raw-TCP service is reached on its declared ports and on the TCP mesh port only, and a connection to any other port of its address is no longer delivered to it (`docs/runbook.md`, "Chart 2.7.0"). No chain carries the stat prefix `cap_tcp_anyport_`, so `tcp.cap_tcp_anyport_<cluster>.downstream_cx_total` (stored as `envoy_tcp_cap_tcp_anyport_.*_downstream_cx_total`) has no series on 2.7.0 and later. | Stop reading the counter: on 2.7.0 an absent series does not mean "no client used an undeclared port", it means the chain does not exist. A harness that graded on it being zero drops that check; one that dials a raw-TCP service on a port it does not declare must dial a declared port. To find such clients before upgrading, read the counter on 2.6.x, knowing that it undercounts: it does not move for a port number that another service declares as raw TCP. |
 | 3 | The renders of the `aether` chart (`chart.aether`, `chart.aether.agent_surge`) pass `clusterName`. Chart 2.6.0 has no default for it and refuses to render without it (`docs/runbook.md`, "Chart 2.6.0"). Nothing else of those renders changed: the same objects, names, labels, arguments and roll strategies. | Pass `clusterName` wherever the harness installs, upgrades or renders the chart. For a cluster that already runs the mesh it is the name that cluster runs with, read from the agent DaemonSet's `--cluster-name` argument; a different name is a rename of the cluster, with the consequences that runbook section lists. |
 | 2 | `agent.xds_acked_tls_clusters` keeps its name, type and labels and means something else (#1508). It was the counts of the last snapshot whose cluster update the proxy acknowledged. It is the count of the clusters the proxy has accepted, each at the version it last acknowledged or stated. | Do not read it as "the proxy holds the newest snapshot" after any cluster ACK: a rejected cluster stays at its accepted version through later ACKs, so the gauge can stay above `agent.snapshot_tls_clusters` for as long as the proxy rejects. Treat an absent series as "not known", and expect it to become absent AFTER having had samples, while the proxy holds a cluster whose pin state the agent cannot determine: a grader that takes a missing series for zero, or that carries the last sample forward, is wrong there. The entry's `notes` have the full statement. |
 | 1 | The first version (#1535). | |
@@ -143,7 +144,7 @@ that names a chart test is referred to by one of its renders.
 | `metrics` of the prober, `resource_attributes` `service.name` | Every `tier*` and `result*` string constant of `prober.go` (read from the source, so a new one cannot be forgotten) recorded through the real `record()`; the resource the prober builds | `//prober/internal/prober:prober_test` |
 | `log_lines` | A burst written by the real fail log with the real cap and window, then flushed as a stopping prober does; the lines are parsed as a harness parses them (marker, one JSON object, exact keys in order, RFC 3339 times, the summary's `t` and `window_start`) | `//prober/internal/prober:prober_test` |
 | `access_logs` | The access log the real builder makes, for each reporter: its `log_name`, the field that names the reporter and the two values the code has for it, and every field the entry lists with the Envoy format operator that renders it. What Envoy renders for an operator, and that a store holds the record, are not compared | `//agent/internal/xds/proxy:proxy_test` |
-| `envoy_stats` | The stat prefix of the portless chain in a capture listener the real generator built | `//agent/internal/xds/proxy:proxy_test` |
+| `envoy_stats` | None since version 4. (The one entry was the stat prefix of the any-port chain of a capture listener, which chart 2.7.0 removed; `//agent/internal/xds/proxy:proxy_test` now holds that no capture chain carries that prefix.) | |
 | `names` | The Go constant the product itself uses | `//test/harnesscontract:harnesscontract_test`, and `//agent/internal/xds/xdsconst:xdsconst_test` for the one constant that is internal to the agent |
 | `charts` | `helm template` of the packaged chart, run with the release name, namespace and `--set` pairs the entry gives | `//test/harnesscontract:{aether,prober,udsecho}_chart_test` |
 | `resource_attributes` `k8s.node.name` | The keys `OTEL_RESOURCE_ATTRIBUTES` sets in the rendered agent and prober containers. The chart entries do not repeat the attribute: each container lists the entry's id (`resource_attributes`), and the chart test reads the key from the entry | `//test/harnesscontract:harnesscontract_test` holds the link (every component has a container that refers to the entry, and no other container does); `//test/harnesscontract:{aether,prober}_chart_test` compare with the render |
@@ -212,8 +213,9 @@ class or in two, a chart test named by an entry it compares with nothing).
   `service.name`) through the metrics pipeline's own configuration. That the
   product sets the attribute is checked (the table above); the label it
   becomes is the pipeline's.
-  The same holds for the stored name of an Envoy stat: only the prefix the
-  agent chooses is tied to code.
+  The same would hold for the stored name of an Envoy stat, of which the
+  contract lists none since version 4: only the prefix the agent chooses can
+  be tied to code.
 - **The meaning of the two halves of `reason`** (`reason_classes`): under
   which reasons the node published no TLS at all, and under which it published
   TLS that checks no server identity. The code states it in comments only.

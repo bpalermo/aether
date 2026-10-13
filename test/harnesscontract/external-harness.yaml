@@ -36,7 +36,7 @@
 # what a metrics pipeline or Envoy does to a name after it leaves the product,
 # and meanings that exist only in prose. Those entries are promises kept by
 # review alone.
-version: 3
+version: 4
 
 # --- Metrics ------------------------------------------------------------------
 #
@@ -312,20 +312,12 @@ access_logs:
 
 # --- Envoy stats --------------------------------------------------------------
 #
-# The agent chooses the stat prefix; Envoy and the metrics pipeline make the
-# stored name out of it. `<cluster>` is the Envoy cluster name with every
-# character outside [a-zA-Z0-9_] flattened to `_` by the pipeline, so a harness
-# matches by pattern and never assembles the name.
-envoy_stats:
-  - id: envoy.capture.anyport_downstream_cx
-    stat_prefix: cap_tcp_anyport_
-    stat: tcp.cap_tcp_anyport_<cluster>.downstream_cx_total
-    stored_name_pattern: envoy_tcp_cap_tcp_anyport_.*_downstream_cx_total
-    notes: >-
-      Connections accepted by the portless any-port chain of a TCP-primary
-      service's capture listener, counted apart from the supported spellings.
-      Only the prefix is tied to code.
-    checked_by: //agent/internal/xds/proxy:proxy_test
+# None since version 4. Until version 3 the one entry here was the stat prefix
+# of the any-port chain of a capture listener (`cap_tcp_anyport_<cluster>`).
+# The chain was removed in chart 2.7.0: a raw-TCP service is reached on the
+# ports it declares and on the TCP mesh port, and on no other port of its
+# address, so there is nothing left to count.
+envoy_stats: []
 
 # --- Names --------------------------------------------------------------------
 #

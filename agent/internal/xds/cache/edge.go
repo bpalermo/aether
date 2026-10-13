@@ -687,6 +687,18 @@ func (c *SnapshotCache) edgeMeshClusterNameLocked(key, meshFQDN string, port uin
 			return portName, true
 		}
 	}
+	// A mesh service with NO default cluster entry: its declared port is raw
+	// TCP (proposal 043), so only its other HTTP ports have a cluster. It is
+	// still a mesh service, and a backend that names a port of it that is not
+	// an HTTP port must fail inside the mesh. Falling through here would send
+	// the request to the cleartext Kubernetes path, to pods that expect the
+	// mesh's mTLS. The name returned has no cluster, so the route answers 503.
+	if c.servicePorts[key].known() {
+		if port == 0 {
+			return meshFQDN, true
+		}
+		return proxy.PortClusterName(key, c.meshDomain, port), true
+	}
 	return "", false
 }
 

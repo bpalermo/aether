@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	registryv1 "aethermesh.dev/api/aether/registry/v1"
+	meshconst "aethermesh.dev/common/constants/mesh"
 	"aethermesh.dev/registry/endpointmeta"
 )
 
@@ -69,8 +70,12 @@ func (p servicePorts) legacyHTTPPort() uint32 {
 }
 
 // legacyTCPPort returns the legacy target when it is a raw-TCP port, else 0.
+//
+// The port must also be SERVED as raw TCP here (its listing holds the pod):
+// the chains built for this number forward to the floor cluster, which exists
+// only then.
 func (p servicePorts) legacyTCPPort() uint32 {
-	if p.legacyClass == registryv1.PortProtocol_PORT_PROTOCOL_TCP {
+	if p.legacyClass == registryv1.PortProtocol_PORT_PROTOCOL_TCP && slices.Contains(p.tcp, p.legacyPort) {
 		return p.legacyPort
 	}
 	return 0
@@ -154,36 +159,31 @@ func endpointPortClasses(ep *registryv1.ServiceEndpoint, listed registryv1.Servi
 	return out
 }
 
-// endpointIdentity identifies an endpoint across listings: a pod that serves
-// ports of two classes is returned by two listings, with the same row.
-type endpointIdentity struct{ cluster, ip string }
-
-// distinctEndpoints calls visit once per distinct endpoint of listings, with
-// the listing it was first read from.
-func distinctEndpoints(listings []listedEndpoints, visit func(ep *registryv1.ServiceEndpoint, listed registryv1.Service_Protocol)) {
-	// An endpoint can only repeat ACROSS listings, so a service in one listing
-	// -- nearly every service -- needs no identity set. This runs for every
-	// service on every registry refresh of every agent.
-	populated := 0
+// servedPorts calls visit for every (endpoint, port, class) the listings
+// SERVE: a port of class P counts when the endpoint is in the listing of P.
+//
+// A pod that serves ports of two classes is returned by two listings, with
+// the same row, and each listing vouches for the ports of its own class. That
+// is also what the cluster entries are built from (one pass per listing), so a
+// port that is served here has a cluster, and a port that has no cluster is
+// not served: a registrar of chart 2.6 on the kubernetes backend lists a pod
+// under its pod-level protocol alone, and behind it the other class's ports of
+// a mixed pod name nothing, where they used to get a chain or a route with no
+// cluster behind it. No endpoint is counted twice for one port: its class has
+// one listing.
+func servedPorts(listings []listedEndpoints, visit func(ep *registryv1.ServiceEndpoint, port uint32, class registryv1.PortProtocol)) {
 	for _, l := range listings {
-		if len(l.endpoints) > 0 {
-			populated++
+		listed := l.protocol
+		if listed == registryv1.Service_PROTOCOL_UNSPECIFIED {
+			listed = registryv1.Service_PROTOCOL_HTTP
 		}
-	}
-	var seen map[endpointIdentity]struct{}
-	if populated > 1 {
-		seen = map[endpointIdentity]struct{}{}
-	}
-	for _, l := range listings {
+		want := endpointmeta.PortProtocolFromService(listed)
 		for _, ep := range l.endpoints {
-			if seen != nil {
-				id := endpointIdentity{cluster: ep.GetClusterName(), ip: ep.GetIp()}
-				if _, dup := seen[id]; dup {
-					continue
+			for port, class := range endpointPortClasses(ep, listed) {
+				if class == want {
+					visit(ep, port, class)
 				}
-				seen[id] = struct{}{}
 			}
-			visit(ep, l.protocol)
 		}
 	}
 }
@@ -271,14 +271,28 @@ func legacyTarget(listings ...listedEndpoints) (port uint32, class registryv1.Po
 		port  uint32
 		class registryv1.PortProtocol
 	}
+	// One vote per endpoint, from the row's OWN declaration of its declared
+	// port, whichever listing returned the row. What the declared port is does
+	// not depend on which listings have caught up: a mixed pod whose HTTP row
+	// is listed before its raw-TCP one is still a pod whose declared port is
+	// raw TCP, and must not be taken for a service with no declared port
+	// (which gets a default HTTP cluster). Whether the port is SERVED here is
+	// servedPorts' question, asked by legacyTCPPort.
 	votes := map[pair]int{}
-	distinctEndpoints(listings, func(ep *registryv1.ServiceEndpoint, listed registryv1.Service_Protocol) {
-		p := ep.GetPort()
-		if p == 0 || p > 65535 {
-			return
+	seen := map[string]struct{}{}
+	for _, l := range listings {
+		for _, ep := range l.endpoints {
+			port := ep.GetPort()
+			class, ok := endpointPortClasses(ep, l.protocol)[port]
+			// The same address in two clusters is two endpoints.
+			id := ep.GetClusterName() + "/" + ep.GetIp()
+			if _, dup := seen[id]; dup || !ok {
+				continue
+			}
+			seen[id] = struct{}{}
+			votes[pair{port: port, class: class}]++
 		}
-		votes[pair{port: p, class: endpointPortClasses(ep, listed)[p]}]++
-	})
+	}
 	var best pair
 	for k, n := range votes {
 		switch {
@@ -300,17 +314,22 @@ func legacyTarget(listings ...listedEndpoints) (port uint32, class registryv1.Po
 // target, from every listing the service appears in.
 func deriveServicePorts(listings ...listedEndpoints) servicePorts {
 	votes := map[uint32]map[registryv1.PortProtocol]int{}
-	distinctEndpoints(listings, func(ep *registryv1.ServiceEndpoint, listed registryv1.Service_Protocol) {
-		for port, class := range endpointPortClasses(ep, listed) {
-			if votes[port] == nil {
-				votes[port] = map[registryv1.PortProtocol]int{}
-			}
-			votes[port][class]++
+	servedPorts(listings, func(_ *registryv1.ServiceEndpoint, port uint32, class registryv1.PortProtocol) {
+		if votes[port] == nil {
+			votes[port] = map[registryv1.PortProtocol]int{}
 		}
+		votes[port][class]++
 	})
 	var out servicePorts
 	for port, v := range votes {
 		class, conflict := classOfPort(port, v)
+		if port == meshconst.ProxyL4OutboundPort && class == registryv1.PortProtocol_PORT_PROTOCOL_HTTP {
+			// The mesh's raw-TCP port. The capture listener matches raw-TCP
+			// chains on that number, so it cannot also select an HTTP chain:
+			// a pod that declares it as HTTP is not served on it, and is told.
+			out.conflicts = append(out.conflicts, fmt.Sprintf("%d: reserved for the mesh's raw-TCP port, not served as http", port))
+			continue
+		}
 		switch class {
 		case registryv1.PortProtocol_PORT_PROTOCOL_HTTP:
 			out.http = append(out.http, port)

@@ -7,8 +7,10 @@
 package registrytest
 
 import (
+	"cmp"
 	"maps"
 	"slices"
+	"strings"
 	"testing"
 
 	registryv1 "aethermesh.dev/api/aether/registry/v1"
@@ -50,8 +52,10 @@ func RequireNamespaceQualifiedKeys(t testing.TB, services map[string][]*registry
 // port has a class, and a pod that serves ports of two classes is in both
 // listings on every backend.
 //
-// listings is ListAllEndpoints' output per protocol. Pass every protocol the
-// test listed; a protocol left out is simply not checked.
+// listings is ListAllEndpoints' output per protocol. Pass EVERY protocol the
+// backend serves, with an empty map for one that returned nothing: a protocol
+// that is not a key of listings is not checked, and rule 3 can only look for a
+// row in the listings it was given.
 //
 //  1. Every endpoint returned under protocol P advertises at least one port of
 //     class P in port_protocols. A listing is "who serves a port of P", so a
@@ -63,13 +67,21 @@ func RequireNamespaceQualifiedKeys(t testing.TB, services map[string][]*registry
 //     carries the same row: the same port, ports and port_protocols. A reader
 //     takes a port's class from the row, so two listings that disagree about
 //     one pod give two readers two different services.
+//  3. Completeness: an endpoint that declares a port of class P in
+//     port_protocols is in listing P of the same service, for every P that is
+//     a key of listings. Rules 1 and 2 hold for a backend that files a mixed
+//     pod under its pod-level protocol alone, which leaves the pod's other
+//     class with no cluster (#1672); this rule is the one that backend breaks.
+//     A row with an empty port_protocols declares no class and is exempt, as
+//     in rule 1. A caller that passes only some protocols gets completeness
+//     among those only.
 //
 // Call it from each backend's listing tests (the kubernetes unit tests and the
 // etcd integration test).
 func RequirePerPortProtocols(t testing.TB, listings map[registryv1.Service_Protocol]map[string][]*registryv1.ServiceEndpoint) {
 	t.Helper()
 
-	seen := map[rowIdentity]rowSighting{}
+	seen := map[rowIdentity]*rowSighting{}
 	// A fixed order, so a violation is reported the same way on every run.
 	for _, protocol := range slices.Sorted(maps.Keys(listings)) {
 		services := listings[protocol]
@@ -79,20 +91,33 @@ func RequirePerPortProtocols(t testing.TB, listings map[registryv1.Service_Proto
 			}
 		}
 	}
+	for _, id := range slices.SortedFunc(maps.Keys(seen), compareRowIdentity) {
+		requireListedUnderEveryClass(t, listings, id, seen[id])
+	}
 }
 
 // rowIdentity is one endpoint of one service; rowSighting is the first listing
-// it was seen in, and the row it had there.
+// it was seen in, the row it had there, and every listing it was seen in.
 type (
 	rowIdentity struct{ service, cluster, ip string }
 	rowSighting struct {
 		protocol registryv1.Service_Protocol
 		endpoint *registryv1.ServiceEndpoint
+		listedIn map[registryv1.Service_Protocol]struct{}
 	}
 )
 
-// requirePerPortRow applies both rules of RequirePerPortProtocols to one row.
-func requirePerPortRow(t testing.TB, seen map[rowIdentity]rowSighting, protocol registryv1.Service_Protocol, key string, ep *registryv1.ServiceEndpoint) {
+func compareRowIdentity(a, b rowIdentity) int {
+	return cmp.Or(
+		strings.Compare(a.service, b.service),
+		strings.Compare(a.cluster, b.cluster),
+		strings.Compare(a.ip, b.ip),
+	)
+}
+
+// requirePerPortRow applies rules 1 and 2 of RequirePerPortProtocols to one
+// row, and records the listing it was seen in for rule 3.
+func requirePerPortRow(t testing.TB, seen map[rowIdentity]*rowSighting, protocol registryv1.Service_Protocol, key string, ep *registryv1.ServiceEndpoint) {
 	t.Helper()
 	if !servesClass(ep, protocol) {
 		t.Errorf("service %q endpoint %s is listed under %v but advertises no %v port (port_protocols=%v)",
@@ -101,9 +126,13 @@ func requirePerPortRow(t testing.TB, seen map[rowIdentity]rowSighting, protocol 
 	id := rowIdentity{service: key, cluster: ep.GetClusterName(), ip: ep.GetIp()}
 	first, dup := seen[id]
 	if !dup {
-		seen[id] = rowSighting{protocol: protocol, endpoint: ep}
+		seen[id] = &rowSighting{
+			protocol: protocol, endpoint: ep,
+			listedIn: map[registryv1.Service_Protocol]struct{}{protocol: {}},
+		}
 		return
 	}
+	first.listedIn[protocol] = struct{}{}
 	if !sameRow(first.endpoint, ep) {
 		t.Errorf("service %q endpoint %s differs between the %v and %v listings: "+
 			"port %d vs %d, ports %v vs %v, port_protocols %v vs %v",
@@ -111,6 +140,33 @@ func requirePerPortRow(t testing.TB, seen map[rowIdentity]rowSighting, protocol 
 			first.endpoint.GetPort(), ep.GetPort(),
 			first.endpoint.GetPorts(), ep.GetPorts(),
 			first.endpoint.GetPortProtocols(), ep.GetPortProtocols())
+	}
+}
+
+// requireListedUnderEveryClass applies rule 3 of RequirePerPortProtocols to one
+// endpoint: it is in the listing of every class it declares a port of, among
+// the listings the caller passed. The classes are those of the row it was
+// first seen with; rule 2 reports a row that differs between listings.
+func requireListedUnderEveryClass(t testing.TB, listings map[registryv1.Service_Protocol]map[string][]*registryv1.ServiceEndpoint, id rowIdentity, sighting *rowSighting) {
+	t.Helper()
+	declared := map[registryv1.Service_Protocol]struct{}{}
+	for _, class := range sighting.endpoint.GetPortProtocols() {
+		if class == registryv1.PortProtocol_PORT_PROTOCOL_UNSPECIFIED {
+			continue // names no class, so no listing to be in
+		}
+		// The two enums are numerically identical (endpointmeta pins it).
+		declared[registryv1.Service_Protocol(class)] = struct{}{}
+	}
+	for _, protocol := range slices.Sorted(maps.Keys(declared)) {
+		if _, passed := listings[protocol]; !passed {
+			continue
+		}
+		if _, listed := sighting.listedIn[protocol]; listed {
+			continue
+		}
+		t.Errorf("service %q endpoint %s declares a %v port and is missing from the %v listing "+
+			"(cluster %q, port_protocols=%v)",
+			id.service, id.ip, protocol, protocol, id.cluster, sighting.endpoint.GetPortProtocols())
 	}
 }
 

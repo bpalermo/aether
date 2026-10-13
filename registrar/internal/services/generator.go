@@ -95,12 +95,15 @@ const (
 // other way. The snapshot builds these slices for the caller, so sorting them
 // in place touches nothing shared.
 func sortEndpoints(eps []*registryv1.ServiceEndpoint) {
-	slices.SortStableFunc(eps, func(a, b *registryv1.ServiceEndpoint) int {
-		if c := strings.Compare(a.GetClusterName(), b.GetClusterName()); c != 0 {
-			return c
-		}
-		return strings.Compare(a.GetIp(), b.GetIp())
-	})
+	slices.SortStableFunc(eps, endpointOrder)
+}
+
+// endpointOrder compares two rows by (cluster, address).
+func endpointOrder(a, b *registryv1.ServiceEndpoint) int {
+	if c := strings.Compare(a.GetClusterName(), b.GetClusterName()); c != 0 {
+		return c
+	}
+	return strings.Compare(a.GetIp(), b.GetIp())
 }
 
 // NeedLeaderElection makes the generator run only on the elected leader (single writer).
@@ -230,20 +233,26 @@ func (g *Generator) buildDesiredServices(ctx context.Context) map[client.ObjectK
 func legacyAnnotations(rule LegacyAnnotationRule, perListing [][]*registryv1.ServiceEndpoint) (port uint32, appProtocol string, ok bool) {
 	if rule == LegacyAnnotationsByDeclaredPort {
 		// The 2.6 kubernetes listing for P was the pods whose DECLARED port is
-		// of class P. Such a pod is in today's listing for P as well (it serves
-		// that port), so filtering today's listing by the declared port's class
-		// gives the 2.6 listing back, and the first non-empty one wins as it
-		// did then.
-		for i, protocol := range registry.ServedProtocols {
-			for _, ep := range perListing[i] {
-				if declaredClass(ep, protocol) == protocol {
-					return ep.GetPort(), protocolAppProtocol[protocol], true
-				}
+		// of class P, and the first non-empty one, in registry.ServedProtocols'
+		// order, decided both annotations. A row says the class of its declared
+		// port itself (port_protocols[port]), so that listing is rebuilt from
+		// the service's rows wherever they were read: the answer is the first
+		// class any row declares, whichever of today's listings the row is in.
+		// It must not depend on the row being in the listing of that class,
+		// because the listings a reconcile sees can be partial: the kubernetes
+		// backend is listed one protocol at a time, and a registration lands
+		// one protocol at a time. A pod that declares an HTTP port and is seen
+		// in the TCP listing alone is still an HTTP-declared service; stamping
+		// the class of the listing would have a 2.6 agent build a raw-TCP chain
+		// on that service's address for as long as the listings stay partial.
+		for _, protocol := range registry.ServedProtocols {
+			if ep := firstDeclaring(perListing, protocol); ep != nil {
+				return ep.GetPort(), protocolAppProtocol[protocol], true
 			}
 		}
-		// Every row names a declared port of a class it is not listed under,
-		// which neither backend writes. Fall through to the listing rule so
-		// the service keeps its Service.
+		// No row declares a port of a served class, which neither backend
+		// writes. Fall through to the listing rule so the service keeps its
+		// Service.
 	}
 	for i, protocol := range registry.ServedProtocols {
 		if len(perListing[i]) > 0 {
@@ -251,6 +260,27 @@ func legacyAnnotations(rule LegacyAnnotationRule, perListing [][]*registryv1.Ser
 		}
 	}
 	return 0, "", false
+}
+
+// firstDeclaring returns the row of one service whose declared port is of
+// class protocol, or nil when there is none. perListing is in
+// registry.ServedProtocols' order. Of several such rows it returns the first
+// by (cluster, address), and of one endpoint read from two listings the row of
+// the earlier listing, so the answer does not move with the order rows were
+// listed in.
+func firstDeclaring(perListing [][]*registryv1.ServiceEndpoint, protocol registryv1.Service_Protocol) *registryv1.ServiceEndpoint {
+	var first *registryv1.ServiceEndpoint
+	for i, listing := range registry.ServedProtocols {
+		for _, ep := range perListing[i] {
+			if declaredClass(ep, listing) != protocol {
+				continue
+			}
+			if first == nil || endpointOrder(ep, first) < 0 {
+				first = ep
+			}
+		}
+	}
+	return first
 }
 
 // declaredClass is the class of the port ep declares in endpoint.aether.io/port.
@@ -443,12 +473,21 @@ func mergePorts(legacy, realPorts []corev1.ServicePort) []corev1.ServicePort {
 }
 
 // pruneServices deletes managed mesh Services that are no longer in desired.
+//
+// A clusterset VIP Service (<svc>-clusterset) carries the mesh-service label
+// too, so that agents capture its address, but the MCS import generator owns
+// it and prunes it by its own label. It is not a registry service's name, so
+// pruning it here deleted it on every reconcile, and the import generator
+// created it again with a new ClusterIP.
 func (g *Generator) pruneServices(ctx context.Context, managed corev1.ServiceList, desired map[client.ObjectKey]desiredService) {
 	for i := range managed.Items {
 		s := &managed.Items[i]
 		key := client.ObjectKeyFromObject(s)
 		if _, ok := desired[key]; ok {
 			continue // converged below
+		}
+		if s.Labels[aetherlabels.LabelClustersetService] == "true" {
+			continue // the MCS import generator's
 		}
 		if err := g.Delete(ctx, s); err != nil && !apierrors.IsNotFound(err) {
 			g.Log.ErrorContext(ctx, "prune mesh Service failed", "service", key.String(), "error", err)

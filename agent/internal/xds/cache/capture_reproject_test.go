@@ -152,12 +152,15 @@ func TestCaptureReprojectionKeepsDeclaredPortChains(t *testing.T) {
 		assertDeclaredPortChains(t, c, "a real change to the service list must carry the derived ports over")
 	})
 
-	t.Run("the any-port shim is untouched", func(t *testing.T) {
+	t.Run("there is no any-port chain, before or after a re-projection", func(t *testing.T) {
+		// The any-port chain (cap_tcp_anyport_<cluster>) was removed in
+		// chart 2.7.0: a raw-TCP service is reached on the ports it declares
+		// and on :18082. A re-projection must not bring it back.
 		c, reg := newReprojectCache(t)
 		projectEchoTCP(t, c)
 		require.NoError(t, c.LoadClustersFromRegistry(ctx, "cluster-1", "node-1", reg))
+		assert.NotContains(t, captureChainNames(t, c, "node-1"), reprojectAnyPort)
 		projectEchoTCP(t, c)
-		assert.Contains(t, captureChainNames(t, c, "node-1"), reprojectAnyPort,
-			"removing the shim is proposal 037 Phase 4's call, not this fix's")
+		assert.NotContains(t, captureChainNames(t, c, "node-1"), reprojectAnyPort)
 	})
 }

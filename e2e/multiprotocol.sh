@@ -30,16 +30,22 @@
 #   mp-tcpfirst   9000   tcp        9000,8080=h1    tcp  9000 -> revtcp
 #                                                   http 8080 -> rev8080
 #   mp-nine       9000   http       9000            http 9000 -> nine9000
+#   mp-tcponly    9000   tcp        9000            tcp  9000 -> onlytcp
+#                                                   tcp  7777 -> onlytcp7777 (NOT declared)
 #
 # (/port, /protocol and /ports are the endpoint.aether.io/ annotations.)
 # mp-httponly is the control: its :9000 listener is as alive as mp-mixed's and
 # is not declared. mp-nine serves HTTP on the port NUMBER mp-mixed declares as
-# raw TCP. mp-eighty really listens on 80.
+# raw TCP. mp-eighty really listens on 80. mp-tcponly has no HTTP port at all;
+# its second listener is not declared and answers with a marker of its own, so
+# "the port that was dialled reached the pod" and "the declared port answered
+# for another one" are two different answers.
 #
 # TWO CLIENTS. "client" is captured (the chart default, redirect-all).
 # "client-nocapture" carries capture.aether.io/redirect-all: "false" and only
 # ever dials the loopback outbound listener, 127.0.0.1:18081, with the service
-# in Host.
+# in Host, or uses that listener as its HTTP proxy (the P legs; there the
+# captured client does the same).
 #
 # NAMES. A service answers to its mesh name <svc>.<ns>.aether.internal and to
 # its Kubernetes names <svc>.<ns>.svc.cluster.local and <svc>.<ns>.
@@ -119,6 +125,60 @@
 #                  it is HTTP; for mp-tcpfirst they are refused, 421
 #                  port-required, and :18082 reaches its raw TCP (X4, X1)
 #
+# A raw-TCP service is reached on the ports it declares (chart 2.7.0 removes
+# the chain that sent ANY port of such a service to its declared port):
+#
+#   W1  captured   mp-tcponly: raw TCP to <mesh name>:9000 and to :18082
+#                  -> onlytcp
+#   W2  captured   mp-tcponly: raw TCP to :7777 (a port it listens on and does
+#                  not declare), to :8080 and :9090 (HTTP port numbers of OTHER
+#                  services) and to :80 -> no application answers. Any marker
+#                  is a failure: onlytcp is the declared port answering for
+#                  another one, onlytcp7777 the undeclared listener, anything
+#                  else another service. What the client sees instead is
+#                  printed, not asserted, one line per port starting with
+#                  "W2-OBSERVED": curl's exit code and how long it took
+#   W3  both       mp-tcponly over HTTP: captured http://<mesh name>:8080/
+#                  -> 421 port-not-declared; captured :18081 and the port-less
+#                  URL -> 421 no-http-port; loopback Host <mesh name>:9000
+#                  -> 421 port-not-http
+#
+# :18081 is the mesh's HTTP proxy port. A client that is given a proxy
+# connects to it and sends the absolute URL and Host: <name>:<port>; nothing
+# about the connection names a service port, so Host decides, port included.
+# That holds for the loopback listener 127.0.0.1:18081 and for a captured dial
+# to <name>:18081. A dial to a REAL port is unchanged (A5), and so are
+# Host <name>:18081 and a port-less Host (A12). "proxied" below is literally
+# curl --proxy http://127.0.0.1:18081 <url>, from BOTH clients:
+#
+#   P1  proxied    http://<mesh name of mp-multi>:8080/ and :9090/ -> multi8080,
+#                  multi9090; mp-eighty's port 80 -> eighty80. curl drops a
+#                  default port from the request line and from Host, so that
+#                  one request is sent with --request-target and -H Host, both
+#                  spelling ":80"; what the plain http://<name>:80/ gets (a
+#                  port-less authority, the legacy spelling of A12) is printed
+#                  as "P1-OBSERVED" and not asserted
+#   P2  proxied    http://<mesh name of mp-multi>:7777/ -> 421
+#                  port-not-declared; http://<mesh name of mp-mixed>:9000/
+#                  -> 421 port-not-http; and, from client-nocapture, a name
+#                  that is no mesh service (http://example.invalid:8080/)
+#                  -> 404
+#   P3  captured   dial http://<name of mp-multi>:18081/ with Host <name>:9090
+#                  -> multi9090, Host <name>:8080 -> multi8080, Host
+#                  <name>:7777 -> 421 port-not-declared; on the mesh name and
+#                  on the svc.cluster.local name (in the URL and in Host)
+#   P4  proxied    a service's HTTP filters and route rules are applied on
+#                  every path to the service: while the HTTPRoute of A4
+#                  exists, http://<mesh name of mp-multi>:9090/ ->
+#                  multi9090+a4 and :8080/ -> multi8080+a4. It runs inside
+#                  A4's window (one apply, one delete) and is reported under
+#                  its own ID; run without A4 it opens the window itself
+#   P5  proxied    documentation, never a failure: https://<mesh name of
+#                  mp-multi>:8080/, which is a CONNECT. One line per client
+#                  starting with "P5-OBSERVED": the status of the CONNECT
+#                  response if there was one, curl's exit code and the time.
+#                  INFO in the table
+#
 # A13 (the server-first leg of the optional inspector change) is not
 # implemented: that change is not part of this phase's work.
 #
@@ -150,6 +210,16 @@
 # and X6 read); MP_REGISTRY_BACKEND=kubernetes runs the same legs on the
 # chart's default backend, which derives the listings from the pods and starts
 # no etcd (M6 and X6 are skipped there, and say so). CI runs both.
+#
+# VERSION SKEW. The components are installed from two groups of images, each
+# with its own tag (default "latest"): MP_TAG_AGENT for agent, mesh-dns,
+# proxy-supervisor, cni-install and uds-csi; MP_TAG_REGISTRAR for registrar
+# and controller. `up` loads exactly those tags, and builds only the images
+# that are used at "latest" (nothing under MP_SKIP_BUILD=1); any other tag
+# must already be in the local Docker daemon. `verify` reads the tags back
+# from the installed workloads and prints them first, as two lines starting
+# with "MP-CELL", so a log names the cell it measured. e2e/README.md has the
+# whole procedure. CI runs no skew cell.
 #
 # Usage: e2e/multiprotocol.sh {up|test|verify|down}   (bare = up + verify)
 #
@@ -185,8 +255,10 @@ TCP_PORT="9000"
 UNDECLARED_PORT="7777"
 MESH_HTTP_PORT="18081"
 MESH_TCP_PORT="18082"
-# The loopback outbound listener, as a client-nocapture pod dials it.
+# The loopback outbound listener, as a client-nocapture pod dials it, and the
+# same listener named as an HTTP proxy (curl --proxy).
 LOOPBACK_URL="http://127.0.0.1:$MESH_HTTP_PORT/"
+PROXY_URL="http://127.0.0.1:$MESH_HTTP_PORT"
 # The mixed workload's endpoint.aether.io/ports. The default is the declaration
 # under test; the red half (see the header) overrides it. CI never sets it.
 MP_MIXED_PORTS="${MP_MIXED_PORTS:-$HTTP_PORT,$TCP_PORT=tcp}"
@@ -201,9 +273,21 @@ etcd | kubernetes) ;;
 	exit 2
 	;;
 esac
+# The image tag of each component group (see "VERSION SKEW" in the header).
+# CI sets neither.
+MP_TAG_AGENT="${MP_TAG_AGENT:-latest}"
+MP_TAG_REGISTRAR="${MP_TAG_REGISTRAR:-latest}"
+AGENT_GROUP=(agent mesh-dns proxy-supervisor cni-install uds-csi)
+REGISTRAR_GROUP=(registrar controller)
 # Red-run aids (see "A RED RUN" in the header). CI sets none of them.
-ALL_LEGS=(M0 M1 M2 M3 M4 M5 M6 M7 X1 X2 X3 X4 X5 X6 A1 A2 A3 A4 A5 A6 A7 A8 A9 A10 A11 A12)
-MP_LEGS="${MP_LEGS:-${ALL_LEGS[*]}}"
+ALL_LEGS=(M0 M1 M2 M3 M4 M5 M6 M7 X1 X2 X3 X4 X5 X6 A1 A2 A3 A4 A5 A6 A7 A8 A9 A10 A11 A12
+	W1 W2 W3 P1 P2 P3 P4 P5)
+# P3 (a captured dial to :18081 routed by its Host port alone) is not in the
+# default run yet: a dial to 18081 with another Host port is still refused as
+# port-mismatch. It joins the default with the change that makes 18081 the
+# mesh's HTTP proxy port on the captured path. MP_LEGS=P3 runs it.
+DEFAULT_LEGS=("${ALL_LEGS[@]/P3/}")
+MP_LEGS="${MP_LEGS:-${DEFAULT_LEGS[*]}}"
 MP_KEEP_GOING="${MP_KEEP_GOING:-0}"
 MP_TIMEOUT="${MP_TIMEOUT:-}"
 # How many probes a measured batch sends: PROBES for the 037 legs, A_PROBES for
@@ -233,8 +317,13 @@ ETCD_NAME="${ETCD_NAME:-aether-multiprotocol-etcd}"
 A4_ROUTE="mp-a4"
 A4_HEADER_VALUE="a4"
 
+# WORKLOADS are the six that serve HTTP on at least one declared port: the
+# addressing legs iterate them. TCP_ONLY has no HTTP port (the W legs).
 WORKLOADS=(mp-httponly mp-multi mp-eighty mp-mixed mp-tcpfirst mp-nine)
+TCP_ONLY="mp-tcponly"
 CLIENTS=(client client-nocapture)
+# What the undeclared listener of TCP_ONLY answers.
+STRAY_MARKER="onlytcp$UNDECLARED_PORT"
 
 # wl_tag WORKLOAD: the prefix of its markers.
 wl_tag() {
@@ -245,6 +334,7 @@ wl_tag() {
 	mp-mixed) echo mix ;;
 	mp-tcpfirst) echo rev ;;
 	mp-nine) echo nine ;;
+	mp-tcponly) echo only ;;
 	*) echo "unknown workload '$1'" >&2 && return 1 ;;
 	esac
 }
@@ -256,6 +346,7 @@ wl_http_ports() {
 	mp-multi) echo "$HTTP_PORT $ALT_PORT" ;;
 	mp-eighty) echo "$LOW_PORT $HTTP_PORT $ALT_PORT" ;;
 	mp-nine) echo "$TCP_PORT" ;;
+	mp-tcponly) ;;
 	*) echo "unknown workload '$1'" >&2 && return 1 ;;
 	esac
 }
@@ -265,15 +356,42 @@ wl_http_ports() {
 # and 2"). HTTP for every workload but mp-tcpfirst.
 wl_legacy_port() {
 	case "$1" in
-	mp-tcpfirst | mp-nine) echo "$TCP_PORT" ;;
+	mp-tcpfirst | mp-nine | mp-tcponly) echo "$TCP_PORT" ;;
 	*) echo "$HTTP_PORT" ;;
 	esac
+}
+
+# image_tag IMAGE: the tag IMAGE is loaded and installed at.
+image_tag() {
+	local i
+	for i in "${AGENT_GROUP[@]}"; do
+		if [ "$i" = "$1" ]; then echo "$MP_TAG_AGENT" && return 0; fi
+	done
+	for i in "${REGISTRAR_GROUP[@]}"; do
+		if [ "$i" = "$1" ]; then echo "$MP_TAG_REGISTRAR" && return 0; fi
+	done
+	echo latest
 }
 
 # marker WORKLOAD PORT: what the HTTP listener of WORKLOAD on PORT answers.
 # tcp_marker WORKLOAD: what its l4echo answers.
 marker() { printf '%s%s' "$(wl_tag "$1")" "$2"; }
 tcp_marker() { printf '%stcp' "$(wl_tag "$1")"; }
+
+# marker_owner TOKEN: the workload and listener a marker of this suite belongs
+# to (every marker there is), or nothing when TOKEN is not one.
+marker_owner() {
+	local w p
+	for w in "${WORKLOADS[@]}"; do
+		for p in $(wl_http_ports "$w"); do
+			if [ "$1" = "$(marker "$w" "$p")" ]; then echo "$w, HTTP port $p" && return 0; fi
+		done
+	done
+	for w in mp-httponly mp-mixed mp-tcpfirst "$TCP_ONLY"; do
+		if [ "$1" = "$(tcp_marker "$w")" ]; then echo "$w, raw-TCP port $TCP_PORT" && return 0; fi
+	done
+	if [ "$1" = "$STRAY_MARKER" ]; then echo "$TCP_ONLY, its undeclared listener on $UNDECLARED_PORT"; fi
+}
 
 mesh_name() { printf '%s.%s.%s' "$1" "$TEST_NS" "$MESH_DOMAIN"; }
 k8s_fqdn() { printf '%s.%s.svc.cluster.local' "$1" "$TEST_NS"; }
@@ -382,11 +500,18 @@ build_images() {
 		ok "skipping image build (MP_SKIP_BUILD=1; images pre-built)"
 		return
 	fi
-	log "building + loading aether images (incl. the l4echo test backend)"
+	log "building + loading the aether images used at 'latest' (incl. the l4echo test backend)"
+	# Only what is used at "latest" is built: an image of a group that runs
+	# another tag (a skew cell) was built from another commit and tagged by
+	# hand.
 	local t
 	for t in //agent/cmd/agent //agent/cmd/mesh-dns //agent/cmd/proxy-supervisor \
 		//cni/cmd/cni-install //registrar/cmd/registrar //controller/cmd/controller //agent/cmd/uds-csi \
 		//e2e/l4echo; do
+		if [ "$(image_tag "${t##*/}")" != "latest" ]; then
+			note "not building ${t##*/}: it runs at tag '$(image_tag "${t##*/}")'"
+			continue
+		fi
 		(cd "$REPO_ROOT" && bazel run "$t:image_load" >/dev/null 2>&1) || die "image build failed for $t"
 	done
 	ok "images built"
@@ -442,13 +567,17 @@ start_etcd() {
 }
 
 load_images() {
-	log "loading images into '$CLUSTER'"
-	local img
+	log "loading images into '$CLUSTER' (agent group at '$MP_TAG_AGENT', registrar group at '$MP_TAG_REGISTRAR')"
+	# Exactly the references in use, each once.
+	local img ref loaded=" "
 	for img in "${IMAGES[@]}"; do
-		kind load docker-image "${IMAGE_REGISTRY}/${img}:latest" --name "$CLUSTER" >/dev/null 2>&1 ||
-			die "could not load ${IMAGE_REGISTRY}/${img}:latest into kind (was it built?)"
+		ref="${IMAGE_REGISTRY}/${img}:$(image_tag "$img")"
+		case "$loaded" in *" $ref "*) continue ;; esac
+		kind load docker-image "$ref" --name "$CLUSTER" >/dev/null 2>&1 ||
+			die "could not load $ref into kind (was it built, or tagged? see VERSION SKEW in the header)"
+		loaded+="$ref "
 	done
-	ok "images loaded"
+	ok "images loaded:$loaded"
 }
 
 # HTTPRoute (standard channel), for leg A4. It goes in BEFORE the agent
@@ -528,7 +657,7 @@ install_aether() {
 		backend+=(--set "registrar.region=$REGION" --set "registrar.etcd.region=$REGION"
 			--set "registrar.etcd.endpoints[0]=http://$(etcd_ip):2379")
 	fi
-	img() { echo "--set $1.image.repository=${IMAGE_REGISTRY}/$2 --set $1.image.tag=latest --set $1.image.digest= --set $1.image.pullPolicy=Never"; }
+	img() { echo "--set $1.image.repository=${IMAGE_REGISTRY}/$2 --set $1.image.tag=$(image_tag "$2") --set $1.image.digest= --set $1.image.pullPolicy=Never"; }
 	log "installing the aether CRDs"
 	helm --kube-context "$CTX" upgrade --install aether-crds "$charts/crds" \
 		-n "$NS" --create-namespace --wait --timeout 2m >/dev/null || die "crds chart install failed"
@@ -537,7 +666,7 @@ install_aether() {
 	# transparent capture with redirect-all (which is what captures a dial to
 	# any port of a mesh address), mesh DNS, GAMMA. Per-port protocols have no
 	# values gate.
-	log "installing aether (SPIRE ON, $MP_REGISTRY_BACKEND registry — see the header)"
+	log "installing aether (SPIRE ON, $MP_REGISTRY_BACKEND registry — see the header; agent group at '$MP_TAG_AGENT', registrar group at '$MP_TAG_REGISTRAR')"
 	# shellcheck disable=SC2046
 	helm --kube-context "$CTX" upgrade --install aether "$charts/aether" \
 		-n "$NS" --create-namespace \
@@ -561,13 +690,13 @@ install_aether() {
 	ok "aether up"
 }
 
-# container_yaml WORKLOAD KIND PORT: one container of a workload, as a YAML
-# list item at the indentation of spec.template.spec.containers. KIND "http"
-# is hashicorp/http-echo answering marker(WORKLOAD, PORT); KIND "tcp" is
-# e2e/l4echo (reads one line, writes "<text> <line>", closes) answering
-# tcp_marker(WORKLOAD). One container per port.
+# container_yaml WORKLOAD KIND PORT [TEXT]: one container of a workload, as a
+# YAML list item at the indentation of spec.template.spec.containers. KIND
+# "http" is hashicorp/http-echo answering marker(WORKLOAD, PORT); KIND "tcp" is
+# e2e/l4echo (reads one line, writes "<text> <line>", closes) answering TEXT,
+# or tcp_marker(WORKLOAD) without one. One container per port.
 container_yaml() {
-	local name="$1" kind="$2" port="$3"
+	local name="$1" kind="$2" port="$3" text="${4:-}"
 	case "$kind" in
 	http)
 		cat <<YAML
@@ -586,7 +715,7 @@ YAML
         - name: tcp-$port
           image: ${IMAGE_REGISTRY}/l4echo:latest
           imagePullPolicy: Never
-          args: ["--mode=tcp", "--listen=:$port", "--text=$(tcp_marker "$name")"]
+          args: ["--mode=tcp", "--listen=:$port", "--text=${text:-$(tcp_marker "$name")}"]
           ports: [{containerPort: $port}]
           securityContext:
             allowPrivilegeEscalation: false
@@ -601,8 +730,9 @@ YAML
 # deploy_workload NAME PRIMARY PROTOCOL PORTS LISTENER... — one pod. PRIMARY,
 # PROTOCOL and PORTS are its endpoint.aether.io/port, /protocol (the class of
 # an unsuffixed port) and /ports; each LISTENER is "http:<port>" or
-# "tcp:<port>", one container each (container_yaml). A listener is on the mesh
-# only if PORTS declares it.
+# "tcp:<port>", or "tcp:<port>:<text>" for an l4echo that answers <text>; one
+# container each (container_yaml). A listener is on the mesh only if PORTS
+# declares it.
 #
 # A listener below 1024 (mp-eighty's :80) is bound by a NON-ROOT container
 # with every capability dropped, through the pod-level sysctl
@@ -618,13 +748,14 @@ YAML
 # service, and skips a name some other Service already owns. The registry
 # service name is the pod's ServiceAccount.
 deploy_workload() {
-	local name="$1" primary="$2" protocol="$3" ports="$4" spec containers="" sysctls=""
+	local name="$1" primary="$2" protocol="$3" ports="$4" spec kind port text containers="" sysctls=""
 	shift 4
 	for spec in "$@"; do
-		if [ "${spec#*:}" -lt 1024 ]; then
+		IFS=: read -r kind port text <<<"$spec"
+		if [ "$port" -lt 1024 ]; then
 			sysctls='sysctls: [{name: net.ipv4.ip_unprivileged_port_start, value: "0"}]'
 		fi
-		containers+="$(container_yaml "$name" "${spec%%:*}" "${spec#*:}")"$'\n'
+		containers+="$(container_yaml "$name" "$kind" "$port" "$text")"$'\n'
 	done
 	kc apply -f - >/dev/null <<YAML || die "workload $name apply failed"
 apiVersion: v1
@@ -694,7 +825,7 @@ YAML
 }
 
 deploy_workloads() {
-	log "deploying ${WORKLOADS[*]} (mp-mixed ports: $MP_MIXED_PORTS) and ${CLIENTS[*]}"
+	log "deploying ${WORKLOADS[*]} $TCP_ONLY (mp-mixed ports: $MP_MIXED_PORTS) and ${CLIENTS[*]}"
 	kc create ns "$TEST_NS" >/dev/null 2>&1 || true
 	deploy_workload mp-httponly "$HTTP_PORT" http "$HTTP_PORT" "http:$HTTP_PORT" "tcp:$TCP_PORT"
 	deploy_workload mp-multi "$HTTP_PORT" http "$HTTP_PORT,$ALT_PORT" "http:$HTTP_PORT" "http:$ALT_PORT"
@@ -702,20 +833,21 @@ deploy_workloads() {
 	deploy_workload mp-mixed "$HTTP_PORT" http "$MP_MIXED_PORTS" "http:$HTTP_PORT" "tcp:$TCP_PORT"
 	deploy_workload mp-tcpfirst "$TCP_PORT" tcp "$TCP_PORT,$HTTP_PORT=h1" "tcp:$TCP_PORT" "http:$HTTP_PORT"
 	deploy_workload mp-nine "$TCP_PORT" http "$TCP_PORT" "http:$TCP_PORT"
+	deploy_workload "$TCP_ONLY" "$TCP_PORT" tcp "$TCP_PORT" "tcp:$TCP_PORT" "tcp:$UNDECLARED_PORT:$STRAY_MARKER"
 
 	# The upstreams annotation is NOT an optimisation: there is no on-demand
 	# discovery for tcp_proxy. An undeclared TCP upstream yields a chain that
 	# matches and a cluster that is missing, which looks exactly like a routing
 	# bug. Both clients name every workload.
 	local w upstreams=""
-	for w in "${WORKLOADS[@]}"; do
+	for w in "${WORKLOADS[@]}" "$TCP_ONLY"; do
 		upstreams+="${upstreams:+,}$w.$TEST_NS"
 	done
 	deploy_client client "$upstreams"
 	deploy_client client-nocapture "$upstreams" false
 
 	local d
-	for d in "${WORKLOADS[@]}" "${CLIENTS[@]}"; do
+	for d in "${WORKLOADS[@]}" "$TCP_ONLY" "${CLIENTS[@]}"; do
 		kc -n "$TEST_NS" rollout status "deploy/$d" --timeout=180s >/dev/null ||
 			die "workload '$d' never became Ready"
 	done
@@ -726,20 +858,27 @@ deploy_workloads() {
 
 # The body of an HTTP probe batch, run by the CLIENT POD's sh (busybox ash: no
 # bash, no pipefail). Arguments: URL, HOST (empty = the Host curl writes
-# itself, which drops a default port), N. Prints one line per request:
+# itself, which drops a default port), N, PROXY (empty = none; otherwise the
+# request goes through curl --proxy PROXY, which connects to PROXY and sends
+# the absolute URL in the request line). With a PROXY and a HOST the request
+# line is forced to URL as it is written (--request-target): curl drops a
+# default port there too, and that is the only way to put ":80" in both.
+# Prints one line per request:
 #
 #   <status> <first token of the body> <x-aether-error> <x-mp-route> <total s> <dns s>
 #
 # with "-" for what is absent and status 000 when there was no HTTP response.
 HTTP_POD_SCRIPT="$(
 	cat <<'SH'
-url="$1"; host="$2"; n="$3"; i=1
+url="$1"; host="$2"; n="$3"; proxy="${4:-}"; i=1
+set -- -s --max-time 5 -D - -w "\nMPSTAT %{http_code} %{time_total} %{time_namelookup}\n"
+if [ -n "$host" ]; then set -- "$@" -H "Host: $host"; fi
+if [ -n "$proxy" ]; then
+	set -- "$@" --proxy "$proxy"
+	if [ -n "$host" ]; then set -- "$@" --request-target "$url"; fi
+fi
 while [ "$i" -le "$n" ]; do
-	if [ -n "$host" ]; then
-		curl -s --max-time 5 -D - -w "\nMPSTAT %{http_code} %{time_total} %{time_namelookup}\n" -H "Host: $host" "$url" 2>/dev/null
-	else
-		curl -s --max-time 5 -D - -w "\nMPSTAT %{http_code} %{time_total} %{time_namelookup}\n" "$url" 2>/dev/null
-	fi | tr -d "\r" | awk '
+	curl "$@" "$url" 2>/dev/null | tr -d "\r" | awk '
 		BEGIN { st = "000"; t = "0"; dns = "0"; err = "-"; rt = "-"; body = "-"; inbody = 0 }
 		/^MPSTAT / { st = $2; t = $3; dns = $4; next }
 		!inbody && /^$/ { inbody = 1; next }
@@ -791,9 +930,16 @@ SH
 #
 # so every HTTP assertion is "every token of the batch is exactly WANT", and
 # "the refusal is immediate" is part of the token.
-http_tokens() {
-	local client="$1" url="$2" host="$3" n="$4"
-	kc -n "$TEST_NS" exec "deploy/$client" -c curl -- sh -c "$HTTP_POD_SCRIPT" sh "$url" "$host" "$n" 2>/dev/null |
+#
+# proxy_tokens CLIENT URL HOST N — the same through curl --proxy PROXY_URL. The
+# response is the proxy's own answer to a plain-HTTP request (no CONNECT), so
+# the tokens read the same.
+http_tokens() { tokens_via "" "$@"; }
+proxy_tokens() { tokens_via "$PROXY_URL" "$@"; }
+
+tokens_via() {
+	local proxy="$1" client="$2" url="$3" host="$4" n="$5"
+	kc -n "$TEST_NS" exec "deploy/$client" -c curl -- sh -c "$HTTP_POD_SCRIPT" sh "$url" "$host" "$n" "$proxy" 2>/dev/null |
 		awk 'NF >= 5 {
 			if ($1 == "000") tok = "NOREPLY"
 			else if ($1 == "200") tok = $2
@@ -812,23 +958,35 @@ tcp_tokens() {
 	kc -n "$TEST_NS" exec deploy/client -c curl -- sh -c "$TCP_POD_SCRIPT" sh "$target" "$kind" "$n" 2>/dev/null || true
 }
 
-# show_exchange CLIENT URL HOST — one request, with its response headers, body
-# and timings, on stderr: what a failed HTTP assertion looked like on the wire.
+# show_exchange CLIENT URL HOST [PROXY] — one request, with its response
+# headers, body and timings, on stderr: what a failed HTTP assertion looked
+# like on the wire. PROXY as in HTTP_POD_SCRIPT.
 show_exchange() {
-	local client="$1" url="$2" host="$3"
-	printf '\033[1;33m  -- one request from %s: GET %s%s --\033[0m\n' "$client" "$url" "${host:+  (Host: $host)}" >&2
+	local client="$1" url="$2" host="$3" proxy="${4:-}"
+	printf '\033[1;33m  -- one request from %s: GET %s%s%s --\033[0m\n' "$client" "$url" "${host:+  (Host: $host)}" "${proxy:+  (--proxy $proxy)}" >&2
 	# SC2016: the single quotes are the point — the body is evaluated by the
-	# POD's shell; $1 and $2 are its arguments.
+	# POD's shell; $1, $2 and $3 are its arguments.
 	# shellcheck disable=SC2016
 	kc -n "$TEST_NS" exec "deploy/$client" -c curl -- sh -c '
-		fmt="\n-- status %{http_code}, total %{time_total}s, dns %{time_namelookup}s, connect %{time_connect}s, to %{remote_ip}:%{remote_port}\n"
-		if [ -n "$2" ]; then
-			curl -s -i --max-time 5 -w "$fmt" -H "Host: $2" "$1"
-		else
-			curl -s -i --max-time 5 -w "$fmt" "$1"
-		fi 2>&1
+		url="$1"; host="$2"; proxy="$3"
+		set -- -s -i --max-time 5 -w "\n-- status %{http_code}, total %{time_total}s, dns %{time_namelookup}s, connect %{time_connect}s, to %{remote_ip}:%{remote_port}\n"
+		if [ -n "$host" ]; then set -- "$@" -H "Host: $host"; fi
+		if [ -n "$proxy" ]; then
+			set -- "$@" --proxy "$proxy"
+			if [ -n "$host" ]; then set -- "$@" --request-target "$url"; fi
+		fi
+		curl "$@" "$url" 2>&1
 		echo "-- curl exit $?"
-	' sh "$url" "$host" 2>&1 | sed -n '1,40s/^/    /p' >&2 || true
+	' sh "$url" "$host" "$proxy" 2>&1 | sed -n '1,40s/^/    /p' >&2 || true
+}
+
+# show_failed FN ARG... — the exchange behind a failed `expect`, when FN is an
+# HTTP probe.
+show_failed() {
+	case "$1" in
+	http_tokens) show_exchange "$2" "$3" "$4" ;;
+	proxy_tokens) show_exchange "$2" "$3" "$4" "$PROXY_URL" ;;
+	esac
 }
 
 count_token() { printf '%s\n' "$1" | awk -v want="$2" '$1 == want { n++ } END { print n + 0 }'; }
@@ -852,6 +1010,7 @@ CURRENT_LEG=""
 LEG_CHECKS=0
 LEG_FAILS=()
 LEG_SKIP=""
+LEG_INFO=""
 RES_ID=()
 RES_STATUS=()
 RES_DETAIL=()
@@ -878,6 +1037,9 @@ skip() {
 	note "SKIP $CURRENT_LEG: $*"
 }
 
+# info TEXT — the leg asserts nothing: it is reported as INFO with TEXT.
+info() { LEG_INFO="$*"; }
+
 # expect WHAT WANT TIMEOUT N MEANING FN ARG... — FN ARG... <n> prints one token
 # per probe (http_tokens, tcp_tokens). Poll small batches until every probe of
 # one batch answers WANT, then one measured batch of N that must be WANT on
@@ -896,7 +1058,7 @@ expect() {
 			break
 		fi
 		if [ "$SECONDS" -ge "$deadline" ]; then
-			if [ "$1" = "http_tokens" ]; then show_exchange "$2" "$3" "$4"; fi
+			show_failed "$@"
 			fail "$what never answered '$want' in ${timeout}s, last batch: $(histogram "$replies")" "$meaning"
 			return 0
 		fi
@@ -904,7 +1066,7 @@ expect() {
 	done
 	replies="$("$@" "$n")"
 	if [ "$(count_token "$replies" "$want")" -ne "$n" ]; then
-		if [ "$1" = "http_tokens" ]; then show_exchange "$2" "$3" "$4"; fi
+		show_failed "$@"
 		fail "$what: expected $n/$n '$want', got $(histogram "$replies")" "$meaning"
 		return 0
 	fi
@@ -941,6 +1103,80 @@ loopback() {
 	local want="$1" host="$2" meaning="$3"
 	expect "loopback $LOOPBACK_URL with Host: $host" "$want" "$A_TIMEOUT" "$A_PROBES" "$meaning" \
 		http_tokens client-nocapture "$LOOPBACK_URL" "$host"
+}
+
+# proxied WANT CLIENT AUTHORITY MEANING [EXPLICIT] — from deploy/CLIENT,
+# literally `curl --proxy http://127.0.0.1:18081 http://AUTHORITY/`: the client
+# connects to the loopback listener and sends the absolute URL and
+# Host: AUTHORITY. With EXPLICIT the request line and Host are forced to spell
+# AUTHORITY as written (see HTTP_POD_SCRIPT), for a default port.
+proxied() {
+	local want="$1" client="$2" authority="$3" meaning="$4" host=""
+	if [ -n "${5:-}" ]; then host="$authority"; fi
+	expect "$client: curl --proxy $PROXY_URL http://$authority/${host:+ (request line and Host forced to $host)}" \
+		"$want" "$A_TIMEOUT" "$A_PROBES" "$meaning" proxy_tokens "$client" "http://$authority/" "$host"
+}
+
+# expect_no_application HOST:PORT — three raw-TCP probes from the captured
+# client, none of which may read anything back, like expect_unanswered; a
+# reply is named for what it is. Every marker of the suite is known to
+# marker_owner: the service's own declared port answering for another one, its
+# undeclared listener, and a marker of ANOTHER service are three different
+# defects.
+expect_no_application() {
+	local target="$1" replies tok owner seen=""
+	replies="$(tcp_tokens "$target" line 3)"
+	if [ "$(count_token "$replies" NOREPLY)" -eq 3 ]; then
+		passed "raw TCP to $target -> no application answers (3/3)"
+		return 0
+	fi
+	for tok in $(printf '%s\n' "$replies" | sort -u); do
+		[ "$tok" != "NOREPLY" ] || continue
+		owner="$(marker_owner "$tok")"
+		if [ "$tok" = "$(tcp_marker "$TCP_ONLY")" ]; then
+			seen+="; '$tok' is the service's own DECLARED port $TCP_PORT answering for a port that is not it (the any-port chain)"
+		elif [ "$tok" = "$STRAY_MARKER" ]; then
+			seen+="; '$tok' is the pod's undeclared listener: a port nobody declared was forwarded to the pod"
+		elif [ -n "$owner" ]; then
+			seen+="; '$tok' is a marker of ANOTHER service ($owner)"
+		else
+			seen+="; '$tok' is no marker of this suite, and still an answer"
+		fi
+	done
+	fail "raw TCP to $target was answered ($(histogram "$replies"))${seen:-; fewer than 3 probes ran}"
+}
+
+# curl_exit_meaning CODE — the curl exit codes a probe that is not answered
+# ends with.
+curl_exit_meaning() {
+	case "$1" in
+	0) echo "the peer closed the connection" ;;
+	7) echo "could not connect: refused or unreachable" ;;
+	28) echo "timed out at --max-time 5" ;;
+	52) echo "the peer closed without a reply" ;;
+	56) echo "receive failure: reset" ;;
+	*) echo "see curl's exit codes" ;;
+	esac
+}
+
+# observe_tcp HOST:PORT — one raw-TCP probe from the captured client, reported
+# and not asserted: curl's exit code, the total time, and the time to connect
+# (0.000000 when it never connected). The line starts with W2-OBSERVED.
+observe_tcp() {
+	local target="$1" rc="" total="" connect=""
+	# SC2016: evaluated by the POD's shell. Without pipefail, $? after the
+	# substitution is curl's.
+	# shellcheck disable=SC2016
+	read -r rc total connect < <(kc -n "$TEST_NS" exec deploy/client -c curl -- sh -c '
+		out=$(printf "probe-observe\n" | curl -s -o /dev/null -w "%{time_total} %{time_connect}" --max-time 5 "telnet://$1" 2>/dev/null)
+		echo "$? ${out:-- -}"
+	' sh "$target" 2>/dev/null || true) || true
+	if [ -z "$rc" ]; then
+		printf 'W2-OBSERVED raw TCP to %s: no observation (the probe did not run)\n' "$target"
+		return 0
+	fi
+	printf 'W2-OBSERVED raw TCP to %s: curl exit %s (%s), total %ss, connected after %ss\n' \
+		"$target" "$rc" "$(curl_exit_meaning "$rc")" "$total" "$connect"
 }
 
 # shared KEY FN — an assertion two legs own (X4 is the mp-tcpfirst half of
@@ -1261,6 +1497,8 @@ leg_A4() {
 		loopback "$base+$A4_HEADER_VALUE" "$name:$p" \
 			"'$base' alone is the port answering WITHOUT the route's header on the loopback listener; another marker is the rule moving the request to another port"
 	done
+	# P4 is asserted while the route exists: one apply and one delete for both.
+	if leg_selected P4; then p4_in_window check_p4_routed; fi
 	# Remove it, and wait until it is gone from the data plane: every later leg
 	# compares whole tokens, and a leftover header would fail them all.
 	remove_a4_route
@@ -1268,6 +1506,56 @@ leg_A4() {
 		base="$(marker mp-multi "$p")"
 		captured "$base" "$name:$p" "" "the HTTPRoute was deleted and its header is still added"
 		loopback "$base" "$name:$p" "the HTTPRoute was deleted and its header is still added"
+	done
+	if leg_selected P4; then p4_in_window check_p4_gone; fi
+}
+
+# P4's assertions, made inside A4's window, are kept here until leg P4 reports
+# them under its own ID.
+P4_RAN=0
+P4_CHECKS=0
+P4_FAILS=()
+
+# p4_in_window FN — run FN as leg P4 while another leg is running, and put
+# that leg's counters back afterwards.
+p4_in_window() {
+	local leg="$CURRENT_LEG" checks="$LEG_CHECKS"
+	local -a fails=(${LEG_FAILS[@]+"${LEG_FAILS[@]}"})
+	CURRENT_LEG="P4"
+	LEG_CHECKS=0
+	LEG_FAILS=()
+	"$1"
+	P4_RAN=1
+	P4_CHECKS=$((P4_CHECKS + LEG_CHECKS))
+	P4_FAILS+=(${LEG_FAILS[@]+"${LEG_FAILS[@]}"})
+	CURRENT_LEG="$leg"
+	LEG_CHECKS="$checks"
+	LEG_FAILS=(${fails[@]+"${fails[@]}"})
+}
+
+# check_p4_routed — with the HTTPRoute of A4 in place, a request through the
+# proxy port carries the route's header and is answered by the port its Host
+# names.
+check_p4_routed() {
+	note "P4 (inside A4's window): the HTTPRoute applies through the proxy port, curl --proxy $PROXY_URL"
+	local name client p base
+	name="$(mesh_name mp-multi)"
+	for client in "${CLIENTS[@]}"; do
+		for p in $(wl_http_ports mp-multi); do
+			base="$(marker mp-multi "$p")"
+			proxied "$base+$A4_HEADER_VALUE" "$client" "$name:$p" \
+				"'$base' alone is the port answering WITHOUT the route's header: a request through the proxy port is not served by the virtual host the service's route rules are on; another marker is another port answering"
+		done
+	done
+}
+
+check_p4_gone() {
+	local name client p
+	name="$(mesh_name mp-multi)"
+	for client in "${CLIENTS[@]}"; do
+		for p in $(wl_http_ports mp-multi); do
+			proxied "$(marker mp-multi "$p")" "$client" "$name:$p" "the HTTPRoute was deleted and its header is still added through the proxy port"
+		done
 	done
 }
 
@@ -1386,22 +1674,25 @@ leg_A11() {
 # endpoint.aether.io/port; :18081, the port-less URL (a dial to 80) and a
 # port-less or :18081 Host on loopback reach it when it is HTTP.
 #
-# mp-eighty is the case to read twice: it DECLARES port 80, and a port-less
-# dial of port 80 still answers from 8080, its legacy target (proposal 043,
-# decision 11: the legacy meaning of a dial to port 80 is kept through chart
-# 2.8, because changing it is from one working answer to another). Port 80 by
-# name, with ":80" in Host, is A1.
+# mp-eighty is the case to read twice: it DECLARES port 80, so a port-less
+# dial of port 80 is port 80, like a dial to any declared port, and answers
+# from 80, not from 8080, its legacy target. Only a service that does not
+# declare 80 keeps the legacy meaning of that dial.
 leg_A12() {
 	log "A12 the legacy spellings reach the port declared in endpoint.aether.io/port, unchanged in this phase"
-	local w name want meaning
+	local w name want meaning dialled80
 	for w in "${WORKLOADS[@]}"; do
 		[ "$w" != "mp-tcpfirst" ] || continue
 		name="$(mesh_name "$w")"
 		want="$(marker "$w" "$(wl_legacy_port "$w")")"
 		meaning="the legacy target of $w is :$(wl_legacy_port "$w"); another marker is a legacy spelling that changed meaning in this phase"
 		captured "$want" "$name:$MESH_HTTP_PORT" "" "$meaning"
-		captured "$want" "$name" "" "$meaning"
-		captured "$want" "$(k8s_fqdn "$w")" "" "$meaning"
+		dialled80="$want"
+		if [ "$w" = "mp-eighty" ]; then
+			dialled80="$(marker "$w" "$LOW_PORT")"
+		fi
+		captured "$dialled80" "$name" "" "a port-less dial is a dial to port 80: a declared port 80 answers it, else the legacy target of $w, :$(wl_legacy_port "$w")"
+		captured "$dialled80" "$(k8s_fqdn "$w")" "" "a port-less dial is a dial to port 80: a declared port 80 answers it, else the legacy target of $w, :$(wl_legacy_port "$w")"
 		loopback "$want" "$name" "$meaning"
 		loopback "$want" "$name:$MESH_HTTP_PORT" "$meaning"
 	done
@@ -1410,7 +1701,212 @@ leg_A12() {
 	shared tcpfirst_meshtcp check_tcpfirst_meshtcp
 }
 
+# --- a raw-TCP service is reached on the ports it declares ---------------------
+
+# W1 — the two spellings of a raw-TCP service that work: its declared port, and
+# the legacy :18082.
+leg_W1() {
+	local name target
+	name="$(mesh_name "$TCP_ONLY")"
+	log "W1 a service with no HTTP port, raw TCP on its declared port and on the legacy mesh port: $name:$TCP_PORT, $name:$MESH_TCP_PORT"
+	for target in "$name:$TCP_PORT" "$name:$MESH_TCP_PORT"; do
+		expect "raw TCP to $target" "$(tcp_marker "$TCP_ONLY")" 90 "$A_PROBES" \
+			"NOREPLY means the source has no chain for that port of the service, or no tcp: cluster (is it in the client's upstreams?)" \
+			tcp_tokens "$target" line
+	done
+}
+
+# W2 — every other port of the service's address reaches no application. Until
+# chart 2.7.0 a chain with no port sent them all to the declared port
+# (onlytcp answered on every one of these). The four ports are the
+# cases that differ in the data plane: a port no service declares, two port
+# numbers other services declare as HTTP (each has an HTTP chain of its own),
+# and port 80.
+#
+# What the client gets instead is the cluster's own answer for a Service with
+# no endpoints on that port, and is recorded, not asserted (decision 10).
+leg_W2() {
+	local name port
+	name="$(mesh_name "$TCP_ONLY")"
+	log "W2 captured: raw TCP to a port $TCP_ONLY does not declare ($UNDECLARED_PORT, $HTTP_PORT, $ALT_PORT, $LOW_PORT) reaches no application"
+	for port in "$UNDECLARED_PORT" "$HTTP_PORT" "$ALT_PORT" "$LOW_PORT"; do
+		expect_no_application "$name:$port"
+	done
+	note "what the client sees on each of them (recorded, not asserted):"
+	for port in "$UNDECLARED_PORT" "$HTTP_PORT" "$ALT_PORT" "$LOW_PORT"; do
+		observe_tcp "$name:$port"
+	done
+}
+
+# W3 — HTTP to a service with no HTTP port is refused by name, at once, on each
+# path: a real port number it does not declare, the two legacy HTTP spellings
+# (there is no HTTP port for them to mean), and on loopback its raw-TCP port.
+leg_W3() {
+	local name meaning
+	name="$(mesh_name "$TCP_ONLY")"
+	log "W3 HTTP to $TCP_ONLY, which has no HTTP port, is refused by name"
+	meaning="NOREPLY is the HTTP request carried as raw bytes to the declared port (the any-port chain) or leaving through the passthrough; ':slow' is a refusal that was not immediate"
+	captured "HTTP421:port-not-declared" "$name:$HTTP_PORT" "" "$meaning"
+	captured "HTTP421:no-http-port" "$name:$MESH_HTTP_PORT" "" "$meaning"
+	captured "HTTP421:no-http-port" "$name" "" "$meaning"
+	loopback "HTTP421:port-not-http" "$name:$TCP_PORT" \
+		"HTTP502/503 is the request forwarded to the raw-TCP port or to a cluster nobody published; ':slow' is a refusal that was not immediate"
+}
+
+# --- :18081 is the mesh's HTTP proxy port -------------------------------------
+
+# P1 — the request a client with a proxy sends: connect to the proxy, absolute
+# URL in the request line, Host: <name>:<port>. Nothing was dialled that names
+# a service port, so Host decides. curl is given --proxy and nothing else: the
+# leg measures whether the listener takes the absolute-form request line at
+# all, which a hand-written Host header on an origin-form request would not.
+leg_P1() {
+	log "P1 curl --proxy $PROXY_URL http://<mesh name>:P/, from both clients: Host decides, port included"
+	local client name p replies
+	name="$(mesh_name mp-multi)"
+	for client in "${CLIENTS[@]}"; do
+		for p in $(wl_http_ports mp-multi); do
+			proxied "$(marker mp-multi "$p")" "$client" "$name:$p" \
+				"NOREPLY or HTTP400 is the listener not taking an absolute-form request line; another marker is another port answering; HTTP421 says why in x-aether-error"
+		done
+	done
+	# Port 80 by name. curl drops a default port, so the plain form of this URL
+	# is a port-less authority, which is the legacy spelling of A12 and another
+	# answer. It is recorded below; the assertion spells ":80" out.
+	name="$(mesh_name mp-eighty)"
+	for client in "${CLIENTS[@]}"; do
+		proxied "$(marker mp-eighty "$LOW_PORT")" "$client" "$name:$LOW_PORT" \
+			"'$(marker mp-eighty "$HTTP_PORT")' is ':$LOW_PORT' read as a port-less name (the legacy target)" explicit
+	done
+	for client in "${CLIENTS[@]}"; do
+		replies="$(proxy_tokens "$client" "http://$name:$LOW_PORT/" "" 3)"
+		printf 'P1-OBSERVED %s: curl --proxy %s http://%s:%s/ as curl sends it (port-less request line and Host): %s\n' \
+			"$client" "$PROXY_URL" "$name" "$LOW_PORT" "$(histogram "$replies")"
+	done
+}
+
+# P2 — the refusals of the loopback rule hold through the proxy form, and a
+# name that is no mesh service is the listener's 404.
+leg_P2() {
+	log "P2 curl --proxy $PROXY_URL to a port that is not declared, a raw-TCP port, and a name that is no mesh service"
+	local client
+	for client in "${CLIENTS[@]}"; do
+		proxied "HTTP421:port-not-declared" "$client" "$(mesh_name mp-multi):$UNDECLARED_PORT" \
+			"HTTP503 (and ':slow') is the on-demand lookup of a cluster that will never exist; a marker is another port answering for an undeclared one"
+		proxied "HTTP421:port-not-http" "$client" "$(mesh_name mp-mixed):$TCP_PORT" \
+			"HTTP502/503 is the request forwarded to the raw-TCP port; ':slow' is a refusal that was not immediate"
+	done
+	proxied "HTTP404" client-nocapture "example.invalid:$HTTP_PORT" \
+		"a name that is no mesh service is not served by the proxy port: anything but its 404 is the request going somewhere"
+}
+
+# P3 — a captured dial to <name>:18081 is a dial to the proxy port, not to a
+# port of the service: Host decides there too. (A dial to a real port is A5:
+# the dialled port decides, and a Host that names another one is refused.)
+leg_P3() {
+	log "P3 captured: dial <name>:$MESH_HTTP_PORT, the proxy port, with Host <name>:P"
+	local name p
+	for name in "$(mesh_name mp-multi)" "$(k8s_fqdn mp-multi)"; do
+		for p in "$ALT_PORT" "$HTTP_PORT"; do
+			captured "$(marker mp-multi "$p")" "$name:$MESH_HTTP_PORT" "$name:$p" \
+				"'HTTP421:port-mismatch' is the proxy port read as a real port of the service; '$(marker mp-multi "$(wl_legacy_port mp-multi)")' for another port is the Host port ignored"
+		done
+		captured "HTTP421:port-not-declared" "$name:$MESH_HTTP_PORT" "$name:$UNDECLARED_PORT" \
+			"'HTTP421:port-mismatch' is the proxy port read as a real port of the service; a marker is another port answering for an undeclared one"
+	done
+}
+
+# P4 — a service's HTTP filters and route rules are applied on every path to
+# the service, the proxy port included. Asserted inside A4's window when A4
+# runs (p4_in_window); alone, it opens the same window itself.
+leg_P4() {
+	log "P4 the HTTPRoute of A4 applies through the proxy port, from both clients"
+	if [ "$P4_RAN" -eq 1 ]; then
+		LEG_CHECKS="$P4_CHECKS"
+		LEG_FAILS=(${P4_FAILS[@]+"${P4_FAILS[@]}"})
+		note "asserted inside leg A4's window in this run ($P4_CHECKS assertions, ${#LEG_FAILS[@]} failed): see above"
+		return 0
+	fi
+	if ! kc get crd httproutes.gateway.networking.k8s.io >/dev/null 2>&1; then
+		fail "the HTTPRoute CRD is not installed, so the agent never watched it" "run '$0 up' first (it installs Gateway API $GWAPI_VERSION)"
+		return 0
+	fi
+	if ! apply_a4_route; then
+		fail "the HTTPRoute $A4_ROUTE was not accepted by the API server"
+		return 0
+	fi
+	check_p4_routed
+	remove_a4_route
+	check_p4_gone
+}
+
+# P5 — an https:// URL through a proxy is a CONNECT to <name>:<port>. Nothing
+# is decided about it: this prints what the proxy port does with one today.
+leg_P5() {
+	local name client rc status total seen=""
+	name="$(mesh_name mp-multi)"
+	log "P5 (recorded, never a failure) curl --proxy $PROXY_URL https://$name:$HTTP_PORT/, a CONNECT"
+	for client in "${CLIENTS[@]}"; do
+		rc="" status="" total=""
+		# SC2016: evaluated by the POD's shell; $? after the substitution is curl's.
+		# shellcheck disable=SC2016
+		read -r rc status total < <(kc -n "$TEST_NS" exec "deploy/$client" -c curl -- sh -c '
+			out=$(curl -s -o /dev/null -w "%{http_connect} %{time_total}" --max-time 5 --proxy "$2" "$1" 2>/dev/null)
+			echo "$? ${out:-000 -}"
+		' sh "https://$name:$HTTP_PORT/" "$PROXY_URL" 2>/dev/null || true) || true
+		if [ -z "$rc" ]; then
+			printf 'P5-OBSERVED %s: no observation (the probe did not run)\n' "$client"
+			seen+="${seen:+; }$client: no observation"
+			continue
+		fi
+		if [ "$status" = "000" ]; then status="none"; fi
+		printf 'P5-OBSERVED %s: CONNECT %s:%s through %s: response status %s, curl exit %s, total %ss\n' \
+			"$client" "$name" "$HTTP_PORT" "$PROXY_URL" "$status" "$rc" "$total"
+		seen+="${seen:+; }$client: CONNECT status $status, curl exit $rc, ${total}s"
+	done
+	info "$seen"
+}
+
 # --- verify -------------------------------------------------------------------
+
+# installed_images — every image of the installed aether workloads, init
+# containers included, one per line.
+installed_images() {
+	local r
+	for r in ds/aether-agent ds/aether-mesh-dns ds/aether-proxy ds/aether-uds-csi deploy/aether-registrar deploy/aether-controller; do
+		kc -n "$NS" get "$r" -o jsonpath='{range .spec.template.spec.initContainers[*]}{.image}{"\n"}{end}{range .spec.template.spec.containers[*]}{.image}{"\n"}{end}' 2>/dev/null || true
+	done
+}
+
+# cell_line VAR IMAGES IMAGE... — one MP-CELL line: the tags the IMAGEs of one
+# group are installed at, read from IMAGES (installed_images), under the name
+# of the variable that sets them.
+cell_line() {
+	local var="$1" images="$2" img tag tags="" detail=""
+	shift 2
+	for img in "$@"; do
+		tag="$(printf '%s\n' "$images" |
+			awk -v p="$IMAGE_REGISTRY/$img:" 'index($0, p) == 1 { print substr($0, length(p) + 1) }' | sort -u | tr '\n' '+')"
+		tag="${tag%+}"
+		tag="${tag:-none}"
+		detail+="${detail:+ }$img:$tag"
+		case ",$tags," in
+		*",$tag,"*) ;;
+		*) tags+="${tags:+,}$tag" ;;
+		esac
+	done
+	printf 'MP-CELL %s=%s (installed: %s)\n' "$var" "$tags" "$detail"
+}
+
+# print_cell — which images this cluster runs, read back from the workloads and
+# not from this run's environment, so the log of a `verify` names the skew
+# cell it measured.
+print_cell() {
+	local images
+	images="$(installed_images)"
+	cell_line MP_TAG_AGENT "$images" "${AGENT_GROUP[@]}"
+	cell_line MP_TAG_REGISTRAR "$images" "${REGISTRAR_GROUP[@]}"
+}
 
 # await_converged — before any leg: wait until every workload answers on one
 # HTTP spelling that works with and without proposal 043 (its HTTP port by
@@ -1420,7 +1916,7 @@ leg_A12() {
 # leg run alone (MP_LEGS) or first does not need a registration-sized timeout.
 await_converged() {
 	log "waiting for every workload to answer once through the mesh"
-	local w name authority want deadline replies
+	local w name authority want
 	for w in "${WORKLOADS[@]}"; do
 		name="$(mesh_name "$w")"
 		authority="$name:$HTTP_PORT"
@@ -1429,19 +1925,30 @@ await_converged() {
 			authority="$name:$MESH_HTTP_PORT"
 			want="$(marker "$w" "$TCP_PORT")"
 		fi
-		deadline=$((SECONDS + $(cap_timeout 240)))
-		while true; do
-			replies="$(http_tokens client "http://$authority/" "" "$AWAIT_PROBES")"
-			if [ "$(count_token "$replies" "$want")" -eq "$AWAIT_PROBES" ]; then
-				ok "$w answers ($want)"
-				break
-			fi
-			if [ "$SECONDS" -ge "$deadline" ]; then
-				note "$w did not answer '$want' on http://$authority/ (last batch: $(histogram "$replies")); going on, the legs will say why"
-				break
-			fi
-			sleep 3
-		done
+		await_answer "$w" "http://$authority/" "$want" http_tokens client "http://$authority/" ""
+	done
+	# The one with no HTTP port: raw TCP on its declared port.
+	name="$(mesh_name "$TCP_ONLY")"
+	await_answer "$TCP_ONLY" "raw TCP to $name:$TCP_PORT" "$(tcp_marker "$TCP_ONLY")" tcp_tokens "$name:$TCP_PORT" line
+}
+
+# await_answer WORKLOAD WHERE WANT FN ARG... — poll FN ARG... <n> (http_tokens,
+# tcp_tokens) until one whole batch answers WANT, or say that it never did.
+await_answer() {
+	local w="$1" where="$2" want="$3" deadline replies
+	shift 3
+	deadline=$((SECONDS + $(cap_timeout 240)))
+	while true; do
+		replies="$("$@" "$AWAIT_PROBES")"
+		if [ "$(count_token "$replies" "$want")" -eq "$AWAIT_PROBES" ]; then
+			ok "$w answers ($want)"
+			return 0
+		fi
+		if [ "$SECONDS" -ge "$deadline" ]; then
+			note "$w did not answer '$want' on $where (last batch: $(histogram "$replies")); going on, the legs will say why"
+			return 0
+		fi
+		sleep 3
 	done
 }
 
@@ -1452,18 +1959,23 @@ leg_selected() {
 	esac
 }
 
-# run_leg ID — run leg_<ID> and record PASS, FAIL or SKIP with a detail.
+# run_leg ID — run leg_<ID> and record PASS, FAIL, SKIP or INFO (a leg that
+# only records) with a detail.
 run_leg() {
 	local id="$1" i detail=""
 	CURRENT_LEG="$id"
 	LEG_CHECKS=0
 	LEG_FAILS=()
 	LEG_SKIP=""
+	LEG_INFO=""
 	"leg_$id"
 	RES_ID+=("$id")
 	if [ -n "$LEG_SKIP" ]; then
 		RES_STATUS+=(SKIP)
 		RES_DETAIL+=("$LEG_SKIP")
+	elif [ -n "$LEG_INFO" ]; then
+		RES_STATUS+=(INFO)
+		RES_DETAIL+=("$LEG_INFO")
 	elif [ "${#LEG_FAILS[@]}" -gt 0 ]; then
 		for ((i = 0; i < ${#LEG_FAILS[@]}; i++)); do
 			detail+="${detail:+ | }${LEG_FAILS[$i]}"
@@ -1498,11 +2010,12 @@ verify() {
 			exit 2
 		fi
 	done
-	for d in "${WORKLOADS[@]}" "${CLIENTS[@]}"; do
+	for d in "${WORKLOADS[@]}" "$TCP_ONLY" "${CLIENTS[@]}"; do
 		kc -n "$TEST_NS" get deploy "$d" >/dev/null 2>&1 ||
 			die "'$d' is not deployed in '$CLUSTER': run '$0 up' first"
 	done
 	BACKEND="$(live_backend)"
+	print_cell
 	log "verifying on the '$BACKEND' registry backend; legs: $MP_LEGS"
 	# A route left by a run that was interrupted inside A4 would add its header
 	# to every answer of mp-multi.

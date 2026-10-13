@@ -180,7 +180,7 @@ assume this section has been read.
 - Some names are read by a harness outside this repository: the agent's pin
   metrics and their `reason` values, the prober's counter and its
   `AETHER_PROBE_FAIL` line, the fields of the proxy's HTTP access log that the
-  contract lists (and the format operator of each), the any-port stat prefix,
+  contract lists (and the format operator of each),
   the mesh annotations and ports, the chart's workload, container and label
   names and its roll strategies. They are listed in `test/harnesscontract/external-harness.yaml`,
   and `bazel test //test/harnesscontract:checks` fails when the code and that

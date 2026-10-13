@@ -115,17 +115,18 @@ type CaptureTCPService struct {
 	// spelling of it (proposal 043, "The legacy spellings during Phases 1 and
 	// 2"). Both forward to the floor cluster, tcp:<fqdn>.
 	//
+	// Those two are the only ports a raw-TCP legacy target is reached on.
+	// There is no port-less "any port of the address" chain any more (it was
+	// cap_tcp_anyport_<cluster>, removed in chart 2.7.0): a connection to a
+	// port the service does not declare is not the service's.
+	//
 	// No service-level protocol is read to set it: the cache derives it from
 	// the registry endpoints, never from the mesh Service's annotation.
 	LegacyTCPPort uint32
-	// AnyPort asks for the portless any-port chain (cap_tcp_anyport_<cluster>):
-	// every port of the VIP that no chain names reaches the legacy target. Set
-	// only for a service whose legacy target is raw TCP and which declares NO
-	// HTTP port. On a service with an HTTP port a per-address chain would
-	// outrank the HTTP chains for the address and forward HTTP to the raw-TCP
-	// port as bytes (measured in the review of #1672 on the kubernetes
-	// backend).
-	AnyPort bool
+	// LegacyHTTP reports that the service's legacy target is an HTTP port, so
+	// that the two legacy HTTP numbers (the mesh HTTP port, and 80) carry its
+	// cleartext HTTP like its declared HTTP ports do. See HTTPPorts.
+	LegacyHTTP bool
 }
 
 // CaptureListenerName returns the per-pod transparent-capture listener name.
@@ -192,7 +193,7 @@ func GenerateCaptureListener(cniPod *cniv1.CNIPod, sourceSpiffeID string, captur
 	// the chains that name it, so a chain that must also serve that port for
 	// its own address needs a copy qualified onto it (#911).
 	named := namedDestinationPorts(tcpServices, httpPorts)
-	chains := captureTCPChains(tcpServices, sourceSpiffeID, httpPorts, named)
+	chains := captureTCPChains(tcpServices, sourceSpiffeID, named)
 	// Scoped mode only: catch raw TCP to the TCP mesh port that no service
 	// chain claimed, before the HCM catch-all fabricates an HTTP 400 for it
 	// (proposal 037; the #460 shape). Redirect-all has the passthrough ->
@@ -201,8 +202,7 @@ func GenerateCaptureListener(cniPod *cniv1.CNIPod, sourceSpiffeID string, captur
 		chains = append(chains, BuildCaptureTCPBlackholeFilterChain(sourceSpiffeID))
 	}
 	// The connection-level L4 access log (aether#1023) on every tcp_proxy chain
-	// built above: floor, per-port, TCPRoute-weighted, the any-port shim, the
-	// TLSRoute SNI chains and the scoped-mode blackhole. Applied here, over the
+	// built above: floor, per-port, TCPRoute-weighted, the TLSRoute SNI chains and the scoped-mode blackhole. Applied here, over the
 	// finished list, rather than in each builder, so a new L4 chain kind cannot
 	// be added without one. The passthrough DefaultFilterChain is attached
 	// below and is NOT logged: it is every non-mesh egress connection, the
@@ -303,8 +303,8 @@ func GenerateCaptureListener(cniPod *cniv1.CNIPod, sourceSpiffeID string, captur
 // captureTCPChains builds every service's raw-TCP and TLSRoute chains of a
 // capture listener. named is every destination port a chain of the listener
 // names (namedDestinationPorts).
-func captureTCPChains(tcpServices []CaptureTCPService, sourceSpiffeID string, httpPorts, named []uint32) []*listenerv3.FilterChain {
-	chains := make([]*listenerv3.FilterChain, 0, len(tcpServices)*2+len(httpPorts)+1)
+func captureTCPChains(tcpServices []CaptureTCPService, sourceSpiffeID string, named []uint32) []*listenerv3.FilterChain {
+	chains := make([]*listenerv3.FilterChain, 0, len(tcpServices)*2+1)
 	for _, svc := range tcpServices {
 		// TLSRoute SNI chains, qualified onto every named port (#911) so they
 		// win on tier 3 instead of losing on tier 1.
@@ -320,12 +320,11 @@ func captureTCPChains(tcpServices []CaptureTCPService, sourceSpiffeID string, ht
 				chains = append(chains, pc)
 			}
 		}
-		// A raw-TCP legacy target: its own port, the TCP mesh port and, for
-		// a service with no HTTP port, the any-port chain (proposal 043,
-		// "The legacy spellings during Phases 1 and 2"). A service whose
-		// legacy target is HTTP gets NONE of these.
+		// A raw-TCP legacy target: its own port and the TCP mesh port
+		// (proposal 043, "The legacy spellings during Phases 1 and 2"). A
+		// service whose legacy target is HTTP gets neither.
 		if svc.LegacyTCPPort != 0 {
-			chains = append(chains, legacyTCPChains(svc, sourceSpiffeID, httpPorts)...)
+			chains = append(chains, legacyTCPChains(svc, sourceSpiffeID)...)
 		}
 	}
 	return chains
@@ -636,7 +635,8 @@ func qualifyChainByPort(src *listenerv3.FilterChain, port uint32, name, statPref
 		return out
 	}
 	// A spelling that is counted separately gets its own tcp_proxy stat
-	// prefix -- which is what makes the any-port chain's usage measurable.
+	// prefix: the TCP mesh port and the legacy target's own port each count
+	// under their chain's name.
 	for _, f := range out.GetFilters() {
 		tc := &tcp_proxyv3.TcpProxy{}
 		if f.GetTypedConfig() == nil || f.GetTypedConfig().UnmarshalTo(tc) != nil {
@@ -696,6 +696,8 @@ func claimedTCPPorts(svc CaptureTCPService) []uint32 {
 // the service's address on that port, and the address is decided before the
 // protocol: the service's own cleartext HTTP would match the address, fail
 // the SNI, and leave through the passthrough instead of reaching cap_http_<P>.
+// The same holds for the two legacy HTTP numbers (the mesh HTTP port, and 80)
+// of a service whose legacy target is HTTP: they carry its HTTP too.
 //
 // The unqualified chains are RETAINED: they still serve every port nothing
 // names.
@@ -706,7 +708,7 @@ func qualifyTLSChainsByPorts(svc CaptureTCPService, tlsChains []*listenerv3.Filt
 	out := make([]*listenerv3.FilterChain, 0, len(tlsChains)*(len(named)+1))
 	out = append(out, tlsChains...)
 	for _, p := range named {
-		if slices.Contains(svc.HTTPPorts, p) {
+		if slices.Contains(svc.HTTPPorts, p) || (svc.LegacyHTTP && (p == meshconst.ProxyOutboundPort || p == 80)) {
 			continue
 		}
 		for _, c := range tlsChains {
@@ -719,25 +721,18 @@ func qualifyTLSChainsByPorts(svc CaptureTCPService, tlsChains []*listenerv3.Filt
 
 // legacyTCPChains returns the chains of a service whose legacy target is raw
 // TCP (proposal 043, "The legacy spellings during Phases 1 and 2"): the TCP
-// mesh port and the legacy target's own port, and for a service with no HTTP
-// port the portless any-port chain.
+// mesh port and the legacy target's own port, and nothing else.
 //
 // Each is a copy of the same floor chain -- passthrough or TCPRoute-weighted
 // -- so they cannot drift from one another.
 //
-// The any-port chain is portless: any OTHER port of this VIP still reaches
-// the legacy target, which is what a pure-TCP service has always done. Being
-// the least specific chain, it catches only what no destination_port chain
-// claimed. Since the listener names every HTTP port number of the mesh, and a
-// connection to a named port is matched only among the chains naming it, the
-// any-port chain gets a twin on each of those numbers; without them a client
-// of a pure-TCP service that dials, say, :8080 would have stopped being served
-// the day some other service declared 8080 as HTTP.
-//
-// Its own stat prefix is the whole point, and the twins share it: the chain's
-// removal is gated on tcp.cap_tcp_anyport_<svc>.downstream_cx_total reading
-// zero across a full release, and that counter has to see every port.
-func legacyTCPChains(svc CaptureTCPService, sourceSpiffeID string, httpPorts []uint32) []*listenerv3.FilterChain {
+// Until chart 2.7.0 a service with no HTTP port also had a port-less chain,
+// cap_tcp_anyport_<cluster>, on which ANY other port of its address reached
+// the legacy target. It is gone: a raw-TCP service is reached on the ports it
+// declares. A connection to another port of its address matches no chain of
+// the service and takes the listener's default, the passthrough to the
+// address that was dialled, which has no such port.
+func legacyTCPChains(svc CaptureTCPService, sourceSpiffeID string) []*listenerv3.FilterChain {
 	tc := BuildCaptureTCPRouteFilterChain(svc, svc.TCPRouteRules, sourceSpiffeID)
 	if tc == nil {
 		return nil
@@ -750,17 +745,6 @@ func legacyTCPChains(svc CaptureTCPService, sourceSpiffeID string, httpPorts []u
 	for _, p := range claimed {
 		name := fmt.Sprintf("cap_tcp_%s_%d", svc.ClusterName, p)
 		out = append(out, qualifyChainByPort(tc, p, name, name))
-	}
-	if !svc.AnyPort {
-		return out
-	}
-	anyPort := "cap_tcp_anyport_" + svc.ClusterName
-	out = append(out, qualifyChainByPort(tc, 0, anyPort, anyPort))
-	for _, p := range httpPorts {
-		if slices.Contains(claimed, p) || slices.Contains(svc.TCPPorts, p) {
-			continue
-		}
-		out = append(out, qualifyChainByPort(tc, p, fmt.Sprintf("%s_p%d", anyPort, p), anyPort))
 	}
 	return out
 }

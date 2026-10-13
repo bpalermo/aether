@@ -42,7 +42,7 @@ func TestL4StatKeys(t *testing.T) {
 }
 
 // l4CaptureFixture returns a capture listener carrying every L4 chain kind:
-// the TCP-primary floor (mesh-port, primary-port and any-port spellings), a
+// the TCP-primary floor (its mesh-port and own-port spellings), a
 // non-primary per-port chain, a TCPRoute-weighted floor, TLSRoute SNI chains
 // and the scoped-mode blackhole.
 func l4CaptureFixture(t *testing.T, withPassthrough bool) *listenerv3.Listener {
@@ -56,7 +56,7 @@ func l4CaptureFixture(t *testing.T, withPassthrough bool) *listenerv3.Listener {
 	l, err := GenerateCaptureListener(pod, "spiffe://aether.internal/ns/aether-test/sa/client", 18001, "aether.internal", false,
 		[]CaptureTCPService{
 			{
-				ClusterName: tcpEcho, ClusterIP: "10.96.0.10", LegacyTCPPort: 9000, AnyPort: true,
+				ClusterName: tcpEcho, ClusterIP: "10.96.0.10", LegacyTCPPort: 9000,
 				TCPPorts: []uint32{9001},
 				TLSRouteRules: []L4ServiceRoute{{
 					SNIHostnames: []string{"a.example.com"},
@@ -64,7 +64,7 @@ func l4CaptureFixture(t *testing.T, withPassthrough bool) *listenerv3.Listener {
 				}},
 			},
 			{
-				ClusterName: TCPClusterName("aether-test/weighted", "aether.internal"), ClusterIP: "10.96.0.11", LegacyTCPPort: 9000, AnyPort: true,
+				ClusterName: TCPClusterName("aether-test/weighted", "aether.internal"), ClusterIP: "10.96.0.11", LegacyTCPPort: 9000,
 				TCPRouteRules: []L4ServiceRoute{{Backends: []L4Backend{
 					{Service: "aether-test/tcp-echo", Cluster: tcpEcho, Weight: 1},
 					{Service: "aether-test/tls-a", Cluster: tlsA, Weight: 1},
@@ -108,15 +108,18 @@ func TestCaptureL4ChainsCarryTheL4AccessLog(t *testing.T) {
 			switch name := fc.GetName(); {
 			case strings.HasPrefix(name, "cap_tls_"):
 				kinds["tls"] = true
-			case strings.HasPrefix(name, "cap_tcp_anyport_"):
-				kinds["anyport"] = true
 			case name == "cap_tcp_blackhole":
 				kinds["blackhole"] = true
 			case strings.HasSuffix(name, "_9001"):
 				kinds["port"] = true
 			case len(tc.GetWeightedClusters().GetClusters()) > 1:
 				kinds["weighted"] = true
+			case strings.HasSuffix(name, "_18082"):
+				kinds["meshport"] = true
+			case strings.HasSuffix(name, "_9000"):
+				kinds["legacy"] = true
 			}
+			assert.NotContains(t, fc.GetName(), "anyport", "the any-port chain was removed in chart 2.7.0")
 			require.Len(t, tc.GetAccessLog(), 1, "chain %s: no L4 access log", fc.GetName())
 			var cfg otelaccesslogv3.OpenTelemetryAccessLogConfig
 			require.NoError(t, proto.Unmarshal(tc.GetAccessLog()[0].GetTypedConfig().GetValue(), &cfg))
@@ -150,7 +153,7 @@ func TestCaptureL4ChainsCarryTheL4AccessLog(t *testing.T) {
 			// Connection-level only: no periodic flush, one record at close.
 			assert.Nil(t, tc.GetAccessLogOptions(), "chain %s: a flush interval makes the log per-interval, not per-connection", fc.GetName())
 		}
-		want := map[string]bool{"tls": true, "anyport": true, "port": true, "weighted": true}
+		want := map[string]bool{"tls": true, "meshport": true, "legacy": true, "port": true, "weighted": true}
 		if !withPassthrough {
 			want["blackhole"] = true
 		}

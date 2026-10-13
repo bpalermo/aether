@@ -89,6 +89,9 @@ go_library(
 go_test(
     name = "cache_test",
     size = "medium",
+    # Under the race detector the suite takes most of a medium test's five
+    # minutes on a CI runner; the resources it needs are still a medium's.
+    timeout = "long",
     srcs = [
         "ackedpins_test.go",
         "ackpublished_test.go",
@@ -124,6 +127,10 @@ go_test(
         "odcds_test.go",
         "outbound_mtls_test.go",
         "outboundroute_test.go",
+        "perport_filters_043_test.go",
+        "perport_routes_043_test.go",
+        "perport_shapes_043_test.go",
+        "perport_skew_043_test.go",
         "pinreport_test.go",
         "podchurn_cds_test.go",
         "podname_namespace_1584_test.go",

@@ -34,7 +34,7 @@ once; every suite is its own job on its own runner, against those images.
 | `uds-csi` | `uds-csi.sh` | 1 | proposal 039: the CSI node plugin on its own |
 | `authz` | `authz.sh` | 1 | proposal 027: ext_authz decisions, sidecar ordering, policy reload |
 | `l4-routes` | `l4routes.sh` | 1 + etcd | TCPRoute, TLSRoute, UDPRoute on the capture path |
-| `multiprotocol` | `multiprotocol.sh` | 1, once per registry backend (`etcd` with its container, `kubernetes`) | proposals 037 and 043 Phase 1: several ports on one service (HTTP and raw TCP in both orders, several HTTP ports, port 80), each reached by its own number on every name of the service, captured and through the loopback listener; a mismatched, non-HTTP or undeclared port refused with a `421` that names why |
+| `multiprotocol` | `multiprotocol.sh` | 1, once per registry backend (`etcd` with its container, `kubernetes`) | proposals 037 and 043 Phase 1: several ports on one service (HTTP and raw TCP in both orders, several HTTP ports, port 80), each reached by its own number on every name of the service, captured and through the loopback listener; a mismatched, non-HTTP or undeclared port refused with a `421` that names why; a raw-TCP service reached on its declared ports only; `:18081` used as an HTTP proxy (`curl --proxy`), where `Host` decides the port |
 | `eastwest-quic` | `eastwest-quic.sh` | 1 | proposal 038: per-source HTTP/3 between pods |
 | `first-install` | `first-install.sh` | 1, under Helm 3 and Helm 4 | the documented first install and its upgrades |
 
@@ -80,6 +80,62 @@ normally ends the run and prints the cluster's state;
 `LEG RESULT DETAIL` table and exits non-zero if any failed. `MP_LEGS="A5 A7"`
 runs a subset, and `MP_TIMEOUT=<seconds>` caps how long a leg waits for an
 answer to converge, which is what each failing assertion costs.
+
+Some of its output is a record and not an assertion, on lines that start with
+a fixed word so they can be grepped out of a log: `W2-OBSERVED` (what a client
+sees on a port a raw-TCP service does not declare: curl's exit code, the total
+time and the time to connect), `P1-OBSERVED` (what `curl --proxy` gets for a
+URL that spells `:80`, which curl sends without the port), `P5-OBSERVED` (the
+answer to a `CONNECT` through the proxy port; leg `P5` is `INFO` in the table,
+never `PASS` or `FAIL`) and `MP-CELL` (below).
+
+### Version skew with `multiprotocol.sh`
+
+The chart is the same on both sides of a skew, so a skew cell is a mix of image
+tags under one chart. `multiprotocol.sh` installs two groups of images, each at
+its own tag (default `latest`):
+
+| Variable | Images |
+| --- | --- |
+| `MP_TAG_AGENT` | `agent`, `mesh-dns`, `proxy-supervisor`, `cni-install`, `uds-csi` |
+| `MP_TAG_REGISTRAR` | `registrar`, `controller` |
+
+To make the older side, build the images from the older commit and give them a
+tag of their own; `<registry>` is what `scripts/image-registry.sh prefix`
+prints:
+
+```bash
+git worktree add ../aether-2.6 <the 2.6 commit>
+(cd ../aether-2.6 && for t in //agent/cmd/agent //agent/cmd/mesh-dns //agent/cmd/proxy-supervisor \
+    //cni/cmd/cni-install //agent/cmd/uds-csi //registrar/cmd/registrar //controller/cmd/controller; do
+  bazel run "$t:image_load"; done)
+for img in agent mesh-dns proxy-supervisor cni-install uds-csi registrar controller; do
+  docker tag <registry>/$img:latest <registry>/$img:2.6
+done
+```
+
+Then build the branch (which moves `latest` to it) and run each cell on a
+cluster of its own. `up` loads exactly the tags in use and builds only the
+images that run at `latest`; with `MP_SKIP_BUILD=1` it builds nothing, which is
+what a cell wants once both sets are in the Docker daemon:
+
+```bash
+# the baseline: everything at 2.6
+MP_SKIP_BUILD=1 MP_TAG_AGENT=2.6 MP_TAG_REGISTRAR=2.6 e2e/multiprotocol.sh up
+MP_KEEP_GOING=1 e2e/multiprotocol.sh verify | tee all-2.6.log; e2e/multiprotocol.sh down
+
+# a cell: new agents under an old registrar and controller
+MP_SKIP_BUILD=1 MP_TAG_REGISTRAR=2.6 e2e/multiprotocol.sh up
+MP_KEEP_GOING=1 e2e/multiprotocol.sh verify | tee agent-new.log; e2e/multiprotocol.sh down
+```
+
+Run a cell with `MP_KEEP_GOING=1` and compare its `LEG RESULT DETAIL` table
+with the all-2.6 run, leg by leg: the legs a newer chart adds or changes fail
+on 2.6, so a cell is read against that baseline and not against a green table.
+`verify` reads the tags back from the installed workloads and prints them
+first, on two lines that start with `MP-CELL`, so each log names its own cell
+whatever the environment of that `verify` was. The workloads and the suite are
+the branch's in every cell. CI runs no skew cell.
 
 ## Adding a suite
 

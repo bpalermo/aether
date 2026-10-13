@@ -32,16 +32,20 @@ func TestPerPortFixtureIsNotVacuous(t *testing.T) {
 	assert.True(t, chains["cap_http_9000"])
 	assert.True(t, chains["cap_tcp_tcp:pp-mixed.default."+meshDomain+"_9000"])
 	assert.True(t, chains["cap_tcp_tcp:pp-tcpfirst.default."+meshDomain+"_9000"])
-	// The any-port chain and its twins exist for the raw-TCP-only service
-	// alone.
-	anyPort := 0
+	// The raw-TCP-only service is reached on its own port and on the TCP
+	// mesh port, and on nothing else: no any-port chain, and no twin of one
+	// on an HTTP port number (removed in chart 2.7.0).
+	var tcpOnly []string
 	for name := range chains {
-		if strings.HasPrefix(name, "cap_tcp_anyport_") {
-			anyPort++
-			assert.Contains(t, name, "pp-tcponly")
+		assert.NotContains(t, name, "cap_tcp_anyport_")
+		if strings.Contains(name, "pp-tcponly") {
+			tcpOnly = append(tcpOnly, name)
 		}
 	}
-	assert.Equal(t, 1+len(PerPortHTTPPorts()), anyPort, "the any-port chain and one twin per HTTP port number")
+	assert.ElementsMatch(t, []string{
+		"cap_tcp_tcp:pp-tcponly.default." + meshDomain + "_6379",
+		"cap_tcp_tcp:pp-tcponly.default." + meshDomain + "_18082",
+	}, tcpOnly)
 
 	// Two services share port 8080's table, each routed to its own cluster.
 	routed := map[string]string{}

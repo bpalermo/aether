@@ -46,7 +46,7 @@
 # `prefix_ranges: <ClusterIP>/32` + `server_names` and NO destination_port.
 # Proposal 037 then gave every TCP-primary service destination_port-qualified
 # floor chains (:18082 and the service's own primary port) plus a portless
-# any-port shim. Envoy resolves destination_port FIRST and only consults the
+# any-port shim (removed in chart 2.7.0). Envoy resolves destination_port FIRST and only consults the
 # portless bucket when no chain claims the exact port — so a TLS dial to the
 # service's primary port, or to :18082, lands on the port-qualified FLOOR chain
 # and the SNI chains are never even considered.
@@ -54,9 +54,8 @@
 # THAT WAS #911, AND IT IS NOW FIXED. The SNI chains are qualified onto every
 # port a floor or per-port chain claims, so they tie the floor chain on tiers 1
 # and 2 and win on tier 3 (server_names). TLSRoute works on both mesh spellings
-# again and no longer depends on the 037 any-port shim — which matters twice
-# over, because Phase 4 proposes to REMOVE that shim, and because TLSRoute
-# traffic was incrementing the very counter Phase 4 is gated on.
+# again and does not depend on the 037 any-port shim, which chart 2.7.0
+# removed.
 #
 # So this leg now dials the service's PRIMARY port, which the floor chain also
 # claims. That is deliberate: dialling a port nothing claims would still pass
