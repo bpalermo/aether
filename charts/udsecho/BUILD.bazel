@@ -287,3 +287,19 @@ helm_template_match_test(
         ],
     },
 )
+
+# And in the chart's namespace, whatever it is set to.
+helm_template_match_test(
+    name = "udsecho_client_url_follows_the_namespace_test",
+    chart = ":udsecho",
+    document_patterns = {
+        "Deployment/uds-client": [
+            "\\n  namespace: other-ns\\n",
+            "\"http://\\$s\\.other-ns\\.aether\\.internal:8080/\"",
+        ],
+    },
+    opts = [
+        "--set",
+        "namespace=other-ns",
+    ],
+)

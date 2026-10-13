@@ -20,20 +20,23 @@ import (
 // Service, and a reference that does not is said in the route's status, not
 // given another meaning).
 //
-// The data plane decides the same question from the registry (the snapshot
-// cache's port facts). The two agree in steady state: a generated Service's
-// ports are derived from the registry by the registrar, and a user Service's
-// port map is what the cache is given. The status is the visible half.
+// The data plane decides the same question from the snapshot cache's port
+// facts. For a generated Service the two agree in steady state: its ports are
+// derived from the registry by the registrar. For a user's Service they are
+// the SAME facts: the Service's port map, which the cache is given, and the
+// class of the pod port behind it as the cache serves it (PodPorts). The
+// status is the visible half.
 type portFacts struct {
 	// ports: true for a port that carries HTTP or may (see unverified),
 	// false for a real port that is known not to: a generated Service's
 	// raw-TCP or UDP port.
 	ports map[uint32]bool
 	// unverified names the ports of a USER Service that could not be judged
-	// by what its pods declare (withPodPorts): the registry holds no row of
-	// the service, its targetPort is a name that was not resolved, or the
-	// pods disagree. The data plane knows no more and does not answer 500
-	// for it; the status says it did not check.
+	// by what its pods declare (withPodPorts): this node holds no row of the
+	// service, or its targetPort is a name that was not resolved. The data
+	// plane of this node knows no more and does not answer 500 for it; the
+	// status says it did not check, and does not overwrite what a node that
+	// does know has said (keptJudgement).
 	unverified map[uint32]bool
 	// undeclared: a USER Service's port (key) whose pod port (value) no
 	// registered pod of the service declares. The data plane answers 500 for
@@ -125,9 +128,12 @@ func parentPortProblem(facts map[string]portFacts, p gatewayv1.ParentReference, 
 	}
 	port := uint32(*p.Port)
 	http, has := f.ports[port]
+	pod, undeclared := f.undeclared[port]
 	switch {
 	case !has:
 		return fmt.Sprintf("Service %s/%s has no port %d (%s); the route is attached to nothing", ns, p.Name, port, f.describe())
+	case undeclared:
+		return fmt.Sprintf("port %d of Service %s/%s targets pod port %d, which no registered pod of the service declares (endpoint.aether.io/ports); the route is attached to nothing", port, ns, p.Name, pod)
 	case !http:
 		return fmt.Sprintf("port %d of Service %s/%s is not an HTTP port (%s); the route is attached to nothing", port, ns, p.Name, f.describe())
 	}
@@ -170,6 +176,23 @@ func backendPortProblem(facts map[string]portFacts, routeNamespace string, refs 
 	return true, "", ""
 }
 
+// parentPortUnchecked reports whether a Service parentRef names a port that
+// could not be judged here (portFacts.unverified).
+func parentPortUnchecked(facts map[string]portFacts, p gatewayv1.ParentReference, routeNamespace string) bool {
+	if p.Port == nil {
+		return false
+	}
+	ns := routeNamespace
+	if p.Namespace != nil && string(*p.Namespace) != "" {
+		ns = string(*p.Namespace)
+	}
+	return facts[serviceref.New(ns, string(p.Name)).Key()].unverified[uint32(*p.Port)]
+}
+
+// uncheckedRefsPrefix opens the ResolvedRefs message of a route whose
+// references could not all be judged here.
+const uncheckedRefsPrefix = "All backend references name a port of their Service. Not checked: "
+
 // resolveRefs is the ResolvedRefs verdict of a route: the shape and
 // ReferenceGrant check every aether route kind shares, then the ports.
 func resolveRefs(facts map[string]portFacts, routeNamespace, routeKind string, refs []gatewayv1.BackendObjectReference, grants []gatewayv1beta1.ReferenceGrant) (bool, string, string) {
@@ -181,8 +204,8 @@ func resolveRefs(facts map[string]portFacts, routeNamespace, routeKind string, r
 	}
 	if unchecked := uncheckedBackendPorts(facts, routeNamespace, refs); len(unchecked) > 0 {
 		return true, string(gatewayv1.RouteReasonResolvedRefs),
-			"All backend references name a port of their Service. Not checked: whether the pods serve " + strings.Join(unchecked, ", ") +
-				" as HTTP (a port of a Service the mesh did not generate, and the registry holds no pod of it to say, or its targetPort is a name that was not resolved). Requests are routed to it; this condition turns False, and they are answered 500, once registered pods declare the port raw TCP or do not declare it"
+			uncheckedRefsPrefix + "whether the pods serve " + strings.Join(unchecked, ", ") +
+				" as HTTP (a port of a Service the mesh did not generate, and this node holds no pod of it to say, or its targetPort is a name that was not resolved). Requests are routed to it; this condition turns False, and they are answered 500, once registered pods declare the port raw TCP or do not declare it"
 	}
 	return true, string(gatewayv1.RouteReasonResolvedRefs), "All backend references resolved"
 }

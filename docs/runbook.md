@@ -3998,7 +3998,7 @@ mesh's HTTP proxy port (`curl --proxy http://127.0.0.1:18081`), where the
 - Chart 2.7.x was never published: 3.0.0 follows 2.6.x.
 - The upgrade is not hitless across versions, by decision. See "During the
   roll, and rolling back" before scheduling it.
-- Deploy prober chart 1.1.0 first (its section follows this one).
+- Deploy prober chart 1.1.1 first (its section follows this one).
 
 **What the major version changes for the compatibility window.** "One
 release" stays one minor of the `aether` chart (`charts/README.md`,
@@ -4010,7 +4010,7 @@ go in 3.1.0. The skew the project designs and tests for is still two adjacent
 minors; 2.6 with 3.0 in one cluster is NOT such a pair, and what it does is
 measured below instead of promised. The harness contract's version (4) and
 the `crds` chart are unchanged by the number; `prober` is 1.1.1 and `udsecho`
-2.0.6, for template tests only (their renders are those of 1.1.0 and 2.0.5).
+2.0.6, for template tests only (their renders are those of 1.1.1 and 2.0.5).
 
 ##### What is fixed
 
@@ -4056,7 +4056,7 @@ To find clients that now see one, look in the proxy's HTTP access log for
 responses with status 421. The case to look for is a proxy or a sidecar inside a pod that forwards
 requests with their original `Host` to a different port.
 
-##### What else a client can notice
+##### BREAKING: a route's ports are real ports, and what else a client can notice
 
 - **A name without a namespace** (`http://<svc>/`, `Host: <svc>:8080`) is the
   service of that name in the caller's own namespace, and nothing else. See
@@ -4085,11 +4085,17 @@ requests with their original `Host` to a different port.
     from the registry. A `backendRef` to a port of your Service whose target
     port the registered pods declare raw TCP or UDP is `UnsupportedProtocol`;
     one whose target port no registered pod declares is `BackendNotFound`;
-    both are answered 500. While no pod of the Service is registered nothing
-    is known: the status stays `ResolvedRefs=True` and says "Not checked",
-    and no request is answered 500 for it. The status is judged again every
-    30 s while a route names a Service the mesh did not generate, since
-    nothing the agent watches changes when such a pod registers.
+    both are answered 500. Where pods disagree about the port, both go by
+    what most pods declare. A `parentRef` to such a port is judged the same
+    way and is `Accepted=False`. A node that holds no pod of the Service
+    knows nothing: it answers no 500 for it, says "Not checked", and leaves
+    a `False` that another node's agent wrote for the same generation of the
+    route in place (every node's agent writes the one status, and the nodes
+    that hold the pods are the ones that answer 500). The status is judged
+    again every 30 s while a route names a Service the mesh did not
+    generate, since nothing the agent watches changes when such a pod
+    registers. A `False` whose pods have all gone stays until the route's
+    spec changes or a node holds a pod of the Service again.
   - A `parentRef` to such a port attaches the route to **nothing**: the
     service answers as if the route did not exist, and the status says
     `Accepted=False` with `NoMatchingParent`.
@@ -4099,7 +4105,10 @@ requests with their original `Host` to a different port.
     a route or a Service changes, not when the pods behind an unchanged
     Service start resolving the name to another number. A name it cannot
     resolve (no slice yet, or slices that disagree) is logged, and a
-    `backendRef` to it keeps reaching the backend's declared port. A numeric
+    `backendRef` to it reaches the port the backend's pods declare in
+    `endpoint.aether.io/port`. This is the one place left where that port
+    stands in for another: nothing says which port the name is, and the
+    route's status says "Not checked" for it. Use a numeric `targetPort`. A numeric
     `targetPort` has none of this. The agent's ClusterRole gains `list` and
     `get` on `endpointslices` for it.
   - A `backendRef` of another kind than a Service, or to a Service in another
@@ -4166,8 +4175,11 @@ service **without** it:
   fetched, and it resumed on the catch-all's route.
 
 Both are closed: every table gives a mesh service a virtual host of its own
-for every authority that can reach it, with the filter, before and after the
-node holds its cluster. If a service relied on such a filter for
+for every authority the mesh claims for it, with the filter, before and after
+the node holds its cluster. (The Kubernetes names of a mesh service behind a
+Service of yours that no route names are not the mesh's: a dial to them
+reaches the pods through your Service, with no filter. See the known limit
+under "While a node holds no endpoint of a service".) If a service relied on such a filter for
 authorization on 2.6 or earlier, requests of these two shapes were not
 authorized by it; its own access log (not the filter's) shows them.
 
@@ -4273,7 +4285,11 @@ registry and the agent watches.
   it is refused at once, `421`, `x-aether-error: short-name-cold`: a request
   can only wait for a cluster named by its authority, and a short authority
   names none. The full name works; the short one does from the moment the
-  node knows the service's ports.
+  node knows the service's ports. A same-named service in ANOTHER namespace
+  changes which ports that is, not where the request goes: when that
+  service has a virtual host for the port, the short name on that port is
+  parked and delivered to the caller's OWN namespace's service (the route
+  names its cluster); it is never the other namespace's.
 - **One limit is left, in the name-only state alone** (a generated Service
   with no real port on it, which is what a chart 2.6 registrar writes): a
   route of that service with a `backendRef` answers whatever port the
@@ -4367,10 +4383,19 @@ service is addressed on a port it declares.
 loopback listener and on a dial to `<name>:18081` alike, the port in `Host`
 (or in an absolute request line) is the port. See "Using the proxy port" in
 the getting-started guide. A `421` for a service whose ports the node knows
-lists them in its body. Four bodies list none, because there is none to list:
-a `Host` that names `18081` or `18082` (`port-not-declared`: the port is the
-mesh's), `short-name-cold`, `caller-namespace-unknown`, and `port-required`
-for a service the node knows by name only.
+lists them in its body ("Its ports: 8080 (http), 9000 (tcp)"). These bodies
+name no port, because the node has none to name:
+
+- a `Host` that names `18081` or `18082` (`port-not-declared`: the port is
+  the mesh's);
+- `short-name-cold` and `caller-namespace-unknown`;
+- `port-required` for a service the node knows by name only;
+- `port-not-declared` for a name the node knows by a Service's port map only
+  (a Service of yours with a route or a filter, no endpoint held): "Its
+  ports: none", since a port map says which Service ports exist and not what
+  the pods serve;
+- `no-http-port` for a service that declares nothing but UDP, or only ports
+  reserved for the mesh: there is no raw-TCP address to offer instead.
 
 One answer in this area is not a `421`. **`500` with `x-aether-error:
 filter-levels`**: a route reached through a name without a namespace carries a
@@ -4403,7 +4428,7 @@ log_name:aether_access_logs response_code:200 (authority:~":18081$" OR NOT autho
 `proxy.access_log.http`; adapt the query to your store.) Group by source
 workload and authority, and move each client to `<name>:<declared port>`.
 The prober, the `udsecho` chart and this repository's own suites were moved
-first (prober chart 1.1.0).
+first (prober chart 1.1.1).
 
 What a first request gets from a node that holds no endpoint of the service
 yet is in "While a node holds no endpoint of a service", above: it is
@@ -4517,7 +4542,7 @@ they still work in the peer's own cluster and in clusters that have not
 upgraded. This cluster's rows always carry the field, so nothing changes for a
 peer that reads them.
 
-##### A port that stops being HTTP is refused at once; a service that vanishes keeps its grace
+##### BREAKING: a port that stops being HTTP is refused at once; a service that vanishes keeps its grace
 
 When every HTTP endpoint of a service leaves the registry, the node keeps the
 service's cluster and virtual host, empty, for 90 s: a request is a retriable
@@ -4532,7 +4557,8 @@ host of that port go in the same refresh, and a request to it is answered
 `421` with `x-aether-error: port-not-declared` or `port-not-http`, like any
 port the service does not serve. The ports the evidence declares are routed in
 the same refresh. When the evidence is the generated Service (the node holds
-no endpoint of the service), the service becomes exactly what a node that
+no endpoint of the service) and it declares other ports than the node last
+saw, a port gained included, the service becomes exactly what a node that
 starts at that moment knows of it: nothing the node remembered is kept, of any
 port or protocol, and every declared port is routed, with the service's
 filter and routes, to a cluster fetched on the first request. Before, such a request was sent for up to 90 s to the pods
@@ -4558,7 +4584,7 @@ service under another protocol. If that were a fault of the registry and not
 the truth, the HTTP port is refused until the next listing has the rows back.
 A listing that fails outright changes nothing (the refresh is abandoned).
 
-##### The generated Service
+##### BREAKING: the generated Service loses its placeholder ports and two annotations
 
 `kubectl get svc` on a generated mesh Service shows what the service serves:
 one port per declared port, named `p<port>-<tcp|udp>`, with `appProtocol`
@@ -4576,7 +4602,7 @@ capture chain; behind a 3.0 registrar it finds none and treats every service
 as HTTP. That is one of the reasons this upgrade is not hitless across
 versions (see "During the roll").
 
-##### The proxy's configuration grows
+##### BREAKING for dashboards: the capture route table and chain are renamed, and the configuration grows
 
 The capture listener of every pod has one HTTP filter chain per HTTP port
 number in the mesh (`cap_http_<port>`), plus `cap_http_other`, where it had one
@@ -4600,7 +4626,15 @@ components is kept. The helm upgrade replaces the registrar at once and rolls
 the agents node by node, so for the length of the agent roll the cluster is
 mixed. What each mix does, measured on kind with chart 2.6.2 images on one
 side and this release on the other, both registry backends
-(`e2e/README.md`, "Version skew with multiprotocol.sh"):
+(`e2e/README.md`, "Version skew with multiprotocol.sh"; the runs are in the
+pull request that removed the registrar's 2.6 annotations, #1693). Measured:
+the two mixes of agents and registrar below, on one node. **Not measured:** a
+3.0 source proxy with a 2.6 destination proxy or the reverse (two nodes on
+different versions); a rollback to 2.6.x; a mixed cluster holding a registry
+row without `port_protocols`; the mixes after the later pull requests of the
+stack (the short-name rule, the reserved ports, the retention rules), which
+change what a 3.0 node answers and not what the two versions exchange. Each
+of those is marked below where it comes up.
 
 - **2.6 agents behind the 3.0 registrar** (every node not yet rolled; the
   window of a normal helm upgrade). The generated Services have lost
@@ -4644,12 +4678,12 @@ would publish a chart with half of the addressing rule. No chart between 2.6.x
 and 3.0.0 exists.
 
 Do it in a maintenance window, clients moved first (see the two BREAKING
-sections above and "Prober chart 1.1.0"), and expect raw-TCP services to be
+sections above and "Prober chart 1.1.1"), and expect raw-TCP services to be
 unreachable from not-yet-rolled nodes for the duration of the agent roll.
 
-#### Prober chart 1.1.0: targets name a declared port (proposal 043)
+#### Prober chart 1.1.1: targets name a declared port (proposal 043)
 
-Deploy prober chart **1.1.0 or later before** `aether` chart 3.0.0. It works against
+Deploy prober chart **1.1.1 before** `aether` chart 3.0.0. It works against
 2.6 (a declared port has always been addressable), and the prober of chart
 1.0.x cannot probe a 3.0.0 mesh: it addressed its targets as `<name>:18081`
 and with a port-less `Host`, which 3.0.0 no longer reads as "the port the pods
@@ -4667,11 +4701,20 @@ service's own port, which is captured **only under redirect-all**
 `capture.aether.io/redirect-all`). Through chart 2.6 they dialled `:18081`,
 which scoped capture diverts too. On a cluster that runs with redirect-all
 off, or for a pod annotated out of it, they get no reply: the connection goes
-to the Service's address, which has no endpoint behind it. Measured in
-`e2e/multiprotocol.sh`, leg `S1`, on both registry backends: a pod with
-redirect-all off that dials `<name>:8080` is not answered (the leg records it,
-`S1-OBSERVED ... NOREPLY=3`), and the same pod reaches the service through
-`127.0.0.1:18081` (asserted). The `liveness` and
+to the Service's address, which has no endpoint behind it. Measured:
+
+- `e2e/multiprotocol.sh`, leg `S1`, on both registry backends, asserts it for
+  a plain `curl`: a pod with redirect-all off that dials `<name>:8080` is not
+  answered, and the same pod reaches the service through `127.0.0.1:18081`.
+- The prober binary itself, run on kind (etcd backend) in a pod with
+  `capture.aether.io/redirect-all: "false"`, with a `reachability` and a
+  `mesh_dns` target on the same service: in 15 s at one probe a second, the
+  `mesh_dns` tier logged 14 `AETHER_PROBE_FAIL` lines, all
+  `connection_error`, and the `liveness` and `reachability` tiers none. The
+  same binary in a pod on redirect-all logged none on any tier.
+- The authz canary and the `udsecho` client were not deployed with
+  redirect-all off. Both are `curl` loops against `http://<name>:8080/`,
+  which is what `S1` asserts. The `liveness` and
 `reachability` tiers use the proxy port and are unaffected. Run the prober
 with redirect-all on.
 
@@ -5776,7 +5819,7 @@ carry:
 | `node` | the **Kubernetes node** the prober pod runs on (`node-c`): the **source** of the probe, never where it went | the collector, from the resource's `k8s.node.name` (chart env `OTEL_RESOURCE_ATTRIBUTES`, downward API `spec.nodeName`) |
 | `pod` | the prober pod (`prober-h2mzs`) | the prober, as a datapoint attribute |
 | `tier` | `liveness`, `reachability`, `mesh_dns` | the prober |
-| `target` | the probed name (`egress`, `echo.aether-test.aether.internal:18081`, …): what was asked for, not the endpoint that would have answered | the prober |
+| `target` | the probed name (`egress`, `echo.aether-test.aether.internal:8080`, …; `...:18081` on series written by prober charts before 1.1.1): what was asked for, not the endpoint that would have answered | the prober |
 | `result` | `success`, `http_error`, `connection_error`, `timeout`, `saturated`, `dns_error`, `dns_nxdomain`, `dns_timeout` | the prober (`classifyFailure`: the error, plus the request phase the deadline interrupted) |
 
 **There is no destination label (#1391).** A burst grouped `by (node)` is placed at its
@@ -5826,7 +5869,7 @@ for a dead pod's frozen burst. Guard `on (node, pod)` instead.
 stdout: a fixed marker, then one JSON object:
 
 ```
-AETHER_PROBE_FAIL {"t":"2026-09-28T04:37:52.114Z","tier":"mesh_dns","target":"echo.aether-test.aether.internal:18081","result":"timeout","err":"Get \"http://echo.aether-test.aether.internal:18081/\": context deadline exceeded","elapsed_ms":2000.4,"phase":"first_byte","reused":false,"conn_ms":412.6,"dns_ms":0.9,"connect_ms":411.5,"tls_ms":-1,"write_ms":0.1,"ttfb_ms":1587.6,"dial":"10.96.0.7:18081","remote":"10.96.0.7:18081","local":"10.0.3.114:49292","trace_id":"9fa32b3befe77ea2253e8831d3472fa8","pod":"prober-h2mzs","node":"node-a","n":1,"truncated":false}
+AETHER_PROBE_FAIL {"t":"2026-09-28T04:37:52.114Z","tier":"mesh_dns","target":"echo.aether-test.aether.internal:8080","result":"timeout","err":"Get \"http://echo.aether-test.aether.internal:8080/\": context deadline exceeded","elapsed_ms":2000.4,"phase":"first_byte","reused":false,"conn_ms":412.6,"dns_ms":0.9,"connect_ms":411.5,"tls_ms":-1,"write_ms":0.1,"ttfb_ms":1587.6,"dial":"10.96.0.7:18081","remote":"10.96.0.7:18081","local":"10.0.3.114:49292","trace_id":"9fa32b3befe77ea2253e8831d3472fa8","pod":"prober-h2mzs","node":"node-a","n":1,"truncated":false}
 ```
 
 - `t` is the client-side timestamp. Line it up against the proxy's hot-restart
@@ -6907,11 +6950,11 @@ cat > request.json <<'EOF'
       "http": {
         "method": "GET",
         "path": "/",
-        "host": "my-service.my-namespace.aether.internal:18081",
+        "host": "my-service.my-namespace.aether.internal:8080",
         "scheme": "http",
         "protocol": "HTTP/1.1",
         "headers": {
-          ":authority": "my-service.my-namespace.aether.internal:18081",
+          ":authority": "my-service.my-namespace.aether.internal:8080",
           ":method": "GET",
           ":path": "/",
           "x-authz": "letmein"

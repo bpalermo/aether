@@ -353,7 +353,7 @@ func runAgent(ctx context.Context) (retErr error) {
 		return err
 	}
 
-	if err = wireReconcilers(m, snapshotCache, reg); err != nil {
+	if err = wireReconcilers(m, snapshotCache); err != nil {
 		return err
 	}
 
@@ -808,8 +808,8 @@ func wireSpireBridge(ctx context.Context, m ctrl.Manager, snapshotCache *cache.S
 
 // wireReconcilers registers the node agent's CR-driven reconcilers (GAMMA,
 // EndpointPolicy, L4 routes, capture) in a fixed order.
-func wireReconcilers(m ctrl.Manager, snapshotCache *cache.SnapshotCache, reg registry.Registry) error {
-	if err := wireGAMMA(m, snapshotCache, reg); err != nil {
+func wireReconcilers(m ctrl.Manager, snapshotCache *cache.SnapshotCache) error {
+	if err := wireGAMMA(m, snapshotCache); err != nil {
 		return err
 	}
 	if err := wireEndpointPolicies(m, snapshotCache); err != nil {
@@ -824,7 +824,7 @@ func wireReconcilers(m ctrl.Manager, snapshotCache *cache.SnapshotCache, reg reg
 // wireGAMMA registers the GAMMA east-west L7 routing reconciler when --gamma is set
 // (proposal 018, Phase 2). It installs the required Gateway API and config.aether.io
 // schemes and sets up the reconciler with the manager.
-func wireGAMMA(m ctrl.Manager, snapshotCache *cache.SnapshotCache, reg registry.Registry) error {
+func wireGAMMA(m ctrl.Manager, snapshotCache *cache.SnapshotCache) error {
 	if !cfg.Gamma {
 		return nil
 	}
@@ -848,9 +848,11 @@ func wireGAMMA(m ctrl.Manager, snapshotCache *cache.SnapshotCache, reg registry.
 		return fmt.Errorf("register config.aether.io scheme: %w", err)
 	}
 	gammaReconciler := &gamma.Reconciler{
-		Client:     m.GetClient(),
-		APIReader:  m.GetAPIReader(),
-		PodPorts:   gamma.RegistryPodPorts(reg),
+		Client:    m.GetClient(),
+		APIReader: m.GetAPIReader(),
+		// The class of a pod port for a route's status is the cache's own
+		// answer, the one its tables are built from: no registry read.
+		PodPorts:   snapshotCache,
 		Sink:       snapshotCache,
 		MeshDomain: cfg.MeshDomain,
 		Log:        l,

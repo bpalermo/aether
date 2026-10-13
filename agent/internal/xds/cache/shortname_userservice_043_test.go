@@ -33,9 +33,16 @@ func TestShortName_AUserServiceWithAFilterPassesThroughLikeItsOtherNames(t *test
 	// cap_http_other, with the same answer).
 	other := a043Service{name: "other", ns: "x", legacy: 8000, ports: map[uint32]registryv1.PortProtocol{8000: h}, ip: "10.0.9.2", vip: "10.96.9.2"}
 
-	for _, withFilter := range []bool{false, true} {
+	// mapped: the agent holds the Service's port map, as it does of every
+	// Service of the cluster when it runs with --gamma. A port map alone does
+	// not make the Service's Kubernetes names the mesh's (no route names it).
+	for _, tc := range []struct{ withFilter, mapped bool }{{false, false}, {true, false}, {false, true}, {true, true}} {
+		withFilter := tc.withFilter
 		c := a043Cache(t, nil)
 		a043Project(c, []a043Service{other})
+		if tc.mapped {
+			c.SetServicePortMaps(map[string]map[uint32]uint32{"demo/echo": {8000: 8080}})
+		}
 		if withFilter {
 			c.SetServiceChainFilters(map[string]proxy.ExtensionFilter{"demo/echo": r3ChainCfg(t)})
 		}
@@ -54,7 +61,7 @@ func TestShortName_AUserServiceWithAFilterPassesThroughLikeItsOtherNames(t *test
 			require.NotNil(t, tables[q.table], q.table)
 			sig := r3Resolve(t, tables[q.table], "demo", q.host, nil)
 			answers[q.table+" "+q.host] = sig.first
-			t.Logf("filter=%v  dial via %-14s Host %-36s -> %s", withFilter, q.table, q.host, sig.first)
+			t.Logf("filter=%v mapped=%v  dial via %-14s Host %-36s -> %s", withFilter, tc.mapped, q.table, q.host, sig.first)
 		}
 		if !withFilter {
 			continue
@@ -68,7 +75,7 @@ func TestShortName_AUserServiceWithAFilterPassesThroughLikeItsOtherNames(t *test
 		} {
 			short, full := answers[pair[0]], answers[pair[1]]
 			assert.Equalf(t, strings.Contains(full, "passthrough"), strings.Contains(short, "passthrough"),
-				"a user's Service with a service-wide filter and no route: %q is answered %q, where %q is answered %q", pair[0], short, pair[1], full)
+				"a user's Service with a service-wide filter and no route (port map held: %v): %q is answered %q, where %q is answered %q", tc.mapped, pair[0], short, pair[1], full)
 		}
 	}
 }

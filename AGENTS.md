@@ -202,8 +202,9 @@ assume this section has been read.
   deprecation in a published chart (chart 3.0.0 did, proposal 043). Its
   runbook section is then the announcement: every removal headed BREAKING,
   with what breaks, how to find what depends on it on the previous chart, and
-  what the mixed cluster does during the roll, measured. The adjacent-minor
-  skew below is not promised across a major version.
+  what the mixed cluster does during the roll, measured, or a statement of
+  exactly which mix was not measured. The adjacent-minor skew below is not
+  promised across a major version.
 - Skew to design and test for: components of two adjacent chart minors in one
   cluster, in both directions (a roll is not atomic, and a rollback is a roll).
   A flag the chart passes must be accepted, or ignored harmlessly, by the

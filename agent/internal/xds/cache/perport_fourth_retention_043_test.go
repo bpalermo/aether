@@ -196,6 +196,12 @@ func TestPerPort_WalkWithRemovalsAndReplacements(t *testing.T) {
 				require.NoError(t, c.generateSnapshot(ctx))
 				where := fmt.Sprintf("seed %d walk %d step %d after %s (order %v)", seed, w, step, k, order)
 				r3NoDuplicateDomains(t, where, a043Tables(t, c))
+				for _, gap := range loopbackGaps(t, c) {
+					if found["LOOPBACK NOT EXHAUSTIVE"] == 0 {
+						t.Logf("%s: %s", where, gap)
+					}
+					found["LOOPBACK NOT EXHAUSTIVE"]++
+				}
 				if tr := os.Getenv("R4_TRACE"); tr != "" && w == r4Env("R4_TRACE_WALK", 0) {
 					var names []string
 					for n2, e2 := range c.clusters {

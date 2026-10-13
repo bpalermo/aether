@@ -365,6 +365,19 @@ func (c *SnapshotCache) LoadClustersFromRegistry(ctx context.Context, clusterNam
 	// below, because a GAMMA backendRef of one service resolves to a port of
 	// ANOTHER service.
 	ports := deriveAllServicePorts(serviceEndpoints, tcpServiceEndpoints, udpServiceEndpoints)
+	// Scoped to the dependency set, as the cluster entries are. A listing is
+	// not always scoped (the registry client answers from an RPC of the whole
+	// mesh while its watch is not ready, and a registry need not scope at
+	// all). Ports derived for a service the node builds no entry of made it
+	// "held" with nothing to hold: every builder of the loopback table that
+	// asks "are its ports known" stood aside for one that asks "has it an
+	// entry", and when a filter or a route then made the service a
+	// dependency, its authority fell to the catch-all until the next refresh.
+	for svc := range ports {
+		if _, inScope := deps[svc]; !inScope {
+			delete(ports, svc)
+		}
+	}
 	listed := make(map[string]struct{}, len(ports))
 	for svc := range ports {
 		listed[svc] = struct{}{}
@@ -1465,9 +1478,17 @@ func (e retentionEvidence) replacedBy(ports map[string]servicePorts, entry clust
 
 // resetByServiceLocked returns the services that are, from this refresh on,
 // exactly what their generated Service says and nothing the node remembers:
-// no row of them is listed, their Service declares ports, and those ports
-// replace at least one HTTP entry the node would otherwise retain
-// (retentionEvidence.replacedBy). Caller must hold clusterMu.
+// no row of them is listed, their Service declares ports, and those ports are
+// not the ones last derived from the service's rows. Caller must hold
+// clusterMu.
+//
+// "Not the same ports", and not only "a retained HTTP port is gone": a port
+// the Service GAINS while the node retains the others (the pod came back
+// elsewhere with one more port, and this node has not been handed its row) was
+// refused for the length of the grace, as no port of what was remembered,
+// where a node that starts in that state routes it. With the same ports the
+// service is a removal, and its entries keep their grace: a single-replica
+// restart is exactly this until the Service loses its ports too.
 //
 // Such a service keeps NO retained entry, of any class, and with its last
 // entry goes what was derived from its last rows (pruneServicePortsLocked,
@@ -1494,11 +1515,20 @@ func (c *SnapshotCache) resetByServiceLocked(prev map[string]clusterEntry, deps 
 		if _, listed := evidence.listed[entry.service]; listed {
 			continue
 		}
-		if evidence.replacedBy(c.servicePorts, entry) != "" {
+		if d, ok := evidence.declared[entry.service]; ok && d.known() && !d.sameDeclaration(c.servicePorts[entry.service]) {
 			reset[entry.service] = struct{}{}
 		}
 	}
 	return reset
+}
+
+// sameDeclaration reports whether what a generated Service declares (d: HTTP
+// ports, and every other port in tcp) is the port set last derived from the
+// service's rows.
+func (d servicePorts) sameDeclaration(last servicePorts) bool {
+	other := append(slices.Clone(last.tcp), last.udp...)
+	slices.Sort(other)
+	return slices.Equal(d.http, last.http) && slices.Equal(d.tcp, slices.Compact(other))
 }
 
 // rehomeBareLoadAssignmentLocked gives the bare-name load assignment of a

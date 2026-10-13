@@ -420,22 +420,52 @@ func (c *SnapshotCache) outboundRefusalVhostsLocked(in ruleInputs) []*routev3.Vi
 	if c.edge || len(c.servicePorts) == 0 {
 		return nil
 	}
-	// A service is refused by name only while it has a cluster entry: that is
-	// what "this node routes the service" means everywhere else.
-	routed := make(map[string]struct{}, len(c.clusters))
-	for _, entry := range c.clusters {
-		routed[entry.service] = struct{}{}
-	}
 	out := make([]*routev3.VirtualHost, 0, 2*len(c.servicePorts))
 	for svc, ports := range c.servicePorts {
-		// A service whose pods declare only ports reserved for the mesh has
-		// no cluster entry and never will: the node knows it, and knows it
-		// serves nothing, so it is refused by name all the same.
-		if _, ok := routed[svc]; ok || ports.reservedOnly {
+		if c.loopbackSourceLocked(svc, in) == loopbackHeld {
 			out = c.appendOutboundRefusalsLocked(out, svc, ports, in)
 		}
 	}
 	return c.dropClaimedDomainsLocked(out)
+}
+
+// loopbackSource is where the loopback table takes a mesh service's virtual
+// hosts from. Exactly one per service, decided in ONE place
+// (loopbackSourceLocked) and asked by every builder: the three builders used
+// to carry a gate each ("has a cluster entry", "its ports are known", "its
+// Service declares ports"), and wherever two gates disagreed about a service
+// none of them built anything for it. Its mesh authority then fell to the
+// catch-all's on-demand route, which runs neither the service's filter nor
+// its routes. That happened five times, each through another pair of gates.
+type loopbackSource int
+
+const (
+	// loopbackUnknown: nothing is known of the name. The catch-all answers.
+	loopbackUnknown loopbackSource = iota
+	// loopbackHeld: the node derived the service's ports from registry rows.
+	// Its cluster entries carry the virtual hosts of its HTTP ports, and
+	// outboundRefusalVhostsLocked claims every other authority of it.
+	loopbackHeld
+	// loopbackDeclared: no rows, and its generated Service declares ports
+	// (outboundDeclaredVhostsLocked).
+	loopbackDeclared
+	// loopbackCold: neither, and a service-wide filter or a route names it
+	// (outboundColdVhostsLocked).
+	loopbackCold
+)
+
+// loopbackSourceLocked classifies one service. Caller must hold clusterMu.
+func (c *SnapshotCache) loopbackSourceLocked(svc string, in ruleInputs) loopbackSource {
+	switch {
+	case c.servicePorts[svc].known():
+		return loopbackHeld
+	case in.declared[svc].known():
+		return loopbackDeclared
+	}
+	if _, filtered := in.chainFilters[svc]; filtered || len(in.routes[svc]) > 0 {
+		return loopbackCold
+	}
+	return loopbackUnknown
 }
 
 // outboundColdVhostsLocked returns the out_http virtual hosts of the services
@@ -485,12 +515,7 @@ func (c *SnapshotCache) outboundColdVhostsLocked(in ruleInputs) []*routev3.Virtu
 	}
 	var out []*routev3.VirtualHost
 	for svc := range cold {
-		// A service whose ports are known is not cold: by its endpoints
-		// (outboundRefusalVhostsLocked and its entries' own virtual hosts)
-		// or by its generated Service (outboundDeclaredVhostsLocked). "Known"
-		// is what decides, not "has a cluster entry": a retained raw-TCP
-		// floor is an entry and gives the service no virtual host.
-		if !c.portsMap(in)[svc].known() {
+		if c.loopbackSourceLocked(svc, in) == loopbackCold {
 			out = c.appendColdVhostsLocked(out, in, svc)
 		}
 	}
@@ -515,9 +540,7 @@ func (c *SnapshotCache) outboundDeclaredVhostsLocked(in ruleInputs) []*routev3.V
 	}
 	var out []*routev3.VirtualHost
 	for svc, ports := range in.declared {
-		// Held or not is what servicePorts says, not "has a cluster entry"
-		// (see outboundColdVhostsLocked).
-		if c.servicePorts[svc].known() {
+		if c.loopbackSourceLocked(svc, in) != loopbackDeclared {
 			continue
 		}
 		for _, p := range ports.http {

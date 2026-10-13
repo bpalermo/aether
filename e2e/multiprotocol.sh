@@ -1935,6 +1935,13 @@ leg_R1() {
 	local name port
 	name="$(mesh_name mp-httponly)"
 	for port in "$UNDECLARED_PORT" "$MESH_HTTP_PORT" "$LOW_PORT"; do
+		# The route is deleted between ports and the parent is seen answering
+		# for itself again first: the 500 asserted below is then THIS port's.
+		# (Re-applied in place, the second and third port's expected answer
+		# was the one the first had left.)
+		remove_route "$R_BACKEND_ROUTE"
+		captured "$(marker mp-httponly "$HTTP_PORT")" "$name:$HTTP_PORT" "" "before backendRef port $port: the previous port's route is deleted and its 500 is still answered"
+		loopback "$(marker mp-httponly "$HTTP_PORT")" "$name:$HTTP_PORT" "before backendRef port $port, loopback: the previous port's route is deleted and its 500 is still answered"
 		if ! apply_backend_route "$R_BACKEND_ROUTE" mp-httponly "$port"; then
 			fail "the HTTPRoute $R_BACKEND_ROUTE (backendRef port $port) was not accepted by the API server"
 			continue
@@ -1951,6 +1958,22 @@ leg_R1() {
 	loopback "$(marker mp-httponly "$HTTP_PORT")" "$name:$HTTP_PORT" "the HTTPRoute was deleted and its 500 is still answered"
 }
 
+# apply_parent_route PORT — the HTTPRoute of R2: every request of mp-httponly's
+# port PORT to mp-multi's second HTTP port.
+apply_parent_route() {
+	kc apply -f - >/dev/null <<YAML
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata: {name: $R_PARENT_ROUTE, namespace: $TEST_NS}
+spec:
+  parentRefs:
+    - {group: "", kind: Service, name: mp-httponly, port: $1}
+  rules:
+    - backendRefs:
+        - {group: "", kind: Service, name: mp-multi, port: $ALT_PORT}
+YAML
+}
+
 # R2 — a parentRef to a port the parent does not have attaches the route to
 # nothing: Accepted=False with NoMatchingParent, and the parent answers for
 # itself on every path, as if the route did not exist. The route's backendRef
@@ -1962,18 +1985,18 @@ leg_R2() {
 	name="$(mesh_name mp-httponly)"
 	own="$(marker mp-httponly "$HTTP_PORT")"
 	for port in "$MESH_HTTP_PORT" "$LOW_PORT" "$UNDECLARED_PORT"; do
-		if ! kc apply -f - >/dev/null <<YAML
-apiVersion: gateway.networking.k8s.io/v1
-kind: HTTPRoute
-metadata: {name: $R_PARENT_ROUTE, namespace: $TEST_NS}
-spec:
-  parentRefs:
-    - {group: "", kind: Service, name: mp-httponly, port: $port}
-  rules:
-    - backendRefs:
-        - {group: "", kind: Service, name: mp-multi, port: $ALT_PORT}
-YAML
-		then
+		# First the same route on a port the parent HAS: it attaches, and the
+		# request moves to its backend. Only then the wrong port. "The parent
+		# answers for itself" is also what a route the agent never read looks
+		# like; after this control it is the answer to THIS parentRef.
+		if ! apply_parent_route "$HTTP_PORT"; then
+			fail "the HTTPRoute $R_PARENT_ROUTE (parentRef port $HTTP_PORT, the control) was not accepted by the API server"
+			continue
+		fi
+		expect_condition "$R_PARENT_ROUTE" Accepted "True/Accepted" "the control: a parentRef to the parent's real port $HTTP_PORT (before parentRef port $port)"
+		captured "$(marker mp-multi "$ALT_PORT")" "$name:$HTTP_PORT" "" \
+			"the control before parentRef port $port: '$own' is the route not applied to the port it does name"
+		if ! apply_parent_route "$port"; then
 			fail "the HTTPRoute $R_PARENT_ROUTE (parentRef port $port) was not accepted by the API server"
 			continue
 		fi
@@ -2204,6 +2227,13 @@ leg_U1() {
 	captured "$OWN_MARKER" "$short" "" "control, no filter: $meaning"
 	captured "$OWN_MARKER" "$two" "" "control, no filter: $meaning"
 	loopback "$OWN_MARKER" "$(mesh_name "$OWN_NAME"):$OWN_SERVICE_PORT" "control, no filter: the mesh name reaches the service through the mesh"
+	# The table of the dialled port, before the filter: the mesh name in Host
+	# on a dial to the Service's address is not claimed there either (the
+	# node has no virtual host for the service on this table), and passes
+	# through like the Service's own names.
+	expect "captured dial to $short with Host $(mesh_name "$OWN_NAME"):$OWN_SERVICE_PORT, no filter" "$OWN_MARKER" "$A_TIMEOUT" "$A_PROBES" \
+		"control: the table of the dialled port claims the service's mesh name before any filter exists" \
+		http_tokens client "http://$short/" "$(mesh_name "$OWN_NAME"):$OWN_SERVICE_PORT"
 
 	kc apply -f - >/dev/null <<YAML || die "U1: the HTTPFilter was not accepted"
 apiVersion: config.aether.io/v1
@@ -2224,6 +2254,16 @@ YAML
 	expect "loopback, Host $(mesh_name "$OWN_NAME"):$OWN_SERVICE_PORT with the filter" "HTTP403" 90 "$A_PROBES" \
 		"the service-wide filter never came into force on the mesh name, so the checks below would show nothing" \
 		http_tokens client-nocapture "$LOOPBACK_URL" "$(mesh_name "$OWN_NAME"):$OWN_SERVICE_PORT"
+	# And on the very table the two calls below go through. The filter gives
+	# the service a virtual host there, for its MESH name: the same dial with
+	# the mesh name in Host, which passed through a moment ago, is now the
+	# mesh's and refused (the pods serve no port $OWN_SERVICE_PORT, and no route
+	# makes the Service's port map count on a dialled port). That change is
+	# the filter having reached this table; before the fix it took the short
+	# name with it.
+	expect "captured dial to $short with Host $(mesh_name "$OWN_NAME"):$OWN_SERVICE_PORT, with the filter" "HTTP421:port-not-declared" 90 "$A_PROBES" \
+		"'$OWN_MARKER' is the filter not having reached the table of the dialled port, so the two checks below would show nothing" \
+		http_tokens client "http://$short/" "$(mesh_name "$OWN_NAME"):$OWN_SERVICE_PORT"
 	captured "$OWN_MARKER" "$short" "" "with the filter: $meaning"
 	captured "$OWN_MARKER" "$two" "" "with the filter: $meaning"
 
@@ -2432,8 +2472,13 @@ leg_S1() {
 	expect "client-nocapture, http://$name:$MESH_HTTP_PORT/ and nothing else" "HTTP421:port-not-declared" "$A_TIMEOUT" "$A_PROBES" \
 		"'$(marker mp-multi "$(wl_legacy_port mp-multi)")' is :$MESH_HTTP_PORT read as 'the port the pods declare', which it meant until chart 3.0.0" \
 		http_tokens client-nocapture "http://$name:$MESH_HTTP_PORT/" ""
-	hist="$(http_tokens client-nocapture "http://$name:$HTTP_PORT/" "" 3 | sort | uniq -c | awk '{printf "%s=%s ", $2, $1}')"
-	note "S1-OBSERVED client-nocapture, a dial to the service's own port, http://$name:$HTTP_PORT/ (not captured): $hist"
+	# The documented limit (runbook, "Prober chart 1.1.0"): a dial to a
+	# service's OWN port from a pod that is not on redirect-all is not
+	# diverted, and nothing answers it. Asserted, so that the day it is
+	# diverted the documentation is found wrong here.
+	expect "client-nocapture, a dial to the service's own port, http://$name:$HTTP_PORT/" "NOREPLY" "$A_TIMEOUT" 3 \
+		"an answer means scoped capture diverts a service's own port now: the limit the runbook states for the prober's mesh_dns tier, the authz canary and the udsecho client is gone" \
+		http_tokens client-nocapture "http://$name:$HTTP_PORT/" ""
 }
 
 # P4 — a service's HTTP filters and route rules are applied on every path to

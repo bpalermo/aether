@@ -46,7 +46,7 @@ probe:
   reachabilityTargets: []
   # Optional mesh_dns tier: namespace-qualified authorities, "<fqdn>:<port>"
   # with a port the service declares (no port is appended: a target without
-  # one dials 80; until chart 1.1.0 the default was 18081). Unlike liveness/reachability these are RESOLVED through the
+  # one dials 80; until chart 1.1.1 the default was 18081). Unlike liveness/reachability these are RESOLVED through the
   # mesh DNS path (CNI :53 DNAT → the standalone aether-mesh-dns daemon, #578 →
   # ClusterIP) rather than being Host-overridden, so a real mesh-DNS outage becomes an alertable dns_* signal
   # (closes the blind spot behind issue #574). Only works because this pod is

@@ -893,8 +893,25 @@ captured mesh name.** Left as it is. The registrar generates a Service only
 for a name no other Service owns; a dial to a user's Service is a dial to an
 address the node does not capture as the mesh's, and leaves through the
 passthrough. The mesh name and the proxy port reach such a service through the
-mesh, by the user Service's port map. No code change; the runbook states it as
-a known limit.
+mesh, by the user Service's port map. A service-wide HTTP filter that targets
+the Service changes none of it: the filter is in force on the mesh name and
+the proxy port, and the Service's Kubernetes names, the one without a
+namespace included, still pass through unfiltered. That half needed code: the
+short name had become a refused mesh name as soon as the service had a filter
+(found by the fourth review), and a dialled-port table now derives no short
+name from a name it claims by its mesh name alone. An HTTPRoute that names the
+Service does make its Kubernetes names the mesh's. The runbook states the
+limit.
+
+**2026-10-12: 18081 is the proxy port, and the authority names the target.**
+`18081` is the mesh's HTTP proxy port, permanently, and a port of no service.
+A client that connects to it (the loopback listener, `http_proxy`, or a dial
+to `<name>:18081`) is asked, by the `Host` header or the absolute request
+line, for a service AND a port: `Host: <name>:<port>` reaches that declared
+port, a `Host` without a port is port 80, and `Host: <name>:18081` asks for a
+port no service has and is refused (`421 port-not-declared`). No cluster is
+named for it, no pod may declare it (nor `18082`), and "the port the pods
+declare" is not something an address can mean.
 
 **A reference is strict and visible (decided with the proposal, restated
 2026-10-12 because older text below says otherwise).** A `backendRef` whose

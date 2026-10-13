@@ -164,6 +164,17 @@ func PruneRouteParentStatus(
 // parentRefEqual reports whether two parentRefs identify the same parent. We
 // always write back the same parentRef we read from the spec, so comparing the
 // dereferenced fields (with their zero-value defaults) suffices.
+// RouteParentCondition returns the condition of type condType that
+// controllerName's entry for parentRef carries in parents, or nil.
+func RouteParentCondition(parents []gatewayv1.RouteParentStatus, controllerName gatewayv1.GatewayController, parentRef gatewayv1.ParentReference, condType string) *metav1.Condition {
+	for i := range parents {
+		if parents[i].ControllerName == controllerName && parentRefEqual(parents[i].ParentRef, parentRef) {
+			return meta.FindStatusCondition(parents[i].Conditions, condType)
+		}
+	}
+	return nil
+}
+
 func parentRefEqual(a, b gatewayv1.ParentReference) bool {
 	return derefGroup(a.Group) == derefGroup(b.Group) &&
 		derefKind(a.Kind) == derefKind(b.Kind) &&

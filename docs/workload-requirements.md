@@ -41,7 +41,7 @@ spec:
 
 | Annotation | Default | Meaning |
 |---|---|---|
-| `endpoint.aether.io/port` | `8080` | Primary application port — what a portless authority resolves to |
+| `endpoint.aether.io/port` | `8080` | The pod's declared port: served, health-checked, and what `<name>:18082` reaches when it is raw TCP. Not what a port-less authority means (that is port 80, served only when declared): a client names the port it wants |
 | `endpoint.aether.io/ports` | `<port>` | Every port the app serves, comma-separated, each optionally suffixed `=h1`, `=h2` or `=tcp` (e.g. `8080,9090=h2,9000=tcp`). A port with no suffix takes `endpoint.aether.io/protocol` |
 | `endpoint.aether.io/protocol` | `http` | The **default** L4 class for ports with no suffix. `http` or `tcp`; a raw-TCP service rides the transparent-capture TCP floor as an mTLS passthrough |
 | `endpoint.aether.io/weight` | `1024` | Load-balancing weight |

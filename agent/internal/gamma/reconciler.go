@@ -694,30 +694,10 @@ func (r *Reconciler) writeRouteStatus(
 			continue
 		}
 		written = append(written, p)
-		accepted := gatewaystatus.Condition{
-			Type:    string(gatewayv1.RouteConditionAccepted),
-			Status:  metav1.ConditionTrue,
-			Reason:  string(gatewayv1.RouteReasonAccepted),
-			Message: "Route accepted by the aether mesh",
-		}
-		if problem := parentPortProblem(facts, p, obj.GetNamespace()); problem != "" {
-			accepted.Status = metav1.ConditionFalse
-			accepted.Reason = string(gatewayv1.RouteReasonNoMatchingParent)
-			accepted.Message = problem
-		}
-		conds := []gatewaystatus.Condition{accepted}
-		resolvedStatus := metav1.ConditionTrue
-		if !backendsResolved {
-			resolvedStatus = metav1.ConditionFalse
-		}
-		conds = append(conds, gatewaystatus.Condition{
-			Type:    string(gatewayv1.RouteConditionResolvedRefs),
-			Status:  resolvedStatus,
-			Reason:  resolvedReason,
-			Message: resolvedMsg,
-		})
+		accepted := acceptedCondition(parents, p, generation, facts, obj.GetNamespace())
+		resolved := resolvedCondition(parents, p, generation, backendsResolved, resolvedReason, resolvedMsg)
 		var upd bool
-		parents, upd = gatewaystatus.MergeRouteParentStatus(parents, gatewaystatus.MeshControllerName, p, generation, conds...)
+		parents, upd = gatewaystatus.MergeRouteParentStatus(parents, gatewaystatus.MeshControllerName, p, generation, accepted, resolved)
 		changed = changed || upd
 	}
 	// The mesh's entry of a parentRef the route no longer names (an edited
@@ -728,6 +708,64 @@ func (r *Reconciler) writeRouteStatus(
 	}
 	status.Parents = parents
 	return r.Status().Update(ctx, obj)
+}
+
+// acceptedCondition is the Accepted condition of one Service parentRef.
+func acceptedCondition(parents []gatewayv1.RouteParentStatus, p gatewayv1.ParentReference, generation int64, facts map[string]portFacts, routeNamespace string) gatewaystatus.Condition {
+	accepted := gatewaystatus.Condition{
+		Type:    string(gatewayv1.RouteConditionAccepted),
+		Status:  metav1.ConditionTrue,
+		Reason:  string(gatewayv1.RouteReasonAccepted),
+		Message: "Route accepted by the aether mesh",
+	}
+	if problem := parentPortProblem(facts, p, routeNamespace); problem != "" {
+		accepted.Status = metav1.ConditionFalse
+		accepted.Reason = string(gatewayv1.RouteReasonNoMatchingParent)
+		accepted.Message = problem
+		return accepted
+	}
+	if parentPortUnchecked(facts, p, routeNamespace) {
+		return keptJudgement(parents, p, generation, accepted)
+	}
+	return accepted
+}
+
+// resolvedCondition is the ResolvedRefs condition of a route, as written on
+// one of its parents.
+func resolvedCondition(parents []gatewayv1.RouteParentStatus, p gatewayv1.ParentReference, generation int64, ok bool, reason, msg string) gatewaystatus.Condition {
+	resolved := gatewaystatus.Condition{
+		Type:    string(gatewayv1.RouteConditionResolvedRefs),
+		Status:  metav1.ConditionTrue,
+		Reason:  reason,
+		Message: msg,
+	}
+	if !ok {
+		resolved.Status = metav1.ConditionFalse
+		return resolved
+	}
+	if strings.HasPrefix(msg, uncheckedRefsPrefix) {
+		return keptJudgement(parents, p, generation, resolved)
+	}
+	return resolved
+}
+
+// keptJudgement returns the condition to write where this node could not judge
+// a port of a user's Service (it holds no pod of it): unjudged, the condition
+// as computed; but when the route's status already says False for this parent,
+// for THIS generation of the route, that False.
+//
+// Every node's agent writes the one status of a route, and they do not all
+// hold the same services. A node that holds the pods says False when they do
+// not serve the port as HTTP, and its table answers 500. A node that holds
+// none must not write "True, not checked" over that: the False is still true
+// on the node that answers 500. It is overwritten by a node that can judge,
+// and by any node when the route's spec changes.
+func keptJudgement(parents []gatewayv1.RouteParentStatus, p gatewayv1.ParentReference, generation int64, unjudged gatewaystatus.Condition) gatewaystatus.Condition {
+	prev := gatewaystatus.RouteParentCondition(parents, gatewaystatus.MeshControllerName, p, unjudged.Type)
+	if prev == nil || prev.Status != metav1.ConditionFalse || prev.ObservedGeneration != generation {
+		return unjudged
+	}
+	return gatewaystatus.Condition{Type: prev.Type, Status: prev.Status, Reason: prev.Reason, Message: prev.Message}
 }
 
 func httpBackendRefs(rules []gatewayv1.HTTPRouteRule) []gatewayv1.BackendObjectReference {

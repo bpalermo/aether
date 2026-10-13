@@ -383,3 +383,49 @@ func TestLoopbackShortNameFloor(t *testing.T) {
 	require.NotEmpty(t, routes)
 	assert.Equal(t, fqdn+":8080", routes[len(routes)-1].GetRoute().GetCluster())
 }
+
+// TestShortName_AColdNameBesideAnotherNamespacesServiceStaysItsOwn: a service
+// the node knows by name only (namespace "a") and a service of the SAME name
+// in another namespace ("b") that the node holds, on port 8080. The short
+// domain "echo:8080" exists because b's service claims that suffix, so the
+// caller in "a" is not refused "short-name-cold" there: its request is parked
+// for a cluster. That cluster is its OWN namespace's, "echo.a.<mesh>:8080",
+// named by the route. It can never be b's: a short name is the caller's
+// namespace's and nothing else.
+func TestShortName_AColdNameBesideAnotherNamespacesServiceStaysItsOwn(t *testing.T) {
+	const mesh = "aether.internal"
+	held := &routev3.VirtualHost{Name: "echo.b|8080", Domains: []string{"echo.b." + mesh + ":8080"}, Routes: []*routev3.Route{{
+		Match:  &routev3.RouteMatch{PathSpecifier: &routev3.RouteMatch_Prefix{Prefix: "/"}},
+		Action: &routev3.Route_Route{Route: &routev3.RouteAction{ClusterSpecifier: &routev3.RouteAction_Cluster{Cluster: "echo.b." + mesh + ":8080"}}},
+	}}}
+	short := ShortNameVirtualHosts([]*routev3.VirtualHost{held}, mesh, []string{"echo.a." + mesh, "echo.b." + mesh}, LoopbackShortNameFloor, nil)
+	byDomain := map[string]*routev3.VirtualHost{}
+	for _, vh := range short {
+		for _, d := range vh.GetDomains() {
+			byDomain[d] = vh
+		}
+	}
+	vh := byDomain["echo:8080"]
+	require.NotNil(t, vh, "the short domain of the suffix b's service claims: %v", keysOfVhosts(byDomain))
+
+	clusters := func(ns string) []string {
+		var out []string
+		for _, r := range shortArmRoutes(t, vh.GetMatcher(), ns) {
+			if c := r.GetRoute().GetCluster(); c != "" {
+				out = append(out, c)
+			}
+			assert.Emptyf(t, r.GetRoute().GetClusterHeader(), "caller in %q: a cluster named by the request's authority", ns)
+		}
+		return out
+	}
+	assert.Equal(t, []string{"echo.a." + mesh + ":8080"}, clusters("a"), "the cold service's caller is sent to another namespace's service, or nowhere")
+	assert.Equal(t, []string{"echo.b." + mesh + ":8080"}, clusters("b"))
+
+	// On a port no namespace's service claims, the cold name's short form is
+	// refused at once: there is no cluster a short authority could name.
+	wild := byDomain["echo:*"]
+	require.NotNil(t, wild, "%v", keysOfVhosts(byDomain))
+	routes := shortArmRoutes(t, wild.GetMatcher(), "a")
+	require.Len(t, routes, 1)
+	assert.Equal(t, RefusalShortNameCold, routes[0].GetResponseHeadersToAdd()[0].GetHeader().GetValue())
+}

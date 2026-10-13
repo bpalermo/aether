@@ -569,3 +569,36 @@ helm_template_match_test(
     },
     opts = AUTHZ_CANARY_OPTS,
 )
+
+# The authz echo listens on the port its pod declares: the annotation, the
+# container's HTTP_PORT and its containerPort are one number. (Each could be
+# changed alone; the canary's URL above names the declared one.)
+helm_template_match_test(
+    name = "prober_authz_echo_serves_the_port_it_declares_test",
+    chart = ":prober",
+    document_patterns = {
+        "Deployment/authz-echo": [
+            "\\n        endpoint\\.aether\\.io/port: \"8080\"\\n",
+            "\\n            - name: HTTP_PORT\\n              value: \"8080\"\\n",
+            "\\n          ports:\\n            - containerPort: 8080\\n",
+        ],
+    },
+    opts = AUTHZ_CANARY_OPTS,
+)
+
+# The canary dials the echo of its OWN namespace: the URL follows the chart's
+# namespace, it does not name one.
+helm_template_match_test(
+    name = "prober_authz_canary_url_follows_the_namespace_test",
+    chart = ":prober",
+    document_patterns = {
+        "Deployment/authz-canary": [
+            "\\n  namespace: canary-ns\\n",
+            "url=\"http://authz-echo\\.canary-ns\\.aether\\.internal:8080/\"",
+        ],
+    },
+    opts = AUTHZ_CANARY_OPTS + [
+        "--set",
+        "namespace.name=canary-ns",
+    ],
+)

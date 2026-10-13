@@ -75,53 +75,128 @@ func TestPerPort_ServiceReplacedByItsServiceAnswersAsAFreshNode(t *testing.T) {
 	}
 }
 
-// TestPerPort_RuleEventDoesNotGiveARetainedEntryItsAuthoritiesBack: a
-// retained entry that gave its authorities up to a live entry of the service
-// (yieldClaimedDomains) stays without them when a rule event rebuilds the
-// virtual hosts between two registry refreshes. It got all of them back: for
-// that one snapshot "<fqdn>:80" and the port-less name were claimed by the
-// retained default cluster, whose endpoints are the raw-TCP floor's.
+// TestPerPort_RuleEventDoesNotGiveARetainedEntryItsAuthoritiesBack: a rule
+// event between two registry refreshes rebuilds the loopback virtual hosts,
+// and a RETAINED entry must give way to a live entry of the service then as
+// it does in a refresh (yieldClaimedDomains).
+//
+// The state: a service behind a user's Service whose port map has no port for
+// pod port 80. It serves 80 (HTTP) and 9000 (raw TCP), and the port its pods
+// declare moves from 80 to 9000. The default HTTP entry (pod port 80) is
+// retained, and so far claims nothing: its virtual host exists and has no
+// domain, like the live per-port entry of 80. Then the Service goes (a port
+// map event). Rebuilt like a live entry, the retained one claimed
+// "<fqdn>:80" and the port-less name beside the live entry of port 80: two
+// virtual hosts with one domain, or a route to the retained default cluster,
+// whose endpoints are by then the raw-TCP floor's.
+//
+// (The first version of this test started from a retained entry that had
+// ALREADY lost its virtual host, which a rule event does not touch: it passed
+// on the code before the fix.)
 func TestPerPort_RuleEventDoesNotGiveARetainedEntryItsAuthoritiesBack(t *testing.T) {
 	ctx := context.Background()
 	h, tcp := registryv1.PortProtocol_PORT_PROTOCOL_HTTP, registryv1.PortProtocol_PORT_PROTOCOL_TCP
 	ports := map[uint32]registryv1.PortProtocol{80: h, 9000: tcp}
-	before := a043Service{name: "echo", ns: "demo", legacy: 80, ports: ports, ip: "10.0.9.1", vip: "10.96.9.1"}
-	after := a043Service{name: "echo", ns: "demo", legacy: 9000, ports: ports, ip: "10.0.9.1", vip: "10.96.9.1"}
-	c := a043Cache(t, []a043Service{before})
-	require.NoError(t, c.LoadClustersFromRegistry(ctx, "cluster-1", "node-1", a043Registry([]a043Service{after})))
+	before := a043Service{name: "echo", ns: "demo", legacy: 80, ports: ports, ip: "10.0.9.1"}
+	after := a043Service{name: "echo", ns: "demo", legacy: 9000, ports: ports, ip: "10.0.9.1"}
+	const fqdn = "echo.demo." + a043Mesh
 
-	retained := func() (clusterEntry, bool) {
+	c := a043Cache(t, nil)
+	// A route makes the service a dependency and its Service's port map count.
+	c.SetServiceRoutes(map[string][]proxy.GammaRoute{"demo/echo": {{Matches: []proxy.GammaMatch{{Prefix: "/"}}}}})
+	c.SetServicePortMaps(map[string]map[uint32]uint32{"demo/echo": {8000: 8080}})
+	require.NoError(t, c.LoadClustersFromRegistry(ctx, "cluster-1", "node-1", a043Registry([]a043Service{before})))
+	require.NoError(t, c.LoadClustersFromRegistry(ctx, "cluster-1", "node-1", a043Registry([]a043Service{after})))
+	require.NoError(t, c.generateSnapshot(ctx))
+
+	entry := func(name string) clusterEntry {
 		c.clusterMu.RLock()
 		defer c.clusterMu.RUnlock()
-		e, ok := c.clusters["demo/echo"]
-		return e, ok && !e.absentSince.IsZero()
+		e, ok := c.clusters[name]
+		require.Truef(t, ok, "no entry %q", name)
+		return e
 	}
-	e, ok := retained()
-	require.True(t, ok, "the default entry of port 80 is retained (the service still declares 80 as HTTP), or the test shows nothing")
-	require.Nil(t, e.vhost, "control: the refresh took the retained entry's authorities away")
+	retained := entry("demo/echo")
+	require.False(t, retained.absentSince.IsZero(), "the default entry of pod port 80 is retained, or the test shows nothing")
+	require.NotNil(t, retained.vhost, "the retained entry still has a virtual host (it claims nothing yet), or a rule event does not touch it and the test shows nothing")
+	require.Empty(t, retained.vhost.GetDomains())
+	live := entry(fqdn + ":80")
+	require.True(t, live.absentSince.IsZero(), "the live per-port entry of 80")
 
-	for _, event := range []struct {
-		name string
-		do   func()
-	}{
-		{"a port map", func() { c.SetServicePortMaps(map[string]map[uint32]uint32{"demo/unrelated": {80: 8080}}) }},
-		{"a route", func() {
-			c.SetServiceRoutes(map[string][]proxy.GammaRoute{"demo/unrelated": {{Matches: []proxy.GammaMatch{{Prefix: "/"}}}}})
-		}},
-		{"a service-wide filter", func() { c.SetServiceChainFilters(map[string]proxy.ExtensionFilter{"demo/unrelated": r3ChainCfg(t)}) }},
-	} {
-		event.do()
-		require.NoError(t, c.generateSnapshot(ctx))
-		e, ok = retained()
-		require.True(t, ok)
-		assert.Nilf(t, e.vhost, "after %s event the retained entry claims %v again", event.name, e.vhost.GetDomains())
-		for _, tname := range []string{proxy.OutboundHTTPRouteName, "cap_http_18081"} {
-			for _, host := range []string{"echo.demo." + a043Mesh + ":80", "echo.demo." + a043Mesh} {
-				got := a043Resolve(t, a043Tables(t, c)[tname], host)
-				assert.NotEqualf(t, "echo.demo."+a043Mesh, got.cluster, "after %s event, %s Host %s is routed to the retained default cluster, whose endpoints are the raw-TCP floor's", event.name, tname, host)
-			}
-		}
+	// The Service goes: the service's ports are its pods' own again.
+	c.SetServicePortMaps(map[string]map[uint32]uint32{})
+	require.NoError(t, c.generateSnapshot(ctx))
+
+	live = entry(fqdn + ":80")
+	require.Contains(t, live.vhost.GetDomains(), fqdn+":80", "control: the live entry of 80 claims its authority after the event")
+	retained = entry("demo/echo")
+	assert.Emptyf(t, retained.vhost.GetDomains(), "the retained entry claims %v beside the live entry of the same port", retained.vhost.GetDomains())
+	for _, tname := range []string{proxy.OutboundHTTPRouteName, "cap_http_18081"} {
+		// a043Resolve fails the test on a domain claimed twice.
+		got := a043Resolve(t, a043Tables(t, c)[tname], fqdn+":80")
+		assert.Equalf(t, fqdn+":80", got.cluster, "%s: Host %s:80 is not answered by the live entry of port 80: %+v", tname, fqdn, got)
+		got = a043Resolve(t, a043Tables(t, c)[tname], fqdn)
+		assert.NotEqualf(t, fqdn, got.cluster, "%s: the port-less name is routed to the retained default cluster, whose endpoints are the raw-TCP floor's", tname)
 	}
+}
+
+// TestPerPort_RuleEventReachesARetainedEntry: a retained entry is rebuilt on a
+// rule event like any other. A service whose rows are gone and whose entry is
+// kept for the grace gets a service-wide filter: the next snapshot's loopback
+// table runs it on the retained virtual host. (Skipping the retained entries
+// in the rebuild left them with the rules of the refresh that retained them.)
+func TestPerPort_RuleEventReachesARetainedEntry(t *testing.T) {
+	ctx := context.Background()
+	h := registryv1.PortProtocol_PORT_PROTOCOL_HTTP
+	echo := a043Service{name: "echo", ns: "demo", legacy: 8080, ports: map[uint32]registryv1.PortProtocol{8080: h}, ip: "10.0.9.1", vip: "10.96.9.1"}
+	c := a043Cache(t, []a043Service{echo})
+	a043ProjectNamesOnly(c, []a043Service{echo})
+	require.NoError(t, c.LoadClustersFromRegistry(ctx, "cluster-1", "node-1", a043Registry(nil)))
+	require.NoError(t, c.generateSnapshot(ctx))
+	c.clusterMu.RLock()
+	e, ok := c.clusters["demo/echo"]
+	c.clusterMu.RUnlock()
+	require.True(t, ok && !e.absentSince.IsZero() && len(e.vhost.GetDomains()) > 0, "the entry is retained with its virtual host, or the test shows nothing")
+	const host = "echo.demo." + a043Mesh + ":8080"
+	before := r3Resolve(t, a043Tables(t, c)[proxy.OutboundHTTPRouteName], "demo", host, nil)
+	require.NotContains(t, before.first, r3Filter, "control: no filter yet")
+
+	c.SetServiceChainFilters(map[string]proxy.ExtensionFilter{"demo/echo": r3ChainCfg(t)})
+	require.NoError(t, c.generateSnapshot(ctx))
+	for _, tname := range []string{proxy.OutboundHTTPRouteName, "cap_http_18081"} {
+		after := r3Resolve(t, a043Tables(t, c)[tname], "demo", host, nil)
+		assert.Containsf(t, after.first, r3Filter, "%s: a filter attached while the service's entry is retained is not in force: %s", tname, after.first)
+	}
+}
+
+// TestPerPort_AListedServiceKeepsItsRetainedFloor: the reset of a service to
+// what its generated Service declares is for a service NO row is listed of.
+// One that is listed is what its rows say, whatever its Service says (the
+// Service is derived from the registry, later): it loses its raw-TCP port in
+// the rows, and the floor of that port keeps its grace, as before.
+func TestPerPort_AListedServiceKeepsItsRetainedFloor(t *testing.T) {
+	ctx := context.Background()
+	h, tcp := registryv1.PortProtocol_PORT_PROTOCOL_HTTP, registryv1.PortProtocol_PORT_PROTOCOL_TCP
+	both := a043Service{name: "echo", ns: "demo", legacy: 8080, ports: map[uint32]registryv1.PortProtocol{8080: h, 9000: tcp}, ip: "10.0.9.1", vip: "10.96.9.1"}
+	httpOnly := a043Service{name: "echo", ns: "demo", legacy: 8080, ports: map[uint32]registryv1.PortProtocol{8080: h}, ip: "10.0.9.1", vip: "10.96.9.1"}
+	// Its Service declares something else again: 9090, which no row has.
+	stale := a043Service{name: "echo", ns: "demo", legacy: 9090, ports: map[uint32]registryv1.PortProtocol{9090: h}, ip: "10.0.9.1", vip: "10.96.9.1"}
+
+	c := a043Cache(t, []a043Service{both})
+	a043Project(c, []a043Service{stale})
+	require.NoError(t, c.LoadClustersFromRegistry(ctx, "cluster-1", "node-1", a043Registry([]a043Service{httpOnly})))
+	require.NoError(t, c.generateSnapshot(ctx))
+
+	c.clusterMu.RLock()
+	floor, ok := c.clusters[proxy.TCPClusterName("demo/echo", a043Mesh)]
+	ports := c.servicePorts["demo/echo"]
+	_, http := c.clusters["demo/echo"]
+	c.clusterMu.RUnlock()
+	require.True(t, ok, "the raw-TCP floor of a listed service was dropped on its Service's word")
+	assert.False(t, floor.absentSince.IsZero(), "the floor is retained for its grace")
+	assert.True(t, http, "the live HTTP entry of a listed service")
+	assert.Equal(t, "8080 (http)", ports.describe(), "a listed service is what its rows say")
+	assert.Equal(t, "echo.demo."+a043Mesh, a043Resolve(t, a043Tables(t, c)[proxy.OutboundHTTPRouteName], "echo.demo."+a043Mesh+":8080").cluster)
 }
 
 // TestPerPort_RefusalsOfAUserServiceNameItsServicePorts: on the loopback
@@ -216,4 +291,39 @@ func TestPerPort_APortMapAloneMakesNoColdName(t *testing.T) {
 	assert.NotEqual(t, "on_demand_catch_all", r3Pick(t, table, "plain-3.demo."+a043Mesh+":80").GetName())
 	assert.Equal(t, "on_demand_catch_all", r3Pick(t, table, "plain-4.demo."+a043Mesh+":80").GetName())
 	_ = capture.CaptureTCPService{}
+}
+
+// TestPerPort_ServiceWhoseServiceGainsARawTCPPortAnswersAsAFreshNode: the
+// Service's word replaces what the node remembers whenever the two differ,
+// and not only in their HTTP ports. A service retained with 8080 (HTTP) whose
+// Service then declares 8080 and a raw-TCP 5432: a node that starts there
+// refuses "<name>:5432" as "not HTTP", and so must this one (it answered
+// "no such port", by what it remembered).
+func TestPerPort_ServiceWhoseServiceGainsARawTCPPortAnswersAsAFreshNode(t *testing.T) {
+	ctx := context.Background()
+	h, tcp := registryv1.PortProtocol_PORT_PROTOCOL_HTTP, registryv1.PortProtocol_PORT_PROTOCOL_TCP
+	before := a043Service{name: "echo", ns: "demo", legacy: 8080, ports: map[uint32]registryv1.PortProtocol{8080: h}, ip: "10.0.9.1", vip: "10.96.9.1"}
+	after := a043Service{name: "echo", ns: "demo", legacy: 8080, ports: map[uint32]registryv1.PortProtocol{8080: h, 5432: tcp}, ip: "10.0.9.2", vip: "10.96.9.1"}
+
+	c := a043Cache(t, []a043Service{before})
+	require.NoError(t, c.LoadClustersFromRegistry(ctx, "cluster-1", "node-1", a043Registry(nil)))
+	a043Project(c, []a043Service{after})
+	require.NoError(t, c.LoadClustersFromRegistry(ctx, "cluster-1", "node-1", a043Registry(nil)))
+	require.NoError(t, c.generateSnapshot(ctx))
+
+	fresh := a043Cache(t, nil)
+	a043Project(fresh, []a043Service{after})
+	require.NoError(t, fresh.LoadClustersFromRegistry(ctx, "cluster-1", "node-1", a043Registry(nil)))
+	require.NoError(t, fresh.generateSnapshot(ctx))
+
+	const host = "echo.demo." + a043Mesh + ":5432"
+	want := a043Resolve(t, a043Tables(t, fresh)[proxy.OutboundHTTPRouteName], host)
+	require.Equal(t, proxy.RefusalPortNotHTTP, want.refusal, "control: what a node that starts in this state answers")
+	got := a043Resolve(t, a043Tables(t, c)[proxy.OutboundHTTPRouteName], host)
+	assert.Equal(t, want.refusal, got.refusal, "after the transitions: %+v", got)
+	for _, port := range []string{":8080", ""} {
+		a := r3Resolve(t, a043Tables(t, c)[proxy.OutboundHTTPRouteName], "demo", "echo.demo."+a043Mesh+port, nil)
+		b := r3Resolve(t, a043Tables(t, fresh)[proxy.OutboundHTTPRouteName], "demo", "echo.demo."+a043Mesh+port, nil)
+		assert.Equalf(t, b.first, a.first, "Host echo.demo.%s%s", a043Mesh, port)
+	}
 }
