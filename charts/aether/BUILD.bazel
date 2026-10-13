@@ -3017,9 +3017,10 @@ helm_template_match_test(
             RULE % ("\"gateway\\.networking\\.k8s\\.io\"", "\"tcproutes/status\", \"tlsroutes/status\", \"udproutes/status\"", "\"get\", \"update\", \"patch\""),
             RULE % ("\"gateway\\.networking\\.k8s\\.io\"", "\"referencegrants\"", READ),
             RULE % ("\"\"", "\"services\"", READ),
-            # Read on demand, never watched: the EndpointSlices of a
-            # route-named Service whose targetPort is a name.
-            RULE % ("\"discovery\\.k8s\\.io\"", "\"endpointslices\"", "\"list\", \"get\"") + "$",
+            # The EndpointSlices of a route-named Service whose targetPort is
+            # a name: read on demand, and watched (metadata only) so that a
+            # name that starts to resolve is seen when its slice appears.
+            RULE % ("\"discovery\\.k8s\\.io\"", "\"endpointslices\"", READ) + "$",
         ],
         "ClusterRoleBinding/release-name-aether-agent-default": [
             BINDING % ("ClusterRole", "release-name-aether-agent-default", "release-name-aether-agent", "default"),

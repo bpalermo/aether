@@ -4084,8 +4084,9 @@ requests with their original `Host` to a different port.
     Service start resolving the name to another number. A name it cannot
     resolve (no slice yet, or slices that disagree) is logged, and a
     `backendRef` to it keeps reaching the backend's declared port. A numeric
-    `targetPort` has none of this. The agent's ClusterRole gains `list` and
-    `get` on `endpointslices` for it.
+    `targetPort` has none of this. The agent's ClusterRole gains `list`,
+    `get` and `watch` on `endpointslices` for it (the watch holds the slices'
+    metadata only).
   - A `backendRef` of another kind than a Service, or to a Service in another
     namespace with no `ReferenceGrant`, is invalid in the same way: its share
     is answered **500** (the status already said `InvalidKind` or
