@@ -322,12 +322,20 @@ envoy_stats: []
 # --- Names --------------------------------------------------------------------
 #
 # Strings a harness writes into its own workloads' manifests or into a URL.
-# A mesh service is addressed from a meshed pod as
+# A mesh service is addressed from a meshed pod on a port it DECLARES
+# (endpoint.aether.io/port, endpoint.aether.io/ports):
 #
-#   <service>.<namespace>.<mesh-domain>:<port.outbound_http>   plain HTTP/1.1
-#   <service>.<namespace>.<mesh-domain>:<port.outbound_l4>     raw TCP, and UDP
+#   <service>.<namespace>.<mesh-domain>:<declared port>        HTTP, raw TCP or
+#                                                              UDP, as declared
+#   <service>.<namespace>.<mesh-domain>:<port.outbound_l4>     raw TCP, and UDP:
+#                                                              the declared port
 #
-# where <mesh-domain> is the chart value `meshDomain`.
+# where <mesh-domain> is the chart value `meshDomain`. <port.outbound_http> is
+# not a port of a service: it is the mesh's HTTP proxy port, the loopback
+# listener a client sends "Host: <service>.<namespace>.<mesh-domain>:<declared
+# port>" to (or uses as its HTTP proxy). A harness that addressed a service as
+# "<name>:<port.outbound_http>", or sent the proxy port a Host without a port,
+# moves to the declared port (version 4).
 #
 # A name a chart passes to a component on its command line is tied to the
 # chart as well: under `charts`, a container's `args` maps the flag to the

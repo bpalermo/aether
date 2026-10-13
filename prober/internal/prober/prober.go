@@ -41,10 +41,6 @@ const (
 	tierReachability = "reachability"
 	tierMeshDNS      = "mesh_dns"
 
-	// defaultMeshDNSPort is appended to a mesh_dns target that omits a port so the
-	// probe still dials the local mesh egress listener after resolving the name.
-	defaultMeshDNSPort = "18081"
-
 	// maxDrainBytes caps the response body drain (see drainBody). Every probe target
 	// answers with a local reply or a small echo document, so the cap is only there so
 	// a misrouted probe onto a streaming endpoint can't make the prober the thing that
@@ -221,13 +217,22 @@ func newProber(cfg Config, log *slog.Logger, res *resource.Resource, meter metri
 		authority: cfg.LivenessAuthority,
 		client:    p.client,
 	})
-	// Reachability tier (optional): full round-trip to an echo upstream.
-	for _, svc := range cfg.ReachabilityTargets {
+	// Reachability tier (optional): full round-trip to an echo upstream,
+	// through the proxy port with the service's mesh name and the port it
+	// declares in Host ("<svc>.<ns>:<port>"). A mesh service is addressed on a
+	// port it declares; a target written without one sends a port-less Host,
+	// which is port 80 and nothing else.
+	for _, t := range cfg.ReachabilityTargets {
+		svc, port := splitTargetPort(t)
+		authority := svc + "." + cfg.MeshDomain
+		if port != "" {
+			authority += ":" + port
+		}
 		p.targets = append(p.targets, target{
 			tier:      tierReachability,
 			name:      svc,
 			url:       "http://" + cfg.Egress + "/",
-			authority: svc + "." + cfg.MeshDomain,
+			authority: authority,
 			client:    p.client,
 		})
 	}
@@ -241,7 +246,11 @@ func newProber(cfg Config, log *slog.Logger, res *resource.Resource, meter metri
 		p.targets = append(p.targets, target{
 			tier: tierMeshDNS,
 			name: fqdn,
-			url:  "http://" + withDefaultPort(fqdn, defaultMeshDNSPort) + "/",
+			// The target is dialled as written: "<fqdn>:<port>" with a port
+			// the service declares. No port is appended (the default used to
+			// be 18081, which is the proxy port, not a port of a service): a
+			// target without one dials port 80.
+			url: "http://" + fqdn + "/",
 			// authority intentionally left empty: do NOT override the Host, so the
 			// transport actually resolves and connects to the real name.
 			//
@@ -255,14 +264,13 @@ func newProber(cfg Config, log *slog.Logger, res *resource.Resource, meter metri
 	return p, nil
 }
 
-// withDefaultPort returns authority unchanged when it already carries a port,
-// otherwise it appends ":port". It handles the no-port case only (mesh-DNS targets
-// are hostnames, never bracketed IPv6 literals).
-func withDefaultPort(authority, port string) string {
-	if _, _, err := net.SplitHostPort(authority); err == nil {
-		return authority
+// splitTargetPort splits a reachability target "<svc>.<ns>[:<port>]" into the
+// service name and the port, "" when the target names none.
+func splitTargetPort(target string) (name, port string) {
+	if host, p, err := net.SplitHostPort(target); err == nil {
+		return host, p
 	}
-	return authority + ":" + port
+	return target, ""
 }
 
 // newResource builds the prober's OTel resource. It is built even when telemetry is

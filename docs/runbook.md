@@ -4191,6 +4191,33 @@ Nothing breaks across versions; the order does not matter.
 - **Rollback** to 2.6.x: the 2.6 registrar removes the extra Service ports on
   its next reconcile.
 
+#### Prober chart 1.1.0: targets name a declared port (proposal 043)
+
+Deploy prober chart **1.1.0 before** `aether` chart 2.7.0. It works against
+2.6 (a declared port has always been addressable), and the prober of chart
+1.0.x cannot probe a 2.7.0 mesh: it addressed its targets as `<name>:18081`
+and with a port-less `Host`, which 2.7.0 no longer reads as "the port the pods
+declare".
+
+| Tier | Dials | What a failure isolates |
+|---|---|---|
+| `liveness` | `127.0.0.1:18081/-/-/live`, a reserved authority | this node's proxy is serving its loopback listener and has its config. Unchanged. |
+| `reachability` | `127.0.0.1:18081` with `Host: <svc>.<ns>.<meshDomain>:<port>` | the data path to the target, without DNS and without capture. The port is new; the series keeps its name (the target without the port). |
+| `mesh_dns` | `http://<fqdn>:<port>/`, resolved | mesh DNS, the capture divert and the data path. It dialled `:18081`; it now dials the declared port, which is the path a workload's own request takes. |
+
+No tier loses coverage. What changes in **your values**:
+
+- `probe.reachabilityTargets`: write `<svc>.<ns>:<port>`. An entry without a
+  port sends a port-less `Host`, which on 2.7.0 is port 80 and nothing else.
+- `probe.meshDNSTargets`: write `<fqdn>:<port>`. No port is appended any more
+  (the default was 18081); an entry without one dials 80. The chart's default
+  targets name `echo.aether-test` on **8080**: check that against the port
+  your echo declares.
+- The `authz-canary` (`authzCanary.enabled`) dials its own echo on 8080, the
+  port it declares.
+
+The upgrade rolls the prober DaemonSet (its arguments change).
+
 #### The prober chart (#1372, #1373, #1374)
 
 The `prober` chart has the same rule since chart **1.0.5**: its DaemonSet's pod

@@ -67,7 +67,9 @@ NS="aether-system"
 TEST_NS="aether-test"
 MESH_DOMAIN="aether.internal"
 # The pod-local outbound listener port every mesh client dials (post-030).
-OUTBOUND_PORT="18081"
+# The port the echoes declare (endpoint.aether.io/port): a mesh service is
+# addressed on a port it declares.
+OUTBOUND_PORT="8080"
 # The pinned Gateway API release (#1583): one for every e2e surface.
 # shellcheck source=e2e/gateway-api-version.sh
 . "$REPO_ROOT/e2e/gateway-api-version.sh"

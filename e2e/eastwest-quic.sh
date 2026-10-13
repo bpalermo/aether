@@ -207,11 +207,11 @@ QUIC_HOSTNAME_GUARD="envoy.reloadable_features.quic_hostname_check_deferred_to_e
 # on (default) = the chart's default egress identity gate (#1053); off = the
 # same install with controller.webhook.identityGate.enabled=false (E6's red arm).
 IDENTITY_GATE="${IDENTITY_GATE:-on}"
-# The mesh VIP Service port every client dials through mesh DNS
-# (meshconst.ProxyOutboundPort); the capture route claims "<fqdn>:18081".
-OUTBOUND_PORT="18081"
 # The application port every destination binds and registers.
 APP_PORT="8080"
+# The port every client dials through mesh DNS: the port the destination
+# declares. The capture route of that port claims "<fqdn>:$APP_PORT".
+OUTBOUND_PORT="$APP_PORT"
 # Destinations. Every one of them is QUIC-eligible — nothing is listed.
 QUIC_DSTS=(quic-a quic-b)
 GAMMA_DSTS=(gamma-a gamma-b)

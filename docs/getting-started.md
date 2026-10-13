@@ -10,9 +10,10 @@ A practical guide to installing Aether and onboarding your first workload.
 > identities — including same-node hops. Interception is **transparent by
 > default**: managed pods' outbound traffic (TCP and UDP) is diverted into the mesh by the
 > CNI, mesh names resolve via a per-node mesh DNS, and apps simply dial
-> `http://<svc>.<ns>.<meshDomain>` (or the ordinary Kubernetes Service name).
-> An explicit local outbound listener (`127.0.0.1:18081` + `Host` header)
-> remains available for clients that prefer zero interception assumptions.
+> `http://<svc>.<ns>.<meshDomain>:<port>` (or the ordinary Kubernetes Service
+> name), on a port the service declares. The mesh's HTTP proxy port
+> (`127.0.0.1:18081`, with a `Host` header or as an HTTP proxy) remains
+> available for clients that prefer zero interception assumptions.
 
 ---
 
@@ -49,7 +50,7 @@ flowchart TB
         proxy["Envoy proxy (DaemonSet)<br/>capture + outbound listeners<br/>inside EACH managed pod's netns"]
         app["app pod"]
         agent -->|xDS snapshot| proxy
-        app -->|"HTTP → my-svc.ns.aether.internal:18081<br/>(transparently captured; mesh DNS)"| proxy
+        app -->|"HTTP → my-svc.ns.aether.internal:8080<br/>(transparently captured; mesh DNS)"| proxy
     end
 
     agent -->|"register / deregister<br/>at CNI ADD / DEL"| registrar
@@ -66,10 +67,11 @@ flowchart TB
   TPROXY-style mark-and-divert that leaves the IP header intact, so the original
   destination survives (proposal 038, #947): TCP lands on the capture listener,
   UDP on a per-VIP listener on 18082. DNS is still a plain DNAT: `:53` goes to a
-  per-node mesh DNS. Apps dial `http://<svc>.<ns>.<meshDomain>:18081` — or the
-  generated Kubernetes Service name `<svc>.<ns>.svc.cluster.local:18081` —
-  with no client changes. The explicit listener (`127.0.0.1:18081` +
-  `Host: <svc>.<ns>.<meshDomain>`) still works everywhere.
+  per-node mesh DNS. Apps dial `http://<svc>.<ns>.<meshDomain>:<port>` — or the
+  generated Kubernetes Service name `<svc>.<ns>.svc.cluster.local:<port>` —
+  on a port the service declares, with no client changes. The proxy port
+  (`127.0.0.1:18081` + `Host: <svc>.<ns>.<meshDomain>:<port>`) works
+  everywhere.
 - **HTTP/3 between proxies.** HTTP requests cross the mesh over HTTP/3 (mTLS
   over QUIC, UDP 18008) with nothing to enable; it needs two DNS SANs on every
   workload SVID (see [HTTP/3 between proxies](#east-west-quic)).
@@ -485,16 +487,19 @@ With transparent capture + mesh DNS (both on by default), just dial the
 destination by name — no client changes, no special listener:
 
 ```bash
-# from inside a managed pod — either form works
-curl http://svc-payments.payments.aether.internal:18081/orders
-curl http://svc-payments.payments.svc.cluster.local:18081/orders
+# from inside a managed pod — either form works. 8080 is a port the
+# service's pods declare (endpoint.aether.io/port or endpoint.aether.io/ports).
+curl http://svc-payments.payments.aether.internal:8080/orders
+curl http://svc-payments.payments.svc.cluster.local:8080/orders
 ```
 
 - **Mesh FQDNs are namespace-qualified:** `<service>.<namespace>.<meshDomain>`
   (proposal 020). The registrar also generates a selectorless Kubernetes
   Service per mesh service, so the ordinary
-  `<service>.<namespace>.svc.cluster.local` name is captured too. Port `18081`
-  is the mesh port those generated Services expose.
+  `<service>.<namespace>.svc.cluster.local` name is captured too. The
+  generated Service exposes the ports the service's pods declare, each under
+  its own number; a service is addressed on one of them. A port it does not
+  declare is refused with a `421` that names its ports.
 - With **redirect-all** (the default, proposal 022) *all* outbound TCP from a
   managed pod is captured: mesh destinations are routed by the mesh, and
   anything else (external APIs, non-mesh Services) passes through untouched.
@@ -502,14 +507,32 @@ curl http://svc-payments.payments.svc.cluster.local:18081/orders
   configuration reference).
 - The callee sees the caller's SPIFFE ID in `x-forwarded-client-cert` (XFCC).
 
-### The explicit listener (still supported)
+### Using the proxy port
 
-Clients that prefer zero interception assumptions can keep addressing the
-local outbound listener directly:
+`127.0.0.1:18081` in every managed pod is the mesh's HTTP proxy port. Clients
+that prefer zero interception assumptions send it the request with the
+service's mesh name **and port** in `Host`:
 
 ```bash
-curl http://127.0.0.1:18081/orders -H 'Host: svc-payments.payments.aether.internal'
+curl http://127.0.0.1:18081/orders -H 'Host: svc-payments.payments.aether.internal:8080'
 ```
+
+It also works as an ordinary HTTP proxy: the request line's authority decides
+where the request goes.
+
+```bash
+curl --proxy http://127.0.0.1:18081 http://svc-payments.payments.aether.internal:8080/orders
+
+# or for a whole process
+export HTTP_PROXY=http://127.0.0.1:18081
+export NO_PROXY=localhost,127.0.0.1,.svc,.cluster.local   # whatever must not go to the mesh
+```
+
+- It carries **HTTP to mesh names only**. A name outside the mesh answers
+  `404`, and `CONNECT` (what a client sends for an `https://` URL through an
+  HTTP proxy) answers `404`: do not set `HTTPS_PROXY` to it.
+- The port in the authority is the service's declared port. `18081` itself is
+  not a port of any service.
 
 Authorities are FQDN-only and deterministic: bare names, foreign domains, or
 nested labels match no route and **404 immediately**. A `:port` suffix is
@@ -629,7 +652,7 @@ metadata:
 
 ```bash
 # on the request (consumer)
-curl http://127.0.0.1:18081/ -H 'Host: my-svc.my-namespace.aether.internal' \
+curl http://127.0.0.1:18081/ -H 'Host: my-svc.my-namespace.aether.internal:8080' \
      -H 'x-aether-subset-version: v2'
 ```
 
@@ -808,7 +831,7 @@ Minimal two-cluster recipe (shared regional etcd, cross-cluster service
 ```
 
 Then `kubectl apply` a `ServiceExport` for `echo` in cluster `b`; a client in
-`a` calls `http://echo.<ns>.<meshDomain>:18081/` and the request rides
+`a` calls `http://echo.<ns>.<meshDomain>:<port>/` and the request rides
 mesh DNS → capture → split-horizon EDS → b's node tunnel → the echo pod,
 mTLS end-to-end. (The reusable e2e harnesses under `e2e/` —
 `multicluster_config.sh`, `multicluster_waypoint.sh`,

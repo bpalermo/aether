@@ -14,7 +14,7 @@
 #
 # Assertions (verify):
 #   1. visibility  — etcd-a holds mirrored /regions/region-b/ keys and vice versa.
-#   2. data path   — client(a) -> echo.aether-test.<meshDomain>:18081 == 200 over
+#   2. data path   — client(a) -> echo.aether-test.<meshDomain>:8080 == 200 over
 #                    the mirror + waypoint (mTLS end-to-end).
 #   3. failover    — scale b's registrar to 0 (replicator leader dies, keepalive
 #                    stops): b's mirror in etcd-a EXPIRES at the lease TTL (~30s)
@@ -580,7 +580,7 @@ client_code() {
 	# normalize to the last 3 chars instead of appending a second fallback.
 	local out
 	out="$(kubectl --context "kind-$CLUSTER_A" -n "$TEST_NS" exec deploy/client -c curl -- \
-		curl -sS -o /dev/null -w '%{http_code}' --max-time 12 "http://echo.$TEST_NS.$MESH_DOMAIN:18081/" 2>/dev/null)" || true
+		curl -sS -o /dev/null -w '%{http_code}' --max-time 12 "http://echo.$TEST_NS.$MESH_DOMAIN:8080/" 2>/dev/null)" || true
 	printf '%s' "${out:-000}" | tail -c 3
 }
 

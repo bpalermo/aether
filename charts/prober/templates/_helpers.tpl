@@ -260,14 +260,14 @@ Upstream authorization list (config.aether.io/upstreams, proposal 004).
 
 Unions the reachability tier's echo service names with the mesh_dns tier's
 resolved authorities: a mesh_dns target dials a real ClusterIP, so its upstream
-cluster must be authorized too. Each mesh_dns FQDN is reduced to its host (the
-":port" is dropped) since authorization keys on the authority, not the port.
+cluster must be authorized too. Every target is reduced to its host (the
+":port" is dropped) since authorization keys on the name, not the port.
 Empty when neither tier is configured.
 */}}
 {{- define "prober.upstreams" -}}
 {{- $u := list -}}
 {{- range .Values.probe.reachabilityTargets -}}
-{{- $u = append $u . -}}
+{{- $u = append $u (splitList ":" . | first) -}}
 {{- end -}}
 {{- range .Values.probe.meshDNSTargets -}}
 {{- $u = append $u (splitList ":" . | first) -}}

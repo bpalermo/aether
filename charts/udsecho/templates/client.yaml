@@ -49,7 +49,7 @@ spec:
               while true; do
                 for s in uds-echo{{ if .Values.policyPath.enabled }} uds-cr-echo{{ end }}; do
                   code=$(curl -sS -o /dev/null -w '%{http_code}' --max-time 5 \
-                    "http://$s.{{ .Values.namespace }}.aether.internal:18081/" 2>/dev/null || echo 000)
+                    "http://$s.{{ .Values.namespace }}.aether.internal:8080/" 2>/dev/null || echo 000)
                   if [ "$code" = "200" ]; then
                     ok=$((ok+1))
                     [ $((ok % 1000)) -eq 0 ] && echo "$(date -u +%FT%TZ) OK count=$ok"

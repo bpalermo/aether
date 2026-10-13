@@ -171,7 +171,7 @@ spec:
           command: ["/bin/sh", "-c"]
           args:
             - |
-              url="http://authz-echo.{{ $ns }}.{{ .Values.authzCanary.meshDomain }}:18081/"
+              url="http://authz-echo.{{ $ns }}.{{ .Values.authzCanary.meshDomain }}:8080/"
               echo "authz-canary loop start $(date -u +%FT%TZ) url=$url allow={{ .Values.authzCanary.allow.expect }} deny={{ .Values.authzCanary.deny.expect }}"
               ok=0
               while true; do
