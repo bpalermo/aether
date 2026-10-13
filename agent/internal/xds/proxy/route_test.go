@@ -118,7 +118,7 @@ func TestCatchAll_KnownTargetNeverShadowedByPassthrough(t *testing.T) {
 	table := BuildCaptureRouteConfiguration(CaptureHTTPRouteName(80), []*routev3.VirtualHost{
 		BuildServiceVirtualHost(cluster+"|80", cluster, routed, nil),
 		BuildRefusalVirtualHost(cluster+"|mismatch", mismatch, RefusalPortMismatch, "refused\n"),
-	}, BuildCaptureCatchAllVirtualHost("aether.internal", 80, true, true))
+	}, BuildCaptureCatchAllVirtualHost("aether.internal", 80, true, true), nil)
 
 	// Every spelling a client might dial on port 80, port-less or spelled out.
 	for _, authority := range routed {
@@ -205,7 +205,7 @@ func TestBuildOutboundRouteConfiguration(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			routeConfig := BuildOutboundRouteConfiguration(tt.vhosts, "aether.internal")
+			routeConfig := BuildOutboundRouteConfiguration(tt.vhosts, "aether.internal", nil)
 
 			require.NotNil(t, routeConfig)
 			assert.Equal(t, OutboundHTTPRouteName, routeConfig.GetName())

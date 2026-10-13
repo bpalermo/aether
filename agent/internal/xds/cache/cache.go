@@ -826,6 +826,13 @@ type clusterEntry struct {
 // NewSnapshotCache creates and returns a new SnapshotCache for the given node.
 // The nodeName is used as the xDS node identifier when updating snapshots.
 func NewSnapshotCache(nodeName string, log *slog.Logger) *SnapshotCache {
+	// A route table in which two virtual hosts claim one authority is rejected
+	// whole by the proxy, so the table builders drop the later claim. That is
+	// always a defect upstream of them: say which.
+	proxy.OnDuplicateDomain(func(table, domain, kept, dropped string) {
+		log.Warn("two virtual hosts of a route table claimed one authority; the later one lost it (the proxy would have rejected the whole table)",
+			"table", table, "authority", domain, "kept", kept, "dropped", dropped)
+	})
 	// Instruments ride the global MeterProvider (no-op unless --otel-enabled);
 	// a registration failure only disables instrumentation, never the cache.
 	metrics, err := cachemetrics.New(otel.Meter(cachemetrics.MeterName))

@@ -942,7 +942,7 @@ func OutboundZeroVhostRouteBootstrapJSON() ([]byte, error) {
 
 // buildOutboundZeroVhostRouteBootstrap assembles the zero-vhost out_http config.
 func buildOutboundZeroVhostRouteBootstrap() (*bootstrapv3.Bootstrap, error) {
-	routeCfg := proxy.BuildOutboundRouteConfiguration(nil, meshDomain)
+	routeCfg := proxy.BuildOutboundRouteConfiguration(nil, meshDomain, nil)
 	if len(routeCfg.GetVirtualHosts()) != 1 {
 		return nil, fmt.Errorf("zero-vhost out_http must carry exactly the catch-all, got %d virtual hosts",
 			len(routeCfg.GetVirtualHosts()))
@@ -1092,7 +1092,7 @@ func buildCaptureRouteTargetBootstrap() (*bootstrapv3.Bootstrap, error) {
 	// everything else falls to the passthrough. Validating it here proves Envoy
 	// ACCEPTS the per-table :authority safe_regex route.
 	routeCfg := proxy.BuildCaptureRouteConfiguration(proxy.CaptureHTTPRouteName(realPort), []*routev3.VirtualHost{vhost},
-		proxy.BuildCaptureCatchAllVirtualHost(meshDomain, realPort, false, true))
+		proxy.BuildCaptureCatchAllVirtualHost(meshDomain, realPort, false, true), nil)
 
 	hcm := &http_connection_managerv3.HttpConnectionManager{
 		StatPrefix: "cap_http_validate",

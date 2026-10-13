@@ -535,8 +535,8 @@ func startBegunMesh(t *testing.T) *begunMesh {
 	}
 
 	listeners = append(listeners,
-		productionOutbound(t, "source", proxy.BuildOutboundRouteConfiguration(vhosts, begunMeshDomain)),
-		productionOutbound(t, "source_previous", previousReleaseRoutes(proxy.BuildOutboundRouteConfiguration(vhosts, begunMeshDomain))),
+		productionOutbound(t, "source", proxy.BuildOutboundRouteConfiguration(vhosts, begunMeshDomain, nil)),
+		productionOutbound(t, "source_previous", previousReleaseRoutes(proxy.BuildOutboundRouteConfiguration(vhosts, begunMeshDomain, nil))),
 	)
 	bs := &bootstrapv3.Bootstrap{
 		Node:            &corev3.Node{Id: envoyNodeID, Cluster: "aether"},

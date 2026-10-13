@@ -308,6 +308,10 @@ func (r *ppRig) publish() {
 	require.NoError(r.t, r.cp.cache.SetSnapshot(context.Background(), envoyNodeID, snap))
 }
 
+// ppBoot, when set, configures the rig's cache before any pod is added: the
+// boot-time settings (the authz sidecar is one).
+var ppBoot func(c *cache.SnapshotCache)
+
 func ppStart(t *testing.T, hcmChain string) *ppRig {
 	t.Helper()
 	bin, err := envoybin.Path()
@@ -328,6 +332,9 @@ func ppStart(t *testing.T, hcmChain string) *ppRig {
 	c := cache.NewSnapshotCache(ppNodeName, slog.New(slog.DiscardHandler))
 	c.SetCaptureEnabled(true)
 	c.SetCaptureRedirectAll(true)
+	if ppBoot != nil {
+		ppBoot(c)
+	}
 	require.NoError(t, c.AddPod(ctx, &cniv1.CNIPod{Name: "client-0", Namespace: ppCallerNamespace, ServiceAccount: "client", NetworkNamespace: "/proc/self/ns/net"}, "aether.internal"))
 	require.NoError(t, c.SetNodeIdentity(ctx, ppNodeSpiffe))
 	ppProject(c)

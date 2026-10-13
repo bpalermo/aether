@@ -110,10 +110,15 @@ func TestPerPort_LiveShortNameResolvesInTheCallersNamespace(t *testing.T) {
 		// with a 200 is "answered as elsewhere/multi".
 		filter, rule bool
 		reason       string
+		notMesh      bool
 	}{
 		{ns: "demo", status: 200, filter: true, rule: true},
 		{ns: "elsewhere", status: 200},
-		{ns: "third", status: 421, reason: proxy.RefusalNameNotInNamespace},
+		// A namespace with no mesh service "multi": not a mesh name there.
+		// On the proxy port it gets what any name that is not the mesh's
+		// gets, 404; on the captured path, the passthrough to the address
+		// dialled (notMesh).
+		{ns: "third", status: 404, notMesh: true},
 	} {
 		t.Run("caller in "+tc.ns, func(t *testing.T) {
 			_, capture, proxyPort := ppStartFrom(t, tc.ns)
@@ -124,6 +129,20 @@ func TestPerPort_LiveShortNameResolvesInTheCallersNamespace(t *testing.T) {
 					}
 					got := ppGetHeaders(at.addr, host, ppSpoof)
 					t.Logf("MEASURED caller in %-9s %-22s Host %-10s -> %s", tc.ns, at.path, host, got)
+					if tc.notMesh {
+						// Exactly what a Host that is no mesh name gets on this
+						// path, and nothing of either "multi": no filter, no
+						// rule, no refusal by the mesh.
+						control := ppGetHeaders(at.addr, "no-such-name:8080", nil)
+						t.Logf("MEASURED caller in %-9s %-22s Host %-10s -> %s (a name that is not the mesh's)", tc.ns, at.path, "no-such-name:8080", control)
+						if got.status != control.status || got.filter || got.rule || got.reason != "" {
+							t.Errorf("caller in %s, %s, Host %s: want what a name that is not the mesh's gets (%s), got %s", tc.ns, at.path, host, control, got)
+						}
+						if at.addr == proxyPort && got.status != tc.status {
+							t.Errorf("caller in %s, proxy port, Host %s: want %d, got %s", tc.ns, host, tc.status, got)
+						}
+						continue
+					}
 					if got.status != tc.status || got.filter != tc.filter || got.rule != tc.rule || got.reason != tc.reason {
 						t.Errorf("caller in %s, %s, Host %s: want status %d filter=%v rule=%v reason=%q, got %s", tc.ns, at.path, host, tc.status, tc.filter, tc.rule, tc.reason, got)
 					}
@@ -182,8 +201,8 @@ func TestPerPort_LiveShortNameWithoutACallerNamespaceIsRefused(t *testing.T) {
 	for _, at := range []struct{ path, addr string }{{"captured dial to :8080", capture}, {"proxy port", proxyPort}} {
 		got := ppGetHeaders(at.addr, "multi:8080", ppSpoof)
 		t.Logf("MEASURED no caller namespace, %-22s Host multi:8080 -> %s", at.path, got)
-		if got.status != 421 || got.reason != proxy.RefusalNameNotInNamespace {
-			t.Errorf("%s, no caller namespace on the connection: want 421 %s, got %s", at.path, proxy.RefusalNameNotInNamespace, got)
+		if got.status != 421 || got.reason != proxy.RefusalCallerUnknown {
+			t.Errorf("%s, no caller namespace on the connection: want 421 %s, got %s", at.path, proxy.RefusalCallerUnknown, got)
 		}
 		// The full name still works: only the short name needs the namespace.
 		if got := ppGetHeaders(at.addr, ppMesh+":8080", nil); got.status != 200 || !got.filter {

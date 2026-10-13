@@ -1,7 +1,9 @@
 package proxy
 
 import (
+	"fmt"
 	"regexp"
+	"sync"
 	"testing"
 
 	cniv1 "aethermesh.dev/api/aether/cni/v1"
@@ -165,7 +167,7 @@ func TestCaptureCatchAll_Shape(t *testing.T) {
 // name without a port is port 80, and a service the node knows has a virtual
 // host that says so). It falls through like a name that is no mesh name.
 func TestOutboundCatchAll_NamesAClusterOnlyFromAnAuthorityWithAPort(t *testing.T) {
-	rc := BuildOutboundRouteConfiguration(nil, "aether.internal")
+	rc := BuildOutboundRouteConfiguration(nil, "aether.internal", nil)
 	require.Len(t, rc.GetVirtualHosts(), 1)
 	vh := rc.GetVirtualHosts()[0]
 	for _, authority := range []string{"svc.ns.aether.internal:8080", "svc.ns.aether.internal:9090", "svc.ns.aether.internal:80"} {
@@ -183,7 +185,7 @@ func TestOutboundCatchAll_NamesAClusterOnlyFromAnAuthorityWithAPort(t *testing.T
 	// The proxy port's capture table has the same floor, with or without
 	// passthrough: a port-less mesh authority names no cluster there either.
 	for _, passthrough := range []bool{false, true} {
-		rc := BuildProxyPortCaptureRouteConfiguration("cap_http_18081", nil, "aether.internal", passthrough)
+		rc := BuildProxyPortCaptureRouteConfiguration("cap_http_18081", nil, "aether.internal", passthrough, nil)
 		require.Len(t, rc.GetVirtualHosts(), 1)
 		vh := rc.GetVirtualHosts()[0]
 		got, _ := resolveCatchAll(vh, "svc.ns.aether.internal:8080", "/")
@@ -202,9 +204,9 @@ func TestOutboundCatchAll_NamesAClusterOnlyFromAnAuthorityWithAPort(t *testing.T
 // still answers under any authority.
 func TestOnDemandCatchAll_NeverParksAnAuthorityThatNamesAMeshPort(t *testing.T) {
 	tables := map[string]*routev3.RouteConfiguration{
-		"out_http":                    BuildOutboundRouteConfiguration(nil, "aether.internal"),
-		"cap_http_18081":              BuildProxyPortCaptureRouteConfiguration("cap_http_18081", nil, "aether.internal", false),
-		"cap_http_18081, passthrough": BuildProxyPortCaptureRouteConfiguration("cap_http_18081", nil, "aether.internal", true),
+		"out_http":                    BuildOutboundRouteConfiguration(nil, "aether.internal", nil),
+		"cap_http_18081":              BuildProxyPortCaptureRouteConfiguration("cap_http_18081", nil, "aether.internal", false, nil),
+		"cap_http_18081, passthrough": BuildProxyPortCaptureRouteConfiguration("cap_http_18081", nil, "aether.internal", true, nil),
 	}
 	for name, rc := range tables {
 		vh := rc.GetVirtualHosts()[len(rc.GetVirtualHosts())-1]
@@ -481,4 +483,126 @@ func TestEdgeUpstreamTCPPortTransportSocket(t *testing.T) {
 	floor := EdgeUpstreamTCPTransportSocket("spiffe://td/ns/a/sa/edge", "ROOTCA", []string{"spiffe://td/ns/b/sa/svc"})
 	assert.NotContains(t, floor.String(), "sni:", "the floor carries no SNI (#306)")
 	assert.Equal(t, floor.String(), EdgeUpstreamTCPPortTransportSocket("spiffe://td/ns/a/sa/edge", "ROOTCA", []string{"spiffe://td/ns/b/sa/svc"}, "").String())
+}
+
+// TestEveryTableClaimsADomainOnce: the proxy rejects a route table in which
+// two virtual hosts claim one authority, and it rejects the WHOLE table. So
+// every builder of a table drops the later claim, whatever handed it two: the
+// first virtual host keeps the authority, the loser keeps its other domains
+// (or goes, when it has none), the inputs are not written to, and the
+// duplicate is reported.
+func TestEveryTableClaimsADomainOnce(t *testing.T) {
+	type dup struct{ table, domain, kept, dropped string }
+	var mu sync.Mutex
+	var reported []dup
+	OnDuplicateDomain(func(table, domain, kept, dropped string) {
+		mu.Lock()
+		defer mu.Unlock()
+		reported = append(reported, dup{table, domain, kept, dropped})
+	})
+	t.Cleanup(func() { OnDuplicateDomain(func(string, string, string, string) {}) })
+
+	vh := func(name string, domains ...string) *routev3.VirtualHost {
+		return BuildRefusalVirtualHost(name, domains, RefusalPortNotDeclared, "x")
+	}
+	in := func() []*routev3.VirtualHost {
+		return []*routev3.VirtualHost{
+			vh("a", "echo.demo.aether.internal:8080", "echo.demo.aether.internal"),
+			vh("b", "echo.demo.aether.internal:8080", "echo.demo.aether.internal:9090"),
+			vh("c", "echo.demo.aether.internal:8080"),
+			vh("d", "other.demo.aether.internal:8080"),
+		}
+	}
+	check := func(table string, rc *routev3.RouteConfiguration, given []*routev3.VirtualHost) {
+		t.Helper()
+		seen := map[string]string{}
+		names := []string{}
+		for _, v := range rc.GetVirtualHosts() {
+			names = append(names, v.GetName())
+			for _, d := range v.GetDomains() {
+				require.Emptyf(t, seen[d], "%s: %q is claimed by %s and %s", table, d, seen[d], v.GetName())
+				seen[d] = v.GetName()
+			}
+		}
+		assert.Equalf(t, "a", seen["echo.demo.aether.internal:8080"], "%s: the first claim keeps the authority", table)
+		assert.Equalf(t, "b", seen["echo.demo.aether.internal:9090"], "%s: the loser keeps its other domains", table)
+		assert.NotContainsf(t, names, "c", "%s: a virtual host with no domain left is dropped", table)
+		assert.Containsf(t, names, "d", "%s", table)
+		assert.Equal(t, []string{"echo.demo.aether.internal:8080", "echo.demo.aether.internal:9090"}, given[1].GetDomains(), "%s: the input was written to", table)
+	}
+	given := in()
+	check("out_http", BuildOutboundRouteConfiguration(given, "aether.internal", nil), given)
+	given = in()
+	check("cap_http_18081", BuildProxyPortCaptureRouteConfiguration("cap_http_18081", given, "aether.internal", true, nil), given)
+	given = in()
+	check("cap_http_8080", BuildCaptureRouteConfiguration("cap_http_8080", given, BuildCaptureCatchAllVirtualHost("aether.internal", 8080, false, true), nil), given)
+
+	mu.Lock()
+	defer mu.Unlock()
+	assert.Len(t, reported, 6, "two losers per table, three tables")
+	assert.Contains(t, reported, dup{"out_http", "echo.demo.aether.internal:8080", "a", "b"})
+	assert.Contains(t, reported, dup{"cap_http_8080", "echo.demo.aether.internal:8080", "a", "c"})
+
+	// A table with no duplicate is handed back as it is.
+	clean := []*routev3.VirtualHost{vh("a", "x:1"), vh("b", "x:2")}
+	rc := BuildCaptureRouteConfiguration("cap_http_1", clean, nil, nil)
+	assert.Same(t, clean[0], rc.GetVirtualHosts()[0])
+}
+
+// TestIndependentWeights: behind an invalid share the valid backends' weights
+// are rescaled to a total that is coprime to a million (the proxy uses one
+// random value for the share's route and for the pick), in their proportions.
+func TestIndependentWeights(t *testing.T) {
+	weights := func(bs []GammaBackend) []uint32 {
+		out := make([]uint32, len(bs))
+		for i, b := range bs {
+			out[i] = b.Weight
+		}
+		return out
+	}
+	mk := func(ws ...uint32) []GammaBackend {
+		out := make([]GammaBackend, len(ws))
+		for i, w := range ws {
+			out[i] = GammaBackend{Cluster: fmt.Sprintf("c%d", i), Weight: w}
+		}
+		return out
+	}
+	for _, in := range [][]uint32{{1, 1}, {500000, 500000}, {90, 10}, {1, 2, 3}, {7, 0, 3}, {999999, 1}, {1000000, 1000000, 1000000}} {
+		got := weights(independentWeights(mk(in...)))
+		var sum, inSum uint64
+		for i := range in {
+			sum += uint64(got[i])
+			inSum += uint64(in[i])
+		}
+		require.Equalf(t, uint64(independentWeightTotal), sum, "%v -> %v", in, got)
+		for i := range in {
+			if in[i] == 0 {
+				assert.Zerof(t, got[i], "%v -> %v: a backend with weight 0 receives nothing", in, got)
+				continue
+			}
+			want := float64(in[i]) / float64(inSum)
+			assert.InDeltaf(t, want, float64(got[i])/float64(sum), 2e-6, "%v -> %v: backend %d keeps its proportion", in, got, i)
+		}
+	}
+	// 999983 has no factor in common with a million.
+	for _, p := range []int{2, 5} {
+		assert.NotZero(t, independentWeightTotal%p)
+	}
+	// No pick, no rescaling.
+	assert.Equal(t, []uint32{7}, weights(independentWeights(mk(7))))
+	assert.Equal(t, []uint32{7, 0}, weights(independentWeights(mk(7, 0))))
+	assert.Empty(t, independentWeights(nil))
+
+	// And only behind an invalid share: a rule whose backends are all valid
+	// keeps the weights it was given.
+	valid, share := splitInvalidBackends(mk(500000, 500000), 0)
+	assert.Nil(t, share)
+	assert.Equal(t, []uint32{500000, 500000}, weights(valid))
+	withInvalid := mk(500000, 500000, 1000000)
+	withInvalid[2].Invalid = true
+	valid, share = splitInvalidBackends(withInvalid, 0)
+	require.NotNil(t, share)
+	assert.Equal(t, uint32(500000), share.GetDefaultValue().GetNumerator())
+	assert.Equal(t, []uint32{499992, 499991}, weights(valid))
+	assert.Equal(t, []uint32{500000, 500000, 1000000}, weights(withInvalid), "the rule's backends were written to")
 }

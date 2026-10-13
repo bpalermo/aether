@@ -212,7 +212,8 @@ func (c *SnapshotCache) generateSnapshot(ctx context.Context) (retErr error) {
 		// push, and BuildOutboundRouteConfiguration's on-demand catch-all makes
 		// the zero-vhost table a working one: mesh-shaped authorities reach their
 		// cluster through ODCDS rather than a dead 404.
-		routes = append(routes, proxy.BuildOutboundRouteConfiguration(vhosts, c.meshDomain))
+		known := c.generatedMeshNames()
+		routes = append(routes, proxy.BuildOutboundRouteConfiguration(vhosts, c.meshDomain, known))
 		// Transparent capture (proposal 018, Phase 3a): the route tables the per-pod
 		// capture listeners reference over RDS. Always emitted when capture is on (each
 		// carries its catch-all) so the listeners' RDS resolves even with no
@@ -227,7 +228,7 @@ func (c *SnapshotCache) generateSnapshot(ctx context.Context) (retErr error) {
 			// virtual hosts (a captured dial to :18081 is the proxy port on
 			// the captured path, and the port in Host decides there too).
 			routes = append(routes, proxy.BuildProxyPortCaptureRouteConfiguration(
-				proxy.CaptureHTTPRouteName(meshconst.ProxyOutboundPort), vhosts, c.meshDomain, c.captureRedirectAll))
+				proxy.CaptureHTTPRouteName(meshconst.ProxyOutboundPort), vhosts, c.meshDomain, c.captureRedirectAll, known))
 		}
 		// Unconditional: out_http is always in `routes`, so an agent with nothing
 		// to publish still hands Envoy a RouteType set its RDS subscription can

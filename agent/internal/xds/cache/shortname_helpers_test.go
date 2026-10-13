@@ -47,12 +47,18 @@ func asCalled(t *testing.T, vh *routev3.VirtualHost) *routev3.VirtualHost {
 }
 
 // matcherArm returns the route list a short name's matcher selects for a
-// caller in ns.
+// caller in ns: the refusal of a connection that carries no namespace ("");
+// else the arm of the namespace, or, when it has none, the table's answer for
+// a name that is not the mesh's.
 func matcherArm(t *testing.T, m *xdsmatcherv3.Matcher, ns string) []*routev3.Route {
 	t.Helper()
 	on := m.GetOnNoMatch()
-	if arm, ok := m.GetMatcherTree().GetExactMatchMap().GetMap()[ns]; ok && ns != "" {
-		on = arm
+	if ns != "" {
+		byCaller := shortByCaller(t, m)
+		on = byCaller.GetOnNoMatch()
+		if arm, ok := byCaller.GetMatcherTree().GetExactMatchMap().GetMap()[ns]; ok {
+			on = arm
+		}
 	}
 	require.NotNil(t, on, "a short name's matcher has neither an arm for %q nor a no-match arm: the request would reach nothing", ns)
 	var list routev3.RouteList
@@ -60,11 +66,26 @@ func matcherArm(t *testing.T, m *xdsmatcherv3.Matcher, ns string) []*routev3.Rou
 	return list.GetRoutes()
 }
 
+// shortByCaller returns the inner matcher of a short name's virtual host: the
+// one reached when the connection carries a caller namespace.
+func shortByCaller(t *testing.T, m *xdsmatcherv3.Matcher) *xdsmatcherv3.Matcher {
+	t.Helper()
+	fields := m.GetMatcherList().GetMatchers()
+	require.Len(t, fields, 1, "a short name's matcher asks one thing first: is the caller's namespace there")
+	inner := fields[0].GetOnMatch().GetMatcher()
+	require.NotNil(t, inner)
+	return inner
+}
+
 // matcherNamespaces returns the namespaces a short name's virtual host has an
 // arm for.
 func matcherNamespaces(vh *routev3.VirtualHost) []string {
 	var out []string
-	for ns := range vh.GetMatcher().GetMatcherTree().GetExactMatchMap().GetMap() {
+	fields := vh.GetMatcher().GetMatcherList().GetMatchers()
+	if len(fields) != 1 {
+		return nil
+	}
+	for ns := range fields[0].GetOnMatch().GetMatcher().GetMatcherTree().GetExactMatchMap().GetMap() {
 		out = append(out, ns)
 	}
 	return out

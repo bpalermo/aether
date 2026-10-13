@@ -238,6 +238,14 @@ func equalGammaRoute(a, b proxy.GammaRoute) bool {
 	if !equalGammaMatches(a.Matches, b.Matches) {
 		return false
 	}
+	// The rule's own filters (ExtensionRef). They were left out, so a route
+	// that changed ONLY its ExtensionRef was "unchanged": the loopback
+	// table's virtual hosts, which are rebuilt on a change, kept the old
+	// filters while the capture tables, rebuilt from the rules, had the new.
+	sameFilter := func(x, y proxy.ExtensionFilter) bool { return x.Name == y.Name && proto.Equal(x.Config, y.Config) }
+	if !slices.EqualFunc(a.ExtensionFilters, b.ExtensionFilters, sameFilter) {
+		return false
+	}
 	for i := range a.Backends {
 		if a.Backends[i] != b.Backends[i] {
 			return false

@@ -25,9 +25,20 @@ import (
 // ports are derived from the registry by the registrar, and a user Service's
 // port map is what the cache is given. The status is the visible half.
 type portFacts struct {
-	// http is false for a real port that is known not to carry HTTP: a
-	// generated Service's raw-TCP or UDP port.
+	// ports: true for a port that carries HTTP or may (see unverified),
+	// false for a real port that is known not to: a generated Service's
+	// raw-TCP or UDP port.
 	ports map[uint32]bool
+	// unverified names the ports of a USER Service: the port exists, and
+	// that is all a Service says. Whether its target port serves HTTP is the
+	// pods' declaration, which the data plane checks per node and the status
+	// cannot: a backendRef to one is answered 500 where the pods declare it
+	// raw TCP. The status must not claim it checked.
+	unverified map[uint32]bool
+	// unknown: a generated Service that carries no real port at all, as a
+	// registrar of chart 2.6 writes it. Nothing is known of the service's
+	// ports from it (the data plane reads the registry), so nothing is said.
+	unknown bool
 }
 
 // generatedPortName matches the name the registrar gives a REAL port of a
@@ -46,9 +57,13 @@ func servicePortFacts(svc *corev1.Service) portFacts {
 		if !generated {
 			// A user Service: every TCP port is a port a route can name. What
 			// its targetPort serves is the pods' declaration, which the data
-			// plane checks.
+			// plane checks and this cannot.
 			if tcp {
 				f.ports[uint32(sp.Port)] = true
+				if f.unverified == nil {
+					f.unverified = map[uint32]bool{}
+				}
+				f.unverified[uint32(sp.Port)] = true
 			}
 			continue
 		}
@@ -57,6 +72,7 @@ func servicePortFacts(svc *corev1.Service) portFacts {
 		}
 		f.ports[uint32(sp.Port)] = tcp && sp.AppProtocol != nil && *sp.AppProtocol == "http"
 	}
+	f.unknown = generated && len(f.ports) == 0
 	return f
 }
 
@@ -97,7 +113,7 @@ func parentPortProblem(facts map[string]portFacts, p gatewayv1.ParentReference, 
 		ns = string(*p.Namespace)
 	}
 	f, known := facts[serviceref.New(ns, string(p.Name)).Key()]
-	if !known {
+	if !known || f.unknown {
 		return ""
 	}
 	port := uint32(*p.Port)
@@ -126,7 +142,7 @@ func backendPortProblem(facts map[string]portFacts, routeNamespace string, refs 
 			ns = routeNamespace
 		}
 		f, known := facts[serviceref.New(ns, string(ref.Name)).Key()]
-		if !known {
+		if !known || f.unknown {
 			continue
 		}
 		port := uint32(*ref.Port)
@@ -152,5 +168,30 @@ func resolveRefs(facts map[string]portFacts, routeNamespace, routeKind string, r
 	if ok, reason, msg := backendPortProblem(facts, routeNamespace, refs); !ok {
 		return ok, reason, msg
 	}
+	if unchecked := uncheckedBackendPorts(facts, routeNamespace, refs); len(unchecked) > 0 {
+		return true, string(gatewayv1.RouteReasonResolvedRefs),
+			"All backend references name a port of their Service. Not checked here: whether the pods serve " + strings.Join(unchecked, ", ") +
+				" as HTTP (a port of a Service the mesh did not generate; the pods' declaration decides, and a request for a port they declare raw TCP, or do not declare, is answered 500)"
+	}
 	return true, string(gatewayv1.RouteReasonResolvedRefs), "All backend references resolved"
+}
+
+// uncheckedBackendPorts names, sorted, the backendRefs whose port is one the
+// status cannot vouch for (portFacts.unverified), as "<ns>/<svc>:<port>".
+func uncheckedBackendPorts(facts map[string]portFacts, routeNamespace string, refs []gatewayv1.BackendObjectReference) []string {
+	var out []string
+	for _, ref := range refs {
+		if ref.Port == nil || (ref.Group != nil && string(*ref.Group) != "") || (ref.Kind != nil && string(*ref.Kind) != "Service") {
+			continue
+		}
+		ns := referencegrant.BackendNamespace(ref.Namespace)
+		if ns == "" {
+			ns = routeNamespace
+		}
+		if f := facts[serviceref.New(ns, string(ref.Name)).Key()]; f.unverified[uint32(*ref.Port)] {
+			out = append(out, fmt.Sprintf("%s/%s:%d", ns, ref.Name, *ref.Port))
+		}
+	}
+	slices.Sort(out)
+	return slices.Compact(out)
 }

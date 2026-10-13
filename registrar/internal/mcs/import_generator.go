@@ -4,7 +4,6 @@ import (
 	"context"
 	"log/slog"
 	"sort"
-	"strconv"
 	"strings"
 	"time"
 
@@ -272,6 +271,16 @@ func (g *ImportGenerator) applyClustersetService(ctx context.Context, d *desired
 			g.Log.WarnContext(ctx, "a non-aether Service owns this name; skipping clusterset VIP", "service", key.String())
 			return ""
 		}
+		// The one thing converged on an existing one: aether.io/port, which a
+		// registrar through chart 2.7 stamped here. It said "the port the pods
+		// declare" about a whole service; nothing reads it, the generated mesh
+		// Services have dropped it, and a stale one would outlive every reader.
+		if _, stale := existing.Annotations[aetherlabels.AnnotationMeshPort]; stale {
+			delete(existing.Annotations, aetherlabels.AnnotationMeshPort)
+			if err := g.Update(ctx, existing); err != nil {
+				g.Log.WarnContext(ctx, "removing the stale aether.io/port annotation from a clusterset Service failed", "service", key.String(), "error", err)
+			}
+		}
 		return clusterIP(existing) // converged (selectorless VIP is static)
 	} else if !apierrors.IsNotFound(err) {
 		g.Log.ErrorContext(ctx, "get clusterset Service failed", "service", key.String(), "error", err)
@@ -288,7 +297,6 @@ func (g *ImportGenerator) applyClustersetService(ctx context.Context, d *desired
 			},
 			Annotations: map[string]string{
 				aetherlabels.AnnotationMeshService:      d.service,
-				aetherlabels.AnnotationMeshPort:         strconv.Itoa(int(g.MeshPort)),
 				aetherlabels.AnnotationClustersetImport: d.service,
 			},
 		},

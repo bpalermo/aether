@@ -737,14 +737,14 @@ func spCLAIPs(res types.Resource) []string {
 //      another service, and a raw-TCP chain only on a port S serves as raw TCP
 //      (or 18082 with a raw-TCP legacy target).
 //
-// PERPORT_WALK_SEEDS=from-to selects the seeds (default 1-8: the suite also runs
-// under the race detector, where each seed costs about ten seconds; a longer
+// PERPORT_WALK_SEEDS=from-to selects the seeds (default 1-4: the suite also runs
+// under the race detector, where each seed costs tens of seconds; a longer
 // range, e.g. 1-500, is for a run by hand). PERPORT_WALK_PLAIN=1 runs
 // the plain walk (13 operations, the first set of checks only).
 // ---------------------------------------------------------------------------
 
 func spSeeds(t *testing.T) (int64, int64) {
-	from, to := int64(1), int64(8)
+	from, to := int64(1), int64(4)
 	if v := os.Getenv("PERPORT_WALK_SEEDS"); v != "" {
 		parts := strings.SplitN(v, "-", 2)
 		a, err := strconv.ParseInt(parts[0], 10, 64)
@@ -1132,14 +1132,20 @@ func TestPerPort_Walk(t *testing.T) {
 								if got.kind == "cluster" {
 									same = same && short.cluster == got.cluster
 								}
-								// One difference is by design: a full name the
-								// table has no virtual host for falls to the
-								// catch-all (the mesh does not know it), while
-								// the short name, when another namespace's
-								// service gives it a virtual host, is REFUSED
-								// for this caller. A short name never falls
-								// through from its own virtual host.
-								if got.vhost == "on_demand_catch_all" && short.kind == "refuse" && short.reason == proxy.RefusalNameNotInNamespace {
+								// A full name the table has no virtual host for
+								// takes the table's floor, and its short name
+								// has an arm that does what the floor does:
+								// on demand, the cluster the FULL name spells,
+								// named by the route and not by the authority.
+								if got.kind == "ondemand" && short.kind == "cluster" && short.cluster == n+suffix {
+									same = true
+								}
+								// The one stated difference: a service known by
+								// name only, on a port the short domain does
+								// not spell (its wildcard). The full name is
+								// parked for the cluster it names; a short
+								// authority names none, and is refused at once.
+								if got.kind == "ondemand" && short.kind == "refuse" && short.reason == proxy.RefusalShortNameCold {
 									same = true
 								}
 								if !same {

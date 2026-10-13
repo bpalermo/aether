@@ -162,9 +162,11 @@ func TestPerPort_TablesForEveryPortAPublishedChainNames(t *testing.T) {
 
 // TestPerPort_ParentPortResolvesThroughThePortMap: a rule whose parentRef
 // names a port of a USER Service applies where that Service port leads: in
-// the table of the Service port on the captured path, and on the pod port's
-// authority on the loopback path. And a change of the parentRef's port alone
-// is a change of the route.
+// the table of the Service port on the captured path, and on the SERVICE
+// port's authority on the loopback path (the authority names the Service's
+// port on both; until the third review the loopback path took the pod port's
+// number). And a change of the parentRef's port alone is a change of the
+// route.
 func TestPerPort_ParentPortResolvesThroughThePortMap(t *testing.T) {
 	ctx := context.Background()
 	h := registryv1.PortProtocol_PORT_PROTOCOL_HTTP
@@ -198,8 +200,21 @@ func TestPerPort_ParentPortResolvesThroughThePortMap(t *testing.T) {
 	const mesh = "web.demo." + a043Mesh
 	assert.True(t, has(tables["cap_http_80"], "web.demo"), "Service port 80")
 	assert.False(t, has(tables["cap_http_81"], "web.demo"), "Service port 81 is another port")
-	assert.True(t, has(tables[proxy.OutboundHTTPRouteName], mesh+":9090"), "loopback: Service port 80 is pod port 9090")
-	assert.False(t, has(tables[proxy.OutboundHTTPRouteName], mesh+":8080"))
+	// The loopback path: the authority names the SERVICE's port, as a dial
+	// does. Port 80 (and the port-less name) leads to pod port 9090 and has
+	// the rule; 81 leads to 8080 and has not; and the pod ports' own numbers,
+	// which the Service does not have, are no authority of the service.
+	out := tables[proxy.OutboundHTTPRouteName]
+	assert.True(t, has(out, mesh+":80"), "loopback: Service port 80")
+	assert.True(t, has(out, mesh), "loopback: a name without a port is the Service's port 80")
+	assert.False(t, has(out, mesh+":81"))
+	for _, podPort := range []string{":9090", ":8080"} {
+		got := a043Resolve(t, out, mesh+podPort)
+		assert.Equalf(t, uint32(421), got.status, "loopback, Host %s%s: a pod port the Service has no port for: %+v", mesh, podPort, got)
+		assert.Equal(t, proxy.RefusalPortNotDeclared, got.refusal)
+	}
+	assert.Equal(t, mesh+":9090", a043Resolve(t, out, mesh+":80").cluster, "Service port 80 is pod port 9090")
+	assert.Equal(t, mesh, a043Resolve(t, out, mesh+":81").cluster, "Service port 81 is pod port 8080, the port the pods declare, whose cluster carries the service's name")
 
 	// The parentRef moves to port 81: nothing else of the rule changes.
 	changed := c.DependencyChanges()
@@ -212,7 +227,8 @@ func TestPerPort_ParentPortResolvesThroughThePortMap(t *testing.T) {
 	tables = a043Tables(t, c)
 	assert.False(t, has(tables["cap_http_80"], "web.demo"))
 	assert.True(t, has(tables["cap_http_81"], "web.demo"))
-	assert.True(t, has(tables[proxy.OutboundHTTPRouteName], mesh+":8080"))
+	assert.True(t, has(tables[proxy.OutboundHTTPRouteName], mesh+":81"))
+	assert.False(t, has(tables[proxy.OutboundHTTPRouteName], mesh+":80"))
 
 	// A port map that changes alone asks for a rebuild too.
 	for len(changed) > 0 {
