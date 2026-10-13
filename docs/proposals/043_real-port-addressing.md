@@ -737,6 +737,56 @@ rule (lowest port of the class, as 037 wrote and never built), adds semantics
 to something scheduled for deletion. Refusing is the least surprising: a
 client either gets what it got before or an answer that tells it what to dial.
 
+## Rulings after acceptance
+
+Decisions the owner took while the work was being built. Where one differs
+from the text above or below, the ruling holds; the *Phases* section is
+rewritten with the last change of the release.
+
+**2026-10-12: a short name resolves in the caller's namespace.** A `Host` with
+no namespace (`echo`, `echo:8080`) means `echo.<the caller's namespace>`, as
+the cluster's DNS search does. Never a service in another namespace, unique or
+not; refused (`421`, `x-aether-error: name-not-in-namespace`) when the
+caller's namespace has no mesh service of the name. This replaces "a bare name
+that two namespaces share is refused" (decided 2026-10-11) and the older
+"served where exactly one namespace owns it". Both paths; the per-port rules,
+service-wide filters and HTTPRoute rules apply to the short name exactly as to
+the full one.
+
+- *Mechanism.* The route tables are shared by every pod of a node, so the
+  caller is read off the connection: each pod's HTTP chains store the pod's
+  namespace in filter state (`aether.source.namespace`), and a short name's
+  virtual host has a `matcher` whose input is that key and whose arms are the
+  routes the full name of each namespace has in the same table. A client
+  cannot set filter state. Measured on the pinned proxy before it was built.
+- *Cost.* No new table. Per table, one virtual host per (short name, authority
+  suffix), with one arm per namespace that has the name; one more network
+  filter on each pod's HTTP chains.
+- *Conformance evidence (corrected).* The mesh conformance suite at v1.6.3
+  sends short authorities: `mesh-basic.go` (`Host: "echo"`),
+  `mesh-frontend.go` (`"echo-v2"`), `httproute-weight.go` (`"echo"`), and
+  others, always from a client in the Services' own namespace. `echo` there is
+  not a mesh service of its own: it is a Service that an HTTPRoute is parented
+  to, or, with no route, a name the mesh passes through. The suite does not
+  depend on a short name reaching another namespace.
+
+**2026-10-12: a cold request is strict.** A request is delivered only where it
+would be once the node holds an endpoint of the service. `http://svc` is
+`svc:80`: it asks for the cluster of port 80, and fails when the service does
+not declare 80, whether or not the node already knows the service. The bare
+cluster name (`<fqdn>`, the internal name of the cluster of the port the pods
+declare) is not reachable from an authority a client typed. `<name>:18081` has
+no rule of its own: 18081 is a port no service declares, and gets the general
+`port-not-declared`.
+
+- *Mechanism.* The agent reads a service's real ports from its generated
+  Service, which it already watches, and routes and refuses by them while it
+  holds no endpoint. On-demand routes name a cluster only from an authority
+  with a port.
+- *Not done:* the alias cluster `<fqdn>:18081` still exists, so for a name the
+  agent knows nothing of, a parked `<fqdn>:18081` request can be delivered to
+  the declared port if the service enters scope meanwhile.
+
 ## Phases
 
 Chart versions follow the compatibility window (`AGENTS.md`, *Compatibility

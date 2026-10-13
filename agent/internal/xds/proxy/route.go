@@ -298,7 +298,7 @@ func BuildCaptureCatchAllVirtualHost(meshDomain string, port uint32, portless, r
 func BuildProxyPortCaptureRouteConfiguration(name string, vhosts []*routev3.VirtualHost, meshDomain string, passthrough bool) *routev3.RouteConfiguration {
 	withCatchAll := make([]*routev3.VirtualHost, 0, len(vhosts)+1)
 	withCatchAll = append(withCatchAll, vhosts...)
-	withCatchAll = append(withCatchAll, buildOnDemandCatchAllVirtualHost(MeshAuthorityRegex(meshDomain, "(:[0-9]+)?"), passthrough))
+	withCatchAll = append(withCatchAll, buildOnDemandCatchAllVirtualHost(MeshAuthorityRegex(meshDomain, ":[0-9]+"), passthrough))
 	return &routev3.RouteConfiguration{Name: name, VirtualHosts: withCatchAll}
 }
 
@@ -323,7 +323,14 @@ func BuildProxyPortCaptureRouteConfiguration(name string, vhosts []*routev3.Virt
 func BuildOutboundRouteConfiguration(vhosts []*routev3.VirtualHost, meshDomain string) *routev3.RouteConfiguration {
 	all := make([]*routev3.VirtualHost, 0, len(vhosts)+1)
 	all = append(all, vhosts...)
-	all = append(all, buildOnDemandCatchAllVirtualHost(MeshAuthorityRegex(meshDomain, "(:[0-9]+)?"), false))
+	// Only an authority WITH a port names a cluster on demand: the cluster
+	// is the one the authority spells, and "<fqdn>:<port>" is a port's
+	// cluster. A port-less mesh authority would spell the bare cluster name,
+	// which is no port's (it is the internal name of the cluster of the port
+	// the pods declare): a name without a port is port 80, and a service the
+	// node knows gets a virtual host that says so. Unknown and port-less
+	// falls through.
+	all = append(all, buildOnDemandCatchAllVirtualHost(MeshAuthorityRegex(meshDomain, ":[0-9]+"), false))
 	return &routev3.RouteConfiguration{
 		Name:         OutboundHTTPRouteName,
 		VirtualHosts: all,

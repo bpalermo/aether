@@ -46,6 +46,21 @@ func sourceTestPod() *cniv1.CNIPod {
 func filterStateValues(t *testing.T, chain *listenerv3.FilterChain) [][2]string {
 	t.Helper()
 	var out [][2]string
+	for _, kv := range allFilterStateValues(t, chain) {
+		// The caller's namespace is not a SOURCE-identity key: it is read by
+		// the route tables only (shortname.go) and has its own tests.
+		if kv[0] != CallerNamespaceFilterStateKey {
+			out = append(out, kv)
+		}
+	}
+	return out
+}
+
+// allFilterStateValues returns every (key, value) a chain's set_filter_state
+// filters store, in chain order.
+func allFilterStateValues(t *testing.T, chain *listenerv3.FilterChain) [][2]string {
+	t.Helper()
+	var out [][2]string
 	for _, f := range chain.GetFilters() {
 		if f.GetName() != "envoy.filters.network.set_filter_state" {
 			continue

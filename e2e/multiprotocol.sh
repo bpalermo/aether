@@ -141,6 +141,13 @@
 #                  False/NoMatchingParent and mp-httponly answers for itself
 #   R3  routes     a valid and an invalid backendRef of equal weight: over 60
 #                  requests only the valid port's marker and 500 are seen
+#   N1  short name mp-short exists in two namespaces. From the first: Host
+#                  mp-short:8080 is the first's (shorta), captured, through
+#                  the proxy port, and when the other's address is dialled
+#   N2  short name the mirror, from the second namespace (shortb); and the
+#                  per-port refusals apply to the short name
+#   N3  short name from a third namespace, which has no mp-short: refused,
+#                  421 name-not-in-namespace, on both paths
 #   W1  captured   mp-tcponly: raw TCP to <mesh name>:9000 and to :18082
 #                  -> onlytcp
 #   W2  captured   mp-tcponly: raw TCP to :7777 (a port it listens on and does
@@ -257,6 +264,13 @@ CLUSTER="${MP_CLUSTER:-multiprotocol}"
 CTX="kind-$CLUSTER"
 NS="aether-system"
 TEST_NS="aether-test"
+# The short-name legs (N1-N3): a second namespace with a service of the SAME
+# name as one in TEST_NS, and a third with no service of that name.
+TEST_NS2="aether-test-2"
+TEST_NS3="aether-test-3"
+SHORT_NAME="mp-short"
+SHORT_MARKER_A="shorta"
+SHORT_MARKER_B="shortb"
 MESH_DOMAIN="aether.internal"
 TRUST_DOMAIN="aether.internal"
 # The application ports of the workloads, a port nobody declares, and the two
@@ -294,7 +308,7 @@ AGENT_GROUP=(agent mesh-dns proxy-supervisor cni-install uds-csi)
 REGISTRAR_GROUP=(registrar controller)
 # Red-run aids (see "A RED RUN" in the header). CI sets none of them.
 ALL_LEGS=(M0 M1 M2 M3 M4 M5 M6 M7 X1 X2 X3 X4 X5 X6 A1 A2 A3 A4 A5 A6 A7 A8 A9 A10 A11 A12
-	W1 W2 W3 P1 P2 P3 P4 P5 R1 R2 R3 S1)
+	W1 W2 W3 P1 P2 P3 P4 P5 R1 R2 R3 S1 N1 N2 N3)
 MP_LEGS="${MP_LEGS:-${ALL_LEGS[*]}}"
 MP_KEEP_GOING="${MP_KEEP_GOING:-0}"
 MP_TIMEOUT="${MP_TIMEOUT:-}"
@@ -715,7 +729,7 @@ container_yaml() {
 		cat <<YAML
         - name: http-$port
           image: $HTTP_ECHO_IMAGE
-          args: ["-text=$(marker "$name" "$port")", "-listen=:$port"]
+          args: ["-text=${text:-$(marker "$name" "$port")}", "-listen=:$port"]
           ports: [{containerPort: $port}]
           securityContext:
             allowPrivilegeEscalation: false
@@ -856,14 +870,29 @@ deploy_workloads() {
 	for w in "${WORKLOADS[@]}" "$TCP_ONLY"; do
 		upstreams+="${upstreams:+,}$w.$TEST_NS"
 	done
+	upstreams+=",$SHORT_NAME.$TEST_NS"
 	deploy_client client "$upstreams"
 	deploy_client client-nocapture "$upstreams" false
 
+	# The short-name legs: one name, two namespaces, and a namespace without it.
+	# The functions above deploy into TEST_NS, so it is set per call.
+	kc create ns "$TEST_NS2" >/dev/null 2>&1 || true
+	kc create ns "$TEST_NS3" >/dev/null 2>&1 || true
+	deploy_workload "$SHORT_NAME" "$HTTP_PORT" http "$HTTP_PORT" "http:$HTTP_PORT:$SHORT_MARKER_A"
+	TEST_NS="$TEST_NS2" deploy_workload "$SHORT_NAME" "$HTTP_PORT" http "$HTTP_PORT" "http:$HTTP_PORT:$SHORT_MARKER_B"
+	local short_upstreams="$SHORT_NAME.$TEST_NS2,$SHORT_NAME.$TEST_NS"
+	TEST_NS="$TEST_NS2" deploy_client client "$short_upstreams"
+	TEST_NS="$TEST_NS3" deploy_client client "$short_upstreams"
+
 	local d
-	for d in "${WORKLOADS[@]}" "$TCP_ONLY" "${CLIENTS[@]}"; do
+	for d in "${WORKLOADS[@]}" "$TCP_ONLY" "${CLIENTS[@]}" "$SHORT_NAME"; do
 		kc -n "$TEST_NS" rollout status "deploy/$d" --timeout=180s >/dev/null ||
 			die "workload '$d' never became Ready"
 	done
+	for d in "$SHORT_NAME" client; do
+		kc -n "$TEST_NS2" rollout status "deploy/$d" --timeout=180s >/dev/null || die "workload '$d' in $TEST_NS2 never became Ready"
+	done
+	kc -n "$TEST_NS3" rollout status deploy/client --timeout=180s >/dev/null || die "the client in $TEST_NS3 never became Ready"
 	ok "workloads deployed"
 }
 
@@ -1903,6 +1932,90 @@ leg_R3() {
 	fi
 	remove_route "$R_WEIGHTED_ROUTE"
 	captured "$(marker mp-httponly "$HTTP_PORT")" "$name:$HTTP_PORT" "" "the HTTPRoute was deleted and is still in force"
+}
+
+# --- a name without a namespace is the caller's namespace's ---------------------
+#
+# "mp-short" exists in two namespaces, with different answers (shorta in
+# $TEST_NS, shortb in $TEST_NS2), and not in a third. A Host with no namespace
+# ("mp-short:8080") means the service of that name in the CALLER's namespace,
+# as the cluster's DNS search path does: never another namespace's, whether or
+# not the name is unique, and a refusal when the caller's namespace has none.
+
+# ns_tokens NS CLIENT URL HOST N — http_tokens from deploy/CLIENT of NS.
+ns_tokens() {
+	local ns="$1"
+	shift
+	TEST_NS="$ns" http_tokens "$@"
+}
+
+# ns_proxy_tokens NS CLIENT URL HOST N — the same through the proxy port, as
+# an origin-form request to the loopback listener with HOST.
+ns_loopback_tokens() {
+	local ns="$1" client="$2" host="$3" n="$4"
+	TEST_NS="$ns" http_tokens "$client" "$LOOPBACK_URL" "$host" "$n"
+}
+
+# N1 — a caller in the first namespace gets the first namespace's service, on
+# both paths, although a service of the same name exists elsewhere.
+leg_N1() {
+	log "N1 Host $SHORT_NAME:$HTTP_PORT from $TEST_NS is $SHORT_NAME.$TEST_NS, captured and through the proxy port"
+	local other meaning
+	other="$SHORT_NAME.$TEST_NS2.svc.cluster.local"
+	meaning="'$SHORT_MARKER_B' is the short name answered by ANOTHER namespace's service; 'HTTP421:name-not-in-namespace' is the caller's namespace not read off the connection"
+	expect "from $TEST_NS, captured http://$SHORT_NAME:$HTTP_PORT/" "$SHORT_MARKER_A" 240 "$A_PROBES" "$meaning" \
+		ns_tokens "$TEST_NS" client "http://$SHORT_NAME:$HTTP_PORT/" ""
+	expect "from $TEST_NS, loopback, Host $SHORT_NAME:$HTTP_PORT" "$SHORT_MARKER_A" "$A_TIMEOUT" "$A_PROBES" "$meaning" \
+		ns_loopback_tokens "$TEST_NS" client-nocapture "$SHORT_NAME:$HTTP_PORT"
+	# The address dialled does not choose the namespace either: the other
+	# namespace's Service address, with the short name in Host.
+	expect "from $TEST_NS, captured dial to $other:$HTTP_PORT with Host $SHORT_NAME:$HTTP_PORT" "$SHORT_MARKER_A" "$A_TIMEOUT" "$A_PROBES" "$meaning" \
+		ns_tokens "$TEST_NS" client "http://$other:$HTTP_PORT/" "$SHORT_NAME:$HTTP_PORT"
+	# The full names are unaffected, from anywhere.
+	expect "from $TEST_NS, captured http://$SHORT_NAME.$TEST_NS2.$MESH_DOMAIN:$HTTP_PORT/" "$SHORT_MARKER_B" "$A_TIMEOUT" "$A_PROBES" \
+		"the full name of the other namespace's service does not answer as that service" \
+		ns_tokens "$TEST_NS" client "http://$SHORT_NAME.$TEST_NS2.$MESH_DOMAIN:$HTTP_PORT/" ""
+}
+
+# N2 — the mirror: a caller in the second namespace gets the second's.
+leg_N2() {
+	log "N2 Host $SHORT_NAME:$HTTP_PORT from $TEST_NS2 is $SHORT_NAME.$TEST_NS2, captured and through the proxy port"
+	local other meaning
+	other="$SHORT_NAME.$TEST_NS.svc.cluster.local"
+	meaning="'$SHORT_MARKER_A' is the short name answered by ANOTHER namespace's service"
+	expect "from $TEST_NS2, captured http://$SHORT_NAME:$HTTP_PORT/" "$SHORT_MARKER_B" 240 "$A_PROBES" "$meaning" \
+		ns_tokens "$TEST_NS2" client "http://$SHORT_NAME:$HTTP_PORT/" ""
+	expect "from $TEST_NS2, loopback, Host $SHORT_NAME:$HTTP_PORT" "$SHORT_MARKER_B" "$A_TIMEOUT" "$A_PROBES" "$meaning" \
+		ns_loopback_tokens "$TEST_NS2" client "$SHORT_NAME:$HTTP_PORT"
+	expect "from $TEST_NS2, captured dial to $other:$HTTP_PORT with Host $SHORT_NAME:$HTTP_PORT" "$SHORT_MARKER_B" "$A_TIMEOUT" "$A_PROBES" "$meaning" \
+		ns_tokens "$TEST_NS2" client "http://$other:$HTTP_PORT/" "$SHORT_NAME:$HTTP_PORT"
+	# The per-port rules apply to the short name as to the full one.
+	expect "from $TEST_NS2, loopback, Host $SHORT_NAME:$UNDECLARED_PORT" "HTTP421:port-not-declared" "$A_TIMEOUT" "$A_PROBES" \
+		"a marker is the short name answered on a port its service does not declare" \
+		ns_loopback_tokens "$TEST_NS2" client "$SHORT_NAME:$UNDECLARED_PORT"
+	expect "from $TEST_NS2, loopback, Host $SHORT_NAME (no port)" "HTTP421:port-required" "$A_TIMEOUT" "$A_PROBES" \
+		"a marker is a name without a port read as something else than port 80" \
+		ns_loopback_tokens "$TEST_NS2" client "$SHORT_NAME"
+}
+
+# N3 — a caller in a namespace that has no service of the name is refused by
+# name, on both paths: it is never answered by either of the two namespaces
+# that do. The cluster's DNS would not resolve the short name there, so the
+# captured request dials a full name and carries the short one in Host.
+leg_N3() {
+	log "N3 Host $SHORT_NAME:$HTTP_PORT from $TEST_NS3, which has no $SHORT_NAME, is refused by name"
+	local meaning target
+	meaning="'$SHORT_MARKER_A' or '$SHORT_MARKER_B' is the short name answered by a namespace the caller is not in"
+	for target in "$SHORT_NAME.$TEST_NS.svc.cluster.local" "$SHORT_NAME.$TEST_NS2.svc.cluster.local"; do
+		expect "from $TEST_NS3, captured dial to $target:$HTTP_PORT with Host $SHORT_NAME:$HTTP_PORT" "HTTP421:name-not-in-namespace" 240 "$A_PROBES" "$meaning" \
+			ns_tokens "$TEST_NS3" client "http://$target:$HTTP_PORT/" "$SHORT_NAME:$HTTP_PORT"
+	done
+	expect "from $TEST_NS3, loopback, Host $SHORT_NAME:$HTTP_PORT" "HTTP421:name-not-in-namespace" "$A_TIMEOUT" "$A_PROBES" "$meaning" \
+		ns_loopback_tokens "$TEST_NS3" client "$SHORT_NAME:$HTTP_PORT"
+	# And its own full-name requests are served as for anyone.
+	expect "from $TEST_NS3, captured http://$SHORT_NAME.$TEST_NS.$MESH_DOMAIN:$HTTP_PORT/" "$SHORT_MARKER_A" "$A_TIMEOUT" "$A_PROBES" \
+		"the full name must answer from any namespace" \
+		ns_tokens "$TEST_NS3" client "http://$SHORT_NAME.$TEST_NS.$MESH_DOMAIN:$HTTP_PORT/" ""
 }
 
 # --- a raw-TCP service is reached on the ports it declares ---------------------

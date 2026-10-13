@@ -30,6 +30,7 @@ go_test(
     name = "capture_test",
     size = "small",
     srcs = [
+        "declaredports_test.go",
         "heartbeat_test.go",
         "initial_projection_test.go",
         "reconciler_test.go",

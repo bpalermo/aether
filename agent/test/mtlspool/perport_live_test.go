@@ -104,15 +104,40 @@ func (r *ppRegistry) ListAllEndpoints(_ context.Context, protocol registryv1.Ser
 		return out, nil
 	}
 	out["demo/other"] = []*registryv1.ServiceEndpoint{ppEndpoint("10.0.1.3", "other")}
+	// A service of the SAME NAME as the one under test, in another
+	// namespace, with no filter and no route: what a short name must never
+	// reach from a caller in "demo", and must reach from one in "elsewhere".
+	out[ppElsewhere] = []*registryv1.ServiceEndpoint{ppEndpoint("10.0.1.4", "multi")}
 	if r.armed.Load() {
 		out[ppSvc] = []*registryv1.ServiceEndpoint{ppEndpoint("10.0.1.2", "multi")}
 	}
 	return out, nil
 }
 
+// ppElsewhere is a second service named "multi", in another namespace.
+const ppElsewhere = "elsewhere/multi"
+
+// ppCallerNamespace is the namespace of the pod whose listeners the rig
+// serves. A test that calls from another namespace sets it before ppStart.
+var ppCallerNamespace = "demo"
+
+// ppDeclared is whether the generated Services carry their real ports. With
+// false the agent knows the services by name only.
+var ppDeclared = true
+
 func ppProject(c *cache.SnapshotCache) {
-	c.SetCaptureAuthorities(map[string]string{ppSvc: "multi.demo.svc.cluster.local", "demo/other": "other.demo.svc.cluster.local"})
-	c.SetCaptureTCPServices([]capture.CaptureTCPService{{ServiceName: ppSvc, ClusterIP: "10.96.1.2"}, {ServiceName: "demo/other", ClusterIP: "10.96.1.3"}})
+	c.SetCaptureAuthorities(map[string]string{
+		ppSvc: "multi.demo.svc.cluster.local", "demo/other": "other.demo.svc.cluster.local", ppElsewhere: "multi.elsewhere.svc.cluster.local",
+	})
+	var declared []uint32
+	if ppDeclared {
+		declared = []uint32{8080, 9090}
+	}
+	c.SetCaptureTCPServices([]capture.CaptureTCPService{
+		{ServiceName: ppSvc, ClusterIP: "10.96.1.2", DeclaredHTTP: declared},
+		{ServiceName: "demo/other", ClusterIP: "10.96.1.3", DeclaredHTTP: declared},
+		{ServiceName: ppElsewhere, ClusterIP: "10.96.1.4", DeclaredHTTP: declared},
+	})
 }
 
 func ppFreePort(t *testing.T) uint32 {
@@ -262,6 +287,9 @@ type ppRig struct {
 	// proxyPort, when set, also publishes the pod's loopback outbound listener
 	// on that port.
 	proxyPort uint32
+	// mutate, when set, edits the translated resources before every publish:
+	// for a measurement of a mechanism the cache does not generate yet.
+	mutate func(map[resourcev3.Type][]types.Resource)
 }
 
 func (r *ppRig) publish() {
@@ -271,6 +299,9 @@ func (r *ppRig) publish() {
 	res := ppTranslate(r.t, r.c, r.port, r.chain, r.backend, r.extra...)
 	if r.proxyPort != 0 {
 		ppWithProxyPort(r.t, r.c, res, r.proxyPort)
+	}
+	if r.mutate != nil {
+		r.mutate(res)
 	}
 	snap, err := cachev3.NewSnapshot(fmt.Sprintf("v%d", r.version), res)
 	require.NoError(r.t, err)
@@ -297,7 +328,7 @@ func ppStart(t *testing.T, hcmChain string) *ppRig {
 	c := cache.NewSnapshotCache(ppNodeName, slog.New(slog.DiscardHandler))
 	c.SetCaptureEnabled(true)
 	c.SetCaptureRedirectAll(true)
-	require.NoError(t, c.AddPod(ctx, &cniv1.CNIPod{Name: "client-0", Namespace: "demo", ServiceAccount: "client", NetworkNamespace: "/proc/self/ns/net"}, "aether.internal"))
+	require.NoError(t, c.AddPod(ctx, &cniv1.CNIPod{Name: "client-0", Namespace: ppCallerNamespace, ServiceAccount: "client", NetworkNamespace: "/proc/self/ns/net"}, "aether.internal"))
 	require.NoError(t, c.SetNodeIdentity(ctx, ppNodeSpiffe))
 	ppProject(c)
 	perRoute, err := anypb.New(&header_mutationv3.HeaderMutationPerRoute{Mutations: &header_mutationv3.Mutations{
@@ -378,7 +409,7 @@ func ppChain(t *testing.T) string {
 	c := cache.NewSnapshotCache(ppNodeName, slog.New(slog.DiscardHandler))
 	c.SetCaptureEnabled(true)
 	c.SetCaptureRedirectAll(true)
-	require.NoError(t, c.AddPod(context.Background(), &cniv1.CNIPod{Name: "client-0", Namespace: "demo", ServiceAccount: "client", NetworkNamespace: "/proc/self/ns/net"}, "aether.internal"))
+	require.NoError(t, c.AddPod(context.Background(), &cniv1.CNIPod{Name: "client-0", Namespace: ppCallerNamespace, ServiceAccount: "client", NetworkNamespace: "/proc/self/ns/net"}, "aether.internal"))
 	require.NoError(t, c.SetNodeIdentity(context.Background(), ppNodeSpiffe))
 	ppProject(c)
 	reg := &ppRegistry{}
