@@ -462,9 +462,25 @@ func notMeshRoutes(floor []*routev3.Route) []*routev3.Route {
 	}
 	out := make([]*routev3.Route, 0, len(floor))
 	for _, r := range floor {
+		// A floor route taken only by a mesh authority (the on-demand route,
+		// the refusal of the mesh's own ports: MeshAuthorityRegex, which needs
+		// "<svc>.<ns>.") is never taken by a short name, which has no dot.
+		if matchesAuthority(r) {
+			continue
+		}
 		out = append(out, proto.Clone(r).(*routev3.Route))
 	}
 	return out
+}
+
+// matchesAuthority reports whether a route has an :authority header matcher.
+func matchesAuthority(r *routev3.Route) bool {
+	for _, h := range r.GetMatch().GetHeaders() {
+		if h.GetName() == ":authority" {
+			return true
+		}
+	}
+	return false
 }
 
 func routeListOnMatch(routes []*routev3.Route) *xdsmatcherv3.Matcher_OnMatch {

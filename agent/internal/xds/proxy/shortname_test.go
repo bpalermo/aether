@@ -154,9 +154,11 @@ func TestShortNameVirtualHosts_Arms(t *testing.T) {
 	a9090 := arm("echo:9090", "a")
 	require.Len(t, a9090, 2)
 	// The route that names the filter itself: BOTH levels are in force, the
-	// service's first, as under the service's own virtual host. With the
-	// route's entry alone the request ran without the service-wide filter.
-	assert.Equal(t, []string{"x-service-wide", "x-route-own"}, stamps(a9090[0].GetTypedPerFilterConfig()[f]),
+	// route's first and the service's after it, as the proxy applies them
+	// under the service's own virtual host (header_mutation.cc reverses the
+	// levels). With the route's entry alone the request ran without the
+	// service-wide filter.
+	assert.Equal(t, []string{"x-route-own", "x-service-wide"}, stamps(a9090[0].GetTypedPerFilterConfig()[f]),
 		"a header_mutation applies every level: the arm's route must carry both")
 	assert.Equal(t, []string{"x-service-wide"}, stamps(a9090[1].GetTypedPerFilterConfig()[f]))
 	assert.Equal(t, "echo.a.aether.internal:8080", arm("echo", "a")[0].GetRoute().GetCluster(), "the port-less authority, where a claims it")
@@ -334,12 +336,21 @@ func TestShortName_NotAMeshNameForTheCallerGetsTheTablesFloor(t *testing.T) {
 			// From b: its own service.
 			assert.Equal(t, "api.b.aether.internal:8080", shortArmRoutes(t, m, "b")[0].GetRoute().GetCluster())
 
-			// From a, which has no mesh "api": the floor's routes, all of
-			// them, in order, and copies.
+			// From a, which has no mesh "api": the floor's routes, in order,
+			// and copies, but for the ones only a mesh authority takes (the
+			// on-demand route, the refusal of the mesh's own ports): a name
+			// without a namespace never does.
+			var want []*routev3.Route
+			for _, r := range floor.GetRoutes() {
+				if !matchesAuthority(r) {
+					want = append(want, r)
+				}
+			}
+			require.Less(t, len(want), len(floor.GetRoutes()), "the floor has a route only a mesh authority takes")
 			got := shortArmRoutes(t, m, "a")
-			require.Len(t, got, len(floor.GetRoutes()))
+			require.Len(t, got, len(want))
 			for i := range got {
-				assert.True(t, proto.Equal(floor.GetRoutes()[i], got[i]), "route %d of the not-a-mesh-name arm is not the floor's", i)
+				assert.True(t, proto.Equal(want[i], got[i]), "route %d of the not-a-mesh-name arm is not the floor's", i)
 			}
 			if tc.passthrough {
 				assert.Equal(t, PassthroughClusterName, last(got).GetRoute().GetCluster(), "leaves to the address that was dialled")

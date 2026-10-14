@@ -267,6 +267,7 @@ cache_go_test(
         "@com_github_envoyproxy_go_control_plane_envoy//extensions/transport_sockets/tls/v3:tls",
         "@com_github_envoyproxy_go_control_plane_envoy//extensions/upstreams/http/v3:http",
         "@com_github_envoyproxy_go_control_plane_envoy//service/discovery/v3:discovery",
+        "@com_github_envoyproxy_go_control_plane_envoy//type/matcher/v3:matcher",
         "@com_github_stretchr_testify//assert",
         "@com_github_stretchr_testify//require",
         "@io_k8s_api//core/v1:core",

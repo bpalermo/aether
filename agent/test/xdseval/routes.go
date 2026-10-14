@@ -205,8 +205,17 @@ func routeMatches(m *routev3.RouteMatch, path string, r Request) (bool, error) {
 			return false, err
 		}
 	}
-	if m.GetRuntimeFraction() != nil || len(m.GetQueryParameters()) > 0 || m.GetGrpc() != nil {
-		return false, Unsupported{"a route match on runtime, query or gRPC"}
+	if ok, err := filterStateMatches(m, r); err != nil || !ok {
+		return false, err
+	}
+	if len(m.GetQueryParameters()) > 0 || m.GetGrpc() != nil {
+		return false, Unsupported{"a route match on query or gRPC"}
+	}
+	// A runtime fraction (the invalid backendRef's share) is a draw. The model
+	// takes the share whenever it is not empty: both tables compared are given
+	// the same draw, which is all a comparison needs.
+	if rf := m.GetRuntimeFraction(); rf != nil && rf.GetDefaultValue().GetNumerator() == 0 {
+		return false, nil
 	}
 	return true, nil
 }
@@ -228,6 +237,26 @@ func pathMatches(m *routev3.RouteMatch, p string) (bool, error) {
 	default:
 		return false, Unsupported{fmt.Sprintf("path specifier %T", ps)}
 	}
+}
+
+// filterStateMatches: RouteMatch.filter_state reads the stream's filter
+// state, which falls back to the connection's (FilterStateImpl's parent):
+// Request.FilterState.
+func filterStateMatches(m *routev3.RouteMatch, r Request) (bool, error) {
+	for _, fs := range m.GetFilterState() {
+		if fs.GetStringMatch() == nil {
+			return false, Unsupported{"a filter-state route match other than a string match"}
+		}
+		v, ok := r.FilterState[fs.GetKey()]
+		if !ok {
+			return false, nil
+		}
+		hit, err := typeStringMatch(fs.GetStringMatch(), v)
+		if err != nil || !hit {
+			return false, err
+		}
+	}
+	return true, nil
 }
 
 func headerMatches(h *routev3.HeaderMatcher, r Request) (bool, error) {

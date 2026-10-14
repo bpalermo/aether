@@ -55,9 +55,11 @@ func TestMergeCaptureRouteTables_OneVirtualHostPerName(t *testing.T) {
 	}
 	assert.Equal(t, []string{"a.ns.mesh", "on_demand_catch_all"}, names, "one virtual host per name, and the catch-all")
 	// Its domains are the spellings port-less and ":*": an exact ":<port>"
-	// spelling is told apart by the matcher.
+	// spelling is told apart by its routes.
 	assert.ElementsMatch(t, []string{"a.ns", "a.ns:*", "a.ns.mesh", "a.ns.mesh:*"}, merged.GetVirtualHosts()[0].GetDomains())
-	assert.NotNil(t, merged.GetVirtualHosts()[0].GetMatcher())
+	for _, vh := range merged.GetVirtualHosts() {
+		assert.Nil(t, vh.GetMatcher(), "a plain route list, no matcher: %s", vh.GetName())
+	}
 	assert.Empty(t, merged.GetVirtualHosts()[0].GetTypedPerFilterConfig(), "the filter config moves onto the routes it was in force on")
 
 	at := func(host string, dialled string) []*routev3.Route {
@@ -65,9 +67,15 @@ func TestMergeCaptureRouteTables_OneVirtualHostPerName(t *testing.T) {
 		if dialled != "" {
 			fs[DialledPortFilterStateKey] = dialled
 		}
-		a, err := xdseval.Resolve(merged, xdseval.Request{Host: host, FilterState: fs})
+		req := xdseval.Request{Host: host, FilterState: fs}
+		a, err := xdseval.Resolve(merged, req)
 		require.NoError(t, err)
-		return a.Routes
+		first, err := xdseval.FirstRoute(a.Routes, req)
+		require.NoError(t, err)
+		if first == nil {
+			return nil
+		}
+		return []*routev3.Route{first}
 	}
 	for _, tc := range []struct {
 		host, dialled, want string
@@ -96,12 +104,13 @@ func TestMergeCaptureRouteTables_OneVirtualHostPerName(t *testing.T) {
 	}
 	// The catch-all names a cluster on demand only for the dialled port.
 	for _, d := range []string{"80", "8080", "9090", "7777"} {
-		routes := at("x.y.mesh:8080", d)
-		var onDemand bool
-		for _, r := range routes {
-			onDemand = onDemand || r.GetRoute().GetClusterHeader() != ""
+		routes := at("x.y.mesh:"+d, d)
+		require.NotEmpty(t, routes)
+		assert.Equal(t, d != "7777", routes[0].GetRoute().GetClusterHeader() != "", "the catch-all, dialled %s", d)
+		if d != "8080" {
+			other := at("x.y.mesh:8080", d)
+			assert.Empty(t, other[0].GetRoute().GetClusterHeader(), "dialled %s, Host :8080: no cluster on demand", d)
 		}
-		assert.Equal(t, d != "7777", onDemand, "the catch-all dialled %s", d)
 	}
 }
 
@@ -141,6 +150,17 @@ func TestMergeCaptureRouteTables_RefusesWhatItDoesNotModel(t *testing.T) {
 		"a missing table": func() (map[uint32]*routev3.RouteConfiguration, *routev3.RouteConfiguration) {
 			return perPort, nil
 		},
+		"a route list a request can fall out of": func() (map[uint32]*routev3.RouteConfiguration, *routev3.RouteConfiguration) {
+			return mutated(func(rc *routev3.RouteConfiguration) {
+				vh := rc.VirtualHosts[0]
+				vh.Routes = []*routev3.Route{{Match: &routev3.RouteMatch{PathSpecifier: &routev3.RouteMatch_Prefix{Prefix: "/only"}}, Action: vh.Routes[0].Action}}
+			})
+		},
+		"two names of one virtual host answered differently for one suffix": func() (map[uint32]*routev3.RouteConfiguration, *routev3.RouteConfiguration) {
+			return mutated(func(rc *routev3.RouteConfiguration) {
+				rc.VirtualHosts[0].Domains = []string{"a.ns.mesh", "a.ns.mesh:8080"}
+			})
+		},
 	} {
 		p, o := in()
 		_, err := MergeCaptureRouteTables(CaptureHTTPChainName, p, o)
@@ -162,12 +182,57 @@ func TestMergeCaptureRouteTables_ShortNameKeepsItsCallerMatcher(t *testing.T) {
 	merged, err := MergeCaptureRouteTables(CaptureHTTPChainName, perPort, other)
 	require.NoError(t, err)
 	for _, d := range []string{"80", "8080", "9090"} {
-		a, err := xdseval.Resolve(merged, xdseval.Request{Host: "a", FilterState: map[string]string{DialledPortFilterStateKey: d, CallerNamespaceFilterStateKey: "ns"}})
-		require.NoError(t, err)
-		require.NotEmpty(t, a.Routes)
-		assert.Equal(t, "arm-"+d, xdseval.OutcomeOf(a.Routes[0]).Reason)
-		a, err = xdseval.Resolve(merged, xdseval.Request{Host: "a", FilterState: map[string]string{DialledPortFilterStateKey: d}})
-		require.NoError(t, err)
-		assert.Equal(t, RefusalCallerUnknown, xdseval.OutcomeOf(a.Routes[0]).Reason, "no caller namespace")
+		first := func(fs map[string]string) xdseval.Outcome {
+			req := xdseval.Request{Host: "a", FilterState: fs}
+			a, err := xdseval.Resolve(merged, req)
+			require.NoError(t, err)
+			r, err := xdseval.FirstRoute(a.Routes, req)
+			require.NoError(t, err)
+			return xdseval.OutcomeOf(r)
+		}
+		assert.Equal(t, "arm-"+d, first(map[string]string{DialledPortFilterStateKey: d, CallerNamespaceFilterStateKey: "ns"}).Reason)
+		assert.Equal(t, RefusalCallerUnknown, first(map[string]string{DialledPortFilterStateKey: d}).Reason, "no caller namespace")
 	}
+}
+
+// TestRefuseCaptureMeshNames: the table published when the per-port tables do
+// not compile refuses every name any of them claims, whatever was dialled,
+// and leaves every other Host to the floor of a port no service declares.
+func TestRefuseCaptureMeshNames(t *testing.T) {
+	perPort, other := mergeTestTables()
+	rc := RefuseCaptureMeshNames(CaptureHTTPChainName, perPort, other)
+	for _, host := range []string{"a.ns.mesh", "a.ns.mesh:8080", "A.NS:9090", "a.ns:1"} {
+		for _, d := range []string{"", "8080", "7777"} {
+			req := xdseval.Request{Host: host, FilterState: map[string]string{DialledPortFilterStateKey: d}}
+			a, err := xdseval.Resolve(rc, req)
+			require.NoError(t, err)
+			r, err := xdseval.FirstRoute(a.Routes, req)
+			require.NoError(t, err)
+			o := xdseval.OutcomeOf(r)
+			assert.Equal(t, uint32(421), o.Status, "%s dialled %q", host, d)
+			assert.Equal(t, RefusalPortNotDeclared, o.Reason)
+		}
+	}
+	req := xdseval.Request{Host: "example.com"}
+	a, err := xdseval.Resolve(rc, req)
+	require.NoError(t, err)
+	r, err := xdseval.FirstRoute(a.Routes, req)
+	require.NoError(t, err)
+	assert.Equal(t, PassthroughClusterName, xdseval.OutcomeOf(r).Cluster, "a Host that is no mesh name leaves as it would")
+}
+
+// TestCaptureChainMatcher_ReportsADuplicateAddress: two capture services that
+// claim one address are reported (the cache logs and counts it), and the first
+// keeps the address.
+func TestCaptureChainMatcher_ReportsADuplicateAddress(t *testing.T) {
+	var got []string
+	OnDuplicateCaptureAddress(func(listener, address, kept, dropped string) {
+		got = append(got, listener+" "+address+" "+kept+" "+dropped)
+	})
+	t.Cleanup(func() { OnDuplicateCaptureAddress(func(string, string, string, string) {}) })
+	perPortListener(t, []CaptureTCPService{
+		{ClusterName: "tcp:a.t.aether.internal", ClusterIP: "10.96.0.1", TCPPorts: []uint32{9000}},
+		{ClusterName: "tcp:b.t.aether.internal", ClusterIP: "10.96.0.1", TCPPorts: []uint32{9001}},
+	}, true)
+	assert.Equal(t, []string{"capture_default_p1 10.96.0.1 tcp:a.t.aether.internal tcp:b.t.aether.internal"}, got)
 }

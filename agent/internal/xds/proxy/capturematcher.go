@@ -5,6 +5,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync/atomic"
 
 	"aethermesh.dev/agent/internal/xds/config"
 	meshconst "aethermesh.dev/common/constants/mesh"
@@ -105,6 +106,8 @@ func BuildDialledPortFilterState() *listenerv3.Filter {
 type captureServiceChains struct {
 	// ip is the service's address as DestinationIPInput renders it.
 	ip string
+	// cluster names the service, for the duplicate-address report.
+	cluster string
 	// chains are the service's chains, in listener order.
 	chains []*listenerv3.FilterChain
 	// tcpPorts maps each raw-TCP port of the service to its chain's name.
@@ -132,7 +135,7 @@ func buildCaptureServiceChains(svc CaptureTCPService, sourceSpiffeID string) (ca
 	if ip == nil || svc.ClusterName == "" {
 		return captureServiceChains{}, false
 	}
-	out := captureServiceChains{ip: ip.String(), tcpPorts: map[uint32]string{}}
+	out := captureServiceChains{ip: ip.String(), cluster: svc.ClusterName, tcpPorts: map[uint32]string{}}
 
 	tls := BuildCaptureTLSRouteFilterChains(svc, svc.TLSRouteRules, sourceSpiffeID)
 	out.chains = append(out.chains, tls...)
@@ -199,13 +202,21 @@ func sniPrecedence(tls []*listenerv3.FilterChain) []sniChain {
 // the top of this file). scoped is capture without redirect-all: no
 // passthrough, HTTP chains matched on the port alone, and the TCP mesh port's
 // blackhole chain for what no service claims there.
-func captureChainMatcher(services []captureServiceChains, scoped bool) *xdsmatcherv3.Matcher {
+func captureChainMatcher(listener string, services []captureServiceChains, scoped bool) *xdsmatcherv3.Matcher {
 	httpBranch := captureHTTPBranch(scoped)
 	byAddress := map[string]*xdsmatcherv3.Matcher_OnMatch{}
+	owner := map[string]string{}
 	for _, s := range services {
-		if _, dup := byAddress[s.ip]; dup {
-			continue // one address, one service: the first keeps it
+		if kept, dup := owner[s.ip]; dup {
+			// One address, one service: the first keeps it, and the second's
+			// chains are on the listener and unreachable. Never expected (an
+			// address is one Service's), so it is reported.
+			if f := duplicateCaptureAddressHook.Load(); f != nil {
+				(*f)(listener, s.ip, kept, s.cluster)
+			}
+			continue
 		}
+		owner[s.ip] = s.cluster
 		if m := captureAddressMatcher(s); m != nil {
 			byAddress[s.ip] = &xdsmatcherv3.Matcher_OnMatch{OnMatch: &xdsmatcherv3.Matcher_OnMatch_Matcher{Matcher: m}}
 		}
@@ -282,6 +293,17 @@ func sniMatcher(names []sniChain) *xdsmatcherv3.Matcher {
 		})
 	}
 	return &xdsmatcherv3.Matcher{MatcherType: &xdsmatcherv3.Matcher_MatcherList_{MatcherList: &xdsmatcherv3.Matcher_MatcherList{Matchers: list}}}
+}
+
+// duplicateCaptureAddressHook is told of every service address two capture
+// services claimed on a listener being built.
+var duplicateCaptureAddressHook atomic.Pointer[func(listener, address, kept, dropped string)]
+
+// OnDuplicateCaptureAddress sets the function told of every service address
+// two capture services claimed on a capture listener being built: the second
+// service's chains are unreachable. The cache sets it to log and count.
+func OnDuplicateCaptureAddress(f func(listener, address, kept, dropped string)) {
+	duplicateCaptureAddressHook.Store(&f)
 }
 
 // captureHTTPBranch is the root's on_no_match: cleartext HTTP to the proxy

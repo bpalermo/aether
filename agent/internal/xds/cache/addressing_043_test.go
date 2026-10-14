@@ -365,14 +365,16 @@ func TestAddressing_CapturedDialledPortDecides(t *testing.T) {
 					}
 
 					// A5: a Host that names ANOTHER port is refused, whatever
-					// that port is, and never obeyed.
+					// that port is, and never obeyed: port-mismatch where the
+					// name is served on the dialled port, port-not-declared
+					// where it is not (the port that decides is none of its).
 					for _, otherPort := range []uint32{80, 8080, 9000, 9090, 18081, 7777} {
 						if otherPort == d {
 							continue
 						}
 						got := a043Resolve(t, table, fmt.Sprintf("%s:%d", name, otherPort))
-						if d == 7777 {
-							assert.Equalf(t, proxy.RefusalPortNotDeclared, got.refusal, "%+v", got)
+						if d == 7777 || !isHTTP {
+							assert.Equalf(t, proxy.RefusalPortNotDeclared, got.refusal, "dialled %d, Host port %d: %+v", d, otherPort, got)
 						} else {
 							assert.Equalf(t, proxy.RefusalPortMismatch, got.refusal, "dialled %d, Host port %d: %+v", d, otherPort, got)
 						}
@@ -1257,18 +1259,21 @@ func TestAddressing_RoutePortsReachTheListener(t *testing.T) {
 	// The published table answers for the port that entered and not for the
 	// one that left: a request dialled to 6544 for the route's parent takes
 	// its virtual host, one dialled to 6543 is the other ports' answer.
-	at := func(d uint32) xdseval.Answer {
-		a, err := xdseval.Resolve(a043Published(t, c), xdseval.Request{Host: "route-only.demo." + a043Mesh, FilterState: map[string]string{proxy.DialledPortFilterStateKey: fmt.Sprint(d)}})
+	first := func(rc *routev3.RouteConfiguration, fs map[string]string) *routev3.Route {
+		req := xdseval.Request{Host: "route-only.demo." + a043Mesh, FilterState: fs}
+		a, err := xdseval.Resolve(rc, req)
 		require.NoError(t, err)
-		return a
+		r, err := xdseval.FirstRoute(a.Routes, req)
+		require.NoError(t, err)
+		return r
 	}
-	other, err := xdseval.Resolve(tables[proxy.CaptureHTTPOtherRouteName], xdseval.Request{Host: "route-only.demo." + a043Mesh})
-	require.NoError(t, err)
-	same, _, err := xdseval.SameAnswer(other, at(6543))
-	require.NoError(t, err)
+	at := func(d uint32) *routev3.Route {
+		return first(a043Published(t, c), map[string]string{proxy.DialledPortFilterStateKey: fmt.Sprint(d)})
+	}
+	other := first(tables[proxy.CaptureHTTPOtherRouteName], nil)
+	same, _ := xdseval.SameTreatment(other, at(6543))
 	assert.True(t, same, "6543 left the mesh")
-	same, _, err = xdseval.SameAnswer(other, at(6544))
-	require.NoError(t, err)
+	same, _ = xdseval.SameTreatment(other, at(6544))
 	assert.False(t, same, "6544 entered the mesh")
 }
 

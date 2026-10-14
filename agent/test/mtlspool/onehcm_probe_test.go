@@ -377,6 +377,19 @@ func ohHTTP1(ip string, port uint32, host string) string {
 	return string(b)
 }
 
+// ohHTTP10 sends one HTTP/1.0 request (http_inspector reports "http/1.0").
+func ohHTTP10(ip string, port uint32, host string) string {
+	c, err := net.DialTimeout("tcp", net.JoinHostPort(ip, strconv.Itoa(int(port))), 2*time.Second)
+	if err != nil {
+		return "ERR " + err.Error()
+	}
+	defer c.Close()
+	_ = c.SetDeadline(time.Now().Add(4 * time.Second))
+	fmt.Fprintf(c, "GET / HTTP/1.0\r\nHost: %s\r\n\r\n", host)
+	b, _ := io.ReadAll(c)
+	return string(b)
+}
+
 // ohRaw sends bytes that are not HTTP or TLS.
 func ohRaw(ip string, port uint32) string {
 	c, err := net.DialTimeout("tcp", net.JoinHostPort(ip, strconv.Itoa(int(port))), 2*time.Second)
@@ -491,7 +504,9 @@ func ohCases(p *ohPorts) []ohCase {
 		{id: "M3 Host names the dialled port twice", send: func() string { return ohHTTP1(ohLocal, p.a, fmt.Sprintf("%s:%d:%d", a, p.a, p.a)) }, want: mismatch},
 		{id: "D4 port-less Host, dialled a's other port", send: func() string { return ohHTTP1(ohLocal, p.a2, a) }, want: a2},
 		{id: "N1 dialled an HTTP port number of the mesh that is not a's", send: func() string { return ohHTTP1(ohLocal, p.c, a) }, want: undeclared},
-		{id: "N2 that port, Host names a's port", send: func() string { return ohHTTP1(ohLocal, p.c, fmt.Sprintf("%s:%d", a, p.a)) }, want: mismatch},
+		// The dialled port is none of a's: port-not-declared whatever the Host
+		// names (the reason-precedence ruling of #1703; it was port-mismatch).
+		{id: "N2 that port, Host names a's port", send: func() string { return ohHTTP1(ohLocal, p.c, fmt.Sprintf("%s:%d", a, p.a)) }, want: undeclared},
 		{id: "O1 dialled a port no service declares", send: func() string { return ohHTTP1(ohLocal, p.o, fmt.Sprintf("%s:%d", a, p.o)) }, want: undeclared},
 		{id: "O2 that port, a Host that is no mesh name", send: func() string { return ohHTTP1(ohLocal, p.o, "example.com") }, want: "PASSTHROUGH"},
 		{id: "C1 a Host that is no mesh name, dialled a's port", send: func() string { return ohHTTP1(ohLocal, p.a, "example.com") }, want: "PASSTHROUGH"},
@@ -501,16 +516,24 @@ func ohCases(p *ohPorts) []ohCase {
 		{id: "B2 HTTP to b's raw-TCP port number at another address", send: func() string { return ohHTTP1(ohLocal, p.t, a) }, want: undeclared, trap: true},
 		{id: "P1 raw bytes to an HTTP port", send: func() string { return ohRaw(ohLocal, p.a) }, want: "PASSTHROUGH"},
 		{id: "H2 h2c, dialled a's port", send: func() string { return ohH2C(ohLocal, p.a, a) }, want: aDefault},
-		{id: "H3 h2c, Host names a's other port", send: func() string { return ohH2C(ohLocal, p.a, fmt.Sprintf("%s:%d", a, p.a2)) }, want: "with a Host header that names another port"},
+		{id: "H3 h2c, Host names a's other port", send: func() string { return ohH2C(ohLocal, p.a, fmt.Sprintf("%s:%d", a, p.a2)) }, want: "was dialled on a port its Host header does not name"},
 		// #911 under filter_chain_match: the port tier wins before the name.
 		{id: "S1 TLS with b's TLSRoute name to b's raw-TCP port", send: func() string { return ohTLS(ohVIPofB, p.t, ohSNI) }, want: "TCP tcp:tlsback.", trap: true},
 		{id: "S2 TLS with b's TLSRoute name to another port of b", send: func() string { return ohTLS(ohVIPofB, p.o, ohSNI) }, want: "TCP tcp:tlsback."},
 		{id: "S3 TLS with b's TLSRoute name to b's OWN HTTP port (the ruling)", send: func() string { return ohTLS(ohVIPofB, p.bh, ohSNI) }, want: "PASSTHROUGH", trap: true},
 		{id: "S4 TLS with another name to b's raw-TCP port", send: func() string { return ohTLS(ohVIPofB, p.t, "other.example") }, want: tcpB},
+		// HTTP/1.0 reaches the HTTP chain (http_inspector reports
+		// "http/1.0"), not the passthrough, and the connection manager answers
+		// it 426: it does not accept HTTP/1.0 (accept_http_10 is unset), on
+		// every HTTP chain of the mesh and before this change alike.
+		{id: "H4 HTTP/1.0, dialled a's port", send: func() string { return ohHTTP10(ohLocal, p.a, a) }, want: "HTTP/1.1 426 Upgrade Required"},
 		{id: "S5 HTTP to b's own HTTP port", send: func() string { return ohHTTP1(ohVIPofB, p.bh, fmt.Sprintf("b.%s.%s", ohNS, ohMesh)) }, want: fmt.Sprintf("cluster=b.%s.%s:%d", ohNS, ohMesh, p.bh), trap: true},
 	}
 	if p.proxy {
-		cases = append(cases, ohCase{id: "X1 dialled the proxy port (the Host's port decides)", send: func() string { return ohHTTP1(ohLocal, 18081, fmt.Sprintf("%s:%d", a, p.a)) }, want: aDefault})
+		cases = append(cases,
+			ohCase{id: "X1 dialled the proxy port (the Host's port decides)", send: func() string { return ohHTTP1(ohLocal, 18081, fmt.Sprintf("%s:%d", a, p.a)) }, want: aDefault},
+			ohCase{id: "X2 TLS to the proxy port", send: func() string { return ohTLS(ohLocal, 18081, "example.com") }, want: "PASSTHROUGH"},
+		)
 	}
 	return cases
 }

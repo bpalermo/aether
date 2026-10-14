@@ -842,6 +842,13 @@ func NewSnapshotCache(nodeName string, log *slog.Logger) *SnapshotCache {
 	if err != nil {
 		log.Error("failed to create snapshot cache metrics; continuing without instrumentation", "error", err)
 	}
+	// Two capture services that claim one address: the second one's chains
+	// are on the listener and unreachable. Always a defect upstream.
+	proxy.OnDuplicateCaptureAddress(func(listener, address, kept, dropped string) {
+		log.Warn("two capture services claimed one service address; the second one's chains are unreachable",
+			"listener", listener, "address", address, "kept", kept, "dropped", dropped)
+		metrics.CaptureDuplicateAddress(context.Background())
+	})
 
 	return &SnapshotCache{
 		SnapshotCache: cachev3.NewSnapshotCache(false, cachev3.IDHash{}, nil),

@@ -7,13 +7,12 @@ import (
 	"strconv"
 	"strings"
 
-	"aethermesh.dev/agent/internal/xds/config"
-	xdscorev3 "github.com/cncf/xds/go/xds/core/v3"
 	xdsmatcherv3 "github.com/cncf/xds/go/xds/type/matcher/v3"
 	routev3 "github.com/envoyproxy/go-control-plane/envoy/config/route/v3"
 	network_inputsv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/matching/common_inputs/network/v3"
 	typematcherv3 "github.com/envoyproxy/go-control-plane/envoy/type/matcher/v3"
 	"google.golang.org/protobuf/proto"
+	"google.golang.org/protobuf/types/known/anypb"
 )
 
 // MergeCaptureRouteTables compiles the per-port capture tables (proposal 043,
@@ -29,28 +28,32 @@ import (
 //   - its domains are every domain of every per-port table, so the proxy
 //     selects, for any Host, a virtual host holding the domain that is the
 //     most specific match of that Host in ANY per-port table;
-//   - that virtual host's matcher branches on the dialled port (filter state,
-//     DialledPortFilterStateKey) and, inside each branch, on the Host itself
-//     (:authority, compared case-insensitively as the proxy compares domains),
-//     to the answer the dialled port's table gives that Host.
+//   - that virtual host is a plain, ordered route list (no matcher): for each
+//     dialled port whose answers differ from the other ports', the routes of
+//     that port's answers, each route also matching the dialled port
+//     (RouteMatch.filter_state on DialledPortFilterStateKey, which the
+//     route's stream reads from the connection) and, when the port answers
+//     some spellings of the name differently from others, the Host's port
+//     suffix (an :authority regex: no port, ":<D>", exactly one port); then
+//     the other ports' answers, matching no dialled port.
 //
-// The Host-level branch is needed because one compiled virtual host stands for
-// several domains that one per-port table may answer differently: in the table
-// of port 8080, "<name>:8080" is routed and "<name>:9090" is a port mismatch,
-// and both are reached through the compiled table's "<name>:*". The branch
-// names exact spellings, so "<name>:8080:8080" is a mismatch as it was.
+// Every answer's route list ends in a route every request takes (a service's
+// fallback, a refusal), so a request a block's conditions take never reaches
+// a later block, and first-match gives each request its dialled port's answer.
+// "<name>:8080:8080" has no suffix the regex accepts: a mismatch, as it was.
 //
 // An answer is the per-port virtual host's routes, with that virtual host's
 // typed_per_filter_config in force on each route (a service-wide HTTP filter
 // is enabled there, and the compiled virtual host also answers the refusals,
-// which must not run it), or its matcher (a short name's caller-namespace
-// matcher), unchanged.
+// which must not run it), or, for a short name, its caller-namespace matcher
+// flattened the same way: each namespace's routes under a filter-state match
+// on the caller's namespace, then what a caller of no such namespace gets,
+// then what a connection with no namespace gets.
 //
 // Domains are grouped into virtual hosts by the name of the per-port virtual
 // host that first claims them: "<mesh name>|<what>" groups under the mesh
 // name, so a service has one virtual host whatever spelling or port names it,
-// and "<short name>|short|<suffix>" under the short name. The grouping decides
-// nothing about answers, only how many virtual hosts there are.
+// and "<short name>|short|<suffix>" under the short name.
 //
 // When the dialled-port filter state is missing (a chain that does not set
 // it), every request gets other's answer: a mesh name the node knows is
@@ -58,8 +61,10 @@ import (
 //
 // An error means the per-port tables use a construct this compiler does not
 // model (a domain wildcard other than "*" and "<name>:*", a virtual-host field
-// other than its routes, matcher and per-filter config). The caller must not
-// publish a table then; nothing the agent builds today does that.
+// other than its routes, matcher and per-filter config, names of one virtual
+// host that one table answers differently for one suffix, a route list a
+// request can fall out of). The caller must not publish the result then;
+// nothing the agent builds today does that.
 func MergeCaptureRouteTables(name string, perPort map[uint32]*routev3.RouteConfiguration, other *routev3.RouteConfiguration) (*routev3.RouteConfiguration, error) {
 	ports := slices.Sorted(maps.Keys(perPort))
 	tables := make([]*mergeTable, 0, len(ports))
@@ -114,6 +119,46 @@ func mergeMembers(all []*mergeTable) map[string][]string {
 		slices.Sort(doms)
 	}
 	return members
+}
+
+// RefuseCaptureMeshNames is the table published in place of cap_http when the
+// per-port tables cannot be compiled: every domain any of them claims is
+// refused (421 port-not-declared), whatever was dialled, and every other Host
+// gets the floor of the table of a port no service declares. No mesh name the
+// node knows is delivered, and none leaves through the passthrough.
+func RefuseCaptureMeshNames(name string, perPort map[uint32]*routev3.RouteConfiguration, other *routev3.RouteConfiguration) *routev3.RouteConfiguration {
+	doms := slices.Sorted(maps.Keys(mergeMembersFlat(append(slices.Collect(maps.Values(perPort)), other))))
+	var star *routev3.VirtualHost
+	for _, vh := range other.GetVirtualHosts() {
+		if slices.Contains(vh.GetDomains(), starGroup) {
+			star = vh
+		}
+	}
+	out := &routev3.RouteConfiguration{Name: name}
+	if len(doms) > 0 {
+		out.VirtualHosts = append(out.VirtualHosts, BuildRefusalVirtualHost("capture_table_unbuilt", doms, RefusalPortNotDeclared,
+			"aether: this node could not build its capture route table, and refuses every mesh name on the captured path until it can. The agent's log says why.\n"))
+	}
+	if star == nil {
+		star = BuildCaptureCatchAllVirtualHost("", 0, false, false)
+	}
+	out.VirtualHosts = append(out.VirtualHosts, proto.Clone(star).(*routev3.VirtualHost))
+	return out
+}
+
+// mergeMembersFlat returns every domain but "*" of tables, lower-cased.
+func mergeMembersFlat(tables []*routev3.RouteConfiguration) map[string]bool {
+	out := map[string]bool{}
+	for _, rc := range tables {
+		for _, vh := range rc.GetVirtualHosts() {
+			for _, d := range vh.GetDomains() {
+				if d = strings.ToLower(d); d != starGroup {
+					out[d] = true
+				}
+			}
+		}
+	}
+	return out
 }
 
 // mergeGroupName is the compiled virtual host a domain belongs to: the part
@@ -252,198 +297,368 @@ func newMergeAnswer(om *xdsmatcherv3.Matcher_OnMatch) (mergeAnswer, error) {
 	return mergeAnswer{onMatch: om, key: string(b)}, nil
 }
 
-// mergeGroup builds one compiled virtual host from the domains doms.
+// mergeGroup builds one compiled virtual host from the domains doms: a plain
+// route list, one block of routes per dialled port whose answers differ from
+// the other ports', each route conditioned on that dialled port, and the
+// other ports' block last, unconditioned on the port.
 func mergeGroup(name string, doms []string, ports []uint32, tables []*mergeTable, other *mergeTable) (*routev3.VirtualHost, error) {
-	otherAnswer, err := mergeAuthority(doms, other)
+	suffixes, err := groupSuffixes(doms)
 	if err != nil {
 		return nil, err
 	}
-	byPort := map[string]*xdsmatcherv3.Matcher_OnMatch{}
+	otherAnswers, err := suffixAnswers(name, doms, other)
+	if err != nil {
+		return nil, err
+	}
+	var routes []*routev3.Route
 	for i, p := range ports {
-		a, err := mergeAuthority(doms, tables[i])
+		answers, err := suffixAnswers(name, doms, tables[i])
 		if err != nil {
 			return nil, err
 		}
-		if a.key != otherAnswer.key {
-			byPort[strconv.Itoa(int(p))] = a.onMatch
+		if sameAnswers(answers, otherAnswers) {
+			continue // the port gets what every other port gets
 		}
-	}
-	vh := &routev3.VirtualHost{Name: name, Domains: mergeDomains(doms)}
-	if len(byPort) == 0 {
-		// Every dialled port gets one answer.
-		if m := otherAnswer.onMatch.GetMatcher(); m != nil {
-			vh.Matcher = m
-		} else {
-			list := &routev3.RouteList{}
-			if err := otherAnswer.onMatch.GetAction().GetTypedConfig().UnmarshalTo(list); err != nil {
-				return nil, err
-			}
-			vh.Routes = list.GetRoutes()
+		port := strconv.Itoa(int(p))
+		block, err := flatBlock(answers, suffixes, []routeCond{dialledCond(port)})
+		if err != nil {
+			return nil, fmt.Errorf("virtual host %s, dialled port %d: %w", name, p, err)
 		}
-		return vh, nil
+		routes = append(routes, block...)
 	}
-	vh.Matcher = &xdsmatcherv3.Matcher{
-		MatcherType: &xdsmatcherv3.Matcher_MatcherTree_{MatcherTree: &xdsmatcherv3.Matcher_MatcherTree{
-			Input: &xdscorev3.TypedExtensionConfig{
-				Name:        dialledPortInputName,
-				TypedConfig: config.TypedConfig(&network_inputsv3.FilterStateInput{Key: DialledPortFilterStateKey}),
-			},
-			TreeType: &xdsmatcherv3.Matcher_MatcherTree_ExactMatchMap{ExactMatchMap: &xdsmatcherv3.Matcher_MatcherTree_MatchMap{Map: byPort}},
-		}},
-		OnNoMatch: otherAnswer.onMatch,
+	block, err := flatBlock(otherAnswers, suffixes, nil)
+	if err != nil {
+		return nil, fmt.Errorf("virtual host %s, any other port: %w", name, err)
 	}
-	return vh, nil
+	return &routev3.VirtualHost{Name: name, Domains: mergeDomains(doms), Routes: append(routes, block...)}, nil
 }
 
+// A group's domains are its names, each with a SUFFIX: "" (no port), ":<P>"
+// or ":*". The virtual host's domains already restrict a Host to the group's
+// names, so a route need only tell suffixes apart, which a small regex on
+// :authority does. That is right only if every name of the group gets the
+// same answer for the same suffix in every table; suffixAnswers checks it.
 const (
-	dialledPortInputName = "aether.matching.inputs.dialled_port"
-	authorityInputName   = "aether.matching.inputs.authority"
+	suffixNone = ""
+	suffixAny  = ":*"
+	starGroup  = "*"
 )
 
-// mergeAuthority is what one table answers for the domains doms, as one
-// matcher branch: a single answer when the table answers them all alike, else
-// a list that names the spellings of every answer but the most common one,
-// which is the list's on_no_match.
-func mergeAuthority(doms []string, t *mergeTable) (mergeAnswer, error) {
-	classes, err := answerClasses(doms, t)
-	if err != nil {
-		return mergeAnswer{}, err
+func domainSuffix(d string) string {
+	if d == starGroup {
+		return starGroup
 	}
-	if len(classes) == 1 {
-		return classes[0].answer, nil
+	if i := strings.IndexByte(d, ':'); i >= 0 {
+		return d[i:]
 	}
-	// The class with the most spellings answers the rest; the first such
-	// class on a tie, in domain order.
-	def := classes[0]
-	for _, c := range classes[1:] {
-		if len(c.doms) > len(def.doms) {
-			def = c
+	return suffixNone
+}
+
+// groupSuffixes returns the suffixes of doms, sorted.
+func groupSuffixes(doms []string) ([]string, error) {
+	seen := map[string]bool{}
+	for _, d := range doms {
+		s := domainSuffix(d)
+		if s != suffixNone && s != suffixAny && s != starGroup {
+			if _, err := strconv.ParseUint(s[1:], 10, 16); err != nil {
+				return nil, fmt.Errorf("domain %q has a suffix the merge does not model", d)
+			}
 		}
+		seen[s] = true
 	}
-	return newMergeAnswer(&xdsmatcherv3.Matcher_OnMatch{OnMatch: &xdsmatcherv3.Matcher_OnMatch_Matcher{Matcher: &xdsmatcherv3.Matcher{
-		MatcherType: &xdsmatcherv3.Matcher_MatcherList_{MatcherList: &xdsmatcherv3.Matcher_MatcherList{Matchers: authorityList(classes, def)}},
-		OnNoMatch:   def.answer.onMatch,
-	}}})
+	return slices.Sorted(maps.Keys(seen)), nil
 }
 
-// answerClass is the domains a table answers alike.
-type answerClass struct {
-	answer mergeAnswer
-	doms   []string
-}
-
-// answerClasses groups doms by what t answers them, in domain order.
-func answerClasses(doms []string, t *mergeTable) ([]*answerClass, error) {
-	var classes []*answerClass
-	byKey := map[string]*answerClass{}
+// suffixAnswers returns, per suffix, what t answers the group's domains with
+// that suffix, and refuses a group whose names disagree on one.
+func suffixAnswers(group string, doms []string, t *mergeTable) (map[string]mergeAnswer, error) {
+	out := map[string]mergeAnswer{}
 	for _, d := range doms {
 		a, err := t.answer(d)
 		if err != nil {
 			return nil, err
 		}
-		c, ok := byKey[a.key]
-		if !ok {
-			c = &answerClass{answer: a}
-			byKey[a.key] = c
-			classes = append(classes, c)
+		s := domainSuffix(d)
+		if prev, ok := out[s]; ok && prev.key != a.key {
+			return nil, fmt.Errorf("table %s, virtual host %s: two names answer the suffix %q differently", t.rc.GetName(), group, s)
 		}
-		c.doms = append(c.doms, d)
+		out[s] = a
 	}
-	return classes, nil
+	return out, nil
 }
 
-// authorityList is the field matchers of mergeAuthority's list. It is
-// first-match, and an exact spelling must be tested before any "<name>:"
-// prefix that would also take it: so the exact spellings of every class come
-// first, including those of the on_no_match class (def) that a prefix of
-// another class would take, and the prefixes last.
-func authorityList(classes []*answerClass, def *answerClass) []*xdsmatcherv3.Matcher_MatcherList_FieldMatcher {
-	var prefixes []string
-	for _, c := range classes {
-		if c != def {
-			prefixes = append(prefixes, wildcardPrefixes(c.doms)...)
+func sameAnswers(a, b map[string]mergeAnswer) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for s, x := range a {
+		if y, ok := b[s]; !ok || y.key != x.key {
+			return false
 		}
 	}
-	input := &xdscorev3.TypedExtensionConfig{
-		Name:        authorityInputName,
-		TypedConfig: config.TypedConfig(&typematcherv3.HttpRequestHeaderMatchInput{HeaderName: ":authority"}),
-	}
-	var list []*xdsmatcherv3.Matcher_MatcherList_FieldMatcher
-	for _, wildcards := range []bool{false, true} {
-		for _, c := range classes {
-			if fm := authorityField(input, c, wildcards, c == def, prefixes); fm != nil {
-				list = append(list, fm)
-			}
-		}
-	}
-	return list
+	return true
 }
 
-// authorityField is the field matcher of one class: its exact spellings, or
-// its "<name>:*" ones. The on_no_match class (isDef) is listed only for the
-// exact spellings a prefix of another class would take, and never for its
-// wildcards. nil when there is nothing to list.
-func authorityField(input *xdscorev3.TypedExtensionConfig, c *answerClass, wildcards, isDef bool, prefixes []string) *xdsmatcherv3.Matcher_MatcherList_FieldMatcher {
-	if isDef && wildcards {
-		return nil
+// flatBlock is one table's answers for the group as routes: every answer but
+// the default one conditioned on the :authority suffixes it is for, then the
+// default, each route also under conds. The default is the answer of ":*"
+// when the group has it (it stands for every port spelling no exact domain
+// names, which no regex lists), else the answer most suffixes get.
+func flatBlock(answers map[string]mergeAnswer, suffixes []string, conds []routeCond) ([]*routev3.Route, error) {
+	bySuffix := map[string][]string{}
+	var keys []string
+	for _, s := range suffixes {
+		k := answers[s].key
+		if _, ok := bySuffix[k]; !ok {
+			keys = append(keys, k)
+		}
+		bySuffix[k] = append(bySuffix[k], s)
 	}
-	var doms []string
-	for _, d := range c.doms {
-		if strings.HasSuffix(d, "*") != wildcards || (isDef && !hasAnyPrefix(d, prefixes)) {
+	def := defaultAnswer(keys, bySuffix)
+	var out []*routev3.Route
+	for _, k := range keys {
+		if k == def {
 			continue
 		}
-		doms = append(doms, d)
+		auth, err := authorityCond(bySuffix[k])
+		if err != nil {
+			return nil, err
+		}
+		routes, err := flattenOnMatch(answers[bySuffix[k][0]].onMatch, append(slices.Clone(conds), auth))
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, routes...)
 	}
-	if len(doms) == 0 {
-		return nil
+	routes, err := flattenOnMatch(answers[bySuffix[def][0]].onMatch, conds)
+	if err != nil {
+		return nil, err
 	}
-	return &xdsmatcherv3.Matcher_MatcherList_FieldMatcher{Predicate: authorityPredicate(input, doms), OnMatch: c.answer.onMatch}
+	return append(out, routes...), nil
 }
 
-// wildcardPrefixes returns the "<name>:" of every "<name>:*" in doms.
-func wildcardPrefixes(doms []string) []string {
-	var out []string
-	for _, d := range doms {
-		if p, wild := strings.CutSuffix(d, "*"); wild {
-			out = append(out, p)
+// defaultAnswer is the answer of ":*" when there is one, else the one most
+// suffixes get (the first on a tie).
+func defaultAnswer(keys []string, bySuffix map[string][]string) string {
+	def := keys[0]
+	for _, k := range keys {
+		if slices.Contains(bySuffix[k], suffixAny) {
+			return k
+		}
+		if len(bySuffix[k]) > len(bySuffix[def]) {
+			def = k
 		}
 	}
-	return out
+	return def
 }
 
-func hasAnyPrefix(d string, prefixes []string) bool {
-	for _, p := range prefixes {
-		if strings.HasPrefix(d, p) {
-			return true
-		}
-	}
-	return false
+// routeCond is one condition added to a route's match: a filter-state value,
+// or a request header.
+type routeCond struct {
+	filterState *typematcherv3.FilterStateMatcher
+	header      *routev3.HeaderMatcher
 }
 
-// authorityPredicate matches a Host that selects one of doms: an exact domain
-// is that Host, and "<name>:*" every Host that starts "<name>:" and matched no
-// exact domain (those are tested first, by the class that holds them, or are
-// the on_no_match class).
-func authorityPredicate(input *xdscorev3.TypedExtensionConfig, doms []string) *xdsmatcherv3.Matcher_MatcherList_Predicate {
-	preds := make([]*xdsmatcherv3.Matcher_MatcherList_Predicate, 0, len(doms))
-	for _, d := range doms {
-		sm := &xdsmatcherv3.StringMatcher{MatchPattern: &xdsmatcherv3.StringMatcher_Exact{Exact: d}, IgnoreCase: true}
-		if prefix, wild := strings.CutSuffix(d, "*"); wild {
-			sm = &xdsmatcherv3.StringMatcher{MatchPattern: &xdsmatcherv3.StringMatcher_Prefix{Prefix: prefix}, IgnoreCase: true}
-		}
-		preds = append(preds, singlePredicate(input, sm))
+func (c routeCond) apply(r *routev3.Route) {
+	if c.filterState != nil {
+		r.Match.FilterState = append(r.Match.FilterState, proto.Clone(c.filterState).(*typematcherv3.FilterStateMatcher))
 	}
-	if len(preds) == 1 {
-		return preds[0]
+	if c.header != nil {
+		r.Match.Headers = append(r.Match.Headers, proto.Clone(c.header).(*routev3.HeaderMatcher))
 	}
-	return &xdsmatcherv3.Matcher_MatcherList_Predicate{MatchType: &xdsmatcherv3.Matcher_MatcherList_Predicate_OrMatcher{
-		OrMatcher: &xdsmatcherv3.Matcher_MatcherList_Predicate_PredicateList{Predicate: preds},
+}
+
+// dialledCond: the connection was dialled on port.
+func dialledCond(port string) routeCond {
+	return routeCond{filterState: &typematcherv3.FilterStateMatcher{
+		Key:     DialledPortFilterStateKey,
+		Matcher: &typematcherv3.FilterStateMatcher_StringMatch{StringMatch: &typematcherv3.StringMatcher{MatchPattern: &typematcherv3.StringMatcher_Exact{Exact: port}}},
 	}}
+}
+
+// authorityCond: the Host's suffix is one of suffixes (never ":*"). The name
+// before it is any: the virtual host's domains have already chosen it. One
+// port at most: "<name>:8080:8080" has no suffix the regex accepts.
+func authorityCond(suffixes []string) (routeCond, error) {
+	portless := false
+	var ports []string
+	for _, s := range suffixes {
+		switch s {
+		case suffixNone:
+			portless = true
+		case suffixAny, starGroup:
+			return routeCond{}, fmt.Errorf("the suffix %q cannot be told apart by a route", s)
+		default:
+			ports = append(ports, s[1:])
+		}
+	}
+	var re string
+	switch {
+	case portless && len(ports) > 0:
+		re = "^[^:]+(:(" + strings.Join(ports, "|") + "))?$"
+	case portless:
+		re = "^[^:]+$"
+	default:
+		re = "^[^:]+:(" + strings.Join(ports, "|") + ")$"
+	}
+	return routeCond{header: &routev3.HeaderMatcher{
+		Name: ":authority",
+		HeaderMatchSpecifier: &routev3.HeaderMatcher_StringMatch{StringMatch: &typematcherv3.StringMatcher{
+			MatchPattern: &typematcherv3.StringMatcher_SafeRegex{SafeRegex: &typematcherv3.RegexMatcher{Regex: re}},
+		}},
+	}}, nil
+}
+
+// flattenOnMatch turns an answer into routes under conds. A RouteList answer
+// is its routes. A matcher answer (a short name's, by the caller's namespace)
+// is the routes of each of its branches under that branch's condition, in
+// the matcher's order, then its on_no_match's. That is the matcher's answer
+// only because every route list ends in a route every request takes
+// (requireTotal): a request that a branch's condition takes never falls
+// through to a later branch.
+func flattenOnMatch(om *xdsmatcherv3.Matcher_OnMatch, conds []routeCond) ([]*routev3.Route, error) {
+	switch {
+	case om == nil:
+		return nil, nil
+	case om.GetMatcher() != nil:
+		return flattenMatcher(om.GetMatcher(), conds)
+	case om.GetAction() != nil:
+		list := &routev3.RouteList{}
+		if err := om.GetAction().GetTypedConfig().UnmarshalTo(list); err != nil {
+			return nil, err
+		}
+		if err := requireTotal(list.GetRoutes()); err != nil {
+			return nil, err
+		}
+		out := make([]*routev3.Route, 0, len(list.GetRoutes()))
+		for _, r := range list.GetRoutes() {
+			c := proto.Clone(r).(*routev3.Route)
+			if c.Match == nil {
+				c.Match = &routev3.RouteMatch{}
+			}
+			for _, cond := range conds {
+				cond.apply(c)
+			}
+			out = append(out, c)
+		}
+		return out, nil
+	}
+	return nil, fmt.Errorf("a matcher branch that is neither a matcher nor an action")
+}
+
+func flattenMatcher(m *xdsmatcherv3.Matcher, conds []routeCond) ([]*routev3.Route, error) {
+	var out []*routev3.Route
+	add := func(om *xdsmatcherv3.Matcher_OnMatch, more ...routeCond) error {
+		routes, err := flattenOnMatch(om, append(slices.Clone(conds), more...))
+		out = append(out, routes...)
+		return err
+	}
+	branches, err := matcherBranches(m)
+	if err != nil {
+		return nil, err
+	}
+	for _, b := range branches {
+		if err := add(b.onMatch, b.cond); err != nil {
+			return nil, err
+		}
+	}
+	if err := add(m.GetOnNoMatch()); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// matcherBranch is one branch of a matcher: its condition and its on_match.
+type matcherBranch struct {
+	cond    routeCond
+	onMatch *xdsmatcherv3.Matcher_OnMatch
+}
+
+// matcherBranches lists a matcher's branches in the order it tries them: a
+// list's field matchers, or an exact map's keys (disjoint, so in any order).
+func matcherBranches(m *xdsmatcherv3.Matcher) ([]matcherBranch, error) {
+	var out []matcherBranch
+	switch {
+	case m.GetMatcherList() != nil:
+		for _, fm := range m.GetMatcherList().GetMatchers() {
+			cond, err := filterStatePredicate(fm.GetPredicate())
+			if err != nil {
+				return nil, err
+			}
+			out = append(out, matcherBranch{cond: cond, onMatch: fm.GetOnMatch()})
+		}
+	case m.GetMatcherTree().GetExactMatchMap() != nil:
+		key, err := filterStateKey(m.GetMatcherTree().GetInput())
+		if err != nil {
+			return nil, err
+		}
+		branches := m.GetMatcherTree().GetExactMatchMap().GetMap()
+		for _, v := range slices.Sorted(maps.Keys(branches)) {
+			out = append(out, matcherBranch{onMatch: branches[v], cond: routeCond{filterState: &typematcherv3.FilterStateMatcher{
+				Key:     key,
+				Matcher: &typematcherv3.FilterStateMatcher_StringMatch{StringMatch: &typematcherv3.StringMatcher{MatchPattern: &typematcherv3.StringMatcher_Exact{Exact: v}}},
+			}}})
+		}
+	default:
+		return nil, fmt.Errorf("a matcher the merge does not model")
+	}
+	return out, nil
+}
+
+func filterStateKey(input interface {
+	GetTypedConfig() *anypb.Any
+},
+) (string, error) {
+	in := &network_inputsv3.FilterStateInput{}
+	if err := input.GetTypedConfig().UnmarshalTo(in); err != nil {
+		return "", fmt.Errorf("a matcher input other than filter state: %w", err)
+	}
+	return in.GetKey(), nil
+}
+
+// filterStatePredicate translates a single filter-state predicate with a
+// string match (a short name's "is the caller's namespace there").
+func filterStatePredicate(p *xdsmatcherv3.Matcher_MatcherList_Predicate) (routeCond, error) {
+	sp := p.GetSinglePredicate()
+	if sp == nil || sp.GetValueMatch() == nil {
+		return routeCond{}, fmt.Errorf("a matcher predicate the merge does not model")
+	}
+	key, err := filterStateKey(sp.GetInput())
+	if err != nil {
+		return routeCond{}, err
+	}
+	sm := &typematcherv3.StringMatcher{IgnoreCase: sp.GetValueMatch().GetIgnoreCase()}
+	switch v := sp.GetValueMatch().GetMatchPattern().(type) {
+	case *xdsmatcherv3.StringMatcher_Exact:
+		sm.MatchPattern = &typematcherv3.StringMatcher_Exact{Exact: v.Exact}
+	case *xdsmatcherv3.StringMatcher_SafeRegex:
+		sm.MatchPattern = &typematcherv3.StringMatcher_SafeRegex{SafeRegex: &typematcherv3.RegexMatcher{Regex: v.SafeRegex.GetRegex()}}
+	default:
+		return routeCond{}, fmt.Errorf("a string match the merge does not model")
+	}
+	return routeCond{filterState: &typematcherv3.FilterStateMatcher{Key: key, Matcher: &typematcherv3.FilterStateMatcher_StringMatch{StringMatch: sm}}}, nil
+}
+
+// requireTotal refuses a route list whose last route some request could fail
+// to match: it must be a "/" prefix with no other condition. Every list the
+// table builders make ends so (a service's fallback, a refusal, a floor's
+// fallthrough).
+func requireTotal(routes []*routev3.Route) error {
+	if len(routes) == 0 {
+		return fmt.Errorf("an empty route list")
+	}
+	m := routes[len(routes)-1].GetMatch()
+	bare := proto.Clone(m).(*routev3.RouteMatch)
+	bare.PathSpecifier = nil
+	if m.GetPrefix() != "/" || !proto.Equal(bare, &routev3.RouteMatch{}) {
+		return fmt.Errorf("a route list whose last route is not taken by every request: %v", m)
+	}
+	return nil
 }
 
 // mergeDomains returns the compiled virtual host's domains: doms without the
 // exact "<name>:<port>" spellings a "<name>:*" of the same virtual host
-// already selects (the virtual host's matcher tells them apart).
+// already selects (its routes tell them apart).
 func mergeDomains(doms []string) []string {
 	wild := map[string]bool{}
 	for _, d := range doms {

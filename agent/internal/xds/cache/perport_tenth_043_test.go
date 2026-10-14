@@ -218,7 +218,7 @@ func TestRefusalBody_EveryRefusalOfANameWithAnUnresolvedPortSaysSo(t *testing.T)
 		{proxy.OutboundHTTPRouteName, mesh + ":7777", "port-not-declared", "a port the Service does not have, on the loopback table"},
 		{proxy.CaptureHTTPOtherRouteName, mesh + ":7777", "port-not-declared", "a dial to a port number that has no chain"},
 		{"cap_http_9090", mesh + ":9090", "port-not-declared", "a dial to another service's port number"},
-		{"cap_http_9090", mesh + ":81", "port-mismatch", "a Host that names another port than the one dialled"},
+		{"cap_http_9090", mesh + ":81", "port-not-declared", "a Host that names another port, on a port the name is not served on"},
 	} {
 		require.NotNilf(t, tables[tc.table], "control: table %s", tc.table)
 		got := a043Resolve(t, tables[tc.table], tc.host)

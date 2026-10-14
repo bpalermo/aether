@@ -8,6 +8,7 @@ go_library(
     testonly = True,
     srcs = [
         "routes.go",
+        "treatment.go",
         "xdseval.go",
     ],
     importpath = "aethermesh.dev/agent/test/xdseval",

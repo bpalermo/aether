@@ -259,7 +259,7 @@ func GenerateCaptureListener(cniPod *cniv1.CNIPod, sourceSpiffeID string, captur
 		StatPrefix:                    podStatName(CaptureListenerName(cniPod)),
 		TrafficDirection:              corev3.TrafficDirection_OUTBOUND,
 		FilterChains:                  chains,
-		FilterChainMatcher:            captureChainMatcher(services, !withPassthrough),
+		FilterChainMatcher:            captureChainMatcher(CaptureListenerName(cniPod), services, !withPassthrough),
 	}
 
 	// SPIKE/M2a passthrough: the DefaultFilterChain is Envoy's true "no named chain

@@ -16,7 +16,6 @@ import (
 	"aethermesh.dev/agent/internal/xds/proxy"
 	cniv1 "aethermesh.dev/api/aether/cni/v1"
 	registryv1 "aethermesh.dev/api/aether/registry/v1"
-	xdscorev3 "github.com/cncf/xds/go/xds/core/v3"
 	bootstrapv3 "github.com/envoyproxy/go-control-plane/envoy/config/bootstrap/v3"
 	clusterv3 "github.com/envoyproxy/go-control-plane/envoy/config/cluster/v3"
 	corev3 "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
@@ -25,7 +24,6 @@ import (
 	routev3 "github.com/envoyproxy/go-control-plane/envoy/config/route/v3"
 	routerv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/http/router/v3"
 	http_connection_managerv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/network/http_connection_manager/v3"
-	network_inputsv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/matching/common_inputs/network/v3"
 	resourcev3 "github.com/envoyproxy/go-control-plane/pkg/resource/v3"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/protobuf/encoding/protojson"
@@ -193,22 +191,47 @@ func TestAgentCaptureListenerAndTableValidate(t *testing.T) {
 	t.Logf("envoy --mode validate:\n%s", out)
 	require.NoError(t, err, "the pinned proxy refuses the agent's capture listener or its table")
 
-	// Seen red: the same bootstrap with a branch of the table keyed on the
-	// destination port directly (DestinationPortInput, which a route table's
-	// matcher may not use: "Route table can only match on request headers")
-	// instead of the filter state the chain records. The gate must refuse it,
-	// or it would not see the table's matcher at all.
-	bad := mutateCompiledTable(t, data, func(vh *routev3.VirtualHost) bool {
-		tree := vh.GetMatcher().GetMatcherTree()
-		if tree == nil {
-			return false
+	// The table is a plain route list: no virtual host has a matcher, and
+	// the routes of a port match the dialled port's filter state.
+	bs := &bootstrapv3.Bootstrap{}
+	require.NoError(t, protojson.Unmarshal(data, bs))
+	fsRoutes := 0
+	for _, l := range bs.GetStaticResources().GetListeners() {
+		if l.GetName() != proxy.CaptureHTTPChainName+"_validate" {
+			continue
 		}
-		tree.Input = &xdscorev3.TypedExtensionConfig{Name: "dport", TypedConfig: mustAny(&network_inputsv3.DestinationPortInput{})}
-		return true
+		hcm := &http_connection_managerv3.HttpConnectionManager{}
+		require.NoError(t, l.GetFilterChains()[0].GetFilters()[0].GetTypedConfig().UnmarshalTo(hcm))
+		for _, vh := range hcm.GetRouteConfig().GetVirtualHosts() {
+			require.Nil(t, vh.GetMatcher(), "virtual host %s has a matcher", vh.GetName())
+			for _, r := range vh.GetRoutes() {
+				for _, fs := range r.GetMatch().GetFilterState() {
+					if fs.GetKey() == proxy.DialledPortFilterStateKey {
+						fsRoutes++
+					}
+				}
+			}
+		}
+	}
+	require.Positive(t, fsRoutes, "anti-vacuity: the validated table has routes on the dialled port")
+
+	// Seen red: the same bootstrap with one dialled-port match whose key is
+	// empty. The gate must refuse it, or it would not be reading the
+	// table's route matches at all.
+	bad := mutateCompiledTable(t, data, func(vh *routev3.VirtualHost) bool {
+		for _, r := range vh.GetRoutes() {
+			for _, fs := range r.GetMatch().GetFilterState() {
+				if fs.GetKey() == proxy.DialledPortFilterStateKey {
+					fs.Key = ""
+					return true
+				}
+			}
+		}
+		return false
 	})
 	out, err = runValidate(t, bad)
-	require.Error(t, err, "validate accepted a route-table matcher on the destination port:\n%s", out)
-	require.Contains(t, out, "Route table can only match on request headers")
+	require.Error(t, err, "validate accepted a filter-state route match with no key:\n%s", out)
+	t.Logf("refused as it must be:\n%s", out)
 }
 
 // mutateCompiledTable edits the first virtual host f changes in the inline

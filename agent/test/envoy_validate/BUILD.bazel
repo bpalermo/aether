@@ -123,7 +123,6 @@ go_test(
         "//api/aether/cni/v1:cni",
         "//api/aether/registry/v1:registry",
         "//common/constants/mesh",
-        "@com_github_cncf_xds_go//xds/core/v3:core",
         "@com_github_envoyproxy_go_control_plane//pkg/resource/v3:resource",
         "@com_github_envoyproxy_go_control_plane_envoy//config/bootstrap/v3:bootstrap",
         "@com_github_envoyproxy_go_control_plane_envoy//config/cluster/v3:cluster",

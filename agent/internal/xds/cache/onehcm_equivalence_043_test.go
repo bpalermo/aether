@@ -11,9 +11,9 @@ import (
 	"aethermesh.dev/agent/internal/xds/proxy"
 	"aethermesh.dev/agent/test/xdseval"
 	registryv1 "aethermesh.dev/api/aether/registry/v1"
-	xdsmatcherv3 "github.com/cncf/xds/go/xds/type/matcher/v3"
 	routev3 "github.com/envoyproxy/go-control-plane/envoy/config/route/v3"
 	header_mutationv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/http/header_mutation/v3"
+	typematcherv3 "github.com/envoyproxy/go-control-plane/envoy/type/matcher/v3"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/protobuf/proto"
@@ -85,7 +85,7 @@ func TestOneHCM_CompiledTableAnswersAsThePerPortTables(t *testing.T) {
 			merged := a043Published(t, c)
 			perPort, other := c.capturePerPortTables(c.captureTableInputs(), c.captureHTTPPorts())
 			require.Greater(t, len(perPort), 2, "the fixture has HTTP port numbers")
-			requireCompiledEquivalent(t, merged, perPort, other)
+			requireCompiledEquivalentAllPaths(t, merged, perPort, other)
 
 			// Not vacuous: the requests the check makes see routed,
 			// refused, mismatched and short-name answers alike.
@@ -118,13 +118,13 @@ func TestOneHCM_EquivalenceCheckSeesAWrongCompiledTable(t *testing.T) {
 	c := oneHCMFixtures(t)["fixture with rules, a filter, imports and a user Service"]
 	merged := a043Published(t, c)
 	perPort, other := c.capturePerPortTables(c.captureTableInputs(), c.captureHTTPPorts())
-	require.Empty(t, compiledMismatches(merged, perPort, other, 1))
+	require.Empty(t, compiledMismatches(merged, perPort, other, 1, true))
 
 	mutate := func(name string, f func(rc *routev3.RouteConfiguration) bool) {
 		t.Run(name, func(t *testing.T) {
 			bad := proto.Clone(merged).(*routev3.RouteConfiguration)
 			require.True(t, f(bad), "the mutation found nothing to change")
-			got := compiledMismatches(bad, perPort, other, 3)
+			got := compiledMismatches(bad, perPort, other, 3, true)
 			assert.NotEmpty(t, got, "the check did not see the defect")
 			t.Logf("seen: %v", got)
 		})
@@ -138,87 +138,102 @@ func TestOneHCM_EquivalenceCheckSeesAWrongCompiledTable(t *testing.T) {
 		return nil
 	}
 	const multi = "multi.demo." + a043Mesh
-
-	mutate("a dialled port loses its branch (answered as any other port)", func(rc *routev3.RouteConfiguration) bool {
-		m := vhost(rc, multi).GetMatcher().GetMatcherTree().GetExactMatchMap().GetMap()
-		_, ok := m["8080"]
-		delete(m, "8080")
-		return ok
-	})
-	mutate("two dialled ports' branches swapped", func(rc *routev3.RouteConfiguration) bool {
-		m := vhost(rc, multi).GetMatcher().GetMatcherTree().GetExactMatchMap().GetMap()
-		if m["8080"] == nil || m["9090"] == nil {
-			return false
+	dialled := func(r *routev3.Route) string {
+		for _, fs := range r.GetMatch().GetFilterState() {
+			if fs.GetKey() == proxy.DialledPortFilterStateKey {
+				return fs.GetStringMatch().GetExact()
+			}
 		}
-		m["8080"], m["9090"] = m["9090"], m["8080"]
-		return true
+		return ""
+	}
+	setDialled := func(r *routev3.Route, port string) {
+		for _, fs := range r.GetMatch().GetFilterState() {
+			if fs.GetKey() == proxy.DialledPortFilterStateKey {
+				fs.GetStringMatch().MatchPattern = &typematcherv3.StringMatcher_Exact{Exact: port}
+			}
+		}
+	}
+
+	mutate("a dialled port loses its routes (answered as any other port)", func(rc *routev3.RouteConfiguration) bool {
+		vh := vhost(rc, multi)
+		before := len(vh.GetRoutes())
+		vh.Routes = slices.DeleteFunc(vh.Routes, func(r *routev3.Route) bool { return dialled(r) == "8080" })
+		return len(vh.GetRoutes()) < before
+	})
+	mutate("two dialled ports' routes swapped", func(rc *routev3.RouteConfiguration) bool {
+		n := 0
+		for _, r := range vhost(rc, multi).GetRoutes() {
+			switch dialled(r) {
+			case "8080":
+				setDialled(r, "9090")
+				n++
+			case "9090":
+				setDialled(r, "8080")
+				n++
+			}
+		}
+		return n > 0
+	})
+	mutate("a route of port 9090 shadows port 8080", func(rc *routev3.RouteConfiguration) bool {
+		vh := vhost(rc, multi)
+		for _, r := range vh.GetRoutes() {
+			if dialled(r) == "9090" && r.GetRoute() != nil {
+				shadow := proto.Clone(r).(*routev3.Route)
+				setDialled(shadow, "8080")
+				vh.Routes = append([]*routev3.Route{shadow}, vh.Routes...)
+				return true
+			}
+		}
+		return false
+	})
+	mutate("the dialled-port predicate dropped from one route", func(rc *routev3.RouteConfiguration) bool {
+		for _, r := range vhost(rc, multi).GetRoutes() {
+			if dialled(r) == "8080" && r.GetRoute() != nil {
+				r.Match.FilterState = nil
+				return true
+			}
+		}
+		return false
 	})
 	mutate("the Host checked by suffix (the prototype's check): <name>:8080:8080 is served", func(rc *routev3.RouteConfiguration) bool {
 		changed := false
-		walkStringMatchers(vhost(rc, multi).GetMatcher(), func(sm *xdsmatcherv3.StringMatcher) {
-			if e := sm.GetExact(); strings.HasSuffix(e, ":8080") {
-				sm.MatchPattern = &xdsmatcherv3.StringMatcher_Suffix{Suffix: ":8080"}
-				changed = true
+		for _, r := range vhost(rc, multi).GetRoutes() {
+			for _, h := range r.GetMatch().GetHeaders() {
+				if h.GetName() == ":authority" && strings.Contains(h.GetStringMatch().GetSafeRegex().GetRegex(), "8080") {
+					h.GetStringMatch().GetSafeRegex().Regex = "(^[^:]+$)|(:8080$)"
+					changed = true
+				}
 			}
-		})
+		}
 		return changed
 	})
-	mutate("the Host compared case-sensitively", func(rc *routev3.RouteConfiguration) bool {
+	mutate("the Host condition dropped from a port's routes", func(rc *routev3.RouteConfiguration) bool {
 		changed := false
-		walkStringMatchers(vhost(rc, multi).GetMatcher(), func(sm *xdsmatcherv3.StringMatcher) {
-			if sm.GetIgnoreCase() {
-				sm.IgnoreCase = false
+		for _, r := range vhost(rc, multi).GetRoutes() {
+			if dialled(r) == "8080" && len(r.GetMatch().GetHeaders()) > 0 {
+				r.Match.Headers = slices.DeleteFunc(r.Match.Headers, func(h *routev3.HeaderMatcher) bool { return h.GetName() == ":authority" })
 				changed = true
 			}
-		})
+		}
 		return changed
-	})
-	mutate("no dialled port falls to a port's answer instead of the others'", func(rc *routev3.RouteConfiguration) bool {
-		vh := vhost(rc, multi)
-		vh.GetMatcher().OnNoMatch = vh.GetMatcher().GetMatcherTree().GetExactMatchMap().GetMap()["8080"]
-		return vh.GetMatcher().GetOnNoMatch() != nil
 	})
 	mutate("the catch-all offers every dialled port the same on-demand spelling", func(rc *routev3.RouteConfiguration) bool {
-		vh := vhost(rc, "on_demand_catch_all")
-		m := vh.GetMatcher().GetMatcherTree().GetExactMatchMap().GetMap()
-		if m["8080"] == nil {
-			return false
+		var want string
+		routes := vhost(rc, "on_demand_catch_all").GetRoutes()
+		for _, r := range routes {
+			if dialled(r) == "8080" && r.GetRoute().GetClusterHeader() != "" {
+				want = r.GetMatch().GetHeaders()[0].GetStringMatch().GetSafeRegex().GetRegex()
+			}
 		}
-		for k := range m {
-			m[k] = m["8080"]
+		changed := false
+		for _, r := range routes {
+			if r.GetRoute().GetClusterHeader() != "" && want != "" {
+				r.GetMatch().GetHeaders()[0].GetStringMatch().GetSafeRegex().Regex = want
+				changed = changed || dialled(r) != "8080"
+			}
 		}
-		return true
+		return changed
 	})
-}
-
-func walkStringMatchers(m *xdsmatcherv3.Matcher, f func(*xdsmatcherv3.StringMatcher)) {
-	if m == nil {
-		return
-	}
-	var pred func(p *xdsmatcherv3.Matcher_MatcherList_Predicate)
-	pred = func(p *xdsmatcherv3.Matcher_MatcherList_Predicate) {
-		if sp := p.GetSinglePredicate(); sp != nil && sp.GetValueMatch() != nil {
-			f(sp.GetValueMatch())
-		}
-		for _, q := range p.GetOrMatcher().GetPredicate() {
-			pred(q)
-		}
-		for _, q := range p.GetAndMatcher().GetPredicate() {
-			pred(q)
-		}
-		if p.GetNotMatcher() != nil {
-			pred(p.GetNotMatcher())
-		}
-	}
-	om := func(o *xdsmatcherv3.Matcher_OnMatch) { walkStringMatchers(o.GetMatcher(), f) }
-	for _, fm := range m.GetMatcherList().GetMatchers() {
-		pred(fm.GetPredicate())
-		om(fm.GetOnMatch())
-	}
-	for _, o := range m.GetMatcherTree().GetExactMatchMap().GetMap() {
-		om(o)
-	}
-	om(m.GetOnNoMatch())
 }
 
 // TestOneHCM_NoDialledPortFailsClosed is control 2 at the table: on a
@@ -236,15 +251,19 @@ func TestOneHCM_NoDialledPortFailsClosed(t *testing.T) {
 		mesh, kube := a043Names(s, a043BareIsUnique(services, s))
 		for _, name := range append([]string{mesh}, kube...) {
 			for _, suffix := range []string{"", ":80", ":8080", ":9090", ":9000", ":7070"} {
-				a, err := table.Resolve(xdseval.Request{Host: name + suffix, FilterState: map[string]string{proxy.CallerNamespaceFilterStateKey: s.ns}})
+				req := xdseval.Request{Host: name + suffix, FilterState: map[string]string{proxy.CallerNamespaceFilterStateKey: s.ns}}
+				a, err := table.Resolve(req)
 				require.NoError(t, err)
-				for _, r := range a.Routes {
-					o := xdseval.OutcomeOf(r)
+				for _, path := range []string{"/", "/x", "/v2"} {
+					req.Path = path
+					first, err := xdseval.FirstRoute(a.Routes, req)
+					require.NoError(t, err)
+					o := xdseval.OutcomeOf(first)
 					assert.Falsef(t, o.Cluster != "" && o.Cluster != proxy.PassthroughClusterName || o.ClusterHeader != "" || len(o.Weighted) > 0,
 						"Host %s with no dialled port reaches %+v", name+suffix, o)
-				}
-				if first, _ := xdseval.FirstRoute(a.Routes, xdseval.Request{Host: name + suffix}); first != nil && first.GetDirectResponse() != nil {
-					assert.Equal(t, uint32(421), first.GetDirectResponse().GetStatus(), "Host %s", name+suffix)
+					if first.GetDirectResponse() != nil && first.GetMatch().GetPath() != proxy.MeshLivePath {
+						assert.Equal(t, uint32(421), o.Status, "Host %s", name+suffix)
+					}
 				}
 				checked++
 			}
@@ -254,7 +273,7 @@ func TestOneHCM_NoDialledPortFailsClosed(t *testing.T) {
 	// Seen red: the same request WITH the dialled port is delivered.
 	a, err := table.Resolve(xdseval.Request{Host: "multi.demo." + a043Mesh + ":8080", FilterState: map[string]string{proxy.DialledPortFilterStateKey: "8080"}})
 	require.NoError(t, err)
-	first, err := xdseval.FirstRoute(a.Routes, xdseval.Request{Host: "multi.demo." + a043Mesh + ":8080"})
+	first, err := xdseval.FirstRoute(a.Routes, xdseval.Request{Host: "multi.demo." + a043Mesh + ":8080", FilterState: map[string]string{proxy.DialledPortFilterStateKey: "8080"}})
 	require.NoError(t, err)
 	require.NotNil(t, first)
 	assert.NotNil(t, first.GetRoute(), "with the dialled port 8080 the request is delivered: %v", first)

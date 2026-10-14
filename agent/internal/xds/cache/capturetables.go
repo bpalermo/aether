@@ -15,7 +15,6 @@ import (
 	"aethermesh.dev/common/serviceref"
 	routev3 "github.com/envoyproxy/go-control-plane/envoy/config/route/v3"
 	"github.com/envoyproxy/go-control-plane/pkg/cache/types"
-	"google.golang.org/protobuf/proto"
 )
 
 // This file builds what proposal 043 calls "the addressing rule" on the
@@ -1255,13 +1254,12 @@ func (c *SnapshotCache) captureRouteTables(ports []uint32) []types.Resource {
 	merged, err := proxy.MergeCaptureRouteTables(proxy.CaptureHTTPChainName, perPort, other)
 	if err != nil {
 		// A construct the compiler does not model: a defect of the builders,
-		// which the tests forbid. Publish the table of a port no service
-		// declares, under the published name: every mesh name the node knows
-		// is refused, none is delivered to a port it was not dialled on, and
-		// the listener's table resolves.
-		c.log.Error("the capture route tables could not be compiled into one; mesh names on the captured path are refused until they can", "error", err)
-		merged = proto.Clone(other).(*routev3.RouteConfiguration)
-		merged.Name = proxy.CaptureHTTPChainName
+		// which the tests forbid. Fail closed: every name any per-port table
+		// claims is refused, whatever was dialled (none is delivered, none is
+		// passed through), and the listener's table resolves.
+		c.log.Error("the capture route tables could not be compiled into one; every mesh name on the captured path is refused until they can", "error", err)
+		c.metrics.CaptureTableCompileFailed(context.Background())
+		merged = proxy.RefuseCaptureMeshNames(proxy.CaptureHTTPChainName, perPort, other)
 	}
 	out := []types.Resource{merged}
 	c.captureTables = captureTablesMemo{valid: true, key: key, deps: deps, arms: arms, tables: out}
@@ -1413,10 +1411,21 @@ func (c *SnapshotCache) appendNameVhosts(vhosts []*routev3.VirtualHost, in captu
 	}
 
 	// A Host that names a port other than the one dialled. The dialled port
-	// decides: the request is refused, never answered by another port. That
-	// holds for a name this node knows no port of as well: what was dialled
-	// is known, and no mesh name may reach the table's fallthrough.
-	refuse("mismatch", proxy.RefusalPortMismatch, fmt.Sprintf("was dialled on port %d with a Host header that names another port", d), domains(n.names, ":*"))
+	// decides: the request is refused, never answered by another port, and no
+	// mesh name may reach the table's fallthrough.
+	//
+	// It is a port MISMATCH only where the name is served on the dialled port
+	// (it routes there, or may: a name this node knows no port of). On a port
+	// the name does not serve the answer is port-not-declared whatever port
+	// the Host names: the port that decides is not one of the name's, which
+	// is also what any port no service declares gets (cap_http_other). The
+	// body names no port: the reason header is the contract, the body is a
+	// diagnostic, and one body for every dialled port is one route for all.
+	if routable || !informed {
+		refuse("mismatch", proxy.RefusalPortMismatch, "was dialled on a port its Host header does not name", domains(n.names, ":*"))
+		return vhosts
+	}
+	refuse("undeclared", proxy.RefusalPortNotDeclared, "does not declare the port that was dialled", domains(n.names, ":*"))
 	return vhosts
 }
 

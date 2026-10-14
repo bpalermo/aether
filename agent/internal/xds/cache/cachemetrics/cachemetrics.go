@@ -318,6 +318,15 @@ type Metrics struct {
 	// nothing shares a name; the cache's duplicatenames.go lists the inputs
 	// known to produce it.
 	duplicateResourceNames metric.Int64Counter
+	// captureTableCompileFailures counts snapshot builds in which the per-port
+	// capture tables could not be compiled into the published cap_http: the
+	// node then refuses every mesh name on the captured path. Zero forever
+	// when every table builder makes only what the compiler models.
+	captureTableCompileFailures metric.Int64Counter
+	// captureDuplicateAddress counts service addresses that two capture
+	// services claimed, per capture listener built: the second service's
+	// chains are on the listener and unreachable.
+	captureDuplicateAddress metric.Int64Counter
 }
 
 // attrVersionSource labels aether.agent.snapshot.resource_versions.
@@ -508,6 +517,14 @@ func (m *Metrics) registerAnomalyCounters(meter metric.Meter) error {
 		metric.WithDescription("Resource names carried by more than one resource of one xDS type in a snapshot build, per build; the proxy is sent only one of them (#1584)")); err != nil {
 		return fmt.Errorf("duplicate resource names: %w", err)
 	}
+	if m.captureTableCompileFailures, err = meter.Int64Counter("aether.agent.capture.table_compile_failures",
+		metric.WithDescription("Snapshot builds whose capture route tables could not be compiled into cap_http; every mesh name on the captured path is refused until they can")); err != nil {
+		return fmt.Errorf("capture table compile failures: %w", err)
+	}
+	if m.captureDuplicateAddress, err = meter.Int64Counter("aether.agent.capture.duplicate_service_address",
+		metric.WithDescription("Service addresses claimed by two capture services when a capture listener was built; the second one's chains are unreachable")); err != nil {
+		return fmt.Errorf("capture duplicate service address: %w", err)
+	}
 
 	return nil
 }
@@ -543,6 +560,8 @@ func (m *Metrics) seedAnomalyCounters() {
 	}
 	m.versionMemoMismatch.Add(ctx, 0)
 	m.duplicateResourceNames.Add(ctx, 0)
+	m.captureTableCompileFailures.Add(ctx, 0)
+	m.captureDuplicateAddress.Add(ctx, 0)
 	// One series per reason, so a grader can ask for reason="not_csi" and get
 	// a zero rather than nothing.
 	for _, r := range udspath.Reasons {
@@ -790,6 +809,24 @@ func (m *Metrics) DuplicateResourceNames(ctx context.Context, n int64) {
 		return
 	}
 	m.duplicateResourceNames.Add(ctx, n)
+}
+
+// CaptureTableCompileFailed counts one snapshot build whose capture tables
+// could not be compiled (the error is logged).
+func (m *Metrics) CaptureTableCompileFailed(ctx context.Context) {
+	if m == nil {
+		return
+	}
+	m.captureTableCompileFailures.Add(ctx, 1)
+}
+
+// CaptureDuplicateAddress counts one service address two capture services
+// claimed on a capture listener built (the services are logged).
+func (m *Metrics) CaptureDuplicateAddress(ctx context.Context) {
+	if m == nil {
+		return
+	}
+	m.captureDuplicateAddress.Add(ctx, 1)
 }
 
 // Generated records the outcome of one snapshot generation.

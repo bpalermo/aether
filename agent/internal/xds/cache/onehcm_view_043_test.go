@@ -16,6 +16,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 
 	"aethermesh.dev/agent/internal/xds/proxy"
@@ -42,7 +43,7 @@ const otherDialled = 17777
 // all (which must be cap_http_other's answer: refused, never delivered); and,
 // for a name without a namespace, each caller namespace the domains name, one
 // they do not, and none.
-func compiledMismatches(merged *routev3.RouteConfiguration, perPort map[uint32]*routev3.RouteConfiguration, other *routev3.RouteConfiguration, limit int) []string {
+func compiledMismatches(merged *routev3.RouteConfiguration, perPort map[uint32]*routev3.RouteConfiguration, other *routev3.RouteConfiguration, limit int, allPaths bool) []string {
 	ports := slices.Sorted(maps.Keys(perPort))
 	tables := map[uint32]*xdseval.Table{}
 	for p, rc := range perPort {
@@ -65,6 +66,14 @@ func compiledMismatches(merged *routev3.RouteConfiguration, perPort map[uint32]*
 		if parts := strings.Split(name, "."); len(parts) >= 2 {
 			namespaces[parts[1]] = struct{}{}
 		}
+		// A mesh-shaped name no table claims, under the same domain: what
+		// the catch-all's on-demand route answers.
+		if parts := strings.Split(name, "."); len(parts) >= 3 {
+			unknown := "zz-unknown.zz-unknown." + strings.Join(parts[2:], ".")
+			for _, s := range suffixes {
+				hosts[unknown+s] = struct{}{}
+			}
+		}
 	}
 	for _, rc := range append(slices.Collect(maps.Values(perPort)), other) {
 		for _, vh := range rc.GetVirtualHosts() {
@@ -85,6 +94,10 @@ func compiledMismatches(merged *routev3.RouteConfiguration, perPort map[uint32]*
 	slices.Sort(callers)
 	dialled := append(slices.Clone(ports), otherDialled, 0)
 
+	probes := []routeProbe{{path: "/"}}
+	if allPaths {
+		probes = routeProbes(append(slices.Collect(maps.Values(perPort)), other))
+	}
 	var out []string
 	for _, host := range slices.Sorted(maps.Keys(hosts)) {
 		forCallers := []string{"default"}
@@ -100,27 +113,93 @@ func compiledMismatches(merged *routev3.RouteConfiguration, perPort map[uint32]*
 				if ns != "" {
 					fs[proxy.CallerNamespaceFilterStateKey] = ns
 				}
-				req := xdseval.Request{Host: host, Path: "/", FilterState: fs}
 				want := otherT
 				if t, ok := tables[d]; ok {
 					want = t
 				}
-				a, errA := want.Resolve(req)
-				b, errB := mergedT.Resolve(req)
-				if errA != nil || errB != nil {
-					out = append(out, fmt.Sprintf("host %q dialled %d caller %q: %v / %v", host, d, ns, errA, errB))
-					continue
-				}
-				if same, why, err := xdseval.SameAnswer(a, b); err != nil || !same {
-					out = append(out, fmt.Sprintf("host %q dialled %d caller %q: per-port vhost %s, compiled vhost %s: %s %v", host, d, ns, a.Vhost, b.Vhost, why, err))
-				}
-				if limit > 0 && len(out) >= limit {
-					return out
+				for _, pr := range probes {
+					req := xdseval.Request{Host: host, Path: pr.path, Headers: pr.headers, FilterState: fs}
+					why := sameFirstRoute(want, mergedT, req)
+					if why == "" {
+						continue
+					}
+					out = append(out, fmt.Sprintf("host %q dialled %d caller %q path %s headers %v: %s", host, d, ns, pr.path, pr.headers, why))
+					if limit > 0 && len(out) >= limit {
+						return out
+					}
 				}
 			}
 		}
 	}
 	return out
+}
+
+// routeProbe is a path and request headers to ask a table about.
+type routeProbe struct {
+	path    string
+	headers map[string]string
+}
+
+// routeProbes returns "/", the path of every route of the tables (a GAMMA
+// rule's prefix or exact path, the liveness path), and "/" with every header a
+// route matches exactly: each route of the tables is the first match of one of
+// them where it can be.
+func routeProbes(tables []*routev3.RouteConfiguration) []routeProbe {
+	paths := map[string]bool{"/": true}
+	headers := map[string]string{}
+	for _, rc := range tables {
+		for _, vh := range rc.GetVirtualHosts() {
+			for _, r := range vh.GetRoutes() {
+				if p := r.GetMatch().GetPrefix() + r.GetMatch().GetPath(); p != "" {
+					paths[p] = true
+				}
+				for _, h := range r.GetMatch().GetHeaders() {
+					if e := h.GetStringMatch().GetExact(); e != "" && !strings.HasPrefix(h.GetName(), ":") {
+						headers[h.GetName()] = e
+					}
+				}
+			}
+		}
+	}
+	var out []routeProbe
+	for _, p := range slices.Sorted(maps.Keys(paths)) {
+		out = append(out, routeProbe{path: p})
+	}
+	if len(headers) > 0 {
+		out = append(out, routeProbe{path: "/", headers: headers})
+	}
+	return out
+}
+
+// sameFirstRoute is "" when the per-port table and the compiled one give req
+// the same first route (SameTreatment: action, filters, rules, status and
+// x-aether-error; not the match, not the body), and why not otherwise.
+func sameFirstRoute(want, got *xdseval.Table, req xdseval.Request) string {
+	a, errA := want.Resolve(req)
+	b, errB := got.Resolve(req)
+	if errA != nil || errB != nil {
+		return fmt.Sprintf("%v / %v", errA, errB)
+	}
+	ra, err := a.Effective()
+	if err != nil {
+		return err.Error()
+	}
+	if a.NoVhost {
+		ra = nil
+	}
+	fa, errA := xdseval.FirstRoute(ra, req)
+	var rb []*routev3.Route
+	if !b.NoVhost {
+		rb = b.Routes
+	}
+	fb, errB := xdseval.FirstRoute(rb, req)
+	if errA != nil || errB != nil {
+		return fmt.Sprintf("%v / %v", errA, errB)
+	}
+	if same, why := xdseval.SameTreatment(fa, fb); !same {
+		return fmt.Sprintf("per-port vhost %s, compiled vhost %s:%s", a.Vhost, b.Vhost, why)
+	}
+	return ""
 }
 
 func firstOr(ports []uint32, def uint32) uint32 {
@@ -130,12 +209,37 @@ func firstOr(ports []uint32, def uint32) uint32 {
 	return ports[0]
 }
 
-// requireCompiledEquivalent is gate (b): the published table answers every
-// request as the per-port table of its dialled port.
+// requireCompiledEquivalent is gate (b) as every per-port read of this
+// package's tests runs it: every request with path "/". The dedicated tests
+// (onehcm_equivalence_043_test.go) also ask every path and header a route of
+// the tables matches (requireCompiledEquivalentAllPaths).
 func requireCompiledEquivalent(t testing.TB, merged *routev3.RouteConfiguration, perPort map[uint32]*routev3.RouteConfiguration, other *routev3.RouteConfiguration) {
 	t.Helper()
+	// The cache returns the SAME table object while its inputs are unchanged
+	// (captureRouteTables' memo), and the walks read it again on every step:
+	// a table checked once against the per-port tables of its inputs is not
+	// checked again.
+	if _, done := checkedCompiled.Load(merged); done {
+		return
+	}
+	requireCompiled(t, merged, perPort, other, false)
+	checkedCompiled.Store(merged, true)
+}
+
+// checkedCompiled holds the published tables requireCompiledEquivalent has
+// checked.
+var checkedCompiled sync.Map
+
+// requireCompiledEquivalentAllPaths is gate (b) over every probe.
+func requireCompiledEquivalentAllPaths(t testing.TB, merged *routev3.RouteConfiguration, perPort map[uint32]*routev3.RouteConfiguration, other *routev3.RouteConfiguration) {
+	t.Helper()
+	requireCompiled(t, merged, perPort, other, true)
+}
+
+func requireCompiled(t testing.TB, merged *routev3.RouteConfiguration, perPort map[uint32]*routev3.RouteConfiguration, other *routev3.RouteConfiguration, allPaths bool) {
+	t.Helper()
 	require.NotNil(t, merged, "no compiled table")
-	bad := compiledMismatches(merged, perPort, other, 20)
+	bad := compiledMismatches(merged, perPort, other, 20, allPaths)
 	require.Empty(t, bad, "the compiled cap_http answers differently from the per-port tables:\n%s", strings.Join(bad, "\n"))
 }
 

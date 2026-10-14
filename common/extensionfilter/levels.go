@@ -18,16 +18,24 @@ import (
 //   - header_to_metadata, rbac: the MOST SPECIFIC level is the whole config.
 //     The route's replaces the virtual host's (both call
 //     resolveMostSpecificPerFilterConfig).
-//   - header_mutation: EVERY level applies, least specific first: the virtual
-//     host's mutations, then the route's (getAllPerFilterConfig; the filter's
-//     most_specific_header_mutations_wins is off, aether never sets it).
-//   - ext_authz: the levels are MERGED field by field: context_extensions are
-//     the union, the route's entry winning a key; disabled and check_settings
-//     are the route's; a service override is the route's when it has one, else
-//     the virtual host's.
+//   - header_mutation: EVERY level applies, MOST specific first: the route's
+//     mutations, then the virtual host's. getAllPerFilterConfig returns the
+//     levels least specific first and the filter reverses them unless
+//     most_specific_header_mutations_wins is set, which aether never sets
+//     (source/extensions/filters/http/header_mutation/header_mutation.cc,
+//     maybeInitializeRouteConfigs). So with OVERWRITE on one header the
+//     virtual host's value is the one left.
+//   - ext_authz: the levels are MERGED (FilterConfigPerRoute(less, more),
+//     source/extensions/filters/http/ext_authz/ext_authz.cc):
+//     context_extensions are the union, the route's entry winning a key;
+//     emit_client_span is the route's when set, else the virtual host's;
+//     disabled and the rest of check_settings are the route's; a service
+//     override (grpc_service, http_service) is the route's ONLY: "Do not
+//     inherit overrides from less specific configuration".
 //
-// Read from the source of the pinned Envoy, and measured on it for the ones
-// that combine (agent/test/mtlspool). It matters wherever one place has to
+// header_to_metadata and rbac read resolveMostSpecificPerFilterConfig
+// (header_to_metadata_filter.cc, rbac_filter.cc). All at the pinned Envoy
+// (189f198), and measured on it for the ones that combine (agent/test/mtlspool). It matters wherever one place has to
 // stand for both levels: a short name's virtual host is shared by several
 // namespaces, so a service's virtual-host config has nowhere to go but onto
 // each of its routes (agent/internal/xds/proxy/shortname.go), and a route that
@@ -92,8 +100,9 @@ func CombineLevels(name string, vhost, route *anypb.Any) (*anypb.Any, error) {
 	}
 }
 
-// combineHeaderMutation: every list of mutations, the virtual host's entries
-// first.
+// combineHeaderMutation: every list of mutations, the route's entries first
+// and the virtual host's after them, the order the filter applies the levels
+// in.
 func combineHeaderMutation(vhost, route *anypb.Any) (*anypb.Any, error) {
 	var vh, rt header_mutationv3.HeaderMutationPerRoute
 	if err := vhost.UnmarshalTo(&vh); err != nil {
@@ -103,12 +112,12 @@ func combineHeaderMutation(vhost, route *anypb.Any) (*anypb.Any, error) {
 		return nil, fmt.Errorf("header_mutation, route level: %w", err)
 	}
 	out := &header_mutationv3.HeaderMutationPerRoute{Mutations: &header_mutationv3.Mutations{}}
-	// proto.Merge appends repeated fields: the virtual host's, then the route's.
-	if vh.GetMutations() != nil {
-		proto.Merge(out.Mutations, vh.GetMutations())
-	}
+	// proto.Merge appends repeated fields: the route's, then the virtual host's.
 	if rt.GetMutations() != nil {
 		proto.Merge(out.Mutations, rt.GetMutations())
+	}
+	if vh.GetMutations() != nil {
+		proto.Merge(out.Mutations, vh.GetMutations())
 	}
 	return packCombined(out)
 }
@@ -136,12 +145,16 @@ func combineExtAuthz(vhost, route *anypb.Any) (*anypb.Any, error) {
 	if err := route.UnmarshalTo(&rt); err != nil {
 		return nil, fmt.Errorf("ext_authz, route level: %w", err)
 	}
-	// disabled is the route's: a route that disables the check disables it.
-	if rt.GetDisabled() || rt.GetCheckSettings() == nil {
+	// disabled is the route's: a route that disables the check disables it,
+	// and nothing else of either level is read.
+	if rt.GetDisabled() {
 		return route, nil
 	}
-	out := proto.Clone(&rt).(*ext_authzv3.ExtAuthzPerRoute)
-	settings := out.GetCheckSettings()
+	// The rest of check_settings is the route's (with none, the defaults).
+	settings := &ext_authzv3.CheckSettings{}
+	if rt.GetCheckSettings() != nil {
+		settings = proto.Clone(rt.GetCheckSettings()).(*ext_authzv3.CheckSettings)
+	}
 	merged := map[string]string{}
 	for k, v := range vh.GetCheckSettings().GetContextExtensions() {
 		merged[k] = v
@@ -153,24 +166,18 @@ func combineExtAuthz(vhost, route *anypb.Any) (*anypb.Any, error) {
 	if len(merged) > 0 {
 		settings.ContextExtensions = merged
 	}
-	// A service override, when the API has one: the route's if it sets one,
-	// else the virtual host's. By field name, so this holds whichever version
-	// of the API is linked.
+	// emit_client_span: the route's when it sets it, else the virtual
+	// host's. By field name, so this holds whichever version of the API is
+	// linked. The service override is NOT inherited: the route's or none.
 	if less := vh.GetCheckSettings(); less != nil {
-		inheritUnset(settings.ProtoReflect(), less.ProtoReflect(), "grpc_service", "http_service")
+		inheritUnset(settings.ProtoReflect(), less.ProtoReflect(), "emit_client_span")
 	}
-	return packCombined(out)
+	return packCombined(&ext_authzv3.ExtAuthzPerRoute{Override: &ext_authzv3.ExtAuthzPerRoute_CheckSettings{CheckSettings: settings}})
 }
 
 // inheritUnset copies each named message field from src to dst when dst does
 // not set it and src does. A name the message does not have is skipped.
 func inheritUnset(dst, src protoreflect.Message, names ...protoreflect.Name) {
-	// The route names a service of its own, of either kind: it is the one.
-	for _, name := range names {
-		if fd := dst.Descriptor().Fields().ByName(name); fd != nil && dst.Has(fd) {
-			return
-		}
-	}
 	for _, name := range names {
 		fd := dst.Descriptor().Fields().ByName(name)
 		if fd == nil || dst.Has(fd) || !src.Has(fd) {
