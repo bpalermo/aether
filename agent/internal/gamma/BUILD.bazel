@@ -60,6 +60,7 @@ go_test(
         "stalestatus_test.go",
         "status_eighth_043_test.go",
         "status_eighth_cap_043_test.go",
+        "status_eleventh_043_test.go",
         "status_ninth_043_test.go",
         "status_seventh_043_test.go",
         "status_sixth_043_test.go",

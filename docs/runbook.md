@@ -4248,7 +4248,10 @@ requests with their original `Host` to a different port.
     Service's named ports change, when the Service object is replaced, when
     the Service has not been one of the concerned ones in between, and when
     the answer is ten minutes old: that last is the bound on a slice change
-    the agent was never told of, and the agent wakes itself for it.
+    the agent was never told of, and the agent wakes itself for it. The bound
+    is **ten minutes plus however long the API server cannot be read** at
+    that moment (below): a ten-minute re-read that fails keeps the answer it
+    came to check.
 
     Through chart 2.6, and the first builds of this one, such a reference
     was served by the port the pods declare in `endpoint.aether.io/port`: a
@@ -4281,16 +4284,36 @@ requests with their original `Host` to a different port.
     from the API for those Services only and are not cached.
 
     **When the API server cannot be read.** A reconcile that has to list a
-    Service's EndpointSlices (a slice event of it, a change of its named
-    ports, the ten-minute re-read) and cannot refuses THAT Service's named
-    ports, not served from the older answer, and fails; the other Services
-    keep their answers and stay routed. The controller runs the reconcile
-    again with a back-off that starts at 5 ms and is capped at **30 s**
-    (controller-runtime's default grows to 1000 s), and the retry reads only
-    what failed. So a Service whose slices changed during an API outage is
-    refused until the API answers, and routed again within 30 s of that; a
-    Service nothing happened to is not touched by the outage. The same cap
-    holds for a status write that fails.
+    Service's EndpointSlices and cannot fails, and what happens to the
+    Service depends on why it was being read:
+
+    - **Something says its answer is no longer current** (a slice event of
+      it was seen, its named ports changed, the Service object was
+      replaced): THAT Service's named ports are refused, not served from the
+      older answer. The other Services keep their answers and stay routed.
+    - **Nothing happened to it, and its answer was only due for the
+      ten-minute re-read**: the answer stays in use, exactly as it was. (In
+      the first build of this the re-read dropped it: an API server that was
+      away when the agent's own timer fired had every such Service of the
+      node refused, with no evidence that any of them had changed.) A slice
+      change the agent was never told of is therefore taken up ten minutes
+      after it at the latest when the API can be read, and otherwise by the
+      first read that succeeds.
+
+    Either way the controller runs the reconcile again with a back-off that
+    starts at 5 ms and is capped at **30 s** (controller-runtime's default
+    grows to 1000 s), and the retry reads only what failed or is still due.
+    So a Service whose slices changed during an API outage, with the event
+    seen, is refused until the API answers, and routed again within 30 s of
+    that; a Service nothing happened to is not touched by the outage. The
+    same cap holds for a status write that fails.
+
+    **A refusal's body is at most 4096 bytes.** Every `421` of a name whose
+    Service has unresolved ports lists them, and a body lists a service's
+    ports. Envoy rejects a route table in which a direct response's body is
+    longer than that, and every route of the table with it, so a body that
+    would be longer is cut and ends in ` ... (truncated)`. The route's status
+    and the agent's WARNs name every port.
   - A `backendRef` of another kind than a Service, or to a Service in another
     namespace with no `ReferenceGrant`, is invalid in the same way: its share
     is answered **500** (the status already said `InvalidKind` or
@@ -4990,6 +5013,33 @@ The series of the `mesh_dns` tier change their `target` label: it is the
 target as written, so `echo.aether-test.aether.internal:18081` becomes
 `...:8080`. Dashboards and alerts that select a `mesh_dns` series by `target`
 need the new value; the old series stop at the upgrade.
+
+**Between the two upgrades the authz canary reads `deny=200`. Do not page on
+it.** This concerns a cluster that runs the canary (`authzCanary.enabled`).
+With the prober chart at 1.1.1 and the mesh still on 2.6.x, the canary's
+request without the header is answered `200` where `403` is expected, and
+its log says so on every cycle:
+
+```
+<time> FAIL allow=200 (want 200) deny=200 (want 403)
+```
+
+It starts when the new canary pod runs and ends when the 3.0.0 agent has
+reached the node that pod runs on (the filter is enabled in the source
+proxy's route table). Nothing regressed. The canary now dials the service's own port, and on
+2.6 a captured request to a service's own port does not pass through the
+service-wide authorization filter at all: that is the bypass chart 3.0.0
+closes ("Fixed: requests that skipped a service-wide HTTP filter" above).
+Through chart 1.0.x the canary dialled `:18081`, a path on which 2.6 did
+apply the filter, so it never showed. The `allow` side reads `200`
+throughout.
+
+It was observed at this project's own upgrade and cleared with the 3.0.0
+agents, with nothing done. If you alert on the canary's `FAIL` lines or on
+`deny != 403`, silence that for the window between the two upgrades, and
+keep the window short: the prober chart, then the `aether` chart, in one
+maintenance. A `deny=200` that is still there once every node runs a 3.0.0
+agent is a real finding: the filter is not being applied.
 
 What changes in **your values**:
 

@@ -324,16 +324,18 @@ func (r *Reconciler) Reconcile(ctx context.Context, _ reconcile.Request) (reconc
 	wait, err := r.writeHTTPRouteStatuses(ctx, httpList, grants, facts, seen)
 	grpcWait, grpcErr := r.writeGRPCRouteStatuses(ctx, grpcList, grants, facts, seen)
 	r.contested.keep(seen)
-	due := soonest(soonest(wait, grpcWait), r.namedResyncDue())
+	held := soonest(wait, grpcWait)
 	if err := errors.Join(err, grpcErr, unresolvedErr); err != nil {
 		// The controller ignores a RequeueAfter beside an error and runs the
-		// reconciler again on its error back-off, which grows to 1000 s. A
-		// route that is being held back must not wait for that: its wait is
-		// kept by a timer of the reconciler's own.
-		r.wakeIn(due)
+		// reconciler again on its own back-off. A route that is being held
+		// back must not wait for that: its wait is kept by a timer of the
+		// reconciler's own. (The ten-minute re-read needs none: every
+		// reconcile, the retries of this error among them, reads what is
+		// due.)
+		r.wakeIn(held)
 		return reconcile.Result{}, err
 	}
-	return reconcile.Result{RequeueAfter: due}, nil
+	return reconcile.Result{RequeueAfter: soonest(held, r.namedResyncDue())}, nil
 }
 
 // wakeIn has the reconciler run again in d (zero: nothing to do), whatever
@@ -761,11 +763,18 @@ func namedSpec(svc *corev1.Service, namedPorts []corev1.ServicePort) string {
 //   - the read is younger than namedResync. That is the bound on an event the
 //     agent never saw (a watch that broke and resumed past it is repaired by
 //     the informer's own relist, which delivers the change as an event; this
-//     is for whatever that does not cover): a kept answer is at most ten
-//     minutes old, and the reconciler asks to be run when the oldest is due.
+//     is for whatever that does not cover): a kept answer is read again when
+//     it is ten minutes old, and the reconciler asks to be run when the
+//     oldest is due.
 //
-// A read that fails keeps nothing, refuses THIS Service's names and is the
-// reconcile's error; the others' kept answers stand.
+// A read that fails is the reconcile's error, so that it is retried. What it
+// does to the Service depends on why the read was made. When something says
+// the kept answer is not current (a slice event, other named ports, another
+// Service object), the answer is dropped and THIS Service's names are
+// refused; the others' kept answers stand. When the read was only the
+// ten-minute one, the kept answer stays in use: an answer with no evidence of
+// change may be used, a known-stale one must not. So the bound on a missed
+// event is ten minutes plus however long the API cannot be read.
 func (r *Reconciler) namedTargetPorts(ctx context.Context, svc *corev1.Service, key string, m map[uint32]uint32, namedPorts []corev1.ServicePort) (map[uint32]unresolvedTarget, error) {
 	spec, now := namedSpec(svc, namedPorts), r.now()
 	r.namedMu.Lock()
@@ -786,6 +795,18 @@ func (r *Reconciler) namedTargetPorts(ctx context.Context, svc *corev1.Service, 
 	r.namedMu.Lock()
 	defer r.namedMu.Unlock()
 	if err != nil {
+		if ok && !changed && kept.spec == spec {
+			// Nothing says the kept answer changed: it was only due to be
+			// read again. It stays in use, its age with it, and the error
+			// has the read retried. Dropping it here had the ten-minute
+			// re-read refuse every concerned Service of the node whenever
+			// the API server was away at that moment.
+			maps.Copy(m, kept.ports)
+			return kept.unresolved, err
+		}
+		// A slice event was seen, or the Service's named ports are others:
+		// the kept answer is known not to be current. Refused until the
+		// read succeeds.
 		delete(r.resolutions, key)
 		return unresolved, err
 	}
@@ -848,26 +869,48 @@ func (r *Reconciler) warnUnresolvedOnce(ctx context.Context, key string, sp core
 // the pods have left) until it is told. The watch is metadata-only: the
 // slice's Service is in its labels, and the slices themselves are read from
 // the API for the few Services concerned.
+//
+// An update is judged by BOTH of its objects. A slice leaves a Service by a
+// change of its label (moved to another Service, or the label removed), and
+// that update's new object no longer names the Service it left: judged by the
+// new object alone, as predicate.NewPredicateFuncs does, the Service that lost
+// its slice was never marked, and its kept answer was used for ten minutes
+// more (still delivered after its last slice was gone; still refused after
+// the slice that disagreed had left).
 func (r *Reconciler) namedTargetSlices() predicate.Predicate {
-	return predicate.NewPredicateFuncs(func(o client.Object) bool {
-		svc := o.GetLabels()[discoveryv1.LabelServiceName]
-		if svc == "" {
-			return false
+	return predicate.Funcs{
+		CreateFunc:  func(e event.CreateEvent) bool { return r.sliceOfANamedTarget(e.Object) },
+		DeleteFunc:  func(e event.DeleteEvent) bool { return r.sliceOfANamedTarget(e.Object) },
+		GenericFunc: func(e event.GenericEvent) bool { return r.sliceOfANamedTarget(e.Object) },
+		UpdateFunc: func(e event.UpdateEvent) bool {
+			was, is := r.sliceOfANamedTarget(e.ObjectOld), r.sliceOfANamedTarget(e.ObjectNew)
+			return was || is
+		},
+	}
+}
+
+// sliceOfANamedTarget reports whether o is an EndpointSlice of a concerned
+// Service, and marks that Service: the reconcile this event causes reads its
+// slices again, and no other's (namedTargetPorts).
+func (r *Reconciler) sliceOfANamedTarget(o client.Object) bool {
+	if o == nil {
+		return false
+	}
+	svc := o.GetLabels()[discoveryv1.LabelServiceName]
+	if svc == "" {
+		return false
+	}
+	key := serviceref.New(o.GetNamespace(), svc).Key()
+	r.namedMu.Lock()
+	defer r.namedMu.Unlock()
+	_, concerned := r.namedTargets[key]
+	if concerned {
+		if r.sliceChanged == nil {
+			r.sliceChanged = map[string]bool{}
 		}
-		key := serviceref.New(o.GetNamespace(), svc).Key()
-		r.namedMu.Lock()
-		defer r.namedMu.Unlock()
-		_, concerned := r.namedTargets[key]
-		if concerned {
-			// The reconcile this event causes reads THIS Service's slices
-			// again, and no other's (namedTargetPorts).
-			if r.sliceChanged == nil {
-				r.sliceChanged = map[string]bool{}
-			}
-			r.sliceChanged[key] = true
-		}
-		return concerned
-	})
+		r.sliceChanged[key] = true
+	}
+	return concerned
 }
 
 // servicePortMapAndFacts returns the port map of one Service when it is a

@@ -8,6 +8,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"time"
+	"unicode/utf8"
 
 	meshconst "aethermesh.dev/common/constants/mesh"
 	xdscorev3 "github.com/cncf/xds/go/xds/core/v3"
@@ -1181,6 +1182,28 @@ func BuildNoHTTPPortVirtualHost(name string, domains []string, tcpSpellings stri
 	return BuildRefusalVirtualHost(name, domains, RefusalNoHTTPPort, body)
 }
 
+// MaxRefusalBody is the longest body of a refusal. Envoy rejects a route
+// table whose direct response carries more than 4096 bytes (the default
+// max_direct_response_body_size_bytes), and with it every other route of the
+// table: one body that grows with the object it describes (a Service's ports)
+// must not be able to do that.
+const MaxRefusalBody = 4096
+
+// ClampRefusalBody returns body when Envoy accepts it, and otherwise its
+// start, cut at a character boundary, ending in a mark that says so. The same
+// input gives the same output on every node.
+func ClampRefusalBody(body string) string {
+	if len(body) <= MaxRefusalBody {
+		return body
+	}
+	const mark = " ... (truncated)\n"
+	cut := MaxRefusalBody - len(mark)
+	for cut > 0 && !utf8.RuneStart(body[cut]) {
+		cut--
+	}
+	return body[:cut] + mark
+}
+
 // BuildFallthroughVirtualHost builds a virtual host that does, for its
 // domains, what a capture table's catch-all does for a name that is not the
 // mesh's: the request leaves to the address that was dialled (redirect-all),
@@ -1215,6 +1238,7 @@ func BuildFallthroughVirtualHost(name string, domains []string, redirectAll bool
 // A direct response: it is answered by the proxy at once, it reaches no
 // cluster, and it cannot be retried into a different answer.
 func BuildRefusalVirtualHost(name string, domains []string, reason, body string) *routev3.VirtualHost {
+	body = ClampRefusalBody(body)
 	return &routev3.VirtualHost{
 		Name:    name,
 		Domains: domains,
