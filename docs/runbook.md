@@ -183,6 +183,20 @@ And a clean run is not evidence of absence: the detector only reports
 interleavings a test actually produced, so a race between two goroutines no test
 runs concurrently stays invisible no matter how often you run it.
 
+**What CI's `race` job runs how often.** Impacted tests run once under the
+detector, and the tests of the concurrency-heavy packages (the list is in
+`.github/workflows/ci.yaml`) run three times. One target of such a package is
+the exception and runs **once**: `//agent/internal/xds/cache:cache_walk_test`,
+the fifteen seeded random walks of proposal 043. They are single-goroutine and
+deterministic for a seed, so a second and a third run repeat the first step
+for step; they are nine tenths of that package's test time, and at three runs
+they had brought the job to 54 of its 60 minutes. Three runs was the figure
+until then, and is still the figure for everything else in the package
+(`cache_test`, the interleaving tests among them). The split is one macro call
+in the package's BUILD file (`cache_go_test`, `defs.bzl`): a new walk is added
+to the list there, and a `--test_filter` that names a walk goes to
+`cache_walk_test`.
+
 ### The external-harness contract
 
 A harness outside this repository (one that rolls the mesh's workloads, reads
@@ -4205,7 +4219,14 @@ requests with their original `Host` to a different port.
       port is `421 port-not-declared` too. Every one of these 421s says why
       in its body, on every table: `Its Service's port 8000 has a targetPort
       that is a name the Service's EndpointSlices do not resolve yet: it is
-      refused until they do.`
+      refused until they do.` That holds for every refusal the name gets
+      while one of its Service's ports is unresolved, whatever the refusal is
+      for: `port-required` for the name without a port, `port-not-http`,
+      `port-mismatch`, and `no-http-port`. The last one says, for a name the
+      node knows no port of at all (a filter or a route and the port map
+      alone), `<name> has no port it can be addressed on yet` and not "serves
+      no HTTP port. Reach it over TCP instead", which it said until this was
+      fixed.
 
     **Whose names are resolved.** Every Service of yours the node's proxy
     can reach a mesh service through: one a route names, one a service-wide
@@ -4215,9 +4236,22 @@ requests with their original `Host` to a different port.
     `targetPort: <name>`, which is the common way to write a Service, then
     had no port at all on the proxy port: `421`, "Its ports: none", on every
     spelling and for as long as the Service existed, with nothing logged.) A
-    Service that fronts nothing of the mesh on the node is not read. The cost
-    is one EndpointSlice list per reconcile for each such Service that has a
-    named `targetPort`, and none for any other.
+    Service that fronts nothing of the mesh on the node is not read.
+
+    **What it costs.** The agent keeps, per Service, what the Service's
+    EndpointSlices said, and lists them again only for the Service a slice
+    event was seen for: **one list per slice event, of that Service**, not one
+    per concerned Service. (Read anew on every reconcile it was the latter:
+    with 200 such Services, 200 lists on every node for each pod of any of
+    them starting or stopping.) Everything is read once when the agent
+    starts. A kept answer is dropped, and the Service read again, when the
+    Service's named ports change, when the Service object is replaced, when
+    the Service has not been one of the concerned ones in between, and when
+    the answer is ten minutes old: that last is the bound on a slice change
+    the agent was never told of, and the agent wakes itself for it. The bound
+    is **ten minutes plus however long the API server cannot be read** at
+    that moment (below): a ten-minute re-read that fails keeps the answer it
+    came to check.
 
     Through chart 2.6, and the first builds of this one, such a reference
     was served by the port the pods declare in `endpoint.aether.io/port`: a
@@ -4249,13 +4283,37 @@ requests with their original `Host` to a different port.
     `watch` on `endpointslices` for this; the slices themselves are read
     from the API for those Services only and are not cached.
 
-    **When the API server cannot be read.** A reconcile that cannot list a
-    Service's EndpointSlices refuses that Service's named ports and fails;
-    the controller runs it again with a back-off that starts at 5 ms and is
-    capped at **30 s** (controller-runtime's default grows to 1000 s). So
-    after an API outage the ports are routed again within 30 s of the API
-    answering, and during it they are refused, not served from an older
-    answer. The same cap holds for a status write that fails.
+    **When the API server cannot be read.** A reconcile that has to list a
+    Service's EndpointSlices and cannot fails, and what happens to the
+    Service depends on why it was being read:
+
+    - **Something says its answer is no longer current** (a slice event of
+      it was seen, its named ports changed, the Service object was
+      replaced): THAT Service's named ports are refused, not served from the
+      older answer. The other Services keep their answers and stay routed.
+    - **Nothing happened to it, and its answer was only due for the
+      ten-minute re-read**: the answer stays in use, exactly as it was. (In
+      the first build of this the re-read dropped it: an API server that was
+      away when the agent's own timer fired had every such Service of the
+      node refused, with no evidence that any of them had changed.) A slice
+      change the agent was never told of is therefore taken up ten minutes
+      after it at the latest when the API can be read, and otherwise by the
+      first read that succeeds.
+
+    Either way the controller runs the reconcile again with a back-off that
+    starts at 5 ms and is capped at **30 s** (controller-runtime's default
+    grows to 1000 s), and the retry reads only what failed or is still due.
+    So a Service whose slices changed during an API outage, with the event
+    seen, is refused until the API answers, and routed again within 30 s of
+    that; a Service nothing happened to is not touched by the outage. The
+    same cap holds for a status write that fails.
+
+    **A refusal's body is at most 4096 bytes.** Every `421` of a name whose
+    Service has unresolved ports lists them, and a body lists a service's
+    ports. Envoy rejects a route table in which a direct response's body is
+    longer than that, and every route of the table with it, so a body that
+    would be longer is cut and ends in ` ... (truncated)`. The route's status
+    and the agent's WARNs name every port.
   - A `backendRef` of another kind than a Service, or to a Service in another
     namespace with no `ReferenceGrant`, is invalid in the same way: its share
     is answered **500** (the status already said `InvalidKind` or
@@ -4955,6 +5013,33 @@ The series of the `mesh_dns` tier change their `target` label: it is the
 target as written, so `echo.aether-test.aether.internal:18081` becomes
 `...:8080`. Dashboards and alerts that select a `mesh_dns` series by `target`
 need the new value; the old series stop at the upgrade.
+
+**Between the two upgrades the authz canary reads `deny=200`. Do not page on
+it.** This concerns a cluster that runs the canary (`authzCanary.enabled`).
+With the prober chart at 1.1.1 and the mesh still on 2.6.x, the canary's
+request without the header is answered `200` where `403` is expected, and
+its log says so on every cycle:
+
+```
+<time> FAIL allow=200 (want 200) deny=200 (want 403)
+```
+
+It starts when the new canary pod runs and ends when the 3.0.0 agent has
+reached the node that pod runs on (the filter is enabled in the source
+proxy's route table). Nothing regressed. The canary now dials the service's own port, and on
+2.6 a captured request to a service's own port does not pass through the
+service-wide authorization filter at all: that is the bypass chart 3.0.0
+closes ("Fixed: requests that skipped a service-wide HTTP filter" above).
+Through chart 1.0.x the canary dialled `:18081`, a path on which 2.6 did
+apply the filter, so it never showed. The `allow` side reads `200`
+throughout.
+
+It was observed at this project's own upgrade and cleared with the 3.0.0
+agents, with nothing done. If you alert on the canary's `FAIL` lines or on
+`deny != 403`, silence that for the window between the two upgrades, and
+keep the window short: the prober chart, then the `aether` chart, in one
+maintenance. A `deny=200` that is still there once every node runs a 3.0.0
+agent is a real finding: the filter is not being applied.
 
 What changes in **your values**:
 

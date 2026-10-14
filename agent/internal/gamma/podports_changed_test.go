@@ -2,11 +2,16 @@ package gamma
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"net/http"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/assert"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllertest"
@@ -172,4 +177,56 @@ func TestSetupWithManager_APodPortsChangeIsAReconcile(t *testing.T) {
 	}
 	cancel()
 	<-stopped
+}
+
+// TestSetupWithManager_AFailedReconcileIsRetriedWithinTheCap: the cap on the
+// retry delay is the one the CONTROLLER is registered with. A reconciler
+// whose reconcile always fails, under a running manager, with the cap set to
+// 50 ms: capped, the retries come 5, 10, 20, 40 and then 50 ms apart, some
+// forty in two seconds; with controller-runtime's default back-off (which
+// doubles to 1000 s) there are nine.
+func TestSetupWithManager_AFailedReconcileIsRetriedWithinTheCap(t *testing.T) {
+	was := maxRetryDelay
+	maxRetryDelay = 50 * time.Millisecond
+	t.Cleanup(func() { maxRetryDelay = was })
+
+	scheme := newScheme(t)
+	informers := &lockedInformers{FakeInformers: &informertest.FakeInformers{Scheme: scheme}}
+	mapper := meta.NewDefaultRESTMapper(nil)
+	mapper.Add(gatewayv1.SchemeGroupVersion.WithKind("HTTPRoute"), meta.RESTScopeNamespace)
+	mapper.Add(corev1.SchemeGroupVersion.WithKind("Service"), meta.RESTScopeNamespace)
+	mapper.Add(discoveryv1.SchemeGroupVersion.WithKind("EndpointSlice"), meta.RESTScopeNamespace)
+	skip := true
+	mgr, err := ctrl.NewManager(&rest.Config{Host: "http://127.0.0.1:1"}, ctrl.Options{
+		Scheme:                 scheme,
+		NewCache:               func(*rest.Config, ctrlcache.Options) (ctrlcache.Cache, error) { return informers, nil },
+		MapperProvider:         func(*rest.Config, *http.Client) (meta.RESTMapper, error) { return mapper, nil },
+		Metrics:                metricsserver.Options{BindAddress: "0"},
+		HealthProbeBindAddress: "0",
+		Controller:             config.Controller{SkipNameValidation: &skip},
+	})
+	require.NoError(t, err)
+
+	var calls atomic.Int64
+	failing := fake.NewClientBuilder().WithScheme(scheme).WithInterceptorFuncs(interceptor.Funcs{
+		List: func(context.Context, client.WithWatch, client.ObjectList, ...client.ListOption) error {
+			calls.Add(1)
+			return errors.New("the API server is away")
+		},
+	}).Build()
+	changed := make(chan event.GenericEvent, 1)
+	r := &Reconciler{Client: failing, Sink: &fakeSink{}, MeshDomain: "mesh", Log: slog.New(slog.DiscardHandler), PodPortsChanged: changed}
+	require.NoError(t, r.SetupWithManager(mgr))
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	stopped := make(chan error, 1)
+	go func() { stopped <- mgr.Start(ctx) }()
+
+	changed <- event.GenericEvent{}
+	require.Eventually(t, func() bool { return calls.Load() > 0 }, 10*time.Second, 5*time.Millisecond, "the reconcile never ran")
+	time.Sleep(2 * time.Second)
+	got := calls.Load()
+	cancel()
+	<-stopped
+	assert.GreaterOrEqualf(t, got, int64(20), "%d reconciles in two seconds of a reconcile that always fails, with the cap at 50 ms: the controller is registered with another back-off than the capped one", got)
 }

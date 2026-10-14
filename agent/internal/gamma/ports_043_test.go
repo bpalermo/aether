@@ -351,6 +351,7 @@ func TestReconcile_AnUnresolvedNamedTargetPortIsRefusedUntilItResolves(t *testin
 
 	// The pods arrive: the slice names the port.
 	require.NoError(t, c.Create(ctx, slice("web-1", 8080)))
+	s10Event(r, "web")
 	run()
 	assert.Equal(t, map[uint32]uint32{80: 8080}, sink.portMaps["ns/web"])
 	assert.Equal(t, metav1.ConditionTrue, statusOf(t, c, gatewayv1.RouteConditionResolvedRefs).Status)
@@ -360,6 +361,7 @@ func TestReconcile_AnUnresolvedNamedTargetPortIsRefusedUntilItResolves(t *testin
 	// A second slice that gives the name another number: refused again, and
 	// the status says the slices disagree.
 	require.NoError(t, c.Create(ctx, slice("web-2", 9090)))
+	s10Event(r, "web")
 	run()
 	assert.Equal(t, map[uint32]uint32{80: 0}, sink.portMaps["ns/web"], "slices that disagree were resolved to one of their numbers")
 	resolved = statusOf(t, c, gatewayv1.RouteConditionResolvedRefs)
@@ -369,6 +371,7 @@ func TestReconcile_AnUnresolvedNamedTargetPortIsRefusedUntilItResolves(t *testin
 
 	// Both go (the Service is scaled to nothing): unresolved again.
 	require.NoError(t, c.Delete(ctx, slice("web-1", 8080)))
+	s10Event(r, "web")
 	require.NoError(t, c.Delete(ctx, slice("web-2", 9090)))
 	run()
 	assert.Equal(t, map[uint32]uint32{80: 0}, sink.portMaps["ns/web"], "a resolution was kept after the slices that gave it were gone")
@@ -406,7 +409,9 @@ func TestReconcile_ASliceReadErrorRefusesAndIsRetried(t *testing.T) {
 	require.Equal(t, map[uint32]uint32{80: 8080}, sink.portMaps["ns/web"], "control: the name resolves")
 	require.Equal(t, metav1.ConditionTrue, statusOf(t, c, gatewayv1.RouteConditionResolvedRefs).Status)
 
+	// A slice event of the Service, and the read it causes fails.
 	fail = true
+	require.True(t, s10Event(r, "web"))
 	_, err = r.Reconcile(ctx, reconcile.Request{})
 	require.Error(t, err, "the slices could not be read and the reconcile asks for no retry")
 	assert.ErrorContains(t, err, "read the EndpointSlices of Service ns/web")

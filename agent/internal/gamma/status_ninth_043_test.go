@@ -237,7 +237,7 @@ func TestReconcile_OnlyConcernedServicesWithANamedTargetPortAreRead(t *testing.T
 	reads = nil
 	_, _, _, err = r.servicePortMaps(ctx, nil, nil)
 	require.NoError(t, err)
-	assert.Equal(t, []string{"held"}, reads)
+	assert.Empty(t, reads, "the one that is still concerned was read at the reconcile before, and no slice event of it came since")
 	assert.Equal(t, map[string]struct{}{"ns/held": {}}, concerned())
 }
 
@@ -293,6 +293,7 @@ func TestReconcile_AnUnresolvedNamedTargetPortIsLoggedOncePerReason(t *testing.T
 
 	// Two slices that disagree: another reason, said once.
 	require.NoError(t, c.Create(ctx, s9Slice("web", "web-1", 8080)))
+	s10Event(r, "web")
 	require.NoError(t, c.Create(ctx, s9Slice("web", "web-2", 9090)))
 	run()
 	run()
@@ -301,9 +302,11 @@ func TestReconcile_AnUnresolvedNamedTargetPortIsLoggedOncePerReason(t *testing.T
 
 	// It resolves, and stops resolving again: said again.
 	require.NoError(t, c.Delete(ctx, s9Slice("web", "web-2", 9090)))
+	s10Event(r, "web")
 	run()
 	require.Len(t, logs.seen, 2, "a port that resolves is not logged")
 	require.NoError(t, c.Delete(ctx, s9Slice("web", "web-1", 8080)))
+	s10Event(r, "web")
 	run()
 	run()
 	require.Len(t, logs.seen, 3, "unresolved again after having resolved: the WARN of before does not cover it")

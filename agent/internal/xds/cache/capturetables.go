@@ -410,7 +410,13 @@ func refusalBody(fqdn, what string, ports servicePorts) string {
 // says it, on every table: a caller refused on the proxy port for "<name>:8000"
 // was told "Its ports: none" and nothing of why.
 func mappedRefusalBody(fqdn, what string, portMap map[uint32]uint32, mapped bool, ports servicePorts) string {
-	body := refusalBody(fqdn, what, portsAsAddressed(portMap, mapped, ports))
+	return refusalBody(fqdn, what, portsAsAddressed(portMap, mapped, ports)) + unresolvedNote(portMap)
+}
+
+// unresolvedNote is the sentence a refusal's body ends with when the name's
+// Service has ports whose targetPort is a name that does not resolve yet, and
+// "" when it has none.
+func unresolvedNote(portMap map[uint32]uint32) string {
 	var unresolved []string
 	for sp, pod := range portMap {
 		if pod == 0 {
@@ -418,10 +424,10 @@ func mappedRefusalBody(fqdn, what string, portMap map[uint32]uint32, mapped bool
 		}
 	}
 	if len(unresolved) == 0 {
-		return body
+		return ""
 	}
 	slices.SortFunc(unresolved, func(a, b string) int { return cmp.Compare(len(a), len(b))*2 + strings.Compare(a, b) })
-	return body + "Its Service's port " + strings.Join(unresolved, ", ") + " has a targetPort that is a name the Service's EndpointSlices do not resolve yet: it is refused until they do.\n"
+	return "Its Service's port " + strings.Join(unresolved, ", ") + " has a targetPort that is a name the Service's EndpointSlices do not resolve yet: it is refused until they do.\n"
 }
 
 // portsAsAddressed returns the ports a refusal's body lists: the ports an
@@ -778,7 +784,7 @@ func (c *SnapshotCache) appendOutboundRefusalsLocked(out []*routev3.VirtualHost,
 			out = append(out, proxy.BuildRefusalVirtualHost(fqdn+"|port-required", []string{fqdn}, proxy.RefusalPortRequired,
 				mappedRefusalBody(fqdn, "was addressed without a port: a name without a port is port 80, which it does not serve as HTTP", portMap, mapped, ports)))
 		} else {
-			out = append(out, c.noHTTPPortVhost(fqdn+"|port-required", svc, []string{fqdn}, ports))
+			out = append(out, c.noHTTPPortVhost(fqdn+"|port-required", svc, []string{fqdn}, ports, portMap))
 		}
 	}
 	var notHTTP []string
@@ -1432,7 +1438,7 @@ func (c *SnapshotCache) appendNameVhosts(vhosts []*routev3.VirtualHost, in captu
 		refuse("refused", proxy.RefusalPortNotDeclared, "has, on the port that was dialled, a targetPort that is a name its Service's EndpointSlices do not resolve yet", own)
 	case n.ports.known() && !n.ports.servesHTTP():
 		// HTTP to a service that serves none: say where it is reached.
-		vhosts = append(vhosts, c.noHTTPPortVhost(n.mesh+"|refused", n.svc, own, n.ports))
+		vhosts = append(vhosts, c.noHTTPPortVhost(n.mesh+"|refused", n.svc, own, n.ports, n.portMap))
 	case !informed:
 		// A name this node holds no endpoint of, on a port nothing says it
 		// has. Its mesh authority may still name the port's cluster on
@@ -1560,8 +1566,18 @@ func (c *SnapshotCache) portVhost(in captureTableInputs, n meshName, d, pod uint
 // noHTTPPortVhost is the refusal of an HTTP request for a service that serves
 // no HTTP port at all (proposal 037): 421 no-http-port, naming where the
 // service is reached over raw TCP.
-func (c *SnapshotCache) noHTTPPortVhost(name, svc string, doms []string, ports servicePorts) *routev3.VirtualHost {
-	body := fmt.Sprintf("aether: %s serves no HTTP port. Reach it over TCP instead: %s\n",
-		proxy.ServiceClusterName(svc, c.meshDomain), c.tcpSpellings(svc, ports))
-	return proxy.BuildRefusalVirtualHost(name, doms, proxy.RefusalNoHTTPPort, body)
+//
+// A name whose Service has a port with a targetPort that is a name that does
+// not resolve yet is told so (portMap, unresolvedNote): that port may well be
+// its HTTP port, and "serves no HTTP port, reach it over TCP" alone sent the
+// reader the wrong way. And when nothing is known of the service's ports at
+// all (a name the node has by a filter or a route and a port map alone), the
+// body does not claim it serves none.
+func (c *SnapshotCache) noHTTPPortVhost(name, svc string, doms []string, ports servicePorts, portMap map[uint32]uint32) *routev3.VirtualHost {
+	fqdn, note := proxy.ServiceClusterName(svc, c.meshDomain), unresolvedNote(portMap)
+	body := fmt.Sprintf("aether: %s serves no HTTP port. Reach it over TCP instead: %s\n", fqdn, c.tcpSpellings(svc, ports))
+	if note != "" && !ports.known() {
+		body = fmt.Sprintf("aether: %s has no port it can be addressed on yet.\n", fqdn)
+	}
+	return proxy.BuildRefusalVirtualHost(name, doms, proxy.RefusalNoHTTPPort, body+note)
 }

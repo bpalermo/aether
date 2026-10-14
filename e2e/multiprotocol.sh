@@ -330,6 +330,9 @@ LATE_MARKER="late8080"
 LATE_SERVICE_PORT=8000
 LATE_ROUTE="mp-late-route"
 LATE_SLICED="mp-late-sliced"
+# How long a slice change may take to show in a route's status (leg U2 says
+# why it is this short).
+U2_EVENT_WINDOW=8
 # Two more Services of the user's that select mp-own's pods: on a port number
 # another mesh service declares as HTTP, and on the port the pods serve.
 OWN_ALT_SERVICE="mp-own-alt"
@@ -1914,6 +1917,26 @@ route_condition() {
 	fi
 }
 
+# expect_condition_within SECONDS ROUTE TYPE WANT MEANING — the condition must
+# be WANT within SECONDS, polled twice a second. For a change the agent is
+# told of by an event, where the long wait of expect_condition would also pass
+# an agent that only found out at some later re-read.
+expect_condition_within() {
+	local within="$1" route="$2" type="$3" want="$4" meaning="$5" got="" start
+	start="$(date +%s.%N)"
+	while :; do
+		got="$(route_condition "$route" "$type")"
+		[ "$got" = "$want" ] && break
+		awk -v s="$start" -v n="$(date +%s.%N)" -v w="$within" 'BEGIN { exit !(n - s >= w) }' && break
+		sleep 0.5
+	done
+	if [ "$got" = "$want" ]; then
+		passed "HTTPRoute $route: $type is $want within ${within}s"
+	else
+		fail "HTTPRoute $route: $type is '${got:-absent}' after ${within}s, want $want" "$meaning"
+	fi
+}
+
 # expect_condition ROUTE TYPE WANT MEANING — poll until the condition is WANT.
 expect_condition() {
 	local route="$1" type="$2" want="$3" meaning="$4" got="" deadline
@@ -2399,15 +2422,26 @@ YAML
 		"no EndpointSlice of $LATE_SLICED names its port: a marker or HTTP503 is the request sent on to a port nothing named"
 	loopback "HTTP500" "$name:$HTTP_PORT" "the same on the loopback listener"
 
+	# Each of the three slice changes must reach the status within
+	# $U2_EVENT_WINDOW seconds, and the three follow one another at once.
+	# That is what tells the agent's WATCH from a relist: with `list` and
+	# `get` on endpointslices but no `watch` (the role before this chart's
+	# last change, or one edited by hand) the informer's reflector cannot
+	# watch, backs off, and lists again every 30 to 60 seconds once its
+	# back-off has reached its cap (client-go: 800 ms doubling to 30 s, with
+	# up to as much again in jitter), which every change would be seen by in
+	# the end. Three windows of $U2_EVENT_WINDOW s in a row are shorter than
+	# one such interval, so a relist can answer one of them at most; with the
+	# plain 90 s wait this leg passed 9 of 9 without the verb.
 	u2_slice a "$HTTP_PORT"
-	expect_condition "$LATE_ROUTE" ResolvedRefs "True/ResolvedRefs" \
-		"'False/BackendNotFound' is the agent not having seen the EndpointSlice appear: nothing else changed"
+	expect_condition_within "$U2_EVENT_WINDOW" "$LATE_ROUTE" ResolvedRefs "True/ResolvedRefs" \
+		"'False/BackendNotFound' is the agent not having been told of the EndpointSlice by its watch: nothing else changed"
 	u2_slice b "$ALT_PORT"
-	expect_condition "$LATE_ROUTE" ResolvedRefs "False/BackendNotFound" \
-		"'True/ResolvedRefs' is two EndpointSlices that give the name different numbers resolved to one of them, or the second slice not seen"
+	expect_condition_within "$U2_EVENT_WINDOW" "$LATE_ROUTE" ResolvedRefs "False/BackendNotFound" \
+		"'True/ResolvedRefs' is two EndpointSlices that give the name different numbers resolved to one of them, or the second slice not seen by the watch"
 	kc -n "$TEST_NS" delete endpointslice "$LATE_SLICED-b" --wait=true >/dev/null 2>&1 || true
-	expect_condition "$LATE_ROUTE" ResolvedRefs "True/ResolvedRefs" \
-		"'False/BackendNotFound' is the agent not having seen the EndpointSlice go"
+	expect_condition_within "$U2_EVENT_WINDOW" "$LATE_ROUTE" ResolvedRefs "True/ResolvedRefs" \
+		"'False/BackendNotFound' is the agent not having been told by its watch that the EndpointSlice went"
 
 	remove_route "$LATE_ROUTE"
 	kc -n "$TEST_NS" delete endpointslice "$LATE_SLICED-a" --ignore-not-found --wait=true >/dev/null 2>&1 || true

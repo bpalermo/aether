@@ -148,6 +148,7 @@ go_test(
         "projection_test.go",
         "quic_outbound_test.go",
         "route_perport_043_test.go",
+        "route_refusalbody_043_test.go",
         "route_test.go",
         "shortname_test.go",
         "sourceidentity_test.go",
@@ -252,6 +253,7 @@ go_test(
         "droppedbackend_test.go",
         "shortname.go",
         "shortname_test.go",
+        "route_refusalbody_043_test.go",
     ],
     deps = [
         "//agent/internal/xds/config",

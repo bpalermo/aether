@@ -123,6 +123,11 @@ type Reconciler struct {
 	namedMu      sync.Mutex
 	namedTargets map[string]struct{}
 	namedNow     map[string]struct{}
+	// resolutions: what the EndpointSlices of each concerned Service said of
+	// its named targetPorts when last read; sliceChanged: the Services a
+	// slice event was seen for since (namedTargetPorts).
+	resolutions  map[string]resolution
+	sliceChanged map[string]bool
 	// warned / warnedNow: the unresolved named targetPorts logged at the
 	// last reconcile and at the running one (warnUnresolvedOnce).
 	warned    map[string]struct{}
@@ -212,7 +217,7 @@ func (r *Reconciler) SetupWithManager(mgr ctrl.Manager) error {
 
 // maxRetryDelay is the longest the controller waits before it runs a
 // reconcile that failed again.
-const maxRetryDelay = 30 * time.Second
+var maxRetryDelay = 30 * time.Second
 
 // retryLimiter is the back-off of a failed reconcile: from 5 ms, doubling, to
 // maxRetryDelay. controller-runtime's default grows to 1000 s. A reconcile
@@ -319,16 +324,18 @@ func (r *Reconciler) Reconcile(ctx context.Context, _ reconcile.Request) (reconc
 	wait, err := r.writeHTTPRouteStatuses(ctx, httpList, grants, facts, seen)
 	grpcWait, grpcErr := r.writeGRPCRouteStatuses(ctx, grpcList, grants, facts, seen)
 	r.contested.keep(seen)
-	due := soonest(wait, grpcWait)
+	held := soonest(wait, grpcWait)
 	if err := errors.Join(err, grpcErr, unresolvedErr); err != nil {
 		// The controller ignores a RequeueAfter beside an error and runs the
-		// reconciler again on its error back-off, which grows to 1000 s. A
-		// route that is being held back must not wait for that: its wait is
-		// kept by a timer of the reconciler's own.
-		r.wakeIn(due)
+		// reconciler again on its own back-off. A route that is being held
+		// back must not wait for that: its wait is kept by a timer of the
+		// reconciler's own. (The ten-minute re-read needs none: every
+		// reconcile, the retries of this error among them, reads what is
+		// due.)
+		r.wakeIn(held)
 		return reconcile.Result{}, err
 	}
-	return reconcile.Result{RequeueAfter: due}, nil
+	return reconcile.Result{RequeueAfter: soonest(held, r.namedResyncDue())}, nil
 }
 
 // wakeIn has the reconciler run again in d (zero: nothing to do), whatever
@@ -689,12 +696,144 @@ func (r *Reconciler) addNamedTarget(key string) {
 	r.namedTargets = union
 }
 
-// endNamedTargets makes the running reconcile's set the current one.
+// endNamedTargets makes the running reconcile's set the current one, and
+// forgets what was kept of a Service that is no longer in it.
 func (r *Reconciler) endNamedTargets() {
 	r.namedMu.Lock()
 	defer r.namedMu.Unlock()
 	r.namedTargets, r.namedNow = r.namedNow, nil
 	r.warned, r.warnedNow = r.warnedNow, nil
+	for key := range r.resolutions {
+		if _, concerned := r.namedTargets[key]; !concerned {
+			delete(r.resolutions, key)
+		}
+	}
+	for key := range r.sliceChanged {
+		if _, concerned := r.namedTargets[key]; !concerned {
+			delete(r.sliceChanged, key)
+		}
+	}
+}
+
+// namedResync is how long a kept resolution of a Service's named targetPorts
+// is used without being read again (namedTargetPorts).
+const namedResync = 10 * time.Minute
+
+// resolution is what the EndpointSlices of one Service said of its named
+// targetPorts when they were last read.
+type resolution struct {
+	// spec names the Service object and its named ports as they were then
+	// (namedSpec): another Service of the name, or other ports, is not this.
+	spec string
+	at   time.Time
+	// ports: Service port to pod port, for the names that resolved.
+	ports      map[uint32]uint32
+	unresolved map[uint32]unresolvedTarget
+}
+
+// namedSpec names a Service object and its named targetPorts.
+func namedSpec(svc *corev1.Service, namedPorts []corev1.ServicePort) string {
+	var b strings.Builder
+	b.WriteString(string(svc.UID))
+	for _, sp := range namedPorts {
+		fmt.Fprintf(&b, "|%d>%s/%s", sp.Port, sp.TargetPort.StrVal, sp.Name)
+	}
+	return b.String()
+}
+
+// namedTargetPorts fills in, in m, the pod ports of the Service's named
+// targetPorts, and returns the ones that do not resolve
+// (resolveNamedTargetPorts), reading the Service's EndpointSlices only when
+// it has to.
+//
+// Every slice event of a concerned Service is a reconcile, and a reconcile
+// judges everything: read anew each time, the slices of EVERY concerned
+// Service were listed for the event of one (200 Services, 200 lists per pod
+// start, on every node), and a list that failed refused every named port of
+// the node, not the one Service's. So what a read said is kept per Service
+// and used again while all of this holds:
+//
+//   - no slice event of the Service has been seen since the read began (the
+//     watch's predicate marks the Service, namedTargetSlices; the mark is
+//     taken BEFORE the read, so an event during it is not lost);
+//   - the Service object and its named ports are the ones that were read
+//     for (namedSpec);
+//   - the Service has been concerned at every reconcile since (endNamedTargets
+//     forgets one that was not);
+//   - the read is younger than namedResync. That is the bound on an event the
+//     agent never saw (a watch that broke and resumed past it is repaired by
+//     the informer's own relist, which delivers the change as an event; this
+//     is for whatever that does not cover): a kept answer is read again when
+//     it is ten minutes old, and the reconciler asks to be run when the
+//     oldest is due.
+//
+// A read that fails is the reconcile's error, so that it is retried. What it
+// does to the Service depends on why the read was made. When something says
+// the kept answer is not current (a slice event, other named ports, another
+// Service object), the answer is dropped and THIS Service's names are
+// refused; the others' kept answers stand. When the read was only the
+// ten-minute one, the kept answer stays in use: an answer with no evidence of
+// change may be used, a known-stale one must not. So the bound on a missed
+// event is ten minutes plus however long the API cannot be read.
+func (r *Reconciler) namedTargetPorts(ctx context.Context, svc *corev1.Service, key string, m map[uint32]uint32, namedPorts []corev1.ServicePort) (map[uint32]unresolvedTarget, error) {
+	spec, now := namedSpec(svc, namedPorts), r.now()
+	r.namedMu.Lock()
+	kept, ok := r.resolutions[key]
+	changed := r.sliceChanged[key]
+	delete(r.sliceChanged, key)
+	r.namedMu.Unlock()
+	if ok && !changed && kept.spec == spec && now.Sub(kept.at) < namedResync {
+		maps.Copy(m, kept.ports)
+		for _, sp := range namedPorts {
+			if u, unresolved := kept.unresolved[uint32(sp.Port)]; unresolved {
+				r.warnUnresolvedOnce(ctx, key, sp, u.why)
+			}
+		}
+		return kept.unresolved, nil
+	}
+	unresolved, err := r.resolveNamedTargetPorts(ctx, svc, key, m, namedPorts)
+	r.namedMu.Lock()
+	defer r.namedMu.Unlock()
+	if err != nil {
+		if ok && !changed && kept.spec == spec {
+			// Nothing says the kept answer changed: it was only due to be
+			// read again. It stays in use, its age with it, and the error
+			// has the read retried. Dropping it here had the ten-minute
+			// re-read refuse every concerned Service of the node whenever
+			// the API server was away at that moment.
+			maps.Copy(m, kept.ports)
+			return kept.unresolved, err
+		}
+		// A slice event was seen, or the Service's named ports are others:
+		// the kept answer is known not to be current. Refused until the
+		// read succeeds.
+		delete(r.resolutions, key)
+		return unresolved, err
+	}
+	res := resolution{spec: spec, at: now, ports: map[uint32]uint32{}, unresolved: unresolved}
+	for _, sp := range namedPorts {
+		if pod := m[uint32(sp.Port)]; pod != 0 {
+			res.ports[uint32(sp.Port)] = pod
+		}
+	}
+	if r.resolutions == nil {
+		r.resolutions = map[string]resolution{}
+	}
+	r.resolutions[key] = res
+	return unresolved, nil
+}
+
+// namedResyncDue returns how long until the oldest kept resolution is to be
+// read again, zero when none is kept.
+func (r *Reconciler) namedResyncDue() time.Duration {
+	now := r.now()
+	r.namedMu.Lock()
+	defer r.namedMu.Unlock()
+	var due time.Duration
+	for _, res := range r.resolutions {
+		due = soonest(due, max(res.at.Add(namedResync).Sub(now), time.Second))
+	}
+	return due
 }
 
 // setNamedTargets replaces the set (tests).
@@ -730,17 +869,48 @@ func (r *Reconciler) warnUnresolvedOnce(ctx context.Context, key string, sp core
 // the pods have left) until it is told. The watch is metadata-only: the
 // slice's Service is in its labels, and the slices themselves are read from
 // the API for the few Services concerned.
+//
+// An update is judged by BOTH of its objects. A slice leaves a Service by a
+// change of its label (moved to another Service, or the label removed), and
+// that update's new object no longer names the Service it left: judged by the
+// new object alone, as predicate.NewPredicateFuncs does, the Service that lost
+// its slice was never marked, and its kept answer was used for ten minutes
+// more (still delivered after its last slice was gone; still refused after
+// the slice that disagreed had left).
 func (r *Reconciler) namedTargetSlices() predicate.Predicate {
-	return predicate.NewPredicateFuncs(func(o client.Object) bool {
-		svc := o.GetLabels()[discoveryv1.LabelServiceName]
-		if svc == "" {
-			return false
+	return predicate.Funcs{
+		CreateFunc:  func(e event.CreateEvent) bool { return r.sliceOfANamedTarget(e.Object) },
+		DeleteFunc:  func(e event.DeleteEvent) bool { return r.sliceOfANamedTarget(e.Object) },
+		GenericFunc: func(e event.GenericEvent) bool { return r.sliceOfANamedTarget(e.Object) },
+		UpdateFunc: func(e event.UpdateEvent) bool {
+			was, is := r.sliceOfANamedTarget(e.ObjectOld), r.sliceOfANamedTarget(e.ObjectNew)
+			return was || is
+		},
+	}
+}
+
+// sliceOfANamedTarget reports whether o is an EndpointSlice of a concerned
+// Service, and marks that Service: the reconcile this event causes reads its
+// slices again, and no other's (namedTargetPorts).
+func (r *Reconciler) sliceOfANamedTarget(o client.Object) bool {
+	if o == nil {
+		return false
+	}
+	svc := o.GetLabels()[discoveryv1.LabelServiceName]
+	if svc == "" {
+		return false
+	}
+	key := serviceref.New(o.GetNamespace(), svc).Key()
+	r.namedMu.Lock()
+	defer r.namedMu.Unlock()
+	_, concerned := r.namedTargets[key]
+	if concerned {
+		if r.sliceChanged == nil {
+			r.sliceChanged = map[string]bool{}
 		}
-		r.namedMu.Lock()
-		defer r.namedMu.Unlock()
-		_, concerned := r.namedTargets[serviceref.New(o.GetNamespace(), svc).Key()]
-		return concerned
-	})
+		r.sliceChanged[key] = true
+	}
+	return concerned
 }
 
 // servicePortMapAndFacts returns the port map of one Service when it is a
@@ -781,7 +951,7 @@ func (r *Reconciler) servicePortMapAndFacts(ctx context.Context, svc *corev1.Ser
 		// this reconcile is still reading the next Service's must reconcile
 		// again, or the name stays unresolved with nothing left to say so.
 		r.addNamedTarget(key)
-		unresolved, err = r.resolveNamedTargetPorts(ctx, svc, key, m, namedPorts)
+		unresolved, err = r.namedTargetPorts(ctx, svc, key, m, namedPorts)
 	}
 	if routed {
 		f := facts[key]
