@@ -12,6 +12,7 @@ import (
 
 	"aethermesh.dev/agent/internal/capture"
 	"aethermesh.dev/agent/internal/xds/proxy"
+	"aethermesh.dev/agent/test/xdseval"
 	cniv1 "aethermesh.dev/api/aether/cni/v1"
 	registryv1 "aethermesh.dev/api/aether/registry/v1"
 	clusterv3 "github.com/envoyproxy/go-control-plane/envoy/config/cluster/v3"
@@ -160,7 +161,7 @@ func a043Tables(t *testing.T, c *SnapshotCache) map[string]*routev3.RouteConfigu
 		require.True(t, ok)
 		out[name] = rc
 	}
-	return out
+	return withPerPortView(t, c, out)
 }
 
 // a043Answer is what a route table does with one request.
@@ -303,13 +304,15 @@ func TestAddressing_CapturedDialledPortDecides(t *testing.T) {
 	c := a043Cache(t, services)
 	tables := a043Tables(t, c)
 
-	// Every HTTP port number of the fixture has a table, and so do port 80,
-	// the proxy port and cap_http_other.
+	// Every HTTP port number of the fixture has a per-port table, and so do
+	// port 80, the proxy port and cap_http_other; the proxy is given ONE of
+	// them besides the proxy port's, cap_http, compiled from the others
+	// (a043Tables holds it to their answers).
 	for _, name := range []string{"cap_http_80", "cap_http_7070", "cap_http_8080", "cap_http_9000", "cap_http_9090", "cap_http_18081", "cap_http_other"} {
 		require.Contains(t, tables, name)
 	}
 	require.NotContains(t, tables, "cap_http_18082", "the TCP mesh port is never an HTTP chain's port")
-	require.NotContains(t, tables, "cap_http", "the single table is gone")
+	require.NotNil(t, a043Published(t, c), "the one published table")
 
 	dialled := []uint32{80, 7070, 7777, 8080, 9000, 9090}
 	for _, s := range services {
@@ -362,14 +365,16 @@ func TestAddressing_CapturedDialledPortDecides(t *testing.T) {
 					}
 
 					// A5: a Host that names ANOTHER port is refused, whatever
-					// that port is, and never obeyed.
+					// that port is, and never obeyed: port-mismatch where the
+					// name is served on the dialled port, port-not-declared
+					// where it is not (the port that decides is none of its).
 					for _, otherPort := range []uint32{80, 8080, 9000, 9090, 18081, 7777} {
 						if otherPort == d {
 							continue
 						}
 						got := a043Resolve(t, table, fmt.Sprintf("%s:%d", name, otherPort))
-						if d == 7777 {
-							assert.Equalf(t, proxy.RefusalPortNotDeclared, got.refusal, "%+v", got)
+						if d == 7777 || !isHTTP {
+							assert.Equalf(t, proxy.RefusalPortNotDeclared, got.refusal, "dialled %d, Host port %d: %+v", d, otherPort, got)
 						} else {
 							assert.Equalf(t, proxy.RefusalPortMismatch, got.refusal, "dialled %d, Host port %d: %+v", d, otherPort, got)
 						}
@@ -570,7 +575,7 @@ func TestAddressing_NoRouteLeavesItsPort(t *testing.T) {
 	}
 	routes, hostDecided := 0, 0
 	for name, table := range a043Tables(t, c) {
-		port, isPortTable := proxy.CaptureHTTPRoutePort(name)
+		port, isPortTable := capturePortOf(name)
 		if name == proxy.OutboundHTTPRouteName || (isPortTable && port == 18081) {
 			hostDecided += a043HostPortClusters(t, table, byMesh)
 			continue
@@ -696,9 +701,9 @@ func chainNames(l *listenerv3.Listener) []string {
 }
 
 // TestAddressing_ListenerChains holds the capture listener's chain set against
-// the fixture: an HTTP chain per HTTP port number, a raw-TCP chain per
-// (service, raw-TCP port), the two legacy chains of a raw-TCP legacy target,
-// and no chain that takes "any other port" of an address.
+// the fixture: the two HTTP chains, a raw-TCP chain per (service, raw-TCP
+// port), the two legacy chains of a raw-TCP legacy target, and no chain that
+// takes "any other port" of an address.
 func TestAddressing_ListenerChains(t *testing.T) {
 	services := a043Fixture()
 	c := a043Cache(t, services)
@@ -706,7 +711,7 @@ func TestAddressing_ListenerChains(t *testing.T) {
 	names := chainNames(l)
 
 	for _, want := range []string{
-		"cap_http_80", "cap_http_7070", "cap_http_8080", "cap_http_9000", "cap_http_9090", "cap_http_18081", "cap_http_other",
+		proxy.CaptureHTTPChainName, "cap_http_18081",
 		// mixed: 9000 is raw TCP, and its legacy target is HTTP.
 		"cap_tcp_tcp:mixed.demo.aether.internal_9000",
 		// tcpfirst: a raw-TCP legacy target on its own port and on :18082.
@@ -722,67 +727,72 @@ func TestAddressing_ListenerChains(t *testing.T) {
 		assert.NotContains(t, name, "anyport", "no service has an any-port chain: a raw-TCP service is reached on the ports it declares")
 		assert.NotContains(t, name, "cap_tcp_tcp:mixed.demo.aether.internal_18082", "the TCP mesh port names nothing on a service whose legacy target is HTTP")
 		assert.NotContains(t, name, "cap_tcp_tcp:nine", "a port declared HTTP gets no raw-TCP chain, whatever another service declares for the number")
+		_, perPort := capturePortOf(name)
+		assert.False(t, perPort && name != "cap_http_18081", "no per-port HTTP chain: %s", name)
 	}
 
 	// A10: nine's HTTP on 9000 and mixed's raw TCP on 9000 are told apart by
-	// the address. The raw-TCP chains of port 9000 match an address; the HTTP
-	// chain of port 9000 matches none.
-	addresses := map[string][]string{}
-	for _, fc := range l.GetFilterChains() {
-		m := fc.GetFilterChainMatch()
-		if m.GetDestinationPort().GetValue() != 9000 {
-			continue
+	// the address.
+	sel := func(ip string, port uint32, http bool) string {
+		c := xdseval.Conn{IP: ip, Port: port, Transport: "raw_buffer"}
+		if http {
+			c.App = []string{"http/1.1"}
 		}
-		for _, r := range m.GetPrefixRanges() {
-			addresses[fc.GetName()] = append(addresses[fc.GetName()], r.GetAddressPrefix())
-		}
-		if len(m.GetPrefixRanges()) == 0 {
-			addresses[fc.GetName()] = nil
-		}
+		name, err := xdseval.SelectChain(l, c)
+		require.NoError(t, err)
+		return name
 	}
-	assert.Equal(t, map[string][]string{
-		"cap_http_9000": nil,
-		"cap_tcp_tcp:mixed.demo.aether.internal_9000":    {"10.96.1.4"},
-		"cap_tcp_tcp:tcpfirst.demo.aether.internal_9000": {"10.96.1.5"},
-		"cap_tcp_tcp:tcponly.demo.aether.internal_9000":  {"10.96.1.7"},
-	}, addresses)
+	assert.Equal(t, proxy.CaptureHTTPChainName, sel("10.96.1.6", 9000, true), "nine's HTTP on 9000")
+	assert.Equal(t, "cap_tcp_tcp:mixed.demo.aether.internal_9000", sel("10.96.1.4", 9000, false))
+	assert.Equal(t, "cap_tcp_tcp:tcpfirst.demo.aether.internal_9000", sel("10.96.1.5", 9000, false))
+	assert.Equal(t, "cap_tcp_tcp:tcponly.demo.aether.internal_9000", sel("10.96.1.7", 9000, false))
+	assert.Equal(t, proxy.CaptureHTTPChainName, sel("10.96.1.4", 8080, true), "mixed's own HTTP")
 
-	// No two chains match the same thing: the proxy rejects such a listener
-	// whole.
-	seen := map[string]string{}
-	for _, fc := range l.GetFilterChains() {
-		key := fc.GetFilterChainMatch().String()
-		if prev, dup := seen[key]; dup {
-			t.Errorf("chains %q and %q have the same match %s", prev, fc.GetName(), key)
-		}
-		seen[key] = fc.GetName()
+	// Every action of the matcher names a chain of the listener, and no name
+	// is used twice: the proxy closes the connection for the first and
+	// rejects the listener for the second.
+	have := map[string]int{}
+	for _, n := range names {
+		have[n]++
+	}
+	for n, k := range have {
+		assert.Equalf(t, 1, k, "chain name %s used %d times", n, k)
+	}
+	for _, n := range xdseval.MatcherActionNames(l.GetFilterChainMatcher()) {
+		assert.Contains(t, have, n, "a matcher action names a chain the listener does not have")
 	}
 }
 
-// TestAddressing_ChainAndTableTravelTogether: every cap_http_<P> chain of a
-// listener in a snapshot names a route table of that snapshot, when a port
-// number enters the mesh and when it leaves. A chain naming a table the
-// snapshot does not carry leaves the listener warming (#817).
+// TestAddressing_ChainAndTableTravelTogether: every HTTP chain of a listener
+// in a snapshot names a route table of that snapshot, when a port number
+// enters the mesh and when it leaves (a chain naming a table the snapshot
+// does not carry leaves the listener warming, #817). With one HTTP chain for
+// every port the listener does not change at all: the port number is a
+// branch of cap_http's table, which gains and loses it.
 func TestAddressing_ChainAndTableTravelTogether(t *testing.T) {
 	ctx := context.Background()
 	services := a043Fixture()
 	c := a043Cache(t, services)
+	first := a043CaptureListener(t, c)
 	check := func(wantPort uint32, present bool) {
 		t.Helper()
+		snap, err := c.GetSnapshot("node-1")
+		require.NoError(t, err)
+		published := snap.GetResources(resourcev3.RouteType)
 		tables := a043Tables(t, c)
 		l := a043CaptureListener(t, c)
 		named := 0
 		for _, fc := range l.GetFilterChains() {
-			if !strings.HasPrefix(fc.GetName(), proxy.CaptureHTTPRoutePrefix) {
+			if !strings.HasPrefix(fc.GetName(), proxy.CaptureHTTPChainName) {
 				continue
 			}
 			named++
-			assert.Containsf(t, tables, fc.GetName(), "chain %s names a route table the snapshot does not carry", fc.GetName())
+			assert.Containsf(t, published, fc.GetName(), "chain %s names a route table the snapshot does not carry", fc.GetName())
 		}
-		require.Greater(t, named, 2)
-		assert.Equal(t, present, slices.Contains(chainNames(l), proxy.CaptureHTTPRouteName(wantPort)))
+		require.Equal(t, 2, named)
+		assert.True(t, proto.Equal(first, l), "a port number entering or leaving the mesh changed the capture listener")
 		_, hasTable := tables[proxy.CaptureHTTPRouteName(wantPort)]
-		assert.Equal(t, present, hasTable)
+		assert.Equal(t, present, hasTable, "the per-port table of %d", wantPort)
 	}
 	check(7070, true)
 
@@ -825,6 +835,40 @@ func TestAddressing_EndpointChurnDoesNotRebuildListeners(t *testing.T) {
 	after := a043CaptureListener(t, c)
 	assert.NotSame(t, before, after)
 	assert.Contains(t, chainNames(after), "cap_tcp_tcp:httponly.demo.aether.internal_5555")
+}
+
+// TestAddressing_HTTPPortChangeRebuildsOnlyWhatTheListenerReads: the derived
+// ports still trigger a listener rebuild (refreshCaptureServicePorts) when a
+// service's HTTP ports change, and the trigger is still needed: a service
+// with a TLSRoute matches TLS on every port it does NOT serve HTTP on, so its
+// HTTP ports are in the listener. For a service without one they are not,
+// and the rebuilt listener is the same message (nothing new for the proxy).
+func TestAddressing_HTTPPortChangeRebuildsOnlyWhatTheListenerReads(t *testing.T) {
+	ctx := context.Background()
+	h := registryv1.PortProtocol_PORT_PROTOCOL_HTTP
+	services := a043Fixture()
+	c := a043Cache(t, services)
+	c.SetTLSServiceRoutes(shpTLSRoutes("demo/multi"))
+	require.NoError(t, c.LoadClustersFromRegistry(ctx, "cluster-1", "node-1", a043Registry(services)))
+	before := a043CaptureListener(t, c)
+
+	grow := func(name string) []a043Service {
+		out := slices.Clone(services)
+		for i := range out {
+			if out[i].name == name {
+				out[i].ports = maps.Clone(out[i].ports)
+				out[i].ports[6061] = h
+			}
+		}
+		return out
+	}
+	// httponly has no TLSRoute: its new HTTP port is not in the listener.
+	require.NoError(t, c.LoadClustersFromRegistry(ctx, "cluster-1", "node-1", a043Registry(grow("httponly"))))
+	assert.True(t, proto.Equal(before, a043CaptureListener(t, c)), "an HTTP port of a service without a TLSRoute changed the capture listener")
+
+	// multi has one: TLS on 6061 is no longer matched against its SNI names.
+	require.NoError(t, c.LoadClustersFromRegistry(ctx, "cluster-1", "node-1", a043Registry(grow("multi"))))
+	assert.False(t, proto.Equal(before, a043CaptureListener(t, c)), "control: a TLSRoute parent's HTTP ports are in the listener")
 }
 
 // TestAddressing_RulesFollowTheParentPort is leg A4: a rule whose parentRef
@@ -1221,9 +1265,9 @@ func quicSelectionDefault(t *testing.T, ra *routev3.RouteAction) string {
 
 // TestAddressing_RoutePortsReachTheListener: a port number that enters the
 // mesh through a route alone (a parentRef port, a user Service's port map)
-// gets its chain on the next snapshot. Nothing else rebuilds the listeners
-// for it: the routes did not change, and neither did the Services or the
-// registry.
+// gets its branch of cap_http on the next snapshot, and leaves it the same
+// way. Nothing rebuilds the listeners for it: their one HTTP chain serves
+// every port.
 func TestAddressing_RoutePortsReachTheListener(t *testing.T) {
 	ctx := context.Background()
 	services := a043Fixture()
@@ -1232,19 +1276,39 @@ func TestAddressing_RoutePortsReachTheListener(t *testing.T) {
 		"demo/route-only": {{Backends: []proxy.GammaBackend{{Service: "demo/multi", Cluster: "multi.demo.aether.internal", Weight: 1}}}},
 	})
 	require.NoError(t, c.generateSnapshot(ctx))
-	require.NotContains(t, chainNames(a043CaptureListener(t, c)), "cap_http_6543")
+	before := a043CaptureListener(t, c)
+	require.NotContains(t, a043Tables(t, c), "cap_http_6543")
 
 	c.SetRouteTargetPorts(map[string][]uint32{"demo/route-only": {6543}})
 	require.NoError(t, c.generateSnapshot(ctx))
-	assert.Contains(t, chainNames(a043CaptureListener(t, c)), "cap_http_6543")
 	assert.Contains(t, a043Tables(t, c), "cap_http_6543")
+	assert.Same(t, before, a043CaptureListener(t, c), "a port number entering the mesh rebuilt the capture listener")
 
 	c.SetRouteTargetPorts(nil)
 	c.SetServicePortMaps(map[string]map[uint32]uint32{"demo/route-only": {6544: 8080}})
 	require.NoError(t, c.generateSnapshot(ctx))
-	names := chainNames(a043CaptureListener(t, c))
-	assert.Contains(t, names, "cap_http_6544")
-	assert.NotContains(t, names, "cap_http_6543", "a port number that left the mesh loses its chain")
+	tables := a043Tables(t, c)
+	assert.Contains(t, tables, "cap_http_6544")
+	assert.NotContains(t, tables, "cap_http_6543", "a port number that left the mesh loses its branch")
+	// The published table answers for the port that entered and not for the
+	// one that left: a request dialled to 6544 for the route's parent takes
+	// its virtual host, one dialled to 6543 is the other ports' answer.
+	first := func(rc *routev3.RouteConfiguration, fs map[string]string) *routev3.Route {
+		req := xdseval.Request{Host: "route-only.demo." + a043Mesh, FilterState: fs}
+		a, err := xdseval.Resolve(rc, req)
+		require.NoError(t, err)
+		r, err := xdseval.FirstRoute(a.Routes, req)
+		require.NoError(t, err)
+		return r
+	}
+	at := func(d uint32) *routev3.Route {
+		return first(a043Published(t, c), map[string]string{proxy.DialledPortFilterStateKey: fmt.Sprint(d)})
+	}
+	other := first(tables[proxy.CaptureHTTPOtherRouteName], nil)
+	same, _ := xdseval.SameTreatment(other, at(6543))
+	assert.True(t, same, "6543 left the mesh")
+	same, _ = xdseval.SameTreatment(other, at(6544))
+	assert.False(t, same, "6544 entered the mesh")
 }
 
 // TestAddressing_ScaleWorkedExample builds the worked example of proposal
@@ -1297,10 +1361,10 @@ func TestAddressing_ScaleWorkedExample(t *testing.T) {
 		tcpOnly    bool
 		wantChains int
 	}{
-		// 4 HTTP port numbers (80, 8080, 9090 and the legacy 18081) + other + 20.
-		{"20 raw-TCP ports beside an HTTP legacy target", false, 4 + 1 + 20},
+		// The two HTTP chains (cap_http, cap_http_18081) + 20.
+		{"20 raw-TCP ports beside an HTTP legacy target", false, 2 + 20},
 		// Per raw-TCP-only service: its port and :18082.
-		{"20 raw-TCP legacy targets with no HTTP port", true, 4 + 1 + 20*2},
+		{"20 raw-TCP legacy targets with no HTTP port", true, 2 + 20*2},
 	} {
 		t.Run(shape.name, func(t *testing.T) {
 			c, _ := build(shape.tcpOnly)
@@ -1318,14 +1382,14 @@ func TestAddressing_ScaleWorkedExample(t *testing.T) {
 				assert.Len(t, l.GetFilterChains(), shape.wantChains)
 				chains += len(l.GetFilterChains())
 				for _, fc := range l.GetFilterChains() {
-					if strings.HasPrefix(fc.GetName(), "cap_http_") {
+					if strings.HasPrefix(fc.GetName(), proxy.CaptureHTTPChainName) {
 						hcms++
 					}
 				}
 				assert.NotNil(t, l.GetDefaultFilterChain(), "plus the passthrough default chain")
 			}
 			require.Equal(t, 50, captureListeners)
-			assert.Equal(t, 50*5, hcms, "H+1 HCM configs per pod, H counting the legacy mesh HTTP port")
+			assert.Equal(t, 50*2, hcms, "two HCM configs per pod, whatever the number of HTTP port numbers")
 
 			tables, vhosts, tableBytes := 0, 0, 0
 			for name, res := range snap.GetResources(resourcev3.RouteType) {
@@ -1336,8 +1400,8 @@ func TestAddressing_ScaleWorkedExample(t *testing.T) {
 					tableBytes += proto.Size(rc)
 				}
 			}
-			assert.Equal(t, 6, tables, "cap_http_80, _8080, _9090, _18081, cap_http_other and out_http")
-			t.Logf("%s: chains per pod listener=%d (+1 default), per node=%d; HCM configs per pod=5, per node=%d; route tables per node=%d; capture virtual hosts=%d; capture listeners=%d KiB total (%d KiB each); capture route tables=%d KiB total; clusters=%d",
+			assert.Equal(t, 3, tables, "cap_http, cap_http_18081 and out_http")
+			t.Logf("%s: chains per pod listener=%d (+1 default), per node=%d; HCM configs per pod=2, per node=%d; route tables per node=%d; capture virtual hosts=%d; capture listeners=%d KiB total (%d KiB each); capture route tables=%d KiB total; clusters=%d",
 				shape.name, shape.wantChains, chains, hcms, tables, vhosts, listenerBytes/1024, listenerBytes/1024/50, tableBytes/1024, len(snap.GetResources(resourcev3.ClusterType)))
 		})
 	}
@@ -1352,7 +1416,10 @@ func TestAddressing_TablesAreKeptWhileTheirInputsAre(t *testing.T) {
 	ctx := context.Background()
 	services := a043Fixture()
 	c := a043Cache(t, services)
-	table := func() *routev3.RouteConfiguration { return a043Tables(t, c)["cap_http_8080"] }
+	// The published table is the one kept; what it says is read off the
+	// per-port table it was compiled from (a043Tables holds the two alike).
+	table := func() *routev3.RouteConfiguration { a043Tables(t, c); return a043Published(t, c) }
+	perPort8080 := func() *routev3.RouteConfiguration { return a043Tables(t, c)["cap_http_8080"] }
 	last := table()
 	kept := func(what string) {
 		t.Helper()
@@ -1380,7 +1447,7 @@ func TestAddressing_TablesAreKeptWhileTheirInputsAre(t *testing.T) {
 	c.SetServiceRoutes(map[string][]proxy.GammaRoute{"demo/multi": {{Matches: []proxy.GammaMatch{{Prefix: "/x"}}}}})
 	require.NoError(t, c.generateSnapshot(ctx))
 	rebuilt("a route")
-	require.Len(t, findVHost(last.GetVirtualHosts(), "multi.demo.aether.internal:8080").GetRoutes(), 2)
+	require.Len(t, findVHost(perPort8080().GetVirtualHosts(), "multi.demo.aether.internal:8080").GetRoutes(), 2)
 
 	c.SetServicePortMaps(map[string]map[uint32]uint32{"demo/elsewhere": {80: 8080}})
 	require.NoError(t, c.generateSnapshot(ctx))
@@ -1403,13 +1470,13 @@ func TestAddressing_TablesAreKeptWhileTheirInputsAre(t *testing.T) {
 	require.NoError(t, c.LoadClustersFromRegistry(ctx, "cluster-1", "node-1", a043Registry(retyped)))
 	rebuilt("a port's class")
 	// The service now serves no HTTP port at all, and is told so.
-	got := a043Resolve(t, last, "mixed.demo.aether.internal:8080")
+	got := a043Resolve(t, perPort8080(), "mixed.demo.aether.internal:8080")
 	assert.Equal(t, proxy.RefusalNoHTTPPort, got.refusal)
 
 	// The Services' names alone: a second namespace takes a short name, which
 	// then has an arm for each. Nothing else changes (no address, no
 	// dependency), so only the authorities' generation says so.
-	short := findVHost(last.GetVirtualHosts(), "eighty")
+	short := findVHost(perPort8080().GetVirtualHosts(), "eighty")
 	require.NotNil(t, short)
 	require.Equal(t, []string{"demo"}, matcherNamespaces(short))
 	c.captureMu.RLock()
@@ -1419,7 +1486,7 @@ func TestAddressing_TablesAreKeptWhileTheirInputsAre(t *testing.T) {
 	c.SetCaptureAuthorities(authorities)
 	require.NoError(t, c.generateSnapshot(ctx))
 	rebuilt("a mesh Service name")
-	short = findVHost(last.GetVirtualHosts(), "eighty")
+	short = findVHost(perPort8080().GetVirtualHosts(), "eighty")
 	require.NotNil(t, short, "a short name two namespaces share stays a name: each caller gets its own namespace's")
 	assert.Contains(t, matcherNamespaces(short), "demo", "the first namespace's callers are not affected by the second")
 
@@ -1431,8 +1498,8 @@ func TestAddressing_TablesAreKeptWhileTheirInputsAre(t *testing.T) {
 		}
 		return out
 	}
-	assert.Equal(t, []string{"cap_http_80", "cap_http_other"}, names(c.captureRouteTables([]uint32{80})))
-	assert.Equal(t, []string{"cap_http_80", "cap_http_1234", "cap_http_other"}, names(c.captureRouteTables([]uint32{80, 1234})))
+	assert.Equal(t, []string{"cap_http_80", "cap_http_other"}, names(perPortView(t, c, []uint32{80})))
+	assert.Equal(t, []string{"cap_http_80", "cap_http_1234", "cap_http_other"}, names(perPortView(t, c, []uint32{80, 1234})))
 
 	// The QUIC arms have no generation: they are compared.
 	c.captureTables.arms = map[string]map[string]string{"demo/multi": {"spiffe://x": "quic:stale"}}

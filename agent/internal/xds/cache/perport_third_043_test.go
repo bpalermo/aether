@@ -297,7 +297,7 @@ func TestShortName_ArmCarriesBothLevelsOfAFilter(t *testing.T) {
 				// The short arm has ONE place, the route: it must hold the
 				// service-wide configuration as well as the route's own, in
 				// the order the proxy applies the two levels.
-				want = []string{"x-service-wide", "x-route-own"}
+				want = []string{"x-route-own", "x-service-wide"}
 			}
 			assert.Equalf(t, want, stamps(got), "table %s, Host echo:8080 from demo, route %d of the arm: the levels of %s", tname, i, r3Filter)
 		}

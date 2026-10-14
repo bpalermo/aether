@@ -556,7 +556,7 @@ dump_state() {
 	# the whole question.
 	local listeners
 	listeners="$(envoy_admin "config_dump?resource=dynamic_listeners")"
-	printf '\033[1;33m  -- envoy: capture HTTP chains and the route tables they name (cap_http_*; one per HTTP port number) --\033[0m\n' >&2
+	printf '\033[1;33m  -- envoy: capture HTTP chains and the route tables they name (cap_http, cap_http_18081) --\033[0m\n' >&2
 	printf '%s\n' "$listeners" | grep -oE '"(cap_http|out_http)[^"]*"' | sort | uniq -c | sed 's/^/    /' >&2 || true
 	printf '\033[1;33m  -- envoy: TCP filter chains (cap_tcp_* on the source, in_tcp_* on the destination) --\033[0m\n' >&2
 	printf '%s\n' "$listeners" | grep -oE '"(cap_tcp_|in_tcp_)[^"]*"' | sort | uniq -c | sed 's/^/    /' >&2 || true

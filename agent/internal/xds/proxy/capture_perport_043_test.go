@@ -3,10 +3,10 @@ package proxy
 import (
 	"fmt"
 	"slices"
-	"sort"
 	"strings"
 	"testing"
 
+	"aethermesh.dev/agent/test/xdseval"
 	cniv1 "aethermesh.dev/api/aether/cni/v1"
 	meshconst "aethermesh.dev/common/constants/mesh"
 	listenerv3 "github.com/envoyproxy/go-control-plane/envoy/config/listener/v3"
@@ -17,11 +17,17 @@ import (
 )
 
 // Proposal 043, "The chains of a capture listener": the port a client DIALLED
-// selects the chain. These tests hold the listener's shape against the silent
-// wrong answers the layout exists to remove: HTTP delivered to another port's
-// table, HTTP on a port number some other service declares raw TCP leaving
-// through the passthrough, and a per-address chain swallowing a service's own
-// HTTP.
+// decides what a request reaches. Since this change the listener has ONE HTTP
+// chain for every port but the proxy port, selected by a matching tree that
+// backtracks (capturematcher.go), and cap_http's one route table branches on
+// the dialled port. These tests hold the listener against the silent wrong
+// answers the layout exists to remove: HTTP on a port number some other
+// service declares raw TCP leaving through the passthrough, a per-address
+// chain swallowing a service's own HTTP, a TLSRoute that is inert on a port,
+// and an action that names no chain (which closes the connection).
+//
+// They select chains with xdseval.SelectChain, which evaluates the listener's
+// filter_chain_matcher the way the proxy does.
 
 const perPortSource = "spiffe://aether.internal/ns/default/sa/client"
 
@@ -29,15 +35,62 @@ func perPortPod() *cniv1.CNIPod {
 	return &cniv1.CNIPod{Name: "p1", Namespace: "default", NetworkNamespace: "/var/run/netns/p1"}
 }
 
-func perPortListener(t *testing.T, svcs []CaptureTCPService, httpPorts []uint32, withPassthrough bool) *listenerv3.Listener {
+func perPortListener(t *testing.T, svcs []CaptureTCPService, withPassthrough bool) *listenerv3.Listener {
 	t.Helper()
-	l, err := GenerateCaptureListener(perPortPod(), perPortSource, meshconst.ProxyCapturePort, "aether.internal", false, svcs, httpPorts, withPassthrough, nil)
+	l, err := GenerateCaptureListener(perPortPod(), perPortSource, meshconst.ProxyCapturePort, "aether.internal", false, svcs, withPassthrough, nil)
 	require.NoError(t, err)
+	requireMatcherNamesChains(t, l)
 	return l
 }
 
-// matchKey renders every criterion of a filter-chain match that Envoy tells two
-// chains apart by. Two chains with the same key are a listener Envoy rejects
+// requireMatcherNamesChains is gate (a): every action of the listener's
+// filter_chain_matcher names a chain the listener has, and no two chains share
+// a name. An action naming a chain that is not there closes the connection
+// (filter_chain_manager_impl.cc NoopFilterChainAction): neither the default
+// chain nor a rejected listener says so.
+func requireMatcherNamesChains(t interface {
+	require.TestingT
+	Helper()
+}, l *listenerv3.Listener,
+) {
+	t.Helper()
+	require.NotNil(t, l.GetFilterChainMatcher(), "the capture listener selects its chains with filter_chain_matcher")
+	have := map[string]int{}
+	for _, fc := range l.GetFilterChains() {
+		have[fc.GetName()]++
+		require.Nil(t, fc.GetFilterChainMatch(), "chain %s carries a filter_chain_match the proxy would ignore", fc.GetName())
+	}
+	for name, n := range have {
+		require.Equal(t, 1, n, "chain name %q used %d times: the proxy rejects the listener", name, n)
+		require.NotEmpty(t, name, "every chain needs a name when the listener has a matcher")
+	}
+	for _, name := range xdseval.MatcherActionNames(l.GetFilterChainMatcher()) {
+		require.Contains(t, have, name, "a matcher action names chain %q, which the listener does not have", name)
+	}
+}
+
+func sel(t *testing.T, l *listenerv3.Listener, c xdseval.Conn) string {
+	t.Helper()
+	name, err := xdseval.SelectChain(l, c)
+	require.NoError(t, err)
+	return name
+}
+
+func httpConn(ip string, port uint32) xdseval.Conn {
+	return xdseval.Conn{IP: ip, Port: port, Transport: "raw_buffer", App: []string{"http/1.1"}}
+}
+
+func rawConn(ip string, port uint32) xdseval.Conn {
+	return xdseval.Conn{IP: ip, Port: port, Transport: "raw_buffer"}
+}
+
+func tlsConn(ip string, port uint32, sni string) xdseval.Conn {
+	return xdseval.Conn{IP: ip, Port: port, Transport: "tls", SNI: sni, App: []string{"h2", "http/1.1"}}
+}
+
+// matchKey renders every criterion of a filter_chain_match that Envoy tells two
+// chains apart by, for the listeners that still select chains that way (the
+// inbound listener). Two chains with the same key are a listener Envoy rejects
 // whole ("multiple filter chains with the same matching rules").
 func matchKey(fc *listenerv3.FilterChain) string {
 	m := fc.GetFilterChainMatch()
@@ -45,11 +98,11 @@ func matchKey(fc *listenerv3.FilterChain) string {
 	for _, pr := range m.GetPrefixRanges() {
 		prefixes = append(prefixes, fmt.Sprintf("%s/%d", pr.GetAddressPrefix(), pr.GetPrefixLen().GetValue()))
 	}
-	sort.Strings(prefixes)
+	slices.Sort(prefixes)
 	sni := slices.Clone(m.GetServerNames())
-	sort.Strings(sni)
+	slices.Sort(sni)
 	alpn := slices.Clone(m.GetApplicationProtocols())
-	sort.Strings(alpn)
+	slices.Sort(alpn)
 	port := "any"
 	if m.GetDestinationPort() != nil {
 		port = fmt.Sprint(m.GetDestinationPort().GetValue())
@@ -76,7 +129,7 @@ func duplicateMatches(chains []*listenerv3.FilterChain) (dups []string) {
 			dups = append(dups, fmt.Sprintf("name %q used %d times", n, c))
 		}
 	}
-	sort.Strings(dups)
+	slices.Sort(dups)
 	return dups
 }
 
@@ -98,201 +151,193 @@ func chainTCPProxy(fc *listenerv3.FilterChain) *tcp_proxyv3.TcpProxy {
 	return nil
 }
 
-// TestCaptureHTTPChains_OnePerPortNumber: one cap_http_<P> chain per HTTP port
-// number, matched on destination port P, cleartext and sniffed HTTP, serving
-// the route table of the SAME name; and cap_http_other with no destination
-// port. A chain whose table name differed from its own would send port P's
-// requests through another port's table.
-func TestCaptureHTTPChains_OnePerPortNumber(t *testing.T) {
-	ports := []uint32{80, 8080, 9090, 18081}
-	l := perPortListener(t, nil, ports, true)
+// testPorts are the ports the selection tests dial: HTTP port numbers of a
+// typical mesh, raw-TCP ones, the mesh's own two and a port nothing names.
+var testPorts = []uint32{80, 443, 5432, 7777, 8080, 9000, 9090, 9100, meshconst.ProxyOutboundPort, meshconst.ProxyL4OutboundPort}
 
-	require.Len(t, l.GetFilterChains(), len(ports)+1, "one chain per HTTP port number, plus cap_http_other")
-	for _, p := range ports {
-		name := fmt.Sprintf("cap_http_%d", p)
-		fc := chainByName(l.GetFilterChains(), name)
-		require.NotNil(t, fc, name)
-		m := fc.GetFilterChainMatch()
-		require.NotNil(t, m.GetDestinationPort(), "%s must match its destination port", name)
-		assert.Equal(t, p, m.GetDestinationPort().GetValue(), name)
-		assert.Equal(t, "raw_buffer", m.GetTransportProtocol(), name)
-		assert.Equal(t, []string{"http/1.0", "http/1.1", "h2c"}, m.GetApplicationProtocols(), name)
-		assert.Empty(t, m.GetPrefixRanges(), "%s is per port NUMBER, not per service address", name)
-		assert.Equal(t, name, hcmRouteName(t, fc), "the chain of port %d must serve the table of port %d", p, p)
-	}
-	other := chainByName(l.GetFilterChains(), CaptureHTTPOtherRouteName)
-	require.NotNil(t, other)
-	assert.Nil(t, other.GetFilterChainMatch().GetDestinationPort(), "cap_http_other names no destination port")
-	assert.Equal(t, "raw_buffer", other.GetFilterChainMatch().GetTransportProtocol())
-	assert.Equal(t, []string{"http/1.0", "http/1.1", "h2c"}, other.GetFilterChainMatch().GetApplicationProtocols())
-	assert.Equal(t, CaptureHTTPOtherRouteName, hcmRouteName(t, other))
-	assert.Empty(t, duplicateMatches(l.GetFilterChains()))
+// TestCaptureHTTPChains_TwoChainsWhateverTheMesh: the listener has two HTTP
+// chains, cap_http and the proxy port's cap_http_18081, each serving the
+// route table of its own name; cleartext HTTP to any port but 18081 reaches
+// cap_http, which records the dialled port for its table. Nothing about the
+// HTTP port numbers of the mesh is in the listener any more: a port number
+// entering or leaving the mesh does not rebuild it.
+func TestCaptureHTTPChains_TwoChainsWhateverTheMesh(t *testing.T) {
+	l := perPortListener(t, nil, true)
 
-	// Negative control: a port that is NOT in the set has no chain.
-	assert.Nil(t, chainByName(l.GetFilterChains(), "cap_http_7777"))
-	// And every route table named is named by exactly one chain.
-	routes := map[string]int{}
+	var httpChains []string
 	for _, fc := range l.GetFilterChains() {
-		routes[hcmRouteName(t, fc)]++
+		if strings.HasPrefix(fc.GetName(), CaptureHTTPChainName) {
+			httpChains = append(httpChains, fc.GetName())
+			assert.Equal(t, fc.GetName(), hcmRouteName(t, fc), "chain %s must serve the table of its own name", fc.GetName())
+		}
 	}
-	for name, n := range routes {
-		assert.Equal(t, 1, n, "route table %s", name)
+	assert.Equal(t, []string{CaptureHTTPChainName, "cap_http_18081"}, httpChains)
+
+	for _, p := range testPorts {
+		want := CaptureHTTPChainName
+		if p == meshconst.ProxyOutboundPort {
+			want = "cap_http_18081"
+		}
+		assert.Equal(t, want, sel(t, l, httpConn("10.96.0.9", p)), "HTTP to port %d", p)
+		h2c := httpConn("10.96.0.9", p)
+		h2c.App = []string{"h2c"}
+		assert.Equal(t, want, sel(t, l, h2c), "h2c to port %d", p)
+		// Not HTTP, or TLS: the passthrough.
+		assert.Equal(t, "cap_passthrough", sel(t, l, rawConn("10.96.0.9", p)), "raw bytes to port %d", p)
+		assert.Equal(t, "cap_passthrough", sel(t, l, tlsConn("10.96.0.9", p, "example.com")), "TLS to port %d", p)
 	}
+
+	// The dialled port is recorded by cap_http, connection-level, never
+	// shared upstream; cap_http_18081 does not need it.
+	assert.True(t, chainHasDialledPort(chainByName(l.GetFilterChains(), CaptureHTTPChainName)))
+	assert.False(t, chainHasDialledPort(chainByName(l.GetFilterChains(), "cap_http_18081")))
 }
 
-// TestCaptureHTTPChains_PortSetIsNormalised: zeros, values above 65535, the TCP
-// mesh port and duplicates never become chains. A cap_http_18082 chain would
-// tie with the scoped-mode blackhole chain and be shadowed by every raw-TCP
-// legacy chain; a duplicate is a listener Envoy rejects whole.
-func TestCaptureHTTPChains_PortSetIsNormalised(t *testing.T) {
-	assert.Equal(t, []uint32{80, 8080}, normalizeHTTPPorts([]uint32{8080, 0, 80, 18082, 8080, 70000, 80}))
-	assert.Empty(t, normalizeHTTPPorts(nil))
-
-	for _, withPassthrough := range []bool{true, false} {
-		l := perPortListener(t, nil, []uint32{8080, 0, 80, meshconst.ProxyL4OutboundPort, 8080, 70000}, withPassthrough)
-		var names []string
-		for _, fc := range l.GetFilterChains() {
-			if strings.HasPrefix(fc.GetName(), CaptureHTTPRoutePrefix) {
-				names = append(names, fc.GetName())
-			}
+func chainHasDialledPort(fc *listenerv3.FilterChain) bool {
+	for _, f := range fc.GetFilters() {
+		if strings.Contains(f.GetTypedConfig().String(), DialledPortFilterStateKey) && strings.Contains(f.GetTypedConfig().String(), "%DOWNSTREAM_LOCAL_PORT%") {
+			return true
 		}
-		assert.Equal(t, []string{"cap_http_80", "cap_http_8080", CaptureHTTPOtherRouteName}, names, "withPassthrough=%v", withPassthrough)
-		assert.Empty(t, duplicateMatches(l.GetFilterChains()), "withPassthrough=%v", withPassthrough)
 	}
+	return false
 }
 
 // TestCaptureHTTPChains_ScopedMode: without the passthrough (the scoped shape
-// only unit tests build) the per-port chains match on the destination port
-// alone and cap_http_other is the catch-all, with no match at all.
+// only unit tests build) the HTTP chains are selected by the port alone, and
+// the TCP mesh port goes to the blackhole chain.
 func TestCaptureHTTPChains_ScopedMode(t *testing.T) {
-	l := perPortListener(t, nil, []uint32{8080}, false)
+	l := perPortListener(t, nil, false)
 	assert.Nil(t, l.GetDefaultFilterChain())
-
-	p := chainByName(l.GetFilterChains(), "cap_http_8080")
-	require.NotNil(t, p)
-	assert.Equal(t, uint32(8080), p.GetFilterChainMatch().GetDestinationPort().GetValue())
-	assert.Empty(t, p.GetFilterChainMatch().GetTransportProtocol())
-	assert.Empty(t, p.GetFilterChainMatch().GetApplicationProtocols())
-
-	other := chainByName(l.GetFilterChains(), CaptureHTTPOtherRouteName)
-	require.NotNil(t, other)
-	assert.Nil(t, other.GetFilterChainMatch(), "the scoped catch-all has no match criteria")
 	require.NotNil(t, chainByName(l.GetFilterChains(), "cap_tcp_blackhole"))
-	assert.Empty(t, duplicateMatches(l.GetFilterChains()))
+	assert.Equal(t, CaptureHTTPChainName, sel(t, l, httpConn("10.96.0.9", 8080)))
+	assert.Equal(t, CaptureHTTPChainName, sel(t, l, rawConn("10.96.0.9", 8080)), "scoped: the port alone decides")
+	assert.Equal(t, "cap_http_18081", sel(t, l, rawConn("10.96.0.9", 18081)))
+	assert.Equal(t, "cap_tcp_blackhole", sel(t, l, rawConn("10.96.0.9", meshconst.ProxyL4OutboundPort)))
+	assert.Equal(t, "cap_tcp_blackhole", sel(t, l, httpConn("10.96.0.9", meshconst.ProxyL4OutboundPort)))
 }
 
-// TestCaptureChains_NoDuplicateMatch runs the duplicate check over the shapes
-// most likely to produce two chains with one match.
-func TestCaptureChains_NoDuplicateMatch(t *testing.T) {
+// TestCaptureChains_EveryActionNamesAChain runs gate (a) over the shapes most
+// likely to name a chain twice or one that is not there, and shows the gate
+// sees both defects.
+func TestCaptureChains_EveryActionNamesAChain(t *testing.T) {
 	tls := []L4ServiceRoute{{
-		SNIHostnames: []string{"a.example.com"},
+		SNIHostnames: []string{"a.example.com", "*.wild.example.com"},
 		Backends:     []L4Backend{{Service: "t/x", Cluster: "tcp:x.t.aether.internal", Weight: 1}},
 	}}
-	shapes := map[string]struct {
-		svcs  []CaptureTCPService
-		ports []uint32
-	}{
-		"legacy target IS the TCP mesh port": {
-			svcs:  []CaptureTCPService{{ClusterName: "tcp:a.t.aether.internal", ClusterIP: "10.96.0.1", LegacyTCPPort: meshconst.ProxyL4OutboundPort, TCPPorts: []uint32{meshconst.ProxyL4OutboundPort}}},
-			ports: []uint32{80, 18081},
-		},
-		"legacy port repeated in TCPPorts": {
-			svcs:  []CaptureTCPService{{ClusterName: "tcp:a.t.aether.internal", ClusterIP: "10.96.0.1", LegacyTCPPort: 9000, TCPPorts: []uint32{9000, 9001}}},
-			ports: []uint32{80, 18081},
-		},
+	shapes := map[string][]CaptureTCPService{
+		"legacy target IS the TCP mesh port": {{ClusterName: "tcp:a.t.aether.internal", ClusterIP: "10.96.0.1", LegacyTCPPort: meshconst.ProxyL4OutboundPort, TCPPorts: []uint32{meshconst.ProxyL4OutboundPort}}},
+		"legacy port repeated in TCPPorts":   {{ClusterName: "tcp:a.t.aether.internal", ClusterIP: "10.96.0.1", LegacyTCPPort: 9000, TCPPorts: []uint32{9000, 9001}}},
 		"one number, HTTP for one service and raw TCP for another": {
-			svcs: []CaptureTCPService{
-				{ClusterName: "tcp:mixed.t.aether.internal", ClusterIP: "10.96.0.1", HTTPPorts: []uint32{8080}, TCPPorts: []uint32{9000}},
-				{ClusterName: "tcp:nine.t.aether.internal", ClusterIP: "10.96.0.2", HTTPPorts: []uint32{9000}, TCPPorts: []uint32{8080}},
-			},
-			ports: []uint32{80, 8080, 9000, 18081},
-		},
-		"raw-TCP service whose port is another service's HTTP number": {
-			svcs: []CaptureTCPService{
-				{ClusterName: "tcp:raw.t.aether.internal", ClusterIP: "10.96.0.1", LegacyTCPPort: 8080},
-				{ClusterName: "tcp:web.t.aether.internal", ClusterIP: "10.96.0.2", HTTPPorts: []uint32{8080}, TCPPorts: []uint32{9000}},
-			},
-			ports: []uint32{80, 8080, 18081},
+			{ClusterName: "tcp:mixed.t.aether.internal", ClusterIP: "10.96.0.1", HTTPPorts: []uint32{8080}, TCPPorts: []uint32{9000}},
+			{ClusterName: "tcp:nine.t.aether.internal", ClusterIP: "10.96.0.2", HTTPPorts: []uint32{9000}, TCPPorts: []uint32{8080}},
 		},
 		"TLSRoute on a mixed service and on a pure-TCP one": {
-			svcs: []CaptureTCPService{
-				{ClusterName: "tcp:mixed.t.aether.internal", ClusterIP: "10.96.0.1", HTTPPorts: []uint32{8080}, TCPPorts: []uint32{9000}, TLSRouteRules: tls},
-				{ClusterName: "tcp:raw.t.aether.internal", ClusterIP: "10.96.0.2", LegacyTCPPort: 9000, TLSRouteRules: tls},
-			},
-			ports: []uint32{0, 80, 8080, 8080, 18081, meshconst.ProxyL4OutboundPort},
+			{ClusterName: "tcp:mixed.t.aether.internal", ClusterIP: "10.96.0.1", HTTPPorts: []uint32{8080}, TCPPorts: []uint32{9000}, TLSRouteRules: tls},
+			{ClusterName: "tcp:raw.t.aether.internal", ClusterIP: "10.96.0.2", LegacyTCPPort: 9000, TLSRouteRules: tls},
 		},
+		"a TLSRoute alone": {{ClusterName: "tcp:tls.t.aether.internal", ClusterIP: "10.96.0.3", TLSRouteRules: tls}},
 		"two services, the same address by mistake, different ports": {
-			svcs: []CaptureTCPService{
-				{ClusterName: "tcp:a.t.aether.internal", ClusterIP: "10.96.0.1", HTTPPorts: []uint32{8080}, TCPPorts: []uint32{9000}},
-				{ClusterName: "tcp:b.t.aether.internal", ClusterIP: "10.96.0.1", HTTPPorts: []uint32{8080}, TCPPorts: []uint32{9001}},
-			},
-			ports: []uint32{80, 8080, 18081},
+			{ClusterName: "tcp:a.t.aether.internal", ClusterIP: "10.96.0.1", HTTPPorts: []uint32{8080}, TCPPorts: []uint32{9000}},
+			{ClusterName: "tcp:b.t.aether.internal", ClusterIP: "10.96.0.1", HTTPPorts: []uint32{8080}, TCPPorts: []uint32{9001}},
 		},
+		"no address": {{ClusterName: "tcp:none.t.aether.internal", LegacyTCPPort: 9000}},
 	}
-	for name, shape := range shapes {
+	for name, svcs := range shapes {
 		for _, withPassthrough := range []bool{true, false} {
 			t.Run(fmt.Sprintf("%s/passthrough=%v", name, withPassthrough), func(t *testing.T) {
-				l := perPortListener(t, shape.svcs, shape.ports, withPassthrough)
-				assert.Empty(t, duplicateMatches(l.GetFilterChains()))
+				perPortListener(t, svcs, withPassthrough) // runs the gate
 			})
 		}
 	}
 
-	// Negative control: the helper does find a duplicate when there is one.
-	l := perPortListener(t, nil, []uint32{8080}, true)
-	twice := append(slices.Clone(l.GetFilterChains()), l.GetFilterChains()[0])
-	assert.Len(t, duplicateMatches(twice), 2, "one shared match and one repeated name")
-	sameMatch := []*listenerv3.FilterChain{
-		{Name: "x", FilterChainMatch: l.GetFilterChains()[0].GetFilterChainMatch()},
-		{Name: "y", FilterChainMatch: l.GetFilterChains()[0].GetFilterChainMatch()},
+	// Seen red: the gate fails on a listener that lost a chain an action
+	// names, and on one with a name twice.
+	l := perPortListener(t, shapes["TLSRoute on a mixed service and on a pure-TCP one"], true)
+	for _, drop := range []string{"cap_tls_tcp:mixed.t.aether.internal_0", "cap_tcp_tcp:raw.t.aether.internal_9000", CaptureHTTPChainName} {
+		lost := listenerWithout(l, drop)
+		assert.True(t, gateFails(lost), "the gate must fail when chain %s is gone", drop)
+		// and what the proxy then does: closes the connection
+		found := false
+		for _, c := range []xdseval.Conn{tlsConn("10.96.0.1", 7777, "a.example.com"), rawConn("10.96.0.2", 9000), httpConn("10.96.0.9", 8080)} {
+			name, err := xdseval.SelectChain(lost, c)
+			require.NoError(t, err)
+			found = found || name == ""
+		}
+		assert.True(t, found, "a connection to the lost chain %s is closed", drop)
 	}
-	assert.Len(t, duplicateMatches(sameMatch), 1)
+	twice := listenerWithout(l, "")
+	twice.FilterChains = append(twice.FilterChains, twice.FilterChains[0])
+	assert.True(t, gateFails(twice), "the gate must fail on a name used twice")
 }
 
+func listenerWithout(l *listenerv3.Listener, chain string) *listenerv3.Listener {
+	out := &listenerv3.Listener{FilterChainMatcher: l.GetFilterChainMatcher(), DefaultFilterChain: l.GetDefaultFilterChain()}
+	for _, fc := range l.GetFilterChains() {
+		if fc.GetName() != chain {
+			out.FilterChains = append(out.FilterChains, fc)
+		}
+	}
+	return out
+}
+
+// fakeT records a failure instead of stopping the test, so a gate can be
+// shown to fail.
+type fakeT struct{ failed bool }
+
+func (f *fakeT) Helper()               {}
+func (f *fakeT) Errorf(string, ...any) { f.failed = true }
+func (f *fakeT) FailNow()              { f.failed = true; panic(fakeFailNow{}) }
+
+// gateFails runs gate against l on a fakeT and reports whether it failed.
+func gateFails(l *listenerv3.Listener) (failed bool) {
+	ft := &fakeT{}
+	defer func() {
+		if r := recover(); r != nil {
+			if _, ok := r.(fakeFailNow); !ok {
+				panic(r)
+			}
+		}
+		failed = ft.failed
+	}()
+	requireMatcherNamesChains(ft, l)
+	return ft.failed
+}
+
+type fakeFailNow struct{}
+
 // TestCaptureChains_RawTCPAndHTTPShareAPortNumber is the measured finding the
-// per-port layout exists for (proposal 043, layout L2): service A declares 9000
-// as raw TCP, service B serves HTTP on 9000. Envoy matches the destination
-// port first and does not backtrack, so with only a port-less HTTP chain, B's
-// HTTP on 9000 left through the passthrough. Both chains must name 9000: A's
-// with A's address, the HTTP one with none.
+// per-port layout of chart 3.0.0 existed for (proposal 043, layout L2):
+// service A declares 9000 as raw TCP, service B serves HTTP on 9000. With
+// filter_chain_match and one port-less HTTP chain, B's HTTP on 9000 left
+// through the passthrough. With the matching tree, A's address and port reach
+// A's raw-TCP chain, and HTTP to 9000 at any other address reaches cap_http.
 func TestCaptureChains_RawTCPAndHTTPShareAPortNumber(t *testing.T) {
 	svcs := []CaptureTCPService{
 		{ClusterName: "tcp:a.t.aether.internal", ClusterIP: "10.96.0.1", HTTPPorts: []uint32{8080}, TCPPorts: []uint32{9000}},
 	}
-	l := perPortListener(t, svcs, []uint32{80, 8080, 9000, 18081}, true)
+	l := perPortListener(t, svcs, true)
 
 	raw := chainByName(l.GetFilterChains(), "cap_tcp_tcp:a.t.aether.internal_9000")
 	require.NotNil(t, raw)
-	assert.Equal(t, uint32(9000), raw.GetFilterChainMatch().GetDestinationPort().GetValue())
-	require.Len(t, raw.GetFilterChainMatch().GetPrefixRanges(), 1)
-	assert.Equal(t, "10.96.0.1", raw.GetFilterChainMatch().GetPrefixRanges()[0].GetAddressPrefix())
-	assert.Equal(t, uint32(32), raw.GetFilterChainMatch().GetPrefixRanges()[0].GetPrefixLen().GetValue())
 	require.NotNil(t, chainTCPProxy(raw))
 	assert.Equal(t, "tcp:a.t.aether.internal:9000", chainTCPProxy(raw).GetCluster(),
 		"the raw-TCP port's own cluster, never the floor (which forwards to another port)")
 
-	http := chainByName(l.GetFilterChains(), "cap_http_9000")
-	require.NotNil(t, http, "HTTP on port number 9000 must have a chain although A declares 9000 raw TCP")
-	assert.Equal(t, uint32(9000), http.GetFilterChainMatch().GetDestinationPort().GetValue())
-	assert.Empty(t, http.GetFilterChainMatch().GetPrefixRanges())
-
-	// A has no chain that claims its ADDRESS on its HTTP port: its own HTTP
-	// must reach cap_http_8080.
-	for _, fc := range l.GetFilterChains() {
-		m := fc.GetFilterChainMatch()
-		if len(m.GetPrefixRanges()) == 0 {
+	assert.Equal(t, raw.GetName(), sel(t, l, rawConn("10.96.0.1", 9000)))
+	assert.Equal(t, raw.GetName(), sel(t, l, httpConn("10.96.0.1", 9000)), "A's raw-TCP port is raw TCP whatever the bytes look like")
+	assert.Equal(t, CaptureHTTPChainName, sel(t, l, httpConn("10.96.0.2", 9000)), "B's HTTP on 9000 must reach cap_http although A declares 9000 raw TCP")
+	// A's own HTTP, on its HTTP port and on any other: cap_http.
+	for _, p := range testPorts {
+		if p == 9000 || p == meshconst.ProxyOutboundPort {
 			continue
 		}
-		if m.GetDestinationPort() == nil {
-			t.Errorf("chain %s claims A's address on every port; it would swallow A's HTTP", fc.GetName())
-			continue
-		}
-		assert.NotEqual(t, uint32(8080), m.GetDestinationPort().GetValue(), "chain %s claims A's address on its HTTP port", fc.GetName())
+		assert.Equal(t, CaptureHTTPChainName, sel(t, l, httpConn("10.96.0.1", p)), "HTTP to A's address on %d", p)
 	}
 
 	// Negative control: without the declaration there is no raw-TCP chain.
-	bare := perPortListener(t, []CaptureTCPService{{ClusterName: "tcp:a.t.aether.internal", ClusterIP: "10.96.0.1", HTTPPorts: []uint32{8080}}}, []uint32{9000}, true)
+	bare := perPortListener(t, []CaptureTCPService{{ClusterName: "tcp:a.t.aether.internal", ClusterIP: "10.96.0.1", HTTPPorts: []uint32{8080}}}, true)
 	assert.Nil(t, chainByName(bare.GetFilterChains(), "cap_tcp_tcp:a.t.aether.internal_9000"))
+	assert.Equal(t, "cap_passthrough", sel(t, bare, rawConn("10.96.0.1", 9000)))
 }
 
 // TestCaptureChains_LegacyTCPTarget: a raw-TCP legacy target gets a chain on
@@ -304,47 +349,44 @@ func TestCaptureChains_LegacyTCPTarget(t *testing.T) {
 	l := perPortListener(t, []CaptureTCPService{
 		{ClusterName: cluster, ClusterIP: "10.96.0.1", HTTPPorts: []uint32{8080}, LegacyTCPPort: 9000, TCPPorts: []uint32{9000}},
 		{ClusterName: "tcp:mixed.t.aether.internal", ClusterIP: "10.96.0.2", HTTPPorts: []uint32{8080}, TCPPorts: []uint32{9000}},
-	}, []uint32{80, 8080, 18081}, true)
+	}, true)
 
 	for _, p := range []uint32{9000, meshconst.ProxyL4OutboundPort} {
-		fc := chainByName(l.GetFilterChains(), fmt.Sprintf("cap_tcp_%s_%d", cluster, p))
+		name := fmt.Sprintf("cap_tcp_%s_%d", cluster, p)
+		fc := chainByName(l.GetFilterChains(), name)
 		require.NotNil(t, fc, "port %d", p)
-		assert.Equal(t, p, fc.GetFilterChainMatch().GetDestinationPort().GetValue())
-		assert.Equal(t, "10.96.0.1", fc.GetFilterChainMatch().GetPrefixRanges()[0].GetAddressPrefix())
 		assert.Equal(t, cluster, chainTCPProxy(fc).GetCluster(), "the legacy target is reached through the floor cluster")
 		assert.Equal(t, fc.GetName(), chainTCPProxy(fc).GetStatPrefix())
+		assert.Equal(t, name, sel(t, l, rawConn("10.96.0.1", p)))
 	}
 	// The HTTP-legacy service: its own per-port chain, to its own cluster, and
 	// nothing on the TCP mesh port.
-	assert.NotNil(t, chainByName(l.GetFilterChains(), "cap_tcp_tcp:mixed.t.aether.internal_9000"))
+	assert.Equal(t, "cap_tcp_tcp:mixed.t.aether.internal_9000", sel(t, l, rawConn("10.96.0.2", 9000)))
 	assert.Nil(t, chainByName(l.GetFilterChains(), "cap_tcp_tcp:mixed.t.aether.internal_18082"),
 		"raw TCP to :18082 of a service whose legacy target is HTTP names nothing")
-	assert.Empty(t, duplicateMatches(l.GetFilterChains()))
+	assert.Equal(t, "cap_passthrough", sel(t, l, rawConn("10.96.0.2", meshconst.ProxyL4OutboundPort)))
 }
 
-// addressOnlyChains returns the names of the chains that claim an address on
-// EVERY port: a prefix match, no destination port, and no server name. That
-// is the shape of the any-port chain. An SNI chain has it too, but for its
-// server names only, and is not counted.
-func addressOnlyChains(chains []*listenerv3.FilterChain) (names []string) {
-	for _, fc := range chains {
-		m := fc.GetFilterChainMatch()
-		if len(m.GetPrefixRanges()) > 0 && m.GetDestinationPort() == nil && len(m.GetServerNames()) == 0 {
-			names = append(names, fc.GetName())
+// rawReach returns the ports of testPorts (and extra) on which raw bytes to ip
+// reach a chain of the service rather than an HTTP chain or the passthrough.
+func rawReach(t *testing.T, l *listenerv3.Listener, ip string, extra ...uint32) []uint32 {
+	t.Helper()
+	var out []uint32
+	for _, p := range append(slices.Clone(testPorts), extra...) {
+		name := sel(t, l, rawConn(ip, p))
+		if strings.HasPrefix(name, "cap_tcp_") && name != "cap_tcp_blackhole" {
+			out = append(out, p)
 		}
 	}
-	return names
+	slices.Sort(out)
+	return slices.Compact(out)
 }
 
-// TestCaptureChains_NoAnyPortChainForAServiceWithHTTP: the any-port chain
-// matched a service's address on every port nothing else named. On a service
-// with an HTTP port it would have outranked the HTTP chains for the address
-// (the address is decided before the protocol) and forwarded HTTP to the
-// raw-TCP port as bytes, so such a service never had one. Since chart 3.0.0
-// NO service has one: a raw-TCP legacy target is reached on its own port and
-// on :18082, and on nothing else. The rule, over every shape of service: no
-// chain claims an address without naming a destination port, unless it names
-// a server (a TLSRoute chain).
+// TestCaptureChains_NoAnyPortChainForAServiceWithHTTP: since chart 3.0.0 a
+// raw-TCP service is reached on the ports it declares and nowhere else (its
+// legacy target's own port and :18082); the any-port chain is gone. Over
+// every shape of service, raw bytes to its address reach it on exactly those
+// ports.
 func TestCaptureChains_NoAnyPortChainForAServiceWithHTTP(t *testing.T) {
 	const cluster = "tcp:first.t.aether.internal"
 	tls := []L4ServiceRoute{{
@@ -355,11 +397,8 @@ func TestCaptureChains_NoAnyPortChainForAServiceWithHTTP(t *testing.T) {
 		{Service: "t/x", Cluster: "tcp:x.t.aether.internal", Weight: 1},
 		{Service: "t/y", Cluster: "tcp:y.t.aether.internal", Weight: 1},
 	}}}
-	httpPorts := []uint32{80, 8080, 18081}
 	for name, tt := range map[string]struct {
-		svc CaptureTCPService
-		// the destination ports of the chains that claim the address
-		// without a server name
+		svc   CaptureTCPService
 		ports []uint32
 	}{
 		"raw-TCP legacy target, with an HTTP port": {
@@ -395,260 +434,149 @@ func TestCaptureChains_NoAnyPortChainForAServiceWithHTTP(t *testing.T) {
 		},
 	} {
 		for _, withPassthrough := range []bool{true, false} {
-			l := perPortListener(t, []CaptureTCPService{tt.svc}, httpPorts, withPassthrough)
-			assert.Empty(t, addressOnlyChains(l.GetFilterChains()), "%s: a chain claims the address on every port", name)
-			var ports []uint32
+			l := perPortListener(t, []CaptureTCPService{tt.svc}, withPassthrough)
 			for _, fc := range l.GetFilterChains() {
 				assert.NotContains(t, fc.GetName(), "anyport", name)
-				tc := chainTCPProxy(fc)
-				if tc != nil {
+				if tc := chainTCPProxy(fc); tc != nil {
 					assert.NotContains(t, tc.GetStatPrefix(), "anyport", name)
 				}
-				m := fc.GetFilterChainMatch()
-				if len(m.GetPrefixRanges()) == 0 || len(m.GetServerNames()) > 0 {
-					continue
-				}
-				ports = append(ports, m.GetDestinationPort().GetValue())
 			}
-			assert.ElementsMatch(t, tt.ports, ports, "%s (passthrough %v): the ports the service's address is claimed on", name, withPassthrough)
-			assert.Empty(t, duplicateMatches(l.GetFilterChains()), name)
+			got := rawReach(t, l, "10.96.0.1", 1234, 31000)
+			assert.Equal(t, tt.ports, got, "%s (passthrough %v): the ports raw bytes reach the service on", name, withPassthrough)
 		}
 	}
-
-	// Negative control: the helper does see a chain of that shape. The
-	// unqualified floor chain, before it is given its ports, is one.
-	floor := BuildCaptureTCPRouteFilterChain(CaptureTCPService{ClusterName: cluster, ClusterIP: "10.96.0.1", LegacyTCPPort: 9000}, nil, perPortSource)
-	require.NotNil(t, floor)
-	assert.Len(t, addressOnlyChains([]*listenerv3.FilterChain{floor}), 1)
-	// ... and does not take an SNI chain for one.
-	sni := BuildCaptureTLSRouteFilterChains(CaptureTCPService{ClusterName: cluster, ClusterIP: "10.96.0.1", LegacyTCPPort: 9000}, tls, perPortSource)
-	require.NotEmpty(t, sni)
-	assert.Empty(t, addressOnlyChains(sni))
 }
 
-// TestCaptureChains_NoChainOnAnHTTPPortNumberTheServiceDoesNotDeclare: the listener names every
-// HTTP port number of the mesh, and a connection to a named port is matched
-// only among the chains naming it. While a pure-TCP service had an any-port
-// chain, that chain needed a twin on each of those numbers. The chain is gone
-// (chart 3.0.0) and so are the twins: on an HTTP port number of the mesh that
-// the service does not declare, NO chain claims its address. A client that
-// dials one gets what the address gives it there, which is nothing.
+// TestCaptureChains_NoChainOnAnHTTPPortNumberTheServiceDoesNotDeclare: on an
+// HTTP port number of the mesh that a raw-TCP service does not declare,
+// nothing of the service is reached at its address. The ports it does
+// declare are served by their own chains, to their own clusters.
 func TestCaptureChains_NoChainOnAnHTTPPortNumberTheServiceDoesNotDeclare(t *testing.T) {
 	const cluster = "tcp:raw.t.aether.internal"
-	httpPorts := []uint32{80, 8080, 9000, 9100, 18081}
 	l := perPortListener(t, []CaptureTCPService{
 		{ClusterName: cluster, ClusterIP: "10.96.0.1", LegacyTCPPort: 9000, TCPPorts: []uint32{9100}},
-	}, httpPorts, true)
-
-	claimed := map[uint32]string{} // destination port -> the chain claiming the address there
-	for _, fc := range l.GetFilterChains() {
-		m := fc.GetFilterChainMatch()
-		if len(m.GetPrefixRanges()) == 0 {
-			continue
-		}
-		assert.Equal(t, "10.96.0.1", m.GetPrefixRanges()[0].GetAddressPrefix())
-		tc := chainTCPProxy(fc)
-		require.NotNil(t, tc, fc.GetName())
-		assert.Equal(t, fc.GetName(), tc.GetStatPrefix(), "every chain counts under its own name")
-		claimed[m.GetDestinationPort().GetValue()] = fc.GetName()
+	}, true)
+	assert.Equal(t, []uint32{9000, 9100, 18082}, rawReach(t, l, "10.96.0.1"))
+	for _, p := range []uint32{80, 8080, 9090, 18081} {
+		assert.Equal(t, "cap_passthrough", sel(t, l, rawConn("10.96.0.1", p)), "raw bytes to %d", p)
 	}
-	assert.Equal(t, map[uint32]string{
-		9000:  "cap_tcp_" + cluster + "_9000",
-		9100:  "cap_tcp_" + cluster + "_9100",
-		18082: "cap_tcp_" + cluster + "_18082",
-	}, claimed, "the legacy target's own port, the other raw-TCP port and the TCP mesh port; nothing on 80, 8080 or 18081, and nothing without a port (key 0)")
-	// The ports it claims are served by their own chains, to their own clusters.
 	assert.Equal(t, cluster, chainTCPProxy(chainByName(l.GetFilterChains(), "cap_tcp_"+cluster+"_9000")).GetCluster())
 	assert.Equal(t, cluster, chainTCPProxy(chainByName(l.GetFilterChains(), "cap_tcp_"+cluster+"_18082")).GetCluster())
 	assert.Equal(t, cluster+":9100", chainTCPProxy(chainByName(l.GetFilterChains(), "cap_tcp_"+cluster+"_9100")).GetCluster())
-	assert.Empty(t, duplicateMatches(l.GetFilterChains()))
-
-	// The same service with no HTTP port number on the listener at all: the
-	// same three chains. What the mesh declares elsewhere changes nothing
-	// about where a raw-TCP service is reached.
-	bare := perPortListener(t, []CaptureTCPService{
-		{ClusterName: cluster, ClusterIP: "10.96.0.1", LegacyTCPPort: 9000, TCPPorts: []uint32{9100}},
-	}, nil, true)
-	var names []string
-	for _, fc := range bare.GetFilterChains() {
-		if len(fc.GetFilterChainMatch().GetPrefixRanges()) > 0 {
-			names = append(names, fc.GetName())
-		}
+	for _, p := range []uint32{9000, 9100, 18082} {
+		name := sel(t, l, rawConn("10.96.0.1", p))
+		assert.Equal(t, name, chainTCPProxy(chainByName(l.GetFilterChains(), name)).GetStatPrefix(), "every chain counts under its own name")
 	}
-	assert.ElementsMatch(t, []string{claimed[9000], claimed[9100], claimed[18082]}, names)
 }
 
-// TestCaptureChains_TLSTwinsAndTheProxyPort: the TLS twin rule for the proxy
-// port (18081) and for port 80. A service that serves HTTP is sent its
-// cleartext HTTP on its declared HTTP ports and on the proxy port, where a
-// pod writes "Host: <name>:<port>" to "<name>:18081". A twin of its SNI chain
-// on one of those numbers claims the service's address there; the address is
-// decided before the protocol, so a cleartext request matches the address,
-// has no server name, and leaves through the listener's default instead of
-// reaching cap_http_<P>. So: no twin on a declared HTTP port, and none on
-// 18081 for a service with any HTTP port. Port 80 is a port like any other: a
-// twin stands there unless the service declares it as HTTP (until chart 3.0.0
-// 18081 and 80 both carried the HTTP of "the port the pods declare"). A
-// service with no HTTP port has no HTTP on 18081 either, and its twins there
-// are what keeps its TLSRoute working on that number.
-func TestCaptureChains_TLSTwinsAndTheProxyPort(t *testing.T) {
+// TestCaptureChains_TLSRouteOnEveryPortButTheServicesHTTP: a TLSRoute's server
+// name selects its chain on EVERY port of the service's address but the ones
+// that carry the service's cleartext HTTP: its declared HTTP ports, and the
+// proxy port (18081) when it has any. TLS to one of those leaves through the
+// passthrough, as it did with the per-port listener of chart 3.0.0 (the
+// owner's ruling for this change). On a declared raw-TCP port the server name
+// wins over the port's chain, and any other name gets the port's chain.
+func TestCaptureChains_TLSRouteOnEveryPortButTheServicesHTTP(t *testing.T) {
 	const sni = "a.example.com"
 	rules := []L4ServiceRoute{{
 		SNIHostnames: []string{sni},
 		Backends:     []L4Backend{{Service: "t/x", Cluster: "tcp:x.t.aether.internal", Weight: 1}},
 	}}
-	// Another service, so that 5432 and 18082 are named ports too.
 	other := CaptureTCPService{ClusterName: "tcp:raw.t.aether.internal", ClusterIP: "10.96.0.2", LegacyTCPPort: 5432}
-	httpPorts := []uint32{80, 8080, 9090, 18081}
 
 	for name, tt := range map[string]struct {
-		svc  CaptureTCPService
-		want []uint32 // destination ports of the SNI chains; 0 is the unqualified one
+		svc   CaptureTCPService
+		chain string
+		// noTLS are the ports where TLS with the route's name does NOT reach it
+		noTLS []uint32
 	}{
 		"HTTP and raw TCP": {
-			svc: CaptureTCPService{
-				ClusterName: "tcp:web.t.aether.internal", ClusterIP: "10.96.0.1",
-				HTTPPorts: []uint32{8080}, TCPPorts: []uint32{9000}, TLSRouteRules: rules,
-			},
-			// not 8080 (declared HTTP), not 18081 (the proxy port carries
-			// its HTTP). 80 is not a port of it: a twin stands there.
-			want: []uint32{0, 80, 5432, 9000, 9090, 18082},
+			svc:   CaptureTCPService{ClusterName: "tcp:web.t.aether.internal", ClusterIP: "10.96.0.1", HTTPPorts: []uint32{8080}, TCPPorts: []uint32{9000}, TLSRouteRules: rules},
+			chain: "cap_tls_tcp:web.t.aether.internal_0",
+			noTLS: []uint32{8080, 18081},
 		},
 		"HTTP only": {
-			svc: CaptureTCPService{
-				ClusterName: "tcp:web.t.aether.internal", ClusterIP: "10.96.0.1",
-				HTTPPorts: []uint32{8080, 9090}, TLSRouteRules: rules,
-			},
-			want: []uint32{0, 80, 5432, 18082},
+			svc:   CaptureTCPService{ClusterName: "tcp:web.t.aether.internal", ClusterIP: "10.96.0.1", HTTPPorts: []uint32{8080, 9090}, TLSRouteRules: rules},
+			chain: "cap_tls_tcp:web.t.aether.internal_0",
+			noTLS: []uint32{8080, 9090, 18081},
 		},
 		"raw TCP only": {
-			svc: CaptureTCPService{
-				ClusterName: "tcp:db.t.aether.internal", ClusterIP: "10.96.0.1",
-				LegacyTCPPort: 9000, TLSRouteRules: rules,
-			},
-			want: []uint32{0, 80, 5432, 8080, 9000, 9090, 18081, 18082},
+			svc:   CaptureTCPService{ClusterName: "tcp:db.t.aether.internal", ClusterIP: "10.96.0.1", LegacyTCPPort: 9000, TLSRouteRules: rules},
+			chain: "cap_tls_tcp:db.t.aether.internal_0",
 		},
-		"raw-TCP declared port, with an HTTP port of its own": {
-			svc: CaptureTCPService{
-				ClusterName: "tcp:db.t.aether.internal", ClusterIP: "10.96.0.1",
-				HTTPPorts: []uint32{8080}, LegacyTCPPort: 9000, TLSRouteRules: rules,
-			},
-			// 8080 is its own HTTP, and the proxy port carries it too
-			want: []uint32{0, 80, 5432, 9000, 9090, 18082},
+		"port 80 declared HTTP": {
+			svc:   CaptureTCPService{ClusterName: "tcp:web.t.aether.internal", ClusterIP: "10.96.0.1", HTTPPorts: []uint32{80, 8080}, TLSRouteRules: rules},
+			chain: "cap_tls_tcp:web.t.aether.internal_0",
+			noTLS: []uint32{80, 8080, 18081},
 		},
 	} {
-		l := perPortListener(t, []CaptureTCPService{tt.svc, other}, httpPorts, true)
-		var got []uint32
-		for _, fc := range l.GetFilterChains() {
-			m := fc.GetFilterChainMatch()
-			if !slices.Contains(m.GetServerNames(), sni) {
-				continue
+		l := perPortListener(t, []CaptureTCPService{tt.svc, other}, true)
+		for _, p := range testPorts {
+			got := sel(t, l, tlsConn("10.96.0.1", p, sni))
+			if slices.Contains(tt.noTLS, p) {
+				assert.Equal(t, "cap_passthrough", got, "%s: TLS with the route's name to the service's own HTTP port %d leaves through the passthrough", name, p)
+			} else {
+				assert.Equal(t, tt.chain, got, "%s: TLS with the route's name to port %d", name, p)
 			}
-			require.Len(t, m.GetPrefixRanges(), 1, name)
-			assert.Equal(t, "10.96.0.1", m.GetPrefixRanges()[0].GetAddressPrefix(), name)
-			got = append(got, m.GetDestinationPort().GetValue())
+			// Case does not matter to a server name.
+			if !slices.Contains(tt.noTLS, p) {
+				assert.Equal(t, tt.chain, sel(t, l, tlsConn("10.96.0.1", p, strings.ToUpper(sni))), "%s: upper-case server name to %d", name, p)
+			}
+			// Another name: the raw-TCP port's chain, else the passthrough.
+			want := "cap_passthrough"
+			for _, tp := range rawReach(t, l, "10.96.0.1") {
+				if tp == p {
+					want = sel(t, l, rawConn("10.96.0.1", p))
+				}
+			}
+			assert.Equal(t, want, sel(t, l, tlsConn("10.96.0.1", p, "b.example.com")), "%s: TLS with another name to %d", name, p)
+			// The route's name at ANOTHER address is never the route's.
+			assert.NotEqual(t, tt.chain, sel(t, l, tlsConn("10.96.0.2", p, sni)), "%s: an SNI chain only ever claims its own service's address", name)
 		}
-		assert.ElementsMatch(t, tt.want, got, name)
-		assert.Empty(t, duplicateMatches(l.GetFilterChains()), name)
-
-		// What the rule is for: on a port that carries the service's HTTP, no
-		// chain at all claims the service's address, so the request falls to
-		// the HTTP chain of the port.
-		for _, fc := range l.GetFilterChains() {
-			m := fc.GetFilterChainMatch()
-			if len(m.GetPrefixRanges()) == 0 || m.GetPrefixRanges()[0].GetAddressPrefix() != "10.96.0.1" {
+		// Cleartext HTTP to the service's address reaches cap_http on every
+		// port that is not raw TCP: the TLSRoute does not take it.
+		for _, p := range testPorts {
+			if slices.Contains(rawReach(t, l, "10.96.0.1"), p) {
 				continue
 			}
-			p := m.GetDestinationPort().GetValue()
-			carriesHTTP := slices.Contains(tt.svc.HTTPPorts, p) || (len(tt.svc.HTTPPorts) > 0 && p == meshconst.ProxyOutboundPort)
-			assert.False(t, carriesHTTP, "%s: chain %s claims the address on port %d, which carries the service's HTTP", name, fc.GetName(), p)
+			want := CaptureHTTPChainName
+			if p == meshconst.ProxyOutboundPort {
+				want = "cap_http_18081"
+			}
+			assert.Equal(t, want, sel(t, l, httpConn("10.96.0.1", p)), "%s: HTTP to %d", name, p)
 		}
 	}
 }
 
-// TestCaptureChains_TLSTwinsOnNamedPortsButNotTheServicesOwnHTTP: an SNI chain
-// (address + server_names) is never considered for a connection to a port some
-// chain names (#911), so it gets a twin on every named port of the listener,
-// the HTTP port numbers and OTHER services' raw-TCP ports included. Except the
-// ports that carry its own service's cleartext HTTP: the ports the service
-// declares as HTTP, and the proxy port (18081) of a service that serves HTTP,
-// where a pod sends "Host: <name>:<port>". A twin there claims the service's
-// address on that port, its cleartext HTTP matches the address, fails the SNI
-// and leaves through the passthrough.
-func TestCaptureChains_TLSTwinsOnNamedPortsButNotTheServicesOwnHTTP(t *testing.T) {
-	const sni = "a.example.com"
-	svc := CaptureTCPService{
-		ClusterName: "tcp:mixed.t.aether.internal", ClusterIP: "10.96.0.1",
-		HTTPPorts: []uint32{8080}, TCPPorts: []uint32{9000},
-		TLSRouteRules: []L4ServiceRoute{{
-			SNIHostnames: []string{sni},
-			Backends:     []L4Backend{{Service: "t/x", Cluster: "tcp:x.t.aether.internal", Weight: 1}},
-		}},
+// TestCaptureChains_TLSRouteWildcardHostname: "*.example.com" in a TLSRoute
+// matches any name under example.com, and an exact name of another route wins
+// over it, as filter_chain_match's server_names did.
+func TestCaptureChains_TLSRouteWildcardHostname(t *testing.T) {
+	svc := CaptureTCPService{ClusterName: "tcp:w.t.aether.internal", ClusterIP: "10.96.0.1", LegacyTCPPort: 9000, TLSRouteRules: []L4ServiceRoute{
+		{SNIHostnames: []string{"*.example.com"}, Backends: []L4Backend{{Service: "t/x", Cluster: "tcp:x.t.aether.internal", Weight: 1}}},
+		{SNIHostnames: []string{"exact.example.com"}, Backends: []L4Backend{{Service: "t/y", Cluster: "tcp:y.t.aether.internal", Weight: 1}}},
+		{SNIHostnames: []string{"*.deep.example.com"}, Backends: []L4Backend{{Service: "t/z", Cluster: "tcp:z.t.aether.internal", Weight: 1}}},
+	}}
+	l := perPortListener(t, []CaptureTCPService{svc}, true)
+	for sni, want := range map[string]string{
+		"a.example.com":      "cap_tls_tcp:w.t.aether.internal_0",
+		"a.b.example.com":    "cap_tls_tcp:w.t.aether.internal_0",
+		"exact.example.com":  "cap_tls_tcp:w.t.aether.internal_1",
+		"x.deep.example.com": "cap_tls_tcp:w.t.aether.internal_2",
+		"example.com":        "cap_passthrough",
+		"other.org":          "cap_passthrough",
+	} {
+		assert.Equal(t, want, sel(t, l, tlsConn("10.96.0.1", 7777, sni)), sni)
 	}
-	other := CaptureTCPService{ClusterName: "tcp:raw.t.aether.internal", ClusterIP: "10.96.0.2", LegacyTCPPort: 5432}
-	l := perPortListener(t, []CaptureTCPService{svc, other}, []uint32{80, 8080, 9090, 18081}, true)
-
-	got := map[uint32]bool{}
-	for _, fc := range l.GetFilterChains() {
-		m := fc.GetFilterChainMatch()
-		if !slices.Contains(m.GetServerNames(), sni) {
-			continue
-		}
-		require.Len(t, m.GetPrefixRanges(), 1)
-		assert.Equal(t, "10.96.0.1", m.GetPrefixRanges()[0].GetAddressPrefix(), "an SNI chain only ever claims its own service's address")
-		got[m.GetDestinationPort().GetValue()] = true
-	}
-	want := map[uint32]bool{
-		0:  true,             // the unqualified chain: every port nothing names
-		80: true, 9090: true, // HTTP port numbers of the mesh that are not this service's
-		9000:  true, // its own raw-TCP port
-		5432:  true, // another service's raw-TCP port
-		18082: true, // the TCP mesh port, named by the other service's legacy chain
-	}
-	assert.Equal(t, want, got, "no twin on 8080, the service's own HTTP port, nor on 18081, the proxy port that carries its HTTP")
-	assert.Empty(t, duplicateMatches(l.GetFilterChains()))
-
-	// The helper on its own, with its negative control: the same chains with
-	// no HTTP port declared DO get the 8080 twin.
-	tls := BuildCaptureTLSRouteFilterChains(svc, svc.TLSRouteRules, perPortSource)
-	require.NotEmpty(t, tls)
-	named := namedDestinationPorts([]CaptureTCPService{svc, other}, []uint32{80, 8080, 9090, 18081})
-	assert.Equal(t, []uint32{80, 5432, 8080, 9000, 9090, 18081, 18082}, named)
-	assert.False(t, hasSNIChainAt(qualifyTLSChainsByPorts(svc, tls, named), 8080))
-	assert.False(t, hasSNIChainAt(qualifyTLSChainsByPorts(svc, tls, named), 18081))
-	assert.True(t, hasSNIChainAt(qualifyTLSChainsByPorts(svc, tls, named), 80), "port 80 is not this service's: a twin stands there")
-	noHTTP := svc
-	noHTTP.HTTPPorts = nil
-	assert.True(t, hasSNIChainAt(qualifyTLSChainsByPorts(noHTTP, tls, named), 8080))
-	assert.True(t, hasSNIChainAt(qualifyTLSChainsByPorts(noHTTP, tls, named), 18081), "a service with no HTTP port has no HTTP on the proxy port either")
-	// A service that declares port 80 as HTTP keeps it.
-	eighty := svc
-	eighty.HTTPPorts = []uint32{80, 8080}
-	assert.False(t, hasSNIChainAt(qualifyTLSChainsByPorts(eighty, tls, named), 80))
-	// No named port, or no TLS chain: nothing to do.
-	assert.Len(t, qualifyTLSChainsByPorts(svc, tls, nil), len(tls))
-	assert.Empty(t, qualifyTLSChainsByPorts(svc, nil, named))
+	assert.Equal(t, "cap_tcp_tcp:w.t.aether.internal_9000", sel(t, l, tlsConn("10.96.0.1", 9000, "other.org")))
 }
 
-// TestCaptureHTTPRouteName_RoundTrip: the chain/table name of a port parses
-// back to that port, and nothing else parses to a port. The cache reads the
-// table set off the chain names of the listeners it publishes; a name that
-// parsed wrongly would publish a table for a port no chain serves, or miss one.
-func TestCaptureHTTPRouteName_RoundTrip(t *testing.T) {
+// TestCaptureHTTPRouteName: the name of a per-port table, and of the proxy
+// port's chain and table.
+func TestCaptureHTTPRouteName(t *testing.T) {
 	for _, p := range []uint32{1, 80, 8080, 18081, 65535} {
-		name := CaptureHTTPRouteName(p)
-		assert.Equal(t, fmt.Sprintf("cap_http_%d", p), name)
-		got, ok := CaptureHTTPRoutePort(name)
-		assert.True(t, ok, name)
-		assert.Equal(t, p, got, name)
+		assert.Equal(t, fmt.Sprintf("cap_http_%d", p), CaptureHTTPRouteName(p))
 	}
-	for _, name := range []string{
-		CaptureHTTPOtherRouteName, "cap_http_", "cap_http", "cap_http_0", "cap_http_65536", "cap_http_4294967376",
-		"cap_http_80x", "cap_http_-1", "cap_http_ 80", "cap_tcp_80", "out_http", "", "capture_default_p1", "xcap_http_80",
-	} {
-		p, ok := CaptureHTTPRoutePort(name)
-		assert.False(t, ok, "%q must not parse as a port's table (got %d)", name, p)
-	}
-	assert.True(t, strings.HasPrefix(CaptureHTTPOtherRouteName, CaptureHTTPRoutePrefix),
-		"cap_http_other shares the prefix, which is why it has to be told apart by the parse")
+	assert.True(t, strings.HasPrefix(CaptureHTTPOtherRouteName, CaptureHTTPRoutePrefix))
+	assert.False(t, strings.HasPrefix(CaptureHTTPChainName, CaptureHTTPRoutePrefix), "the published table is not a per-port table")
 }

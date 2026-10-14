@@ -14,6 +14,9 @@ load("@rules_go//go:def.bzl", "go_test")
 go_test(
     name = "mtlspool_test",
     size = "medium",
+    # Over 300 s on a quiet workstation since the one-HCM live probes and
+    # controls (each runs its own proxy).
+    timeout = "long",
     srcs = [
         "accesslog_timing_test.go",
         "ads_sds_test.go",
@@ -23,6 +26,12 @@ go_test(
         "cds_reconnect_test.go",
         "harness_test.go",
         "lds_reconnect_test.go",
+        "onehcm_filterstate_route_test.go",
+        "onehcm_levels_live_test.go",
+        "onehcm_probe_test.go",
+        "onehcm_review_extauthz_override_test.go",
+        "onehcm_review_hm_order_test.go",
+        "onehcm_rules_live_test.go",
         "outcome_1641_cases_test.go",
         "perport_accept_test.go",
         "perport_callerns_test.go",
@@ -42,6 +51,8 @@ go_test(
         "quic_path_a_test.go",
         "quic_selection_test.go",
         "quic_twin_eds_test.go",
+        "review1703r2_hm_query_test.go",
+        "review1703r2_inplace_test.go",
     ],
     data = ["//agent/test/envoybin:envoy_bin"],
     tags = [
@@ -63,6 +74,7 @@ go_test(
         "//api/aether/registry/v1:registry",
         "//common/constants/mesh",
         "//common/extensionfilter",
+        "@com_github_cncf_xds_go//xds/type/matcher/v3:matcher",
         "@com_github_envoyproxy_go_control_plane//pkg/cache/types",
         "@com_github_envoyproxy_go_control_plane//pkg/cache/v3:cache",
         "@com_github_envoyproxy_go_control_plane//pkg/resource/v3:resource",
@@ -80,6 +92,7 @@ go_test(
         "@com_github_envoyproxy_go_control_plane_envoy//config/route/v3:route",
         "@com_github_envoyproxy_go_control_plane_envoy//extensions/filters/http/ext_authz/v3:ext_authz",
         "@com_github_envoyproxy_go_control_plane_envoy//extensions/filters/http/header_mutation/v3:header_mutation",
+        "@com_github_envoyproxy_go_control_plane_envoy//extensions/filters/http/header_to_metadata/v3:header_to_metadata",
         "@com_github_envoyproxy_go_control_plane_envoy//extensions/filters/http/rbac/v3:rbac",
         "@com_github_envoyproxy_go_control_plane_envoy//extensions/filters/http/router/v3:router",
         "@com_github_envoyproxy_go_control_plane_envoy//extensions/filters/network/http_connection_manager/v3:http_connection_manager",
@@ -94,6 +107,7 @@ go_test(
         "@com_github_envoyproxy_go_control_plane_envoy//service/auth/v3:auth",
         "@com_github_envoyproxy_go_control_plane_envoy//service/discovery/v3:discovery",
         "@com_github_envoyproxy_go_control_plane_envoy//service/secret/v3:secret",
+        "@com_github_envoyproxy_go_control_plane_envoy//type/matcher/v3:matcher",
         "@com_github_envoyproxy_go_control_plane_envoy//type/v3:type",
         "@com_github_quic_go_quic_go//http3",
         "@com_github_stretchr_testify//assert",

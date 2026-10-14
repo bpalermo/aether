@@ -50,13 +50,13 @@ func TestPerPort_LiveInvalidBackendShareAndTheValidSplit(t *testing.T) {
 			// does not take part in it.
 			r.mutate = func(res map[resourcev3.Type][]types.Resource) {
 				for _, rc := range res[resourcev3.RouteType] {
-					for _, vh := range rc.(*routev3.RouteConfiguration).GetVirtualHosts() {
-						for _, rt := range vh.GetRoutes() {
-							for _, cw := range rt.GetRoute().GetWeightedClusters().GetClusters() {
-								cw.ResponseHeadersToAdd = []*corev3.HeaderValueOption{{Header: &corev3.HeaderValue{Key: "x-picked", Value: cw.GetName()}}}
-							}
+					// Including the routes inside a virtual host's matcher:
+					// cap_http's are all there (one branch per dialled port).
+					ppEachRoute(t, rc.(*routev3.RouteConfiguration), func(rt *routev3.Route) {
+						for _, cw := range rt.GetRoute().GetWeightedClusters().GetClusters() {
+							cw.ResponseHeadersToAdd = []*corev3.HeaderValueOption{{Header: &corev3.HeaderValue{Key: "x-picked", Value: cw.GetName()}}}
 						}
-					}
+					})
 				}
 			}
 			r.c.SetServiceRoutes(map[string][]proxy.GammaRoute{ppSvc: {{

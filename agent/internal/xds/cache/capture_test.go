@@ -426,7 +426,7 @@ func TestCaptureTables_FallthroughFollowsRedirectAll(t *testing.T) {
 		})
 		c.SetServicePortMaps(map[string]map[uint32]uint32{"team-a/echo": {80: 8080}})
 		var table *routev3.RouteConfiguration
-		for _, r := range c.captureRouteTables([]uint32{80}) {
+		for _, r := range perPortView(t, c, []uint32{80}) {
 			if rc := r.(*routev3.RouteConfiguration); rc.GetName() == "cap_http_80" {
 				table = rc
 			}

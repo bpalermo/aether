@@ -24,12 +24,22 @@ func TestPerPortFixtureIsNotVacuous(t *testing.T) {
 	for _, fc := range listeners[0].GetFilterChains() {
 		chains[fc.GetName()] = true
 	}
-	for _, p := range PerPortHTTPPorts() {
-		assert.Truef(t, chains[proxy.CaptureHTTPRouteName(p)], "no HTTP chain for port %d", p)
+	// Two HTTP chains whatever the mesh declares (the one-HCM capture
+	// listener), and the tables the proxy is given to validate: every
+	// per-port table and the compiled one.
+	assert.True(t, chains[proxy.CaptureHTTPChainName])
+	assert.True(t, chains[proxy.CaptureHTTPRouteName(18081)])
+	assert.False(t, chains["cap_http_8080"], "no per-port chain")
+	validated := map[string]bool{}
+	for _, l := range listeners[1:] {
+		validated[strings.TrimSuffix(l.GetName(), "_validate")] = true
 	}
-	assert.True(t, chains[proxy.CaptureHTTPOtherRouteName])
+	for _, p := range PerPortHTTPPorts() {
+		assert.Truef(t, validated[proxy.CaptureHTTPRouteName(p)], "table of port %d not validated", p)
+	}
+	assert.True(t, validated[proxy.CaptureHTTPOtherRouteName])
+	assert.True(t, validated[proxy.CaptureHTTPChainName], "the compiled table is validated")
 	// One port number, both classes, on one listener.
-	assert.True(t, chains["cap_http_9000"])
 	assert.True(t, chains["cap_tcp_tcp:pp-mixed.default."+meshDomain+"_9000"])
 	assert.True(t, chains["cap_tcp_tcp:pp-tcpfirst.default."+meshDomain+"_9000"])
 	// The raw-TCP-only service is reached on its own port and on the TCP

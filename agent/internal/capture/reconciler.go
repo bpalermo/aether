@@ -1,7 +1,7 @@
 // Package capture contains the node agent's transparent-capture controller: it
 // watches the generated selectorless mesh Services (proposal 018, Phase 3a) and
 // projects their cluster.local authorities into the snapshot cache, which builds the
-// cap_http_<port> route tables the per-pod capture listeners serve. Endpoints stay in the
+// cap_http route table the per-pod capture listeners serve. Endpoints stay in the
 // registry; this only maps a captured authority to its existing service cluster.
 package capture
 
@@ -90,7 +90,7 @@ func declaredPorts(s *corev1.Service) (http, other []uint32) {
 }
 
 // AuthoritySink receives the projections from the generated mesh Services:
-//   - SetCaptureAuthorities: service -> cluster.local FQDN (the cap_http_<port> route tables, transparent capture).
+//   - SetCaptureAuthorities: service -> cluster.local FQDN (the cap_http route table, transparent capture).
 //   - SetMeshDNSRecords:     service -> mesh-Service ClusterIP (the per-pod dns_filter's
 //     A record for <svc>.<meshDomain>, the mesh-global FQDN).
 //   - SetCaptureTCPServices: the non-HTTP services that need per-ClusterIP TCP floor chains.

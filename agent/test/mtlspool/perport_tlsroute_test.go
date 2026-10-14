@@ -8,11 +8,11 @@ package mtlspool
 //
 // The capture listener is the one SnapshotCache generates. To run it outside
 // a pod's network namespace, one listener is published per dialled port D:
-// bound to 0.0.0.0:<free port>, with the chains that name D re-keyed onto that
-// port, the chains that name another port dropped, and every service address
-// (a /32) moved to a loopback alias (127.0.0.N). A connection to 127.0.0.N on
-// that listener is, to the filter-chain match, a connection to the service's
-// address on port D. The passthrough cluster is replaced by a plain cluster to
+// bound to 0.0.0.0:<free port>, with D re-keyed onto that port in its
+// filter_chain_matcher, cap_http recording D as the dialled port, and every
+// service address moved to a loopback alias (127.0.0.N). A connection to
+// 127.0.0.N on that listener is, to the matcher and the route table, a
+// connection to the service's address on port D. The passthrough cluster is replaced by a plain cluster to
 // a second server, so "left the mesh" has a body of its own.
 
 import (
@@ -32,6 +32,7 @@ import (
 	"aethermesh.dev/agent/test/envoybin"
 	cniv1 "aethermesh.dev/api/aether/cni/v1"
 	registryv1 "aethermesh.dev/api/aether/registry/v1"
+	xdsmatcherv3 "github.com/cncf/xds/go/xds/type/matcher/v3"
 	clusterv3 "github.com/envoyproxy/go-control-plane/envoy/config/cluster/v3"
 	corev3 "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
 	endpointv3 "github.com/envoyproxy/go-control-plane/envoy/config/endpoint/v3"
@@ -41,8 +42,51 @@ import (
 	"github.com/stretchr/testify/require"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/durationpb"
-	"google.golang.org/protobuf/types/known/wrapperspb"
 )
+
+// pptRekey moves, in a listener's filter_chain_matcher, every service address
+// onto its alias and the port number from onto to: exact-map keys and exact
+// string predicates alike.
+func pptRekey(t *testing.T, m *xdsmatcherv3.Matcher, alias map[string]string, from, to uint32) {
+	t.Helper()
+	if m == nil {
+		return
+	}
+	key := func(k string) string {
+		if a, ok := alias[k]; ok {
+			return a
+		}
+		if k == fmt.Sprint(from) {
+			return fmt.Sprint(to)
+		}
+		return k
+	}
+	var pred func(p *xdsmatcherv3.Matcher_MatcherList_Predicate)
+	pred = func(p *xdsmatcherv3.Matcher_MatcherList_Predicate) {
+		if sm := p.GetSinglePredicate().GetValueMatch(); sm != nil && sm.GetExact() != "" {
+			sm.MatchPattern = &xdsmatcherv3.StringMatcher_Exact{Exact: key(sm.GetExact())}
+		}
+		for _, q := range p.GetOrMatcher().GetPredicate() {
+			pred(q)
+		}
+		if p.GetNotMatcher() != nil {
+			pred(p.GetNotMatcher())
+		}
+	}
+	for _, fm := range m.GetMatcherList().GetMatchers() {
+		pred(fm.GetPredicate())
+		pptRekey(t, fm.GetOnMatch().GetMatcher(), alias, from, to)
+	}
+	if mm := m.GetMatcherTree().GetExactMatchMap(); mm != nil {
+		next := map[string]*xdsmatcherv3.Matcher_OnMatch{}
+		for k, om := range mm.GetMap() {
+			pptRekey(t, om.GetMatcher(), alias, from, to)
+			next[key(k)] = om
+		}
+		mm.Map = next
+	}
+	pptRekey(t, m.GetOnNoMatch().GetMatcher(), alias, from, to)
+}
 
 func pptServer(t *testing.T, body string) string {
 	t.Helper()
@@ -166,25 +210,18 @@ func TestPerPort_TLSRouteParent_CleartextHTTP_Live(t *testing.T) {
 			}
 		}
 		l.ListenerFilters = lf
-		var chains []*listenerv3.FilterChain
+		// The listener selects its chains with a matching tree: the service
+		// addresses and the dialled port D it names are moved onto the
+		// aliases and this listener's port, and cap_http records D as the
+		// dialled port (it would record the loopback port).
+		pptRekey(t, l.GetFilterChainMatcher(), alias, d, p)
 		var kept []string
 		for _, fc := range l.GetFilterChains() {
-			m := fc.GetFilterChainMatch()
-			if m.GetDestinationPort() != nil {
-				if m.GetDestinationPort().GetValue() != d {
-					continue
-				}
-				m.DestinationPort = wrapperspb.UInt32(p)
+			if fc.GetName() == proxy.CaptureHTTPChainName {
+				ppSetDialledPort(t, fc, fmt.Sprint(d))
 			}
-			for _, pr := range m.GetPrefixRanges() {
-				a, ok := alias[pr.GetAddressPrefix()]
-				require.Truef(t, ok, "chain %s matches an address the rig has no alias for: %s", fc.GetName(), pr.GetAddressPrefix())
-				pr.AddressPrefix = a
-			}
-			chains = append(chains, fc)
 			kept = append(kept, fc.GetName())
 		}
-		l.FilterChains = chains
 		t.Logf("dialled port %d: chains %v + default %s", d, kept, l.GetDefaultFilterChain().GetName())
 		res[resourcev3.ListenerType] = append(res[resourcev3.ListenerType], l)
 	}

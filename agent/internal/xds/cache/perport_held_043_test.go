@@ -6,70 +6,76 @@ import (
 	"time"
 
 	"aethermesh.dev/agent/internal/xds/proxy"
+	"aethermesh.dev/agent/test/xdseval"
 	registryv1 "aethermesh.dev/api/aether/registry/v1"
 	listenerv3 "github.com/envoyproxy/go-control-plane/envoy/config/listener/v3"
 	routev3 "github.com/envoyproxy/go-control-plane/envoy/config/route/v3"
+	http_connection_managerv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/network/http_connection_manager/v3"
 	"github.com/envoyproxy/go-control-plane/pkg/cache/types"
 	resourcev3 "github.com/envoyproxy/go-control-plane/pkg/resource/v3"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"google.golang.org/protobuf/proto"
 )
 
-// TestPerPort_SnapshotPublishesATableForEveryChainItPublishes: the route
-// tables of a snapshot are those of the node's HTTP port set AND of every port
-// a cap_http_<P> chain of a listener IN THAT SNAPSHOT names. A listener built
-// against a port set that has since moved (the listeners are rebuilt when the
-// set changes, on another path than the tables) must still find its table: a
-// chain whose table is missing warms for the whole initial-fetch timeout.
-//
-// Here a published capture listener names a port outside the current set.
+// TestPerPort_SnapshotPublishesATableForEveryChainItPublishes: every route
+// table an HTTP chain of a published capture listener names is in the same
+// snapshot. A chain whose table is missing warms for the whole initial-fetch
+// timeout (#817). With the one-HCM capture listener the names are fixed
+// (cap_http, cap_http_18081), so no port entering or leaving the mesh can
+// leave a chain without its table; this holds the snapshot to it whatever the
+// port set is.
 func TestPerPort_SnapshotPublishesATableForEveryChainItPublishes(t *testing.T) {
 	ctx := context.Background()
 	c := a043Cache(t, a043Fixture())
-	require.NoError(t, c.generateSnapshot(ctx))
-	require.NotContains(t, c.captureHTTPPorts(), uint32(1234))
-
-	// The stored capture listener gains a chain for a port the set does not
-	// hold. The set itself is unchanged, so nothing rebuilds the listener.
-	c.listenerMu.Lock()
-	var touched int
-	for netns, entry := range c.listeners {
-		l, ok := entry.capture.(*listenerv3.Listener)
-		if !ok || l == nil {
-			continue
+	for _, step := range []string{"fixture", "a port number leaves the mesh"} {
+		if step != "fixture" {
+			c.SetServiceRoutes(nil)
+			c.SetServicePortMaps(nil)
 		}
-		l = proto.Clone(l).(*listenerv3.Listener)
-		l.FilterChains = append(l.FilterChains, &listenerv3.FilterChain{Name: proxy.CaptureHTTPRouteName(1234)})
-		entry.capture = l
-		c.listeners[netns] = entry
-		touched++
-	}
-	c.listenerMu.Unlock()
-	require.Equal(t, 1, touched, "the fixture has one pod")
-
-	require.NoError(t, c.generateSnapshot(ctx))
-	snap, err := c.GetSnapshot("node-1")
-	require.NoError(t, err)
-	var named bool
-	for _, r := range snap.GetResources(resourcev3.ListenerType) {
-		for _, fc := range r.(*listenerv3.Listener).GetFilterChains() {
-			named = named || fc.GetName() == "cap_http_1234"
+		require.NoError(t, c.generateSnapshot(ctx))
+		snap, err := c.GetSnapshot("node-1")
+		require.NoError(t, err)
+		routes := snap.GetResources(resourcev3.RouteType)
+		named := 0
+		for _, r := range snap.GetResources(resourcev3.ListenerType) {
+			l := r.(*listenerv3.Listener)
+			if l.GetName()[:min(8, len(l.GetName()))] != "capture_" {
+				continue
+			}
+			for _, fc := range l.GetFilterChains() {
+				for _, f := range fc.GetFilters() {
+					hcm := &http_connection_managerv3.HttpConnectionManager{}
+					if f.GetTypedConfig().UnmarshalTo(hcm) != nil {
+						continue
+					}
+					named++
+					assert.Contains(t, routes, hcm.GetRds().GetRouteConfigName(), "%s: chain %s names a table the snapshot does not publish", step, fc.GetName())
+				}
+			}
+		}
+		require.Equal(t, 2, named, "%s: one capture listener with its two HTTP chains", step)
+		for name := range routes {
+			_, perPort := capturePortOf(name)
+			assert.False(t, perPort && name != "cap_http_18081", "%s: a per-port table %s is published", step, name)
+			assert.NotEqual(t, proxy.CaptureHTTPOtherRouteName, name, step)
 		}
 	}
-	require.True(t, named, "the snapshot must carry the listener with the extra chain, or the test shows nothing")
-	assert.Contains(t, snap.GetResources(resourcev3.RouteType), "cap_http_1234", "a chain this snapshot publishes names a route table it does not publish")
 }
 
-// capTableHas reports whether a set of capture tables holds a virtual host
-// that claims domain in the table of port.
+// capTableHas reports whether a set of capture tables gives a request
+// dialled to port, with Host domain, a virtual host of its own rather than the
+// table's catch-all: in the per-port table of that port, or in the published
+// cap_http.
 func capTableHas(tables []types.Resource, port uint32, domain string) bool {
 	for _, r := range tables {
 		rc := r.(*routev3.RouteConfiguration)
-		if rc.GetName() != proxy.CaptureHTTPRouteName(port) {
-			continue
+		switch rc.GetName() {
+		case proxy.CaptureHTTPRouteName(port):
+			return findVHost(rc.GetVirtualHosts(), domain) != nil
+		case proxy.CaptureHTTPChainName:
+			vh := xdseval.PickVirtualHost(rc, domain)
+			return vh != nil && vh.GetName() != "on_demand_catch_all"
 		}
-		return findVHost(rc.GetVirtualHosts(), domain) != nil
 	}
 	return false
 }
@@ -115,7 +121,7 @@ func TestPerPort_TablesFollowAGenerationAlone(t *testing.T) {
 	c := a043Cache(t, a043Fixture())
 	const host = "multi.demo." + a043Mesh + ":8080"
 	marks := func() []string {
-		for _, r := range c.captureRouteTables([]uint32{8080}) {
+		for _, r := range perPortView(t, c, []uint32{8080}) {
 			if rc := r.(*routev3.RouteConfiguration); rc.GetName() == "cap_http_8080" {
 				return rtpMarks(t, rc, host)
 			}

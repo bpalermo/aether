@@ -47,9 +47,10 @@ func filterStateValues(t *testing.T, chain *listenerv3.FilterChain) [][2]string 
 	t.Helper()
 	var out [][2]string
 	for _, kv := range allFilterStateValues(t, chain) {
-		// The caller's namespace is not a SOURCE-identity key: it is read by
-		// the route tables only (shortname.go) and has its own tests.
-		if kv[0] != CallerNamespaceFilterStateKey {
+		// The caller's namespace and the dialled port are not SOURCE-identity
+		// keys: the route tables alone read them (shortname.go,
+		// capturematcher.go), and they have their own tests.
+		if kv[0] != CallerNamespaceFilterStateKey && kv[0] != DialledPortFilterStateKey {
 			out = append(out, kv)
 		}
 	}
@@ -114,10 +115,8 @@ func TestSourceIdentityStampedOnEveryMeshOriginatingChain(t *testing.T) {
 	})
 
 	t.Run("capture HCM chain", func(t *testing.T) {
-		requireBothSourceKeys(t, buildCaptureHTTPFilterChain(pod, id, testTrustDomain, false, false, nil, CaptureHTTPRouteName(8080), 8080), "capture HCM chain")
-		for _, fc := range buildCaptureHTTPFilterChains(pod, id, testTrustDomain, false, true, nil, []uint32{80, 8080, 18081}) {
-			requireBothSourceKeys(t, fc, "capture HCM chain "+fc.GetName())
-		}
+		requireBothSourceKeys(t, buildCaptureHTTPFilterChain(pod, id, testTrustDomain, false, nil, CaptureHTTPChainName, true), "capture HCM chain")
+		requireBothSourceKeys(t, buildCaptureHTTPFilterChain(pod, id, testTrustDomain, false, nil, CaptureHTTPRouteName(18081), false), "capture HCM chain of the proxy port")
 	})
 
 	t.Run("capture TCP floor chain", func(t *testing.T) {
@@ -138,7 +137,7 @@ func TestSourceIdentityStampedOnEveryMeshOriginatingChain(t *testing.T) {
 		svcWithRoutes := svc
 		svcWithRoutes.TCPRouteRules = rules
 		svcWithRoutes.TLSRouteRules = tlsRules
-		l, err := GenerateCaptureListener(pod, id, 18081, testTrustDomain, false, []CaptureTCPService{svcWithRoutes}, nil, true, nil)
+		l, err := GenerateCaptureListener(pod, id, 18081, testTrustDomain, false, []CaptureTCPService{svcWithRoutes}, true, nil)
 		require.NoError(t, err)
 		named := 0
 		for _, fc := range l.GetFilterChains() {

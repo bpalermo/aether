@@ -511,12 +511,121 @@ Also measured: the route table itself cannot branch on the destination port
 "Route table can only match on request headers"), so the port has to be chosen
 by the chain, with a route table per port.
 
+#### Amendment: one HTTP chain, selected by a matching tree
+
+Chart 3.0.0 shipped the per-port layout above. On the reference cluster it
+measured as 1.6× the capture listeners' LDS size, an RDS apply 8–10× slower,
+a slower successor start at a proxy hot restart and +34% proxy memory: a node
+held pods × (`H` + 1) HCM configurations. It was replaced by one HTTP chain
+per listener, with the same answers.
+
+Both findings above were about the legacy `filter_chain_match`, and both have
+an answer that does not need a chain per port:
+
+- **The listener's `filter_chain_matcher` (the generic matching tree)
+  backtracks.** A branch that ends without a match hands the connection to
+  the `on_no_match` of the map it came from
+  (`source/common/matcher/exact_map_matcher.h`, at the pinned proxy). So
+  "the destination address is a service's, the port is not one of its
+  raw-TCP ports and the server name is none of its TLSRoutes" falls back to
+  the HTTP chain instead of the passthrough. Measured on the pinned proxy
+  (`agent/test/mtlspool/onehcm_probe_test.go`): every case of the L1/L2 table
+  below, and the same chains under `filter_chain_match` (control 1) get the
+  five trap cases wrong.
+- **The route table cannot match `DestinationPortInput`, but it can match
+  filter state.** The HTTP chain stores the connection's destination port
+  (`%DOWNSTREAM_LOCAL_PORT%`, the restored original destination) in filter
+  state under `aether.dialled_port`, connection-level and never shared
+  upstream, and each route of the table matches it with
+  `RouteMatch.filter_state`: a stream's filter state falls back to the
+  connection's (`source/stream_info/filter_state_impl.cc`,
+  `getDataReadOnlyGeneric`; the route reads it in `RouteEntryImplBase`,
+  `source/common/router/config_impl.cc`), measured on the pinned proxy
+  (`mtlspool/onehcm_filterstate_route_test.go`). A client cannot set it. A
+  chain that does not set it gets the answer of a port no service declares:
+  every mesh name is refused, none is delivered (control 2).
+
+The agent still builds the per-port tables `cap_http_<P>` and
+`cap_http_other`: they state the rule, port by port. What it publishes is one
+table, `cap_http`, compiled from them (`proxy.MergeCaptureRouteTables`): one
+virtual host per mesh name (and per short name), whose domains are its
+spellings port-less and `:*`, with a plain, ordered route list and no
+matcher:
+
+- for each port D the name is served on, the name's routes for D (its route
+  rules, ExtensionRef and service-wide filters, imported rules, the HTTP/3
+  selection: everything the per-port table has), each also matching
+  `filter_state aether.dialled_port == "D"` and an `:authority` regex on the
+  Host's port suffix (none, or exactly `:D`; `<name>:8080:8080` is no such
+  suffix); then a route for `filter_state == "D"` alone: 421 port-mismatch;
+- last, every other port: 421 port-not-declared for a name the node knows.
+
+The `*` virtual host branches on the dialled port the same way (each port's
+on-demand spelling). A short name's caller-namespace matcher is flattened
+too: each namespace's routes under a filter-state match on the caller's
+namespace. Every list ends in a route every request takes, so no port's
+routes can take another port's requests.
+
+A service-wide filter's config stays a **virtual-host** config: a full
+name's compiled virtual host belongs to one service, so it carries the
+filter as the per-port virtual host (and the proxy port's) does, and the
+proxy combines it with a rule's own config itself. The refusals in that
+virtual host (port-mismatch, port-not-declared) disable it per route with a
+route-level `FilterConfig{disabled: true}`: the route's answer to "is this
+filter disabled" wins over the virtual host's
+(`RouteEntryImplBase::filterDisabled`, `source/common/router/config_impl.cc`),
+and a disabled filter is not created for the stream
+(`source/common/http/filter_chain_helper.cc`); measured live for
+header_mutation, rbac and ext_authz, with a red control
+(`mtlspool/onehcm_levels_live_test.go`). A short name's virtual host is
+shared by several namespaces' services, so there the two levels are folded
+onto each route (`extensionfilter.CombineLevels`: header_mutation applies the
+route's mutations before the virtual host's; ext_authz never inherits the
+virtual host's service override), and a pair no single config can carry in
+the proxy's order is refused 500 `filter-levels` rather than run differently:
+header_mutation applies each level whole, route first, and within a level its
+request mutations before its query mutations, each query mutation parsing and
+re-rendering `:path` (`header_mutation.cc`), so a rule that mutates the query
+under a service that mutates a request header or the query cannot be folded.
+A full name is never folded (the compiler folds only a virtual host whose
+answers disagree on the virtual-host config, which no builder produces).
+
+The answer for every (name, dialled port, Host spelling) is the per-port
+table's: status, `x-aether-error`, the route's target and the filters and
+rules applied to it (a test compares the first route every request takes,
+on every spelling of every name, every port of the mesh, one other and none,
+for every path and header a route matches: `cache/onehcm_equivalence_043_test.go`),
+and every table the agent's tests read is checked the same way. Two answers
+changed on purpose with this amendment: a refusal's body names no dialled
+port (the reason header is the contract), and on a port the name is not
+served on the answer is port-not-declared whatever port the Host names (it
+was port-mismatch when the Host named another port).
+
+The proxy port keeps its own chain and table (`cap_http_18081`, the loopback
+table's virtual hosts); folding it in is a later change.
+
+TLS carrying a TLSRoute's server name to a port the service itself serves as
+HTTP (or to 18081, when it serves any HTTP) leaves through the passthrough,
+as it did with the per-port chains: the tree does not test the server name on
+those ports. That is the owner's ruling for this change, kept from 3.0.0.
+
 #### The chains of a capture listener
+
+| Chain | Selected when (filter_chain_matcher) | Does |
+|---|---|---|
+| `cap_tcp_<cluster>_<P>`, one per (service, raw-TCP port) | destination address is the service's, destination port `P`, and the server name is none of its TLSRoutes | `tcp_proxy` to `tcp:<fqdn>:<P>` |
+| `cap_tls_<cluster>_<i>`, one per TLSRoute rule of a service | destination address is the service's and the server name is one of the rule's, on any port the service does not serve as HTTP (and not 18081 when it serves any) | `tcp_proxy` to the rule's backends |
+| `cap_http` | anything else that is cleartext (`raw_buffer`) sniffed `http/1.0`, `http/1.1` or `h2c`, on any port but 18081 | records the dialled port; HCM with route table `cap_http`, which branches on it |
+| `cap_http_18081` | the same on port 18081 | HCM with the loopback table's virtual hosts (`cap_http_18081`) |
+| default | nothing above | passthrough to the original destination |
+
+The table above is the listener since the amendment. Until then (chart
+3.0.0) it was:
 
 | Chain | Match | Does |
 |---|---|---|
 | `cap_http_<P>`, one per distinct HTTP port number `P` in the mesh | destination port `P`, `raw_buffer`, sniffed `http/1.0`, `http/1.1` or `h2c` | HCM with route table `cap_http_<P>` |
-| `cap_tcp_<cluster>_<P>`, one per (service, raw-TCP port) | destination port `P`, the service's address `/32` | `tcp_proxy` to `tcp:<fqdn>:<P>` (exists today, `proxy/capture.go:297-318`) |
+| `cap_tcp_<cluster>_<P>`, one per (service, raw-TCP port) | destination port `P`, the service's address `/32` | `tcp_proxy` to `tcp:<fqdn>:<P>` |
 | `cap_http_other` | `raw_buffer`, sniffed HTTP, no destination port | HCM for HTTP on a port number no service declares as HTTP: refuses mesh names, passes everything else through |
 | default | none | passthrough to the original destination |
 
@@ -550,6 +659,8 @@ request to `:9090` is in table 9090, which has no route to anything else.
 - *(a) Captured.* The pod dialled a Service address and port `D`. Table
   `cap_http_<D>` holds, for each service with HTTP on `D`, one virtual host
   whose domains are every name of the service, port-less and with `:D`.
+  (Since the amendment above, that table is the branch `D` of the one
+  published table, `cap_http`.)
 - *(b) Loopback.* The pod dialled `127.0.0.1:18081` and wrote the service into
   `Host`. No capture rule is involved (loopback is accepted before the marks),
   so this is identical with capture on and with
@@ -662,7 +773,8 @@ read).
 |---|---|---|---|
 | Today | 1 + `T'` + default (`T'` counts three chains for a TCP-primary service) | 1 | 2 (`cap_http`, `out_http`) |
 | One HCM chain (first version) | 1 + `T` + default | 1 | 2 |
-| Per port (adopted) | `H` + 1 + `T` + default | `H` + 1 | `H` + 3 (`cap_http_<P>` × `H`, `cap_http_other`, `out_http`, and `cap_http_18081` until Phase 3) |
+| Per port (chart 3.0.0) | `H` + 1 + `T` + default | `H` + 1 | `H` + 3 (`cap_http_<P>` × `H`, `cap_http_other`, `out_http`, and `cap_http_18081` until Phase 3) |
+| One HCM, matching tree (the amendment) | 2 + `T` + default | 2 | 3 (`cap_http`, `cap_http_18081`, `out_http`) |
 
 Worked: 200 services, 3 HTTP port numbers (80, 8080, 9090), 20 raw-TCP pairs,
 50 pods on a node. Chains per pod: 22 today (if none of the 20 is a primary),

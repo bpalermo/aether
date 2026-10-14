@@ -33,6 +33,7 @@ import (
 
 	"aethermesh.dev/agent/internal/xds/config"
 	"aethermesh.dev/agent/internal/xds/proxy"
+	"aethermesh.dev/agent/test/xdseval"
 	meshconst "aethermesh.dev/common/constants/mesh"
 	bootstrapv3 "github.com/envoyproxy/go-control-plane/envoy/config/bootstrap/v3"
 	clusterv3 "github.com/envoyproxy/go-control-plane/envoy/config/cluster/v3"
@@ -710,30 +711,43 @@ func TestCaptureTLSRouteSNIChainsCoexistWithFloor(t *testing.T) {
 	l := singleListener(t, data)
 	proxies := tcpProxyByChain(t, l)
 
-	// The SNI chains, by the hostname each one claims.
+	// The SNI chains, by the hostname that selects each one. The listener
+	// selects with filter_chain_matcher (the one-HCM capture listener), so
+	// this asks the matcher, through the same model of it the unit tests use.
+	selectAt := func(ip string, port uint32, sni string) string {
+		t.Helper()
+		name, err := xdseval.SelectChain(l, xdseval.Conn{IP: ip, Port: port, SNI: sni, Transport: "tls"})
+		if err != nil {
+			t.Fatalf("SelectChain: %v", err)
+		}
+		return name
+	}
 	backendBySNI := map[string]string{}
 	var floorName string
-	for _, fc := range l.GetFilterChains() {
-		m := fc.GetFilterChainMatch()
-		switch {
-		case strings.HasPrefix(fc.GetName(), "cap_tls_"):
-			if len(m.GetServerNames()) != 1 {
-				t.Errorf("chain %q: server_names = %v, want exactly one hostname", fc.GetName(), m.GetServerNames())
-				continue
-			}
-			assertMatchesParentIP(t, fc, L4TLSParentClusterIP,
-				"without the /32 an SNI chain would claim any service's connection carrying that hostname")
-			backendBySNI[m.GetServerNames()[0]] = proxies[fc.GetName()].GetCluster()
-		case strings.HasPrefix(fc.GetName(), "cap_tcp_"):
-			floorName = fc.GetName()
-			if len(m.GetServerNames()) != 0 {
-				t.Errorf("floor chain %q constrains server_names to %v; it must not, or a "+
-					"connection whose SNI matches no TLSRoute has nowhere to land",
-					fc.GetName(), m.GetServerNames())
-			}
-			assertMatchesParentIP(t, fc, L4TLSParentClusterIP,
-				"the floor chain is the fall-through for this service's VIP")
+	for _, sni := range []string{L4SNIAlpha, L4SNIBravo} {
+		// On a port nothing claims, on the parent's own raw-TCP port and on
+		// the TCP mesh port: the TLSRoute's chain (#911).
+		chain := selectAt(L4TLSParentClusterIP, 7777, sni)
+		if !strings.HasPrefix(chain, "cap_tls_") {
+			t.Errorf("SNI %q to the parent's address selects %q, want a TLSRoute chain", sni, chain)
+			continue
 		}
+		for _, port := range []uint32{6379, 18082} {
+			if got := selectAt(L4TLSParentClusterIP, port, sni); got != chain {
+				t.Errorf("SNI %q to :%d selects %q, want %q", sni, port, got, chain)
+			}
+		}
+		// Without the address, the hostname is nobody's: a TLSRoute for one
+		// service must not take another service's connection with that name.
+		if got := selectAt("10.96.250.250", 7777, sni); got == chain {
+			t.Errorf("SNI %q to another address selects the TLSRoute chain %q", sni, chain)
+		}
+		backendBySNI[sni] = proxies[chain].GetCluster()
+	}
+	// A server name no TLSRoute has, on the parent's raw-TCP port: the floor.
+	floorName = selectAt(L4TLSParentClusterIP, 6379, "nobody.l4.test")
+	if !strings.HasPrefix(floorName, "cap_tcp_") {
+		t.Errorf("an SNI matching no TLSRoute selects %q on the parent's port, want its floor chain", floorName)
 	}
 
 	// Both SNIs are routed, and to DIFFERENT backends. Asserting only one SNI
@@ -754,7 +768,7 @@ func TestCaptureTLSRouteSNIChainsCoexistWithFloor(t *testing.T) {
 
 	// The fall-through target, positively: the floor goes to the parent's own
 	// cluster, which is neither TLSRoute backend.
-	if floorName == "" {
+	if !strings.HasPrefix(floorName, "cap_tcp_") {
 		t.Fatalf("no cap_tcp_* floor chain beside the SNI chains: chains %v", chainNames(l))
 	}
 	floorCluster := proxies[floorName].GetCluster()
@@ -767,16 +781,6 @@ func TestCaptureTLSRouteSNIChainsCoexistWithFloor(t *testing.T) {
 			t.Errorf("floor chain routes to %q, the backend of SNI %q — a non-matching SNI would "+
 				"reach a TLSRoute backend", backend, sni)
 		}
-	}
-}
-
-// assertMatchesParentIP checks a chain's filter_chain_match pins the parent
-// Service's ClusterIP as a /32.
-func assertMatchesParentIP(t *testing.T, fc *listenerv3.FilterChain, ip, why string) {
-	t.Helper()
-	ranges := fc.GetFilterChainMatch().GetPrefixRanges()
-	if len(ranges) != 1 || ranges[0].GetAddressPrefix() != ip || ranges[0].GetPrefixLen().GetValue() != 32 {
-		t.Errorf("chain %q: prefix_ranges = %v, want exactly %s/32 — %s", fc.GetName(), ranges, ip, why)
 	}
 }
 

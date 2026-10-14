@@ -174,9 +174,9 @@ func TestSameNamedPodsOtherListenersShareNoName(t *testing.T) {
 	assert.Equal(t, a.GetNetworkNamespace(), udpA.GetAddress().GetSocketAddress().GetNetworkNamespaceFilepath())
 	assert.Equal(t, b.GetNetworkNamespace(), udpB.GetAddress().GetSocketAddress().GetNetworkNamespaceFilepath())
 
-	capA, err := GenerateCaptureListener(a, SpiffeIDFromPod(a, sameNameTrustDomain), 15001, sameNameTrustDomain, false, nil, nil, false, nil)
+	capA, err := GenerateCaptureListener(a, SpiffeIDFromPod(a, sameNameTrustDomain), 15001, sameNameTrustDomain, false, nil, false, nil)
 	require.NoError(t, err)
-	capB, err := GenerateCaptureListener(b, SpiffeIDFromPod(b, sameNameTrustDomain), 15001, sameNameTrustDomain, false, nil, nil, false, nil)
+	capB, err := GenerateCaptureListener(b, SpiffeIDFromPod(b, sameNameTrustDomain), 15001, sameNameTrustDomain, false, nil, false, nil)
 	require.NoError(t, err)
 	assert.Equal(t, "capture_ns-a_web-0", capA.GetName())
 	assert.Equal(t, "capture_ns-a_web-0", capA.GetStatPrefix())

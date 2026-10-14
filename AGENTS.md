@@ -59,7 +59,7 @@ make actionlint    # GitHub Actions workflows (pinned actionlint + ShellCheck)
 - `registrar/internal/replicator` — leader-elected cross-region etcd mirroring under an origin-heartbeat lease (proposal 006).
 - `agent/internal/xds/cache/quicpairs.go`, `agent/internal/xds/quicdemand`, `agent/internal/xds/server` (`odcds.go`) — east-west QUIC twins: observed (SA, destination) pairs and their persisted `demand_confirmed` (#1076), the per-stream ODCDS subscription ledger (#1036/#1052), and on-demand twin admission (#1033).
 - `agent/internal/xds/ack` — per-resource delta-xDS ACK/NACK tracking (no admin polling).
-- `agent/internal/capture` — projects mesh-Service authorities into the capture route tables (`cap_http_<port>`).
+- `agent/internal/capture` — projects mesh-Service authorities into the capture route table (`cap_http`).
 - `agent/internal/proxy/hotrestart` + `agent/internal/supervisorcmd` — the Envoy hot-restart supervisor and its command (#772; child-silent signal #1058).
 - `agent/internal/gatewaystatus` — Gateway API status writers scoped to aether's `controllerName`.
 - `cni/internal/plugin` — the chained CNI plugin, including the TPROXY capture divert (proposal 038) and the mesh-DNS `:53` DNAT.

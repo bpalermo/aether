@@ -49,6 +49,9 @@ go_library(
 go_test(
     name = "gamma_test",
     size = "small",
+    # About 42 s under --config=race on a workstation (the multi-writer status
+    # and named-port slice tests), past the 60 s of "small" on a CI runner.
+    timeout = "moderate",
     srcs = [
         "dropped_test.go",
         "podports_changed_test.go",

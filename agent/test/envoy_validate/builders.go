@@ -474,10 +474,6 @@ func buildNodeUDSBootstrap() (*bootstrapv3.Bootstrap, error) {
 // fixtureLegacyTCPPort is the port the raw-TCP fixture services declare.
 const fixtureLegacyTCPPort = 6379
 
-// fixtureHTTPPorts is the smallest HTTP port set the agent ever builds a
-// capture listener with: the two legacy numbers (cache.captureHTTPPorts).
-var fixtureHTTPPorts = []uint32{80, 18081}
-
 // buildCaptureBootstrap builds the transparent-capture bootstrap config.
 func buildCaptureBootstrap() (*bootstrapv3.Bootstrap, error) {
 	pod := testPod()
@@ -502,7 +498,6 @@ func buildCaptureBootstrap() (*bootstrapv3.Bootstrap, error) {
 		meshDomain,
 		false, // emitStatsPod
 		[]proxy.CaptureTCPService{tcpSvc},
-		fixtureHTTPPorts,
 		true, // withPassthrough
 		nil,  // extensionFilters (escape hatch exercised in the route-target bootstrap)
 	)
@@ -673,7 +668,6 @@ func buildCaptureTCPRouteBootstrap() (*bootstrapv3.Bootstrap, error) {
 		meshDomain,
 		false, // emitStatsPod
 		[]proxy.CaptureTCPService{svc},
-		fixtureHTTPPorts,
 		true, // withPassthrough (redirect-all, the shipped default)
 		nil,  // extensionFilters
 	)
@@ -758,7 +752,6 @@ func buildCaptureTLSRouteBootstrap() (*bootstrapv3.Bootstrap, error) {
 		meshDomain,
 		false, // emitStatsPod
 		[]proxy.CaptureTCPService{svc},
-		fixtureHTTPPorts,
 		true, // withPassthrough
 		nil,  // extensionFilters
 	)

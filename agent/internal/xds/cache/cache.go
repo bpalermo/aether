@@ -588,10 +588,6 @@ type SnapshotCache struct {
 	// to the entries it builds; without that, every mesh-Service re-projection
 	// erased the declared-port chains until the next registry load (#1094).
 	captureDerived map[string]servicePorts
-	// captureHTTPPortsSeen is the HTTP port set (captureHTTPPortsKey) the
-	// per-pod capture listeners were last reconciled against
-	// (reconcileCaptureHTTPPorts). Guarded by captureMu.
-	captureHTTPPortsSeen string
 	// captureProjected is closed by the first SetCaptureTCPServices call: the
 	// mesh-Service reconciler has delivered the service set that defines the
 	// capture listener's TCP chains at least once (CaptureProjected).
@@ -846,6 +842,13 @@ func NewSnapshotCache(nodeName string, log *slog.Logger) *SnapshotCache {
 	if err != nil {
 		log.Error("failed to create snapshot cache metrics; continuing without instrumentation", "error", err)
 	}
+	// Two capture services that claim one address: the second one's chains
+	// are on the listener and unreachable. Always a defect upstream.
+	proxy.OnDuplicateCaptureAddress(func(listener, address, kept, dropped string) {
+		log.Warn("two capture services claimed one service address; the second one's chains are unreachable",
+			"listener", listener, "address", address, "kept", kept, "dropped", dropped)
+		metrics.CaptureDuplicateAddress(context.Background())
+	})
 
 	return &SnapshotCache{
 		SnapshotCache: cachev3.NewSnapshotCache(false, cachev3.IDHash{}, nil),

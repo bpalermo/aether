@@ -158,6 +158,10 @@ var seededCounters = []string{
 	// audit. Zero forever when every builder honours the rule.
 	"aether.agent.snapshot.version_memo_mismatch",
 	"aether.agent.snapshot.duplicate_resource_names",
+	// The one-HCM capture listener: a table the compiler refused, and an
+	// address two capture services claimed.
+	"aether.agent.capture.table_compile_failures",
+	"aether.agent.capture.duplicate_service_address",
 	// A registry row that does not say the protocol of each of its ports
 	// (port_protocols is required). Zero forever once every writer is of
 	// this chart.

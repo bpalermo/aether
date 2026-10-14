@@ -69,7 +69,7 @@ func levelCases() map[string]levelCase {
 					}
 					return out
 				}
-				assert.Equal(t, []string{"x-vhost", "x-route"}, keys(got.GetMutations().GetResponseMutations()), "every level applies, the virtual host's first")
+				assert.Equal(t, []string{"x-route", "x-vhost"}, keys(got.GetMutations().GetResponseMutations()), "every level applies, the route's first (header_mutation.cc reverses the levels): the virtual host's write lands last")
 				assert.Equal(t, []string{"x-vhost-req"}, keys(got.GetMutations().GetRequestMutations()))
 			},
 		},
@@ -203,5 +203,100 @@ func TestCombineLevels_SameBytesEveryTime(t *testing.T) {
 		again, err := CombineLevels(ExtAuthzFilterName, vhost, route)
 		require.NoError(t, err)
 		require.Equal(t, first.GetValue(), again.GetValue(), "the same two levels combined to different bytes")
+	}
+}
+
+// TestCombineExtAuthz_AsTheProxyMergesTheLevels holds combineExtAuthz to
+// FilterConfigPerRoute(less_specific, more_specific) at the pinned Envoy
+// (source/extensions/filters/http/ext_authz/ext_authz.cc): a service override
+// is the route's or none, never inherited from the virtual host; the context
+// extensions are the union even when the route sets no check settings.
+func TestCombineExtAuthz_AsTheProxyMergesTheLevels(t *testing.T) {
+	override := &corev3.GrpcService{TargetSpecifier: &corev3.GrpcService_EnvoyGrpc_{EnvoyGrpc: &corev3.GrpcService_EnvoyGrpc{ClusterName: "service-override"}}}
+	vhost, err := anypb.New(&ext_authzv3.ExtAuthzPerRoute{Override: &ext_authzv3.ExtAuthzPerRoute_CheckSettings{CheckSettings: &ext_authzv3.CheckSettings{
+		ContextExtensions: map[string]string{"tier": "service"},
+		ServiceOverride:   &ext_authzv3.CheckSettings_GrpcService{GrpcService: override},
+	}}})
+	require.NoError(t, err)
+	combine := func(route *ext_authzv3.ExtAuthzPerRoute) *ext_authzv3.ExtAuthzPerRoute {
+		t.Helper()
+		r, err := anypb.New(route)
+		require.NoError(t, err)
+		out, err := CombineLevels(ExtAuthzFilterName, vhost, r)
+		require.NoError(t, err)
+		var got ext_authzv3.ExtAuthzPerRoute
+		require.NoError(t, out.UnmarshalTo(&got))
+		return &got
+	}
+
+	got := combine(&ext_authzv3.ExtAuthzPerRoute{Override: &ext_authzv3.ExtAuthzPerRoute_CheckSettings{CheckSettings: &ext_authzv3.CheckSettings{
+		ContextExtensions: map[string]string{"action": "write"},
+	}}})
+	assert.Nil(t, got.GetCheckSettings().GetGrpcService(), "the virtual host's service override is not inherited")
+	assert.Equal(t, map[string]string{"tier": "service", "action": "write"}, got.GetCheckSettings().GetContextExtensions())
+
+	// A route that only enables the filter: the virtual host's context
+	// extensions still apply (the merged config takes them from both levels).
+	got = combine(&ext_authzv3.ExtAuthzPerRoute{Override: &ext_authzv3.ExtAuthzPerRoute_Disabled{Disabled: false}})
+	assert.False(t, got.GetDisabled())
+	assert.Equal(t, map[string]string{"tier": "service"}, got.GetCheckSettings().GetContextExtensions())
+	assert.Nil(t, got.GetCheckSettings().GetGrpcService())
+
+	// A route that disables the check is the whole answer.
+	got = combine(&ext_authzv3.ExtAuthzPerRoute{Override: &ext_authzv3.ExtAuthzPerRoute_Disabled{Disabled: true}})
+	assert.True(t, got.GetDisabled())
+
+	// The route's own override is kept.
+	mine := &corev3.GrpcService{TargetSpecifier: &corev3.GrpcService_EnvoyGrpc_{EnvoyGrpc: &corev3.GrpcService_EnvoyGrpc{ClusterName: "route-override"}}}
+	got = combine(&ext_authzv3.ExtAuthzPerRoute{Override: &ext_authzv3.ExtAuthzPerRoute_CheckSettings{CheckSettings: &ext_authzv3.CheckSettings{
+		ServiceOverride: &ext_authzv3.CheckSettings_GrpcService{GrpcService: mine},
+	}}})
+	assert.Equal(t, "route-override", got.GetCheckSettings().GetGrpcService().GetEnvoyGrpc().GetClusterName())
+}
+
+// TestCombineHeaderMutation_FailsClosedWhenOneConfigCannotKeepTheOrder: the
+// proxy applies each level whole, route first, request mutations before query
+// mutations within a level (header_mutation.cc). One merged config runs every
+// request mutation first and parses the query once, so a route that mutates
+// the query cannot be combined with a virtual host that mutates a request
+// header or the query. Every other pairing combines.
+func TestCombineHeaderMutation_FailsClosedWhenOneConfigCannotKeepTheOrder(t *testing.T) {
+	query := &corev3.KeyValueMutation{Append: &corev3.KeyValueAppend{Record: &corev3.KeyValuePair{Key: "q"}}}
+	pack := func(req, q, resp bool) *anypb.Any {
+		t.Helper()
+		m := &header_mutationv3.Mutations{}
+		if req {
+			m.RequestMutations = append(m.RequestMutations, stamp("x-req"))
+		}
+		if q {
+			m.QueryParameterMutations = append(m.QueryParameterMutations, query)
+		}
+		if resp {
+			m.ResponseMutations = append(m.ResponseMutations, stamp("x-resp"))
+		}
+		a, err := anypb.New(&header_mutationv3.HeaderMutationPerRoute{Mutations: m})
+		require.NoError(t, err)
+		return a
+	}
+	for _, c := range []struct {
+		name                           string
+		vhReq, vhQ, vhResp, rtReq, rtQ bool
+		inexact                        bool
+	}{
+		{name: "route query, service request", vhReq: true, rtQ: true, inexact: true},
+		{name: "route query, service query", vhQ: true, rtQ: true, inexact: true},
+		{name: "route query and request, service request", vhReq: true, rtReq: true, rtQ: true, inexact: true},
+		{name: "route query, service response only", vhResp: true, rtQ: true},
+		{name: "route request, service query", vhQ: true, rtReq: true},
+		{name: "route request, service request", vhReq: true, rtReq: true},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			_, err := CombineLevels(HeaderMutationFilterName, pack(c.vhReq, c.vhQ, c.vhResp), pack(c.rtReq, c.rtQ, false))
+			if c.inexact {
+				require.ErrorIs(t, err, ErrHeaderMutationLevelsInexact)
+				return
+			}
+			require.NoError(t, err)
+		})
 	}
 }
