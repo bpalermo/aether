@@ -45,7 +45,7 @@ func TestCallerNamespaceIsStoredOnTheHTTPChainsOfAPod(t *testing.T) {
 	assert.Equal(t, pod.GetNamespace(), ns)
 
 	svc := CaptureTCPService{ClusterName: "tcp:svc-a." + testTrustDomain, ClusterIP: "10.96.1.10", LegacyTCPPort: 9000}
-	l, err := GenerateCaptureListener(pod, id, 18001, testTrustDomain, false, []CaptureTCPService{svc}, []uint32{80, 8080}, true, nil)
+	l, err := GenerateCaptureListener(pod, id, 18001, testTrustDomain, false, []CaptureTCPService{svc}, true, nil)
 	require.NoError(t, err)
 	httpChains, tcpChains := 0, 0
 	for _, fc := range l.GetFilterChains() {
@@ -59,7 +59,7 @@ func TestCallerNamespaceIsStoredOnTheHTTPChainsOfAPod(t *testing.T) {
 		tcpChains++
 		assert.Falsef(t, ok, "raw-TCP chain %s stores the caller's namespace, which nothing on it reads", fc.GetName())
 	}
-	assert.GreaterOrEqual(t, httpChains, 3, "cap_http_80, cap_http_8080, cap_http_other")
+	assert.Equal(t, 2, httpChains, "cap_http and cap_http_18081")
 	assert.Positive(t, tcpChains)
 
 	// The value is the namespace itself, set by the agent: not a header, not

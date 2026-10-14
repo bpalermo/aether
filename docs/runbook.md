@@ -4842,22 +4842,46 @@ capture chain; behind a 3.0 registrar it finds none and treats every service
 as HTTP. That is one of the reasons this upgrade is not hitless across
 versions (see "During the roll").
 
-##### BREAKING for dashboards: the capture route table and chain are renamed, and the configuration grows
+##### BREAKING for dashboards: the capture chain is renamed, and the proxy port gets a chain and a table of its own
 
-The capture listener of every pod has one HTTP filter chain per HTTP port
-number in the mesh (`cap_http_<port>`), plus `cap_http_other`, where it had one
-(`capture_<pod>`); and the node has one route table of the same name per chain,
-where it had `cap_http`. The count follows the number of distinct HTTP port
-NUMBERS (always including 80 and 18081), not the number of services. For 200
-services on three HTTP port numbers, 20 raw-TCP ports and 50 pods on a node:
-26 chains per pod listener (the passthrough default included) where there were
-22, 5 HTTP connection managers per pod where there was 1, 6 route tables per
-node where there were 2. A service whose only ports are raw TCP costs two
-chains per pod listener (its declared port and `:18082`), where it had three.
+The capture listener of every pod has two HTTP filter chains, `cap_http` and
+`cap_http_18081` (the mesh's HTTP proxy port), where it had one
+(`capture_<pod>`); the node has a route table of each name, where it had
+`cap_http` alone. Which chain a connection takes is decided by the listener's
+`filter_chain_matcher`, Envoy's generic matching tree, and no chain carries a
+`filter_chain_match` any more. `cap_http` records the port the client dialled
+(filter state `aether.dialled_port`) and its one route table branches on it:
+a request is answered by the rules of the port it was dialled on, whatever
+port number the mesh declares elsewhere.
 
-A dashboard, an alert or a query that names the route table `cap_http` or the
-filter chain `capture_<pod>` (the access log's `filter_chain_name`) needs the
-new names. The HTTP stat prefix (`capture_http`) is unchanged.
+A port number entering or leaving the mesh changes `cap_http`'s table and
+nothing else: no listener is rebuilt for it. For 200 services on three HTTP
+port numbers, 20 raw-TCP ports and 50 pods on a node: 23 chains per pod
+listener (the passthrough default included) where there were 22, 2 HTTP
+connection managers per pod where there was 1, 3 route tables per node where
+there were 2. A service whose only ports are raw TCP costs two chains per pod
+listener (its declared port and `:18082`), where it had three. A TLSRoute
+costs one chain per rule (there is no copy of it per port).
+
+(The first builds of chart 3.0.0 had one HTTP chain and one route table per
+HTTP port number of the mesh, `cap_http_<port>`, plus `cap_http_other`. On
+the reference cluster that measured as 1.6× the capture listeners' LDS size,
+an RDS apply 8–10× slower, a slower successor start at a proxy hot restart
+and +34% proxy memory, and it was replaced by the shape above. Proposal 043,
+"Amendment: one HTTP chain, selected by a matching tree", has the design and
+the gates. Rolling from one of those builds to this one is node-local: the
+capture listener and its tables are a node's own, and what one proxy sends
+another is unchanged. On each node the listener is updated in place; the
+per-port chains it loses drain the connections they hold, and the answer to
+every request is the same before and after.)
+
+A dashboard, an alert or a query that names the filter chain `capture_<pod>`
+(the access log's `filter_chain_name`) needs the new names. The route table
+of captured HTTP is still `cap_http`, and the HTTP stat prefix
+(`capture_http`) is unchanged; the RDS stats of the proxy port's table are
+under `cap_http_18081`. A TLSRoute's chain no longer has per-port copies
+(`cap_tls_<cluster>_<rule>_p<port>`): its L4 access log and `tcp_proxy` stats
+are under `cap_tls_<cluster>_<rule>` on every port.
 
 ##### During the roll, and rolling back
 

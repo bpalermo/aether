@@ -38,12 +38,15 @@ import (
 	"aethermesh.dev/agent/test/envoybin"
 	cniv1 "aethermesh.dev/api/aether/cni/v1"
 	registryv1 "aethermesh.dev/api/aether/registry/v1"
+	xdsmatcherv3 "github.com/cncf/xds/go/xds/type/matcher/v3"
 	clusterv3 "github.com/envoyproxy/go-control-plane/envoy/config/cluster/v3"
 	mutation_rulesv3 "github.com/envoyproxy/go-control-plane/envoy/config/common/mutation_rules/v3"
 	corev3 "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
 	endpointv3 "github.com/envoyproxy/go-control-plane/envoy/config/endpoint/v3"
 	listenerv3 "github.com/envoyproxy/go-control-plane/envoy/config/listener/v3"
+	routev3 "github.com/envoyproxy/go-control-plane/envoy/config/route/v3"
 	header_mutationv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/http/header_mutation/v3"
+	set_filter_state_v3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/network/set_filter_state/v3"
 	discoverygrpc "github.com/envoyproxy/go-control-plane/envoy/service/discovery/v3"
 	"github.com/envoyproxy/go-control-plane/pkg/cache/types"
 	cachev3 "github.com/envoyproxy/go-control-plane/pkg/cache/v3"
@@ -151,6 +154,12 @@ func ppFreePort(t *testing.T) uint32 {
 // ppTranslate turns the agent's snapshot into what the harness proxy can run:
 // the capture listener on loopback (hcmChain re-keyed onto port), every route
 // table and extension config verbatim, and a plain cluster per agent cluster.
+//
+// The capture listener has one HTTP chain, cap_http, which records the port
+// the client dialled for its route table. hcmChain "cap_http_<P>" names the
+// per-port chain these tests were written against: it is cap_http with the
+// dialled port recorded as P whatever loopback port the listener is on, so a
+// request answers as one dialled to P. "cap_http" alone is P = 8080.
 func ppTranslate(t *testing.T, c *cache.SnapshotCache, port uint32, hcmChain, backend string, extra ...string) map[resourcev3.Type][]types.Resource {
 	t.Helper()
 	snap, err := c.GetSnapshot(ppNodeName)
@@ -212,14 +221,21 @@ func ppTranslate(t *testing.T, c *cache.SnapshotCache, port uint32, hcmChain, ba
 		l.ListenerFilters = lf
 		var chains []*listenerv3.FilterChain
 		var names []string
+		chain, dialled := ppDialledChain(hcmChain)
+		// One chain is kept, so the listener's matching tree goes with the
+		// others: the kept chain is matched on the loopback port alone.
+		l.FilterChainMatcher = nil
 		for _, fc := range l.GetFilterChains() {
 			names = append(names, fc.GetName())
 			switch {
-			case fc.GetName() == hcmChain:
+			case fc.GetName() == chain:
 				if fc.FilterChainMatch == nil {
 					fc.FilterChainMatch = &listenerv3.FilterChainMatch{}
 				}
 				fc.FilterChainMatch.DestinationPort = wrapperspb.UInt32(port)
+				if dialled != "" {
+					ppSetDialledPort(t, fc, dialled)
+				}
 				chains = append(chains, fc)
 			}
 		}
@@ -409,8 +425,93 @@ func ppStart(t *testing.T, hcmChain string) *ppRig {
 	return r
 }
 
+// ppEachRoute calls f on every route of rc: a virtual host's own, and those of
+// every RouteList its matcher ends in (cap_http keeps all of its routes
+// there, one branch per dialled port), which f may edit in place.
+func ppEachRoute(t *testing.T, rc *routev3.RouteConfiguration, f func(*routev3.Route)) {
+	t.Helper()
+	var walk func(m *xdsmatcherv3.Matcher)
+	onMatch := func(om *xdsmatcherv3.Matcher_OnMatch) {
+		if om.GetMatcher() != nil {
+			walk(om.GetMatcher())
+			return
+		}
+		a := om.GetAction()
+		if a == nil {
+			return
+		}
+		list := &routev3.RouteList{}
+		if a.GetTypedConfig().UnmarshalTo(list) != nil {
+			return
+		}
+		for _, r := range list.GetRoutes() {
+			f(r)
+		}
+		any, err := anypb.New(list)
+		require.NoError(t, err)
+		a.TypedConfig = any
+	}
+	walk = func(m *xdsmatcherv3.Matcher) {
+		if m == nil {
+			return
+		}
+		for _, fm := range m.GetMatcherList().GetMatchers() {
+			onMatch(fm.GetOnMatch())
+		}
+		for _, om := range m.GetMatcherTree().GetExactMatchMap().GetMap() {
+			onMatch(om)
+		}
+		if m.GetOnNoMatch() != nil {
+			onMatch(m.GetOnNoMatch())
+		}
+	}
+	for _, vh := range rc.GetVirtualHosts() {
+		for _, r := range vh.GetRoutes() {
+			f(r)
+		}
+		walk(vh.GetMatcher())
+	}
+}
+
+// ppDialledChain maps a chain name these tests use onto the listener's chain
+// and the dialled port to record on it (ppTranslate). The proxy port's chain
+// records none.
+func ppDialledChain(hcmChain string) (chain, dialled string) {
+	if rest, ok := strings.CutPrefix(hcmChain, "cap_http_"); ok && rest != "18081" {
+		return proxy.CaptureHTTPChainName, rest
+	}
+	if hcmChain == proxy.CaptureHTTPChainName {
+		return hcmChain, "8080"
+	}
+	return hcmChain, ""
+}
+
+// ppSetDialledPort makes the chain record port as the dialled port instead of
+// the connection's destination port (the harness listener is on a loopback
+// port of its own).
+func ppSetDialledPort(t *testing.T, fc *listenerv3.FilterChain, port string) {
+	t.Helper()
+	found := false
+	for _, f := range fc.GetFilters() {
+		cfg := &set_filter_state_v3.Config{}
+		if f.GetTypedConfig().UnmarshalTo(cfg) != nil {
+			continue
+		}
+		for _, v := range cfg.GetOnNewConnection() {
+			if v.GetObjectKey() == proxy.DialledPortFilterStateKey {
+				v.GetFormatString().GetTextFormatSource().Specifier = &corev3.DataSource_InlineString{InlineString: port}
+				found = true
+			}
+		}
+		a, err := anypb.New(cfg)
+		require.NoError(t, err)
+		f.ConfigType = &listenerv3.Filter_TypedConfig{TypedConfig: a}
+	}
+	require.True(t, found, "chain %s records no dialled port", fc.GetName())
+}
+
 // ppChain is the capture listener's HTTP chain that serves port 8080: the
-// per-port chain on the PR, the single HCM chain on main.
+// per-port chain of chart 3.0.0, cap_http since the one-HCM listener.
 func ppChain(t *testing.T) string {
 	t.Helper()
 	c := cache.NewSnapshotCache(ppNodeName, slog.New(slog.DiscardHandler))

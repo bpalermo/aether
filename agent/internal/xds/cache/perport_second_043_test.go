@@ -305,8 +305,8 @@ func spCaptureTables(c *SnapshotCache, ports ...uint32) map[string]*routev3.Rout
 	set = slices.Compact(set)
 	c.captureTables = captureTablesMemo{}
 	out := map[string]*routev3.RouteConfiguration{}
-	for _, r := range c.captureRouteTables(set) {
-		rc := r.(*routev3.RouteConfiguration)
+	perPort, other := c.capturePerPortTables(c.captureTableInputs(), set)
+	for _, rc := range append(slices.Collect(maps.Values(perPort)), other) {
 		out[rc.GetName()] = rc
 	}
 	c.captureTables = captureTablesMemo{}
@@ -650,10 +650,18 @@ func TestPerPort_SnapshotDoesNotDependOnRowOrder(t *testing.T) {
 		c.clusterMu.RLock()
 		fmt.Fprintf(&b, "ports: %s\n", spPortsString(c.servicePorts["demo/x"]))
 		c.clusterMu.RUnlock()
+		published := map[string]*routev3.RouteConfiguration{}
 		for _, name := range slices.Sorted(maps.Keys(snap.GetResources(resourcev3.RouteType))) {
 			rc := snap.GetResources(resourcev3.RouteType)[name].(*routev3.RouteConfiguration)
 			raw, _ := proto.MarshalOptions{Deterministic: true}.Marshal(rc)
 			fmt.Fprintf(&b, "table %s: %x\n", name, fnv32(raw))
+			published[name] = rc
+		}
+		// What each per-port table answers (cap_http is compiled from them,
+		// and withPerPortView holds it to their answers).
+		view := withPerPortView(t, c, published)
+		for _, name := range slices.Sorted(maps.Keys(view)) {
+			rc := view[name]
 			for _, vh := range rc.GetVirtualHosts() {
 				if strings.HasPrefix(vh.GetName(), "x.demo.") {
 					o := spOutcome{}
@@ -673,9 +681,11 @@ func TestPerPort_SnapshotDoesNotDependOnRowOrder(t *testing.T) {
 		l := a043CaptureListener(t, c)
 		var chains []string
 		for _, fc := range l.GetFilterChains() {
-			chains = append(chains, fc.GetName()+"="+fc.GetFilterChainMatch().String())
+			chains = append(chains, fc.GetName())
 		}
 		sort.Strings(chains)
+		matcher, _ := proto.MarshalOptions{Deterministic: true}.Marshal(l.GetFilterChainMatcher())
+		chains = append(chains, fmt.Sprintf("matcher=%x", fnv32(matcher)))
 		fmt.Fprintf(&b, "chains: %s\n", strings.Join(chains, "; "))
 		return b.String(), c
 	}
@@ -1099,7 +1109,7 @@ func TestPerPort_Walk(t *testing.T) {
 				}
 				for tname, table := range tables {
 					var names []string
-					d, isCapture := proxy.CaptureHTTPRoutePort(tname)
+					d, isCapture := capturePortOf(tname)
 					switch {
 					case tname == proxy.OutboundHTTPRouteName:
 						names = []string{mesh}
@@ -1252,10 +1262,10 @@ func TestPerPort_Walk(t *testing.T) {
 									fmt.Sprintf("%s: %s to %s:%d -> chain %s; ports %s\nafter:\n  %s", where, kind, s.key(), p, chainName, spPortsString(ports), strings.Join(trail, "\n  ")))
 							}
 						}
-						if kind == "raw" && strings.HasPrefix(chainName, "cap_http_") {
+						if kind == "raw" && strings.HasPrefix(chainName, proxy.CaptureHTTPChainName) {
 							note("C: bytes that are not HTTP select an HTTP chain", fmt.Sprintf("%s: raw to %s:%d -> %s", where, s.key(), p, chainName))
 						}
-						if _, mapped := portMaps[s.key()]; kind == "http" && !mapped && ports.hasHTTP(p) && chainName != proxy.CaptureHTTPRouteName(p) {
+						if _, mapped := portMaps[s.key()]; kind == "http" && !mapped && ports.hasHTTP(p) && chainName != proxy.CaptureHTTPChainName {
 							note("C: HTTP to a declared HTTP port does not select that port's HTTP chain",
 								fmt.Sprintf("%s: http to %s:%d -> chain %q; ports %s\nafter:\n  %s", where, s.key(), p, chainName, spPortsString(ports), strings.Join(trail, "\n  ")))
 						}

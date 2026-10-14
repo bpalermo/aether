@@ -117,7 +117,7 @@ func TestAppFacingListenersGetTheAppFacingIdleTimeout(t *testing.T) {
 	for name, withPassthrough := range map[string]bool{"capture scoped": false, "capture redirect-all": true} {
 		t.Run(name, func(t *testing.T) {
 			l, err := GenerateCaptureListener(pod, "spiffe://example.org/ns/default/sa/test", 18001, "mesh.local", false,
-				[]CaptureTCPService{{ClusterName: "redis.mesh.local", ClusterIP: "10.96.1.10", LegacyTCPPort: 9000}}, nil, withPassthrough, nil)
+				[]CaptureTCPService{{ClusterName: "redis.mesh.local", ClusterIP: "10.96.1.10", LegacyTCPPort: 9000}}, withPassthrough, nil)
 			require.NoError(t, err)
 			requireEveryHCMIdle(t, l, 1, appFacingIdleTimeout)
 		})

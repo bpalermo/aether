@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"maps"
 	"math/rand"
-	"net"
 	"slices"
 	"sort"
 	"strings"
@@ -16,6 +15,7 @@ import (
 
 	"aethermesh.dev/agent/internal/capture"
 	"aethermesh.dev/agent/internal/xds/proxy"
+	"aethermesh.dev/agent/test/xdseval"
 	cniv1 "aethermesh.dev/api/aether/cni/v1"
 	registryv1 "aethermesh.dev/api/aether/registry/v1"
 	listenerv3 "github.com/envoyproxy/go-control-plane/envoy/config/listener/v3"
@@ -29,12 +29,10 @@ import (
 )
 
 // ---------------------------------------------------------------------------
-// A model of Envoy's filter_chain_match selection (FilterChainManagerImpl::
-// findFilterChain), as far as the capture listener uses it: destination port,
-// then the MOST SPECIFIC destination prefix only, then the server name, then
-// the transport protocol, then the application protocols. No tier backtracks:
-// a port with its own subtree never falls back to the port-less chains, and a
-// connection that matched a prefix never falls back to a shorter one.
+// Chain selection, as the proxy does it: by the listener's
+// filter_chain_matcher (the one-HCM capture listener), through the model the
+// unit tests share (xdseval.SelectChain), which also models the legacy
+// filter_chain_match of a listener that has no matcher.
 // ---------------------------------------------------------------------------
 
 type shpConn struct {
@@ -46,97 +44,11 @@ type shpConn struct {
 }
 
 func shpSelectChain(l *listenerv3.Listener, c shpConn) string {
-	chains := l.GetFilterChains()
-	// tier 1: destination port
-	var tier []*listenerv3.FilterChain
-	for _, fc := range chains {
-		if fc.GetFilterChainMatch().GetDestinationPort().GetValue() == c.port {
-			tier = append(tier, fc)
-		}
+	name, err := xdseval.SelectChain(l, xdseval.Conn{IP: c.ip, Port: c.port, SNI: c.sni, Transport: c.transport, App: c.app})
+	if err != nil {
+		panic(err)
 	}
-	if len(tier) == 0 {
-		for _, fc := range chains {
-			if fc.GetFilterChainMatch().GetDestinationPort() == nil {
-				tier = append(tier, fc)
-			}
-		}
-	}
-	// tier 2: most specific prefix
-	best := -1
-	ip := net.ParseIP(c.ip)
-	for _, fc := range tier {
-		prs := fc.GetFilterChainMatch().GetPrefixRanges()
-		if len(prs) == 0 {
-			if best < 0 {
-				best = 0
-			}
-			continue
-		}
-		for _, pr := range prs {
-			_, n, err := net.ParseCIDR(fmt.Sprintf("%s/%d", pr.GetAddressPrefix(), pr.GetPrefixLen().GetValue()))
-			if err == nil && n.Contains(ip) && int(pr.GetPrefixLen().GetValue())+1 > best {
-				best = int(pr.GetPrefixLen().GetValue()) + 1
-			}
-		}
-	}
-	var t2 []*listenerv3.FilterChain
-	for _, fc := range tier {
-		prs := fc.GetFilterChainMatch().GetPrefixRanges()
-		if len(prs) == 0 && best == 0 {
-			t2 = append(t2, fc)
-		}
-		for _, pr := range prs {
-			_, n, err := net.ParseCIDR(fmt.Sprintf("%s/%d", pr.GetAddressPrefix(), pr.GetPrefixLen().GetValue()))
-			if err == nil && n.Contains(ip) && int(pr.GetPrefixLen().GetValue())+1 == best {
-				t2 = append(t2, fc)
-			}
-		}
-	}
-	// tier 3: server name (exact, else chains with none)
-	var t3 []*listenerv3.FilterChain
-	for _, fc := range t2 {
-		if c.sni != "" && slices.Contains(fc.GetFilterChainMatch().GetServerNames(), c.sni) {
-			t3 = append(t3, fc)
-		}
-	}
-	if len(t3) == 0 {
-		for _, fc := range t2 {
-			if len(fc.GetFilterChainMatch().GetServerNames()) == 0 {
-				t3 = append(t3, fc)
-			}
-		}
-	}
-	// tier 4: transport protocol
-	var t4 []*listenerv3.FilterChain
-	for _, fc := range t3 {
-		if fc.GetFilterChainMatch().GetTransportProtocol() == c.transport {
-			t4 = append(t4, fc)
-		}
-	}
-	if len(t4) == 0 {
-		for _, fc := range t3 {
-			if fc.GetFilterChainMatch().GetTransportProtocol() == "" {
-				t4 = append(t4, fc)
-			}
-		}
-	}
-	// tier 5: application protocols
-	for _, fc := range t4 {
-		for _, a := range c.app {
-			if slices.Contains(fc.GetFilterChainMatch().GetApplicationProtocols(), a) {
-				return fc.GetName()
-			}
-		}
-	}
-	for _, fc := range t4 {
-		if len(fc.GetFilterChainMatch().GetApplicationProtocols()) == 0 {
-			return fc.GetName()
-		}
-	}
-	if l.GetDefaultFilterChain() != nil {
-		return l.GetDefaultFilterChain().GetName()
-	}
-	return ""
+	return name
 }
 
 func shpHTTP(ip string, port uint32) shpConn {
@@ -147,25 +59,29 @@ func shpRaw(ip string, port uint32) shpConn {
 	return shpConn{ip: ip, port: port, transport: "raw_buffer"}
 }
 
-// shpDuplicateChainMatches returns the chains of l whose filter_chain_match is
-// identical to another chain's. Envoy rejects the whole listener for one.
+// shpDuplicateChainMatches returns what makes the proxy refuse a listener
+// that selects chains with a matcher, or silently close connections: a chain
+// name used twice, a chain without a name, and a matcher action naming a chain
+// the listener does not have.
 func shpDuplicateChainMatches(l *listenerv3.Listener) []string {
-	seen := map[string]string{}
 	var dups []string
-	for _, fc := range l.GetFilterChains() {
-		b, _ := proto.MarshalOptions{Deterministic: true}.Marshal(fc.GetFilterChainMatch())
-		if prev, ok := seen[string(b)]; ok {
-			dups = append(dups, prev+" == "+fc.GetName())
-		}
-		seen[string(b)] = fc.GetName()
-	}
-	// names must be unique too
 	names := map[string]bool{}
 	for _, fc := range l.GetFilterChains() {
+		if fc.GetName() == "" {
+			dups = append(dups, "a chain without a name")
+		}
 		if names[fc.GetName()] {
 			dups = append(dups, "name twice: "+fc.GetName())
 		}
 		names[fc.GetName()] = true
+	}
+	if l.GetFilterChainMatcher() == nil {
+		dups = append(dups, "no filter_chain_matcher")
+	}
+	for _, n := range xdseval.MatcherActionNames(l.GetFilterChainMatcher()) {
+		if !names[n] {
+			dups = append(dups, "an action names no chain: "+n)
+		}
 	}
 	return dups
 }
@@ -220,18 +136,19 @@ func TestPerPort_HostileShapes_NoDuplicateDomainOrChain(t *testing.T) {
 }
 
 // TestPerPort_TLSRouteTwinLeavesTheServicesHTTPPorts: a service that serves
-// HTTP and is ALSO the parent of a TLSRoute. The TLSRoute's SNI chains get a
-// twin on every port some chain names, because the address is decided before
-// the protocol; a twin on a port that carries the service's cleartext HTTP
-// would take that HTTP (it matches the address, fails the SNI and leaves
-// through the passthrough).
+// HTTP and is ALSO the parent of a TLSRoute. Its cleartext HTTP must reach the
+// HTTP chain on every port, and TLS carrying the route's name must reach the
+// route on every port but the ones that carry the service's HTTP: the ports
+// it declares as HTTP, and the proxy port (18081), where a pod sends
+// "Host: <name>:<port>" to "<name>:18081". On those TLS leaves through the
+// passthrough, as it did with chart 3.0.0's per-port chains (the owner's
+// ruling for the one-HCM listener).
 //
-// The ports that carry a service's HTTP are the ports it declares as HTTP,
-// and the proxy port (18081), where a pod sends "Host: <name>:<port>" to
-// "<name>:18081". Port 80 is one of them only for a service that declares it:
-// for any other it is not the service's port, a twin stands there, and
-// cleartext HTTP to it is no longer answered by the mesh at all (until chart
-// 3.0.0 it reached the port the pods declare).
+// With chart 3.0.0's per-port chains the route's twin on a port the service
+// does NOT declare (80 here) took the address there, and cleartext HTTP to it
+// left through the passthrough instead of reaching the mesh: the matching
+// tree backtracks, so it now reaches cap_http, whose table answers by the
+// Host and the dialled port.
 func TestPerPort_TLSRouteTwinLeavesTheServicesHTTPPorts(t *testing.T) {
 	services := a043Fixture()
 	c := a043Cache(t, services)
@@ -240,34 +157,59 @@ func TestPerPort_TLSRouteTwinLeavesTheServicesHTTPPorts(t *testing.T) {
 		vip       = "10.96.1.1" // httponly: 8080 HTTP
 		vipEighty = "10.96.1.3" // eighty: 80, 8080 and 9090 HTTP
 	)
-	// Control: without a TLSRoute every one of these reaches an HTTP chain
-	// (on port 80 of httponly, the chain whose table refuses it by name).
+	httpChain := func(p uint32) string {
+		if p == 18081 {
+			return "cap_http_18081"
+		}
+		return proxy.CaptureHTTPChainName
+	}
+	tlsTo := func(ip string, p uint32) shpConn {
+		sni := "tls.demo.httponly.example"
+		if ip == vipEighty {
+			sni = "tls.demo.eighty.example"
+		}
+		return shpConn{ip: ip, port: p, sni: sni, transport: "tls", app: []string{"h2"}}
+	}
+	// Control: without a TLSRoute every one of these reaches an HTTP chain.
 	for _, v := range []string{vip, vipEighty} {
 		for _, p := range []uint32{80, 8080, 18081} {
-			require.Equal(t, proxy.CaptureHTTPRouteName(p), shpSelectChain(l0, shpHTTP(v, p)), "%s:%d", v, p)
+			require.Equal(t, httpChain(p), shpSelectChain(l0, shpHTTP(v, p)), "%s:%d", v, p)
 		}
 	}
 
 	c.SetTLSServiceRoutes(shpTLSRoutes("demo/httponly"))
 	require.NoError(t, c.generateSnapshot(context.Background()))
 	l := a043CaptureListener(t, c)
-	// The declared port and the proxy port are protected.
-	assert.Equal(t, "cap_http_8080", shpSelectChain(l, shpHTTP(vip, 8080)))
-	assert.Equal(t, "cap_http_18081", shpSelectChain(l, shpHTTP(vip, 18081)), "cleartext HTTP to <vip>:18081 of a TLSRoute parent")
-	// Port 80 is not a port of httponly: the twin stands there, and cleartext
-	// HTTP to it reaches no HTTP chain.
-	assert.NotEqual(t, "cap_http_80", shpSelectChain(l, shpHTTP(vip, 80)), "port 80 is not a port of the service, and its TLSRoute's twin claims the address there")
-	// Another service's ports are untouched by this one's TLSRoute.
-	assert.Equal(t, "cap_http_80", shpSelectChain(l, shpHTTP(vipEighty, 80)))
+	require.Empty(t, shpDuplicateChainMatches(l))
+	// Cleartext HTTP, on every port: the HTTP chain.
+	for _, p := range []uint32{80, 8080, 9090, 18081} {
+		assert.Equal(t, httpChain(p), shpSelectChain(l, shpHTTP(vip, p)), "cleartext HTTP to httponly:%d", p)
+	}
+	// TLS with the route's name: the route, except on the declared HTTP port
+	// and the proxy port, where it is passed through.
+	var route string
+	for _, p := range []uint32{80, 9090, 5555} {
+		got := shpSelectChain(l, tlsTo(vip, p))
+		assert.True(t, strings.HasPrefix(got, "cap_tls_tcp:httponly."), "TLS to httponly:%d selected %q", p, got)
+		route = got
+	}
+	for _, p := range []uint32{8080, 18081} {
+		assert.Equal(t, "cap_passthrough", shpSelectChain(l, tlsTo(vip, p)), "TLS to httponly's own HTTP port %d", p)
+	}
+	// Another service's address is untouched by this one's TLSRoute.
+	assert.NotEqual(t, route, shpSelectChain(l, shpConn{ip: vipEighty, port: 80, sni: "tls.demo.httponly.example", transport: "tls"}))
+	assert.Equal(t, proxy.CaptureHTTPChainName, shpSelectChain(l, shpHTTP(vipEighty, 80)))
 
-	// A TLSRoute parent that DECLARES port 80: its HTTP there is protected
-	// like on any port it declares.
+	// A TLSRoute parent that DECLARES port 80: TLS there is passed through
+	// like on any port it declares, and its HTTP is the HTTP chain's.
 	c.SetTLSServiceRoutes(shpTLSRoutes("demo/eighty"))
 	require.NoError(t, c.generateSnapshot(context.Background()))
 	l = a043CaptureListener(t, c)
 	for _, p := range []uint32{80, 8080, 9090, 18081} {
-		assert.Equal(t, proxy.CaptureHTTPRouteName(p), shpSelectChain(l, shpHTTP(vipEighty, p)), "eighty:%d", p)
+		assert.Equal(t, httpChain(p), shpSelectChain(l, shpHTTP(vipEighty, p)), "eighty:%d", p)
+		assert.Equal(t, "cap_passthrough", shpSelectChain(l, tlsTo(vipEighty, p)), "TLS to eighty's own HTTP port %d", p)
 	}
+	assert.True(t, strings.HasPrefix(shpSelectChain(l, tlsTo(vipEighty, 5555)), "cap_tls_tcp:eighty."))
 }
 
 // TestPerPort_RawTCPServiceIsReachedOnItsDeclaredPortsOnly: a raw-TCP-only
@@ -288,7 +230,7 @@ func TestPerPort_RawTCPServiceIsReachedOnItsDeclaredPortsOnly(t *testing.T) {
 	// HTTP numbers, and a raw-TCP port number of another service.
 	for _, p := range []uint32{5555, 80, 8080, 9090, 7070, 18081, 443} {
 		got := shpSelectChain(l, shpRaw(vip, p))
-		assert.Falsef(t, strings.HasPrefix(got, "cap_tcp_") || strings.HasPrefix(got, "cap_http_"), "raw TCP to tcponly:%d selected chain %q; it must take the passthrough", p, got)
+		assert.Equalf(t, "cap_passthrough", got, "raw TCP to tcponly:%d selected chain %q; it must take the passthrough", p, got)
 	}
 	for _, fc := range l.GetFilterChains() {
 		assert.NotContains(t, fc.GetName(), "anyport")
@@ -316,7 +258,7 @@ func TestPerPort_ChainFilterOfAServiceWithNoEndpointHere(t *testing.T) {
 	c.SetServiceChainFilters(map[string]proxy.ExtensionFilter{"demo/multi": {Name: filter, Config: cfg}})
 	require.NoError(t, c.LoadClustersFromRegistry(ctx, "cluster-1", "node-1", a043Registry(nil)))
 	tables := map[string]*routev3.RouteConfiguration{}
-	for _, r := range c.captureRouteTables([]uint32{80, 8080, 9090}) {
+	for _, r := range perPortView(t, c, []uint32{80, 8080, 9090}) {
 		rc := r.(*routev3.RouteConfiguration)
 		tables[rc.GetName()] = rc
 	}
@@ -583,6 +525,14 @@ func TestPerPort_UndeclaredPortOfARawTCPOnlyService(t *testing.T) {
 		raw := shpSelectChain(l, shpRaw(vip, p))
 		http := shpSelectChain(l, shpHTTP(vip, p))
 		line := fmt.Sprintf("tcponly:%-5d raw TCP -> %-55s HTTP -> %s", p, raw, http)
+		if http == proxy.CaptureHTTPChainName {
+			// The table that answers is the per-port table of the dialled
+			// port, which cap_http was compiled from.
+			http = perPortName(p)
+			if _, ok := tables[http]; !ok {
+				http = proxy.CaptureHTTPOtherRouteName
+			}
+		}
 		if tb, ok := tables[http]; ok {
 			ans := a043Resolve(t, tb, fmt.Sprintf("tcponly.demo.%s:%d", a043Mesh, p))
 			line += fmt.Sprintf(" => vhost=%s status=%d %s cluster=%q", ans.vhost, ans.status, ans.refusal, ans.cluster)

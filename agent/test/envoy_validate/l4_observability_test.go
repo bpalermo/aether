@@ -29,7 +29,7 @@ var l4Bootstraps = []struct {
 	chains   int // tcp_proxy chains on a capture listener
 }{
 	{"capture_tcproute_bootstrap.json", CaptureTCPRouteBootstrapJSON, 3, 2},
-	{"capture_tlsroute_bootstrap.json", CaptureTLSRouteBootstrapJSON, 3, 5},
+	{"capture_tlsroute_bootstrap.json", CaptureTLSRouteBootstrapJSON, 3, 4},
 	{"capture_udp_bootstrap.json", CaptureUDPBootstrapJSON, 2, 0},
 	{"capture_bootstrap.json", CaptureBootstrapJSON, 0, 2},
 }
@@ -115,7 +115,7 @@ func TestL4AccessLogGateCatchesAnUnloggedChain(t *testing.T) {
 			}
 		}
 	}
-	require.GreaterOrEqual(t, stripped, 5, "fixture carries too few capture L4 chains")
+	require.GreaterOrEqual(t, stripped, 4, "fixture carries too few capture L4 chains")
 }
 
 // TestAetherClusterTagCapturesL4Keys runs the chart's OWN aether.cluster stats

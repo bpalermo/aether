@@ -91,26 +91,15 @@ func TestGenerateCaptureListener_HTTPPrimaryGetsNoPortlessChain(t *testing.T) {
 	}}
 
 	l, err := GenerateCaptureListener(pod, "spiffe://aether.internal/ns/default/sa/test",
-		15001, "aether.internal", false, svcs, nil, true, nil)
+		15001, "aether.internal", false, svcs, true, nil)
 	require.NoError(t, err)
 
-	var portless, perPort int
-	for _, fc := range l.GetFilterChains() {
-		m := fc.GetFilterChainMatch()
-		if len(m.GetPrefixRanges()) == 0 {
-			continue // the HCM catch-all
-		}
-		if m.GetDestinationPort() == nil {
-			portless++
-			continue
-		}
-		perPort++
+	// Raw bytes to the VIP reach the service on its raw-TCP port, and on no
+	// other: a chain that claimed the VIP on every port would swallow its HTTP.
+	assert.Equal(t, []uint32{9000}, rawReach(t, l, "10.96.1.30", 1234))
+	for _, p := range []uint32{80, 8080, 9090, 1234} {
+		assert.Equal(t, CaptureHTTPChainName, sel(t, l, httpConn("10.96.1.30", p)), "HTTP to the VIP on %d", p)
 	}
-
-	assert.Zero(t, portless,
-		"an HTTP-primary service must get NO portless /32 chain — it would swallow the VIP's HTTP traffic")
-	assert.Equal(t, 1, perPort,
-		"but its raw-TCP port must still get a destination_port-qualified chain")
 }
 
 // TestGenerateCaptureListener_TCPPrimaryKeepsPortlessChain: the other side of
@@ -129,19 +118,10 @@ func TestGenerateCaptureListener_TCPPrimaryKeepsPortlessChain(t *testing.T) {
 	}}
 
 	l, err := GenerateCaptureListener(pod, "spiffe://aether.internal/ns/default/sa/test",
-		15001, "aether.internal", false, svcs, nil, true, nil)
+		15001, "aether.internal", false, svcs, true, nil)
 	require.NoError(t, err)
 
-	var ports []uint32
-	for _, fc := range l.GetFilterChains() {
-		m := fc.GetFilterChainMatch()
-		if len(m.GetPrefixRanges()) == 0 {
-			continue
-		}
-		assert.NotNil(t, m.GetDestinationPort(), "chain %s claims the VIP on every port", fc.GetName())
-		ports = append(ports, m.GetDestinationPort().GetValue())
-	}
-	assert.ElementsMatch(t, []uint32{9000, 18082}, ports,
+	assert.Equal(t, []uint32{9000, 18082}, rawReach(t, l, "10.96.1.40", 1234, 31000),
 		"a TCP-primary service is reached on its own port and on the TCP mesh port, and on nothing else")
 }
 
@@ -165,17 +145,23 @@ func TestAnyPortShimIsCountedSeparately(t *testing.T) {
 	}}
 
 	l, err := GenerateCaptureListener(pod, "spiffe://aether.internal/ns/default/sa/test",
-		15001, "aether.internal", false, svcs, nil, true, nil)
+		15001, "aether.internal", false, svcs, true, nil)
 	require.NoError(t, err)
 
-	prefixes := map[string]uint32{} // stat prefix -> destination_port (0 = portless)
-	for _, fc := range l.GetFilterChains() {
+	prefixes := map[string]uint32{} // stat prefix -> the port whose raw bytes reach it
+	for _, p := range rawReach(t, l, "10.96.1.50", 1234) {
+		fc := chainByName(l.GetFilterChains(), sel(t, l, rawConn("10.96.1.50", p)))
 		for _, f := range fc.GetFilters() {
 			tc := &tcp_proxyv3.TcpProxy{}
 			if f.GetTypedConfig() == nil || f.GetTypedConfig().UnmarshalTo(tc) != nil {
 				continue
 			}
-			prefixes[tc.GetStatPrefix()] = fc.GetFilterChainMatch().GetDestinationPort().GetValue()
+			prefixes[tc.GetStatPrefix()] = p
+		}
+	}
+	for _, fc := range l.GetFilterChains() {
+		if tc := chainTCPProxy(fc); tc != nil {
+			assert.NotContains(t, tc.GetStatPrefix(), "anyport")
 		}
 	}
 

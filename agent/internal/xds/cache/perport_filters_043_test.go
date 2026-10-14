@@ -8,10 +8,8 @@ import (
 	"aethermesh.dev/agent/internal/xds/proxy"
 	registryv1 "aethermesh.dev/api/aether/registry/v1"
 	clusterv3 "github.com/envoyproxy/go-control-plane/envoy/config/cluster/v3"
-	listenerv3 "github.com/envoyproxy/go-control-plane/envoy/config/listener/v3"
 	routev3 "github.com/envoyproxy/go-control-plane/envoy/config/route/v3"
 	header_mutationv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/http/header_mutation/v3"
-	"github.com/envoyproxy/go-control-plane/pkg/cache/types"
 	resourcev3 "github.com/envoyproxy/go-control-plane/pkg/resource/v3"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -62,7 +60,7 @@ func TestPerPort_ServiceFiltersOnEveryVirtualHost(t *testing.T) {
 			require.NoError(t, c.LoadClustersFromRegistry(ctx, "cluster-1", "node-1", a043Registry(listed)))
 
 			tables := map[string]*routev3.RouteConfiguration{}
-			for _, r := range c.captureRouteTables(append(c.captureHTTPPorts(), 8080, 9090)) {
+			for _, r := range perPortView(t, c, append(c.captureHTTPPorts(), 8080, 9090)) {
 				rc := r.(*routev3.RouteConfiguration)
 				tables[rc.GetName()] = rc
 			}
@@ -145,19 +143,6 @@ func TestPerPort_ServiceFiltersOnEveryVirtualHost(t *testing.T) {
 			}
 		})
 	}
-}
-
-// TestPerPort_TablesForEveryPortAPublishedChainNames: the tables a snapshot
-// carries are those of the node's current HTTP port set AND of every port a
-// cap_http_<P> chain of a listener in that snapshot names. A listener built a
-// moment ago against a set that has since shrunk still finds its table.
-func TestPerPort_TablesForEveryPortAPublishedChainNames(t *testing.T) {
-	stale := &listenerv3.Listener{Name: "capture_demo_old", FilterChains: []*listenerv3.FilterChain{
-		{Name: "cap_http_1234"}, {Name: "cap_http_other"}, {Name: "cap_tcp_tcp:x_5678"},
-	}}
-	other := &listenerv3.Listener{Name: "inbound_demo_old", FilterChains: []*listenerv3.FilterChain{{Name: "cap_http_4321"}}}
-	got := captureTablePorts([]types.Resource{stale, other}, []uint32{80, 18081})
-	assert.Equal(t, []uint32{80, 1234, 18081}, got, "the chain's port is added; a raw-TCP chain and another listener's chains are not")
 }
 
 // TestPerPort_ParentPortResolvesThroughThePortMap: a rule whose parentRef

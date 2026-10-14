@@ -1,0 +1,47 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+# A model of how the pinned proxy selects a listener's filter chain and answers
+# a request from a route table, for the agent's tests. Test-only: nothing in a
+# shipped binary may link it.
+go_library(
+    name = "xdseval",
+    testonly = True,
+    srcs = [
+        "routes.go",
+        "xdseval.go",
+    ],
+    importpath = "aethermesh.dev/agent/test/xdseval",
+    visibility = ["//agent:__subpackages__"],
+    deps = [
+        "//common/extensionfilter",
+        "@com_github_cncf_xds_go//xds/core/v3:core",
+        "@com_github_cncf_xds_go//xds/type/matcher/v3:matcher",
+        "@com_github_envoyproxy_go_control_plane_envoy//config/listener/v3:listener",
+        "@com_github_envoyproxy_go_control_plane_envoy//config/route/v3:route",
+        "@com_github_envoyproxy_go_control_plane_envoy//extensions/matching/common_inputs/network/v3:network",
+        "@com_github_envoyproxy_go_control_plane_envoy//type/matcher/v3:matcher",
+        "@org_golang_google_protobuf//proto",
+        "@org_golang_google_protobuf//types/known/anypb",
+        "@org_golang_google_protobuf//types/known/wrapperspb",
+    ],
+)
+
+go_test(
+    name = "xdseval_test",
+    srcs = ["xdseval_test.go"],
+    embed = [":xdseval"],
+    deps = [
+        "@com_github_cncf_xds_go//xds/core/v3:core",
+        "@com_github_cncf_xds_go//xds/type/matcher/v3:matcher",
+        "@com_github_envoyproxy_go_control_plane_envoy//config/core/v3:core",
+        "@com_github_envoyproxy_go_control_plane_envoy//config/listener/v3:listener",
+        "@com_github_envoyproxy_go_control_plane_envoy//config/route/v3:route",
+        "@com_github_envoyproxy_go_control_plane_envoy//extensions/matching/common_inputs/network/v3:network",
+        "@com_github_envoyproxy_go_control_plane_envoy//type/matcher/v3:matcher",
+        "@com_github_stretchr_testify//assert",
+        "@com_github_stretchr_testify//require",
+        "@org_golang_google_protobuf//proto",
+        "@org_golang_google_protobuf//types/known/anypb",
+        "@org_golang_google_protobuf//types/known/wrapperspb",
+    ],
+)

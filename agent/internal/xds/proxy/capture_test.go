@@ -1,6 +1,8 @@
 package proxy
 
 import (
+	"fmt"
+	"strings"
 	"testing"
 
 	clusterv3 "github.com/envoyproxy/go-control-plane/envoy/config/cluster/v3"
@@ -9,7 +11,6 @@ import (
 	cniv1 "aethermesh.dev/api/aether/cni/v1"
 	meshconst "aethermesh.dev/common/constants/mesh"
 	corev3 "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
-	listenerv3 "github.com/envoyproxy/go-control-plane/envoy/config/listener/v3"
 	routev3 "github.com/envoyproxy/go-control-plane/envoy/config/route/v3"
 	http_connection_managerv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/network/http_connection_manager/v3"
 	tcp_proxyv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/network/tcp_proxy/v3"
@@ -20,7 +21,7 @@ import (
 
 func TestGenerateCaptureListener(t *testing.T) {
 	pod := &cniv1.CNIPod{Name: "p1", Namespace: "default", NetworkNamespace: "/var/run/netns/p1"}
-	l, err := GenerateCaptureListener(pod, "spiffe://aether.internal/ns/default/sa/test", 15001, "aether.internal", false, nil, nil, false, nil)
+	l, err := GenerateCaptureListener(pod, "spiffe://aether.internal/ns/default/sa/test", 15001, "aether.internal", false, nil, false, nil)
 	require.NoError(t, err)
 
 	assert.Equal(t, "capture_default_p1", l.GetName())
@@ -56,34 +57,29 @@ func TestGenerateCaptureListener(t *testing.T) {
 	assert.Equal(t, listenerFilterHTTPInspectorName, l.GetListenerFilters()[1].GetName())
 	assert.Equal(t, listenerFilterTLSInspectorName, l.GetListenerFilters()[2].GetName())
 
-	// no TCP services and no HTTP port number → the one HTTP chain every
-	// listener has, cap_http_other; no DefaultFilterChain (withPassthrough=false).
-	// +1 for cap_tcp_blackhole: scoped mode catches raw TCP to the TCP mesh
-	// port that no service chain claimed, before the HCM fabricates a 400 for
-	// it (proposal 037).
-	require.Len(t, l.GetFilterChains(), 2)
-	assert.Nil(t, l.GetDefaultFilterChain(), "no DefaultFilterChain when withPassthrough=false")
-	// Find the HCM chain by NAME rather than by index: the chain list now also
-	// carries cap_tcp_blackhole, and an index-based lookup silently asserts on
-	// whichever chain happens to be first.
-	var filters []*listenerv3.Filter
+	// No TCP service: the two HTTP chains every listener has, cap_http and
+	// the proxy port's cap_http_18081, and cap_tcp_blackhole: scoped mode
+	// catches raw TCP to the TCP mesh port that no service chain claimed,
+	// before the HCM fabricates a 400 for it (proposal 037). No
+	// DefaultFilterChain (withPassthrough=false).
+	requireMatcherNamesChains(t, l)
+	names := map[string]bool{}
 	for _, fc := range l.GetFilterChains() {
-		if fc.GetName() != "cap_tcp_blackhole" {
-			filters = fc.GetFilters()
-		}
+		names[fc.GetName()] = true
 	}
-	require.NotEmpty(t, filters, "the HCM catch-all chain must be present")
-	hcmFilter := filters[len(filters)-1]
-	var hcm http_connection_managerv3.HttpConnectionManager
-	require.NoError(t, hcmFilter.GetTypedConfig().UnmarshalTo(&hcm))
-	// Proposal 043: with no HTTP port number in the mesh the listener's only
-	// HTTP chain is cap_http_other, and its route table carries the chain's
-	// name (it was the single "cap_http" table before).
-	assert.Equal(t, CaptureHTTPOtherRouteName, hcm.GetRds().GetRouteConfigName())
+	assert.Equal(t, map[string]bool{CaptureHTTPChainName: true, "cap_http_18081": true, "cap_tcp_blackhole": true}, names)
+	assert.Nil(t, l.GetDefaultFilterChain(), "no DefaultFilterChain when withPassthrough=false")
+	// Each HTTP chain serves the route table of its own name.
+	for _, name := range []string{CaptureHTTPChainName, "cap_http_18081"} {
+		filters := chainByName(l.GetFilterChains(), name).GetFilters()
+		var hcm http_connection_managerv3.HttpConnectionManager
+		require.NoError(t, filters[len(filters)-1].GetTypedConfig().UnmarshalTo(&hcm))
+		assert.Equal(t, name, hcm.GetRds().GetRouteConfigName())
+	}
 }
 
 func TestGenerateCaptureListener_RequiresNetns(t *testing.T) {
-	_, err := GenerateCaptureListener(&cniv1.CNIPod{Name: "p1"}, "spiffe://aether.internal/ns/default/sa/test", 15001, "aether.internal", false, nil, nil, false, nil)
+	_, err := GenerateCaptureListener(&cniv1.CNIPod{Name: "p1"}, "spiffe://aether.internal/ns/default/sa/test", 15001, "aether.internal", false, nil, false, nil)
 	assert.Error(t, err)
 }
 
@@ -95,14 +91,15 @@ func TestGenerateCaptureListener_WithTCPServices(t *testing.T) {
 		{ClusterName: "tcp:svc-a.aether.internal", ClusterIP: "10.96.1.10", LegacyTCPPort: 9000},
 		{ClusterName: "tcp:svc-b.aether.internal", ClusterIP: "10.96.1.20", LegacyTCPPort: 9000},
 	}
-	l, err := GenerateCaptureListener(pod, "spiffe://aether.internal/ns/default/sa/test", 15001, "aether.internal", false, tcpSvcs, nil, false, nil)
+	l, err := GenerateCaptureListener(pod, "spiffe://aether.internal/ns/default/sa/test", 15001, "aether.internal", false, tcpSvcs, false, nil)
 	require.NoError(t, err)
 
 	// Each service whose legacy target is raw TCP yields TWO chains
 	// (proposals 037 and 043): the well-known :18082 spelling and its own
 	// port. There is no third: the any-port chain (cap_tcp_anyport_<cluster>)
-	// was removed in chart 3.0.0. Plus cap_http_other and the scoped-mode
-	// blackhole.
+	// was removed in chart 3.0.0. Plus the two HTTP chains and the
+	// scoped-mode blackhole.
+	requireMatcherNamesChains(t, l)
 	names := map[string]bool{}
 	for _, fc := range l.GetFilterChains() {
 		names[fc.GetName()] = true
@@ -113,45 +110,23 @@ func TestGenerateCaptureListener_WithTCPServices(t *testing.T) {
 		assert.NotContains(t, name, "anyport", "the any-port chain is gone: a raw-TCP service is reached on its own port and on :18082 only")
 	}
 	assert.True(t, names["cap_tcp_blackhole"])
-	// The HTTP chain is named after its route table since proposal 043; it
-	// was capture_<pod> while there was one of it.
-	assert.True(t, names[CaptureHTTPOtherRouteName])
+	assert.True(t, names[CaptureHTTPChainName])
 	assert.False(t, names["capture_default_p1"])
-	require.Len(t, l.GetFilterChains(), 6, "2 per TCP service + cap_http_other + blackhole")
+	require.Len(t, l.GetFilterChains(), 7, "2 per TCP service + cap_http + cap_http_18081 + blackhole")
 
-	// Collect chains by match type.
-	var tcpChains []*listenerv3.FilterChain
-	var hcmChain *listenerv3.FilterChain
-	for _, fc := range l.GetFilterChains() {
-		if len(fc.GetFilterChainMatch().GetPrefixRanges()) > 0 {
-			tcpChains = append(tcpChains, fc)
-		} else if fc.GetName() == CaptureHTTPOtherRouteName {
-			hcmChain = fc
+	// Each service's address reaches its own chains on its two ports, and
+	// every one is a single tcp_proxy behind the source filter states.
+	for ip, svc := range map[string]string{"10.96.1.10": "svc-a", "10.96.1.20": "svc-b"} {
+		for _, p := range []uint32{9000, 18082} {
+			name := sel(t, l, rawConn(ip, p))
+			assert.Equal(t, fmt.Sprintf("cap_tcp_tcp:%s.aether.internal_%d", svc, p), name)
+			fc := chainByName(l.GetFilterChains(), name)
+			require.Len(t, fc.GetFilters(), 3, "netns + cert-mapper identity (#842; the #815 copy retired in #1165) + tcp_proxy")
+			assert.Equal(t, "envoy.filters.network.tcp_proxy", fc.GetFilters()[2].GetName())
 		}
+		// Not HTTP on another port: scoped capture hands the port to cap_http.
+		assert.Equal(t, CaptureHTTPChainName, sel(t, l, httpConn(ip, 8080)))
 	}
-	// Four: the :18082 spelling and the port, per service. Every one of them
-	// names a destination port.
-	require.Len(t, tcpChains, 4)
-	for _, fc := range tcpChains {
-		assert.Contains(t, []uint32{9000, 18082}, fc.GetFilterChainMatch().GetDestinationPort().GetValue(), "chain %s", fc.GetName())
-	}
-	require.NotNil(t, hcmChain)
-
-	// TCP chains: keyed by /32 prefix_range, single tcp_proxy filter.
-	ips := map[string]bool{}
-	for _, fc := range tcpChains {
-		require.Len(t, fc.GetFilterChainMatch().GetPrefixRanges(), 1)
-		ip := fc.GetFilterChainMatch().GetPrefixRanges()[0].GetAddressPrefix()
-		ips[ip] = true
-		assert.Equal(t, uint32(32), fc.GetFilterChainMatch().GetPrefixRanges()[0].GetPrefixLen().GetValue())
-		require.Len(t, fc.GetFilters(), 3, "netns + cert-mapper identity (#842; the #815 copy retired in #1165) + tcp_proxy")
-		assert.Equal(t, "envoy.filters.network.tcp_proxy", fc.GetFilters()[2].GetName())
-	}
-	assert.True(t, ips["10.96.1.10"], "svc-a ClusterIP chain present")
-	assert.True(t, ips["10.96.1.20"], "svc-b ClusterIP chain present")
-
-	// HCM catch-all: no prefix_ranges, not matched on application_protocols.
-	assert.Empty(t, hcmChain.GetFilterChainMatch().GetPrefixRanges())
 }
 
 // TestGenerateCaptureListener_InvalidTCPService verifies that TCP services with
@@ -164,18 +139,20 @@ func TestGenerateCaptureListener_InvalidTCPService(t *testing.T) {
 		{ClusterName: "tcp:svc-b.aether.internal", ClusterIP: "not-an-ip", LegacyTCPPort: 9000, TCPPorts: []uint32{9100}},  // bad IP
 		{ClusterName: "tcp:svc-c.aether.internal", ClusterIP: "10.96.1.30", LegacyTCPPort: 9000, TCPPorts: []uint32{9100}}, // valid
 	}
-	l, err := GenerateCaptureListener(pod, "spiffe://aether.internal/ns/default/sa/test", 15001, "aether.internal", false, tcpSvcs, nil, false, nil)
+	l, err := GenerateCaptureListener(pod, "spiffe://aether.internal/ns/default/sa/test", 15001, "aether.internal", false, tcpSvcs, false, nil)
 	require.NoError(t, err)
 
 	// Only the valid service produces chains: its per-port chain, its :18082
-	// spelling and its own port, plus cap_http_other and the scoped-mode
+	// spelling and its own port, plus the two HTTP chains and the scoped-mode
 	// blackhole.
-	require.Len(t, l.GetFilterChains(), 5)
+	requireMatcherNamesChains(t, l)
+	require.Len(t, l.GetFilterChains(), 6)
 	for _, fc := range l.GetFilterChains() {
-		for _, pr := range fc.GetFilterChainMatch().GetPrefixRanges() {
-			assert.Equal(t, "10.96.1.30", pr.GetAddressPrefix(), "chain %s", fc.GetName())
+		if strings.HasPrefix(fc.GetName(), "cap_tcp_tcp:") {
+			assert.Contains(t, fc.GetName(), "svc-c", "chain %s", fc.GetName())
 		}
 	}
+	assert.Equal(t, []uint32{9000, 9100, 18082}, rawReach(t, l, "10.96.1.30"))
 }
 
 // TestGenerateCaptureListener_WithPassthrough verifies that withPassthrough=true adds
@@ -183,23 +160,28 @@ func TestGenerateCaptureListener_InvalidTCPService(t *testing.T) {
 // an extra named chain (DefaultFilterChain is separate from filter_chains).
 func TestGenerateCaptureListener_WithPassthrough(t *testing.T) {
 	pod := &cniv1.CNIPod{Name: "p1", NetworkNamespace: "/var/run/netns/p1"}
-	l, err := GenerateCaptureListener(pod, "spiffe://aether.internal/ns/default/sa/test", 15001, "aether.internal", false, nil, nil, true, nil)
+	l, err := GenerateCaptureListener(pod, "spiffe://aether.internal/ns/default/sa/test", 15001, "aether.internal", false, nil, true, nil)
 	require.NoError(t, err)
 
-	// Named filter_chains: only the HCM chain (no TCP services).
-	require.Len(t, l.GetFilterChains(), 1, "one HCM chain, passthrough is in DefaultFilterChain")
+	// Named filter_chains: the two HTTP chains (no TCP services).
+	requireMatcherNamesChains(t, l)
+	require.Len(t, l.GetFilterChains(), 2, "the HTTP chains, passthrough is in DefaultFilterChain")
 
-	// With passthrough, the HCM chain is scoped to cleartext (transport_protocol=
-	// raw_buffer) so TLS egress (transport_protocol=tls) misses it and falls to the
-	// DefaultFilterChain passthrough instead of failing in the HTTP codec.
-	assert.Equal(t, "raw_buffer", l.GetFilterChains()[0].GetFilterChainMatch().GetTransportProtocol(),
-		"HCM chain must match raw_buffer so TLS egress falls through to the passthrough")
-	// ... AND detected-HTTP application protocols, so cleartext NON-HTTP (raw TCP to
-	// a non-mesh destination) also falls to the passthrough instead of being parsed
-	// as HTTP and answered with a fake 400 (#460 e2e finding).
-	assert.Equal(t, []string{"http/1.0", "http/1.1", "h2c"},
-		l.GetFilterChains()[0].GetFilterChainMatch().GetApplicationProtocols(),
-		"HCM chain must also require http_inspector-detected HTTP so raw TCP passes through")
+	// With passthrough, an HTTP chain takes only cleartext (transport_protocol
+	// raw_buffer) so TLS egress (transport_protocol tls) falls to the
+	// DefaultFilterChain passthrough instead of failing in the HTTP codec ...
+	assert.Equal(t, "cap_passthrough", sel(t, l, tlsConn("10.96.9.9", 443, "example.com")),
+		"TLS egress must fall through to the passthrough")
+	// ... AND only detected HTTP, so cleartext NON-HTTP (raw TCP to a non-mesh
+	// destination) also falls to the passthrough instead of being parsed as
+	// HTTP and answered with a fake 400 (#460 e2e finding).
+	assert.Equal(t, "cap_passthrough", sel(t, l, rawConn("10.96.9.9", 5432)),
+		"raw TCP must pass through, not reach an HTTP chain")
+	for _, app := range []string{"http/1.0", "http/1.1", "h2c"} {
+		c := httpConn("10.96.9.9", 8080)
+		c.App = []string{app}
+		assert.Equal(t, CaptureHTTPChainName, sel(t, l, c), app)
+	}
 
 	// DefaultFilterChain must be set.
 	require.NotNil(t, l.GetDefaultFilterChain(), "DefaultFilterChain must be set when withPassthrough=true")
@@ -223,13 +205,16 @@ func TestGenerateCaptureListener_WithPassthroughAndTCPServices(t *testing.T) {
 	tcpSvcs := []CaptureTCPService{
 		{ClusterName: "tcp:svc-a.aether.internal", ClusterIP: "10.96.1.10", LegacyTCPPort: 9000},
 	}
-	l, err := GenerateCaptureListener(pod, "spiffe://aether.internal/ns/default/sa/test", 15001, "aether.internal", false, tcpSvcs, nil, true, nil)
+	l, err := GenerateCaptureListener(pod, "spiffe://aether.internal/ns/default/sa/test", 15001, "aether.internal", false, tcpSvcs, true, nil)
 	require.NoError(t, err)
 
-	// Named chains: the service's :18082 spelling, its own port, and
-	// cap_http_other. No blackhole here — redirect-all uses passthrough ->
+	// Named chains: the service's :18082 spelling, its own port, and the two
+	// HTTP chains. No blackhole here — redirect-all uses passthrough ->
 	// kube-proxy REJECT, which is already attributable (proposal 037).
-	require.Len(t, l.GetFilterChains(), 3)
+	requireMatcherNamesChains(t, l)
+	require.Len(t, l.GetFilterChains(), 4)
+	assert.Equal(t, "cap_passthrough", sel(t, l, rawConn("10.96.1.10", 7777)), "another port of the address: the passthrough")
+	assert.Equal(t, "cap_tcp_tcp:svc-a.aether.internal_9000", sel(t, l, rawConn("10.96.1.10", 9000)))
 	// DefaultFilterChain carries the passthrough.
 	require.NotNil(t, l.GetDefaultFilterChain())
 	assert.Equal(t, "cap_passthrough", l.GetDefaultFilterChain().GetName())

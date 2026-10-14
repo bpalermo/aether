@@ -13,16 +13,19 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// captureVhost finds a vhost by name in the cap_http route configuration.
+// captureVhost finds a vhost by name in the snapshot's route tables, and in
+// the per-port tables its cap_http was compiled from (perPortView).
 func captureVhost(t *testing.T, c *SnapshotCache, node, name string) *routev3.VirtualHost {
 	t.Helper()
 	snap, err := c.GetSnapshot(node)
 	require.NoError(t, err)
-	for _, res := range snap.GetResources(resourcev3.RouteType) {
-		rc, ok := res.(*routev3.RouteConfiguration)
-		if !ok {
-			continue
+	tables := map[string]*routev3.RouteConfiguration{}
+	for n, res := range snap.GetResources(resourcev3.RouteType) {
+		if rc, ok := res.(*routev3.RouteConfiguration); ok {
+			tables[n] = rc
 		}
+	}
+	for _, rc := range withPerPortView(t, c, tables) {
 		for _, vh := range rc.GetVirtualHosts() {
 			if vh.GetName() == name {
 				return vh

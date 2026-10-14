@@ -13,9 +13,9 @@ import (
 	"aethermesh.dev/agent/internal/xds/proxy"
 	meshconst "aethermesh.dev/common/constants/mesh"
 	"aethermesh.dev/common/serviceref"
-	listenerv3 "github.com/envoyproxy/go-control-plane/envoy/config/listener/v3"
 	routev3 "github.com/envoyproxy/go-control-plane/envoy/config/route/v3"
 	"github.com/envoyproxy/go-control-plane/pkg/cache/types"
+	"google.golang.org/protobuf/proto"
 )
 
 // This file builds what proposal 043 calls "the addressing rule" on the
@@ -1182,69 +1182,6 @@ func captureHTTPPortsKey(ports []uint32) string {
 	return strings.Join(parts, ",")
 }
 
-// reconcileCaptureHTTPPorts rebuilds the per-pod capture listeners when the
-// HTTP port set of the mesh has CHANGED since they were last built.
-//
-// The set has three sources that change on their own schedules (the
-// mesh-Service reconciler, the registry refresh, the GAMMA reconciler), and a
-// listener is also built by whichever pod event comes next. Running here, on
-// every snapshot build, is the discipline reconcileCaptureTCPChains follows for
-// the same reason: one comparison over the DERIVED set, so that no source can
-// leave a listener without a chain for a port forever, and so that nothing is
-// rebuilt on an event that left the set alone. A listener rebuild drains
-// connections, and the set changes only when a port NUMBER enters or leaves
-// the mesh, which is rarer than a service changing (proposal 043, Risk 8).
-func (c *SnapshotCache) reconcileCaptureHTTPPorts() {
-	if !c.captureEnabled || c.edge {
-		return
-	}
-	key := captureHTTPPortsKey(c.captureHTTPPorts())
-
-	c.captureMu.Lock()
-	changed := c.captureHTTPPortsSeen != key
-	c.captureHTTPPortsSeen = key
-	c.captureMu.Unlock()
-
-	if !changed {
-		return
-	}
-	shared := c.extensionHTTPFilters()
-	c.listenerMu.Lock()
-	c.rebuildPodListenersLocked("HTTP port set change", shared)
-	c.listenerMu.Unlock()
-}
-
-// captureTablePorts returns the port numbers a capture route table must be
-// published for in a snapshot that carries listeners: every port the node's
-// HTTP port set holds now, and every port a cap_http_<P> chain of one of
-// those listeners names.
-//
-// The second half is what makes "a chain and its table appear and disappear
-// in one snapshot" true by construction instead of by timing. A chain naming
-// a table the snapshot does not carry leaves its listener warming until the
-// initial-fetch timeout (#817); reading the names off the very listeners
-// being published means a listener built a moment ago against a set that has
-// since changed still finds its tables. A table no chain names costs nothing:
-// no proxy subscribes to it.
-func captureTablePorts(listeners []types.Resource, current []uint32) []uint32 {
-	set := make(map[uint32]struct{}, len(current))
-	for _, p := range current {
-		set[p] = struct{}{}
-	}
-	for _, r := range listeners {
-		l, ok := r.(*listenerv3.Listener)
-		if !ok || l == nil || !strings.HasPrefix(l.GetName(), "capture_") {
-			continue
-		}
-		for _, fc := range l.GetFilterChains() {
-			if p, ok := proxy.CaptureHTTPRoutePort(fc.GetName()); ok {
-				set[p] = struct{}{}
-			}
-		}
-	}
-	return slices.Sorted(maps.Keys(set))
-}
-
 // captureTablesKey names the inputs a set of capture route tables was built
 // from, by generation: while it is unchanged (and the QUIC arms are, which
 // have no generation of their own) the tables built last are still exact.
@@ -1261,6 +1198,9 @@ type captureTablesKey struct {
 	portsGen uint64
 	// ports is the set of tables asked for.
 	ports string
+	// redirectAll selects the tables' fallthrough (passthrough or 404). It
+	// is set once before the manager starts; tests flip it.
+	redirectAll bool
 }
 
 // captureTablesMemo is the last set of capture route tables and what it was
@@ -1277,23 +1217,23 @@ type captureTablesMemo struct {
 	tables []types.Resource
 }
 
-// captureRouteTables returns the capture listener's route tables for one
-// snapshot: cap_http_<P> for every port in ports, and cap_http_other.
+// captureRouteTables returns the capture listener's route table for one
+// snapshot: cap_http, compiled from the per-port tables of every port in
+// ports and of every other port (capturePerPortTables).
 //
 // The tables are a function of the Services, the registry's ports, the routes
 // and the QUIC arms, none of which an endpoint coming or going changes. They
 // are therefore kept between snapshots and returned AS THE SAME OBJECTS while
 // those inputs are unchanged, so the snapshot's version memo does not marshal
-// and hash them again (#1105, #1115): a node has one such table per HTTP port
-// number, each holding a virtual host or two per mesh service, and a snapshot
-// is built on every pod event.
+// and hash them again (#1105, #1115): the table holds a branch per HTTP port
+// number for every mesh service, and a snapshot is built on every pod event.
 //
 // The generations are read BEFORE the inputs. A mutation that lands in
 // between leaves tables newer than their key; the next build then sees a
 // newer generation and rebuilds, which costs one build and never serves a
 // stale table.
 func (c *SnapshotCache) captureRouteTables(ports []uint32) []types.Resource {
-	key := captureTablesKey{ports: captureHTTPPortsKey(ports)}
+	key := captureTablesKey{ports: captureHTTPPortsKey(ports), redirectAll: c.captureRedirectAll}
 	c.depMu.RLock()
 	key.depGen = c.depGen
 	c.depMu.RUnlock()
@@ -1311,16 +1251,37 @@ func (c *SnapshotCache) captureRouteTables(ports []uint32) []types.Resource {
 		return m.tables
 	}
 
-	in := c.captureTableInputsFor(deps, arms)
-	out := make([]types.Resource, 0, len(ports)+1)
+	perPort, other := c.capturePerPortTables(c.captureTableInputsFor(deps, arms), ports)
+	merged, err := proxy.MergeCaptureRouteTables(proxy.CaptureHTTPChainName, perPort, other)
+	if err != nil {
+		// A construct the compiler does not model: a defect of the builders,
+		// which the tests forbid. Publish the table of a port no service
+		// declares, under the published name: every mesh name the node knows
+		// is refused, none is delivered to a port it was not dialled on, and
+		// the listener's table resolves.
+		c.log.Error("the capture route tables could not be compiled into one; mesh names on the captured path are refused until they can", "error", err)
+		merged = proto.Clone(other).(*routev3.RouteConfiguration)
+		merged.Name = proxy.CaptureHTTPChainName
+	}
+	out := []types.Resource{merged}
+	c.captureTables = captureTablesMemo{valid: true, key: key, deps: deps, arms: arms, tables: out}
+	return out
+}
+
+// capturePerPortTables builds the per-port capture tables (proposal 043, "The
+// addressing rule"): cap_http_<P> for every port in ports but the proxy port,
+// and cap_http_other. They are the rule, port by port; the table the proxy is
+// given is compiled from them (MergeCaptureRouteTables).
+func (c *SnapshotCache) capturePerPortTables(in captureTableInputs, ports []uint32) (map[uint32]*routev3.RouteConfiguration, *routev3.RouteConfiguration) {
+	perPort := make(map[uint32]*routev3.RouteConfiguration, len(ports))
 	for _, p := range ports {
 		if p == meshconst.ProxyOutboundPort {
-			// The table of the proxy port is not a per-port table: it is the
-			// loopback table under another name (proxyPortCaptureTable),
-			// built with the snapshot.
+			// The proxy port has its own chain, served the loopback table
+			// under another name (BuildProxyPortCaptureRouteConfiguration),
+			// built with the snapshot. cap_http never sees it dialled.
 			continue
 		}
-		out = append(out, proxy.BuildCaptureRouteConfiguration(
+		perPort[p] = proxy.BuildCaptureRouteConfiguration(
 			proxy.CaptureHTTPRouteName(p),
 			c.captureTableVhosts(in, p),
 			// Never a port-less authority: on a dial to port 80 it would
@@ -1329,16 +1290,15 @@ func (c *SnapshotCache) captureRouteTables(ports []uint32) []types.Resource {
 			// (coldVhost).
 			proxy.BuildCaptureCatchAllVirtualHost(c.meshDomain, p, false, c.captureRedirectAll),
 			c.shortNamesOf(in, p),
-		))
+		)
 	}
-	out = append(out, proxy.BuildCaptureRouteConfiguration(
+	other := proxy.BuildCaptureRouteConfiguration(
 		proxy.CaptureHTTPOtherRouteName,
 		c.captureTableVhosts(in, 0),
 		proxy.BuildCaptureCatchAllVirtualHost(c.meshDomain, 0, false, c.captureRedirectAll),
 		c.shortNamesOf(in, 0),
-	))
-	c.captureTables = captureTablesMemo{valid: true, key: key, deps: deps, arms: arms, tables: out}
-	return out
+	)
+	return perPort, other
 }
 
 // captureTableVhosts builds the virtual hosts of the table of dialled port

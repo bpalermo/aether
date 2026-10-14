@@ -74,9 +74,9 @@ func (c *SnapshotCache) generateSnapshot(ctx context.Context) (retErr error) {
 	// And for the UDP capture listener, whose bindable backend depends on the
 	// cluster cache the registry fills asynchronously (#873).
 	c.reconcileUDPCaptureListeners()
-	// And for the HTTP chains: one per HTTP port number of the mesh, a set
-	// that the Services, the registry and the routes each move (proposal 043).
-	c.reconcileCaptureHTTPPorts()
+	// (The HTTP chains are not reconciled: there are two whatever the mesh
+	// declares, cap_http and cap_http_18081. The HTTP port numbers of the mesh
+	// are branches of cap_http's one route table.)
 
 	// Who owns each per-pod listener, and the netns → identity index, for the
 	// identity-binding lines this build logs once the snapshot is set (#1621).
@@ -219,11 +219,10 @@ func (c *SnapshotCache) generateSnapshot(ctx context.Context) (retErr error) {
 		// carries its catch-all) so the listeners' RDS resolves even with no
 		// in-scope authorities yet.
 		if c.captureEnabled {
-			// One table per HTTP port number, and cap_http_other (proposal
-			// 043). The set is read off the capture listeners THIS snapshot
-			// publishes, so a chain and the table it names are always in the
-			// same snapshot (captureTablePorts).
-			routes = append(routes, c.captureRouteTables(captureTablePorts(listeners, c.captureHTTPPorts()))...)
+			// cap_http: one table, with a branch per HTTP port number of the
+			// mesh and one for every other port (proposal 043). Its name is
+			// fixed, so the chain that names it always finds it.
+			routes = append(routes, c.captureRouteTables(c.captureHTTPPorts())...)
 			// And the table of the proxy port's chain: the loopback table's
 			// virtual hosts (a captured dial to :18081 is the proxy port on
 			// the captured path, and the port in Host decides there too).

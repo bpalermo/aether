@@ -588,10 +588,6 @@ type SnapshotCache struct {
 	// to the entries it builds; without that, every mesh-Service re-projection
 	// erased the declared-port chains until the next registry load (#1094).
 	captureDerived map[string]servicePorts
-	// captureHTTPPortsSeen is the HTTP port set (captureHTTPPortsKey) the
-	// per-pod capture listeners were last reconciled against
-	// (reconcileCaptureHTTPPorts). Guarded by captureMu.
-	captureHTTPPortsSeen string
 	// captureProjected is closed by the first SetCaptureTCPServices call: the
 	// mesh-Service reconciler has delivered the service set that defines the
 	// capture listener's TCP chains at least once (CaptureProjected).

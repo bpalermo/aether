@@ -226,7 +226,7 @@ func TestPerPort_PinnedProxyAcceptsTheCacheSnapshot(t *testing.T) {
 		l.Name = "capture"
 		for _, fc := range l.GetFilterChains() {
 			chainNames = append(chainNames, fc.GetName())
-			if strings.HasPrefix(fc.GetName(), "cap_http_") {
+			if strings.HasPrefix(fc.GetName(), proxy.CaptureHTTPChainName) {
 				tables++
 			}
 		}
@@ -245,7 +245,7 @@ func TestPerPort_PinnedProxyAcceptsTheCacheSnapshot(t *testing.T) {
 		stats = ppaStats(t, e.admin, "(update_rejected|update_success|update_failure|listener_added|total_listeners_active|total_listeners_warming)")
 		ok := 0
 		for k, v := range stats {
-			if strings.Contains(k, ".rds.cap_http_") && strings.HasSuffix(k, "update_success") && v != "0" {
+			if strings.Contains(k, ".rds.cap_http") && strings.HasSuffix(k, "update_success") && v != "0" {
 				ok++
 			}
 		}
@@ -269,7 +269,7 @@ func TestPerPort_PinnedProxyAcceptsTheCacheSnapshot(t *testing.T) {
 		if strings.HasSuffix(k, "update_rejected") && stats[k] != "0" {
 			t.Errorf("the pinned proxy REJECTED an update: %s = %s", k, stats[k])
 		}
-		if strings.Contains(k, ".rds.cap_http_") && strings.HasSuffix(k, "update_success") && stats[k] != "0" {
+		if strings.Contains(k, ".rds.cap_http") && strings.HasSuffix(k, "update_success") && stats[k] != "0" {
 			accepted++
 		}
 	}

@@ -70,7 +70,7 @@ func l4CaptureFixture(t *testing.T, withPassthrough bool) *listenerv3.Listener {
 					{Service: "aether-test/tls-a", Cluster: tlsA, Weight: 1},
 				}}},
 			},
-		}, nil, withPassthrough, nil)
+		}, withPassthrough, nil)
 	require.NoError(t, err)
 	return l
 }

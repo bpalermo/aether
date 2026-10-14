@@ -175,6 +175,26 @@ func (s PerPortService) legacyVhost(doms []string) *routev3.VirtualHost {
 	}
 }
 
+// perPortTablesAndCompiled returns the per-port tables of the fixture, and the
+// one table the agent compiles from them and publishes
+// (proxy.MergeCaptureRouteTables).
+func perPortTablesAndCompiled() ([]*routev3.RouteConfiguration, error) {
+	tables := make([]*routev3.RouteConfiguration, 0, len(PerPortHTTPPorts())+2)
+	perPort := map[uint32]*routev3.RouteConfiguration{}
+	for _, port := range PerPortHTTPPorts() {
+		tables = append(tables, PerPortRouteTable(port))
+		if port != meshconst.ProxyOutboundPort {
+			perPort[port] = PerPortRouteTable(port)
+		}
+	}
+	tables = append(tables, PerPortRouteTable(0))
+	merged, err := proxy.MergeCaptureRouteTables(proxy.CaptureHTTPChainName, perPort, PerPortRouteTable(0))
+	if err != nil {
+		return nil, fmt.Errorf("MergeCaptureRouteTables: %w", err)
+	}
+	return append(tables, merged), nil
+}
+
 // CapturePerPortBootstrapJSON builds the per-port capture bootstrap: the real
 // per-pod capture listener for the fixture, and one loopback listener per
 // route table that serves that table inline, so the proxy validates the
@@ -219,7 +239,6 @@ func buildCapturePerPortBootstrap() (*bootstrapv3.Bootstrap, error) {
 		meshDomain,
 		false, // emitStatsPod
 		inputs,
-		PerPortHTTPPorts(),
 		true, // withPassthrough (redirect-all, the shipped default)
 		nil,  // extensionFilters
 	)
@@ -227,8 +246,11 @@ func buildCapturePerPortBootstrap() (*bootstrapv3.Bootstrap, error) {
 		return nil, fmt.Errorf("GenerateCaptureListener: %w", err)
 	}
 	listeners := []*listenerv3.Listener{capture}
-	for i, port := range append(PerPortHTTPPorts(), 0) {
-		table := PerPortRouteTable(port)
+	tables, err := perPortTablesAndCompiled()
+	if err != nil {
+		return nil, err
+	}
+	for i, table := range tables {
 		hcm := &http_connection_managerv3.HttpConnectionManager{
 			StatPrefix: table.GetName() + "_validate",
 			RouteSpecifier: &http_connection_managerv3.HttpConnectionManager_RouteConfig{
