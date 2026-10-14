@@ -42,13 +42,27 @@ import (
 // a later block, and first-match gives each request its dialled port's answer.
 // "<name>:8080:8080" has no suffix the regex accepts: a mismatch, as it was.
 //
-// An answer is the per-port virtual host's routes, with that virtual host's
-// typed_per_filter_config in force on each route (a service-wide HTTP filter
-// is enabled there, and the compiled virtual host also answers the refusals,
-// which must not run it), or, for a short name, its caller-namespace matcher
-// flattened the same way: each namespace's routes under a filter-state match
-// on the caller's namespace, then what a caller of no such namespace gets,
-// then what a connection with no namespace gets.
+// An answer is the per-port virtual host's routes, or, for a short name, its
+// caller-namespace matcher flattened: each namespace's routes under a
+// filter-state match on the caller's namespace, then what a caller of no such
+// namespace gets, then what a connection with no namespace gets.
+//
+// A per-port virtual host's typed_per_filter_config (a service-wide HTTP
+// filter is enabled there) stays a VIRTUAL-HOST config: the compiled virtual
+// host of a service carries it, so the proxy combines it with a route's own
+// config exactly as it does on the per-port table (and on the proxy port).
+// The routes of that compiled virtual host that come from an answer without
+// it (a refusal) disable each of its filters (route-level FilterConfig
+// disabled: the route's own answer to "is this filter disabled" wins over the
+// virtual host's, source/common/router/config_impl.cc,
+// RouteEntryImplBase::filterDisabled, and a disabled filter is not created
+// for the stream, source/common/http/filter_chain_helper.cc), so a refusal
+// runs none of them, as on the per-port table. Only when that cannot be said
+// (two answers of one compiled virtual host with different virtual-host
+// configs, or a route without the virtual-host config that sets one of its
+// filters itself) is the virtual-host config folded into each route instead
+// (extensionfilter.CombineLevels, which refuses a route it cannot fold
+// exactly); no table the agent builds does that today.
 //
 // Domains are grouped into virtual hosts by the name of the per-port virtual
 // host that first claims them: "<mesh name>|<what>" groups under the mesh
@@ -186,8 +200,12 @@ type mergeTable struct {
 }
 
 type mergeAnswer struct {
-	onMatch *xdsmatcherv3.Matcher_OnMatch
-	key     string
+	// onMatch is the answer's routes (or matcher) as the per-port table has
+	// them; armed has the virtual host's config folded into each route.
+	onMatch, armed *xdsmatcherv3.Matcher_OnMatch
+	// cfg is the per-port virtual host's typed_per_filter_config.
+	cfg map[string]*anypb.Any
+	key string
 }
 
 func indexMergeTable(rc *routev3.RouteConfiguration) (*mergeTable, error) {
@@ -271,17 +289,20 @@ func (t *mergeTable) answer(d string) (mergeAnswer, error) {
 	if a, ok := t.answers[vh]; ok {
 		return a, nil
 	}
-	var om *xdsmatcherv3.Matcher_OnMatch
+	var om, armed *xdsmatcherv3.Matcher_OnMatch
 	if vh.GetMatcher() != nil {
 		om = &xdsmatcherv3.Matcher_OnMatch{OnMatch: &xdsmatcherv3.Matcher_OnMatch_Matcher{Matcher: proto.Clone(vh.GetMatcher()).(*xdsmatcherv3.Matcher)}}
+		armed = om
 	} else {
-		routes := make([]*routev3.Route, 0, len(vh.GetRoutes()))
+		raw := make([]*routev3.Route, 0, len(vh.GetRoutes()))
+		folded := make([]*routev3.Route, 0, len(vh.GetRoutes()))
 		for _, r := range vh.GetRoutes() {
-			routes = append(routes, armRoute(vh, r))
+			raw = append(raw, proto.Clone(r).(*routev3.Route))
+			folded = append(folded, armRoute(vh, r))
 		}
-		om = routeListOnMatch(routes)
+		om, armed = routeListOnMatch(raw), routeListOnMatch(folded)
 	}
-	a, err := newMergeAnswer(om)
+	a, err := newMergeAnswer(om, armed, vh.GetTypedPerFilterConfig())
 	if err != nil {
 		return mergeAnswer{}, err
 	}
@@ -289,13 +310,108 @@ func (t *mergeTable) answer(d string) (mergeAnswer, error) {
 	return a, nil
 }
 
-func newMergeAnswer(om *xdsmatcherv3.Matcher_OnMatch) (mergeAnswer, error) {
-	b, err := proto.MarshalOptions{Deterministic: true}.Marshal(om)
+func newMergeAnswer(om, armed *xdsmatcherv3.Matcher_OnMatch, cfg map[string]*anypb.Any) (mergeAnswer, error) {
+	det := proto.MarshalOptions{Deterministic: true}
+	b, err := det.Marshal(om)
 	if err != nil {
 		return mergeAnswer{}, err
 	}
-	return mergeAnswer{onMatch: om, key: string(b)}, nil
+	c, err := det.Marshal(&routev3.VirtualHost{TypedPerFilterConfig: cfg})
+	if err != nil {
+		return mergeAnswer{}, err
+	}
+	return mergeAnswer{onMatch: om, armed: armed, cfg: cfg, key: string(b) + "\x00" + string(c)}, nil
 }
+
+// groupLevels says where a compiled virtual host keeps a service-wide
+// filter's config: on the virtual host (native: cfg, and the routes of an
+// answer without it disable its filters), or folded into every route.
+type groupLevels struct {
+	native bool
+	cfg    map[string]*anypb.Any
+}
+
+// levelsOf decides groupLevels for the answers of one compiled virtual host.
+func levelsOf(answers []mergeAnswer) groupLevels {
+	var cfg map[string]*anypb.Any
+	for _, a := range answers {
+		if len(a.cfg) == 0 {
+			continue
+		}
+		if cfg != nil && !sameFilterConfigs(cfg, a.cfg) {
+			return groupLevels{}
+		}
+		cfg = a.cfg
+	}
+	for _, a := range answers {
+		if len(a.cfg) == 0 && !leavesFiltersAlone(a.onMatch, cfg) {
+			return groupLevels{}
+		}
+	}
+	return groupLevels{native: true, cfg: cfg}
+}
+
+// leavesFiltersAlone: no route of om configures a filter of cfg itself (a
+// matcher answer is not looked into, and counts as configuring them).
+func leavesFiltersAlone(om *xdsmatcherv3.Matcher_OnMatch, cfg map[string]*anypb.Any) bool {
+	if len(cfg) == 0 {
+		return true
+	}
+	list := &routev3.RouteList{}
+	if om.GetAction() == nil || om.GetAction().GetTypedConfig().UnmarshalTo(list) != nil {
+		return false
+	}
+	for _, r := range list.GetRoutes() {
+		for name := range cfg {
+			if _, ok := r.GetTypedPerFilterConfig()[name]; ok {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+func sameFilterConfigs(a, b map[string]*anypb.Any) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for k, v := range a {
+		if w, ok := b[k]; !ok || !proto.Equal(v, w) {
+			return false
+		}
+	}
+	return true
+}
+
+// routes is answer a as routes of the compiled virtual host, under conds.
+func (g groupLevels) routes(a mergeAnswer, conds []routeCond) ([]*routev3.Route, error) {
+	if !g.native {
+		return flattenOnMatch(a.armed, conds)
+	}
+	out, err := flattenOnMatch(a.onMatch, conds)
+	if err != nil || len(a.cfg) > 0 || len(g.cfg) == 0 {
+		return out, err
+	}
+	for _, r := range out {
+		if r.TypedPerFilterConfig == nil {
+			r.TypedPerFilterConfig = map[string]*anypb.Any{}
+		}
+		for name := range g.cfg {
+			r.TypedPerFilterConfig[name] = disabledFilterConfig
+		}
+	}
+	return out, nil
+}
+
+// disabledFilterConfig is a route-level per-filter entry that disables the
+// filter on that route (envoy.config.route.v3.FilterConfig, disabled).
+var disabledFilterConfig = func() *anypb.Any {
+	a := &anypb.Any{}
+	if err := anypb.MarshalFrom(a, &routev3.FilterConfig{Disabled: true}, proto.MarshalOptions{Deterministic: true}); err != nil {
+		panic(err)
+	}
+	return a
+}()
 
 // mergeGroup builds one compiled virtual host from the domains doms: a plain
 // route list, one block of routes per dialled port whose answers differ from
@@ -310,27 +426,31 @@ func mergeGroup(name string, doms []string, ports []uint32, tables []*mergeTable
 	if err != nil {
 		return nil, err
 	}
-	var routes []*routev3.Route
-	for i, p := range ports {
-		answers, err := suffixAnswers(name, doms, tables[i])
-		if err != nil {
+	portAnswers := make([]map[string]mergeAnswer, len(ports))
+	all := slices.Collect(maps.Values(otherAnswers))
+	for i := range ports {
+		if portAnswers[i], err = suffixAnswers(name, doms, tables[i]); err != nil {
 			return nil, err
 		}
-		if sameAnswers(answers, otherAnswers) {
+		all = append(all, slices.Collect(maps.Values(portAnswers[i]))...)
+	}
+	levels := levelsOf(all)
+	var routes []*routev3.Route
+	for i, p := range ports {
+		if sameAnswers(portAnswers[i], otherAnswers) {
 			continue // the port gets what every other port gets
 		}
-		port := strconv.Itoa(int(p))
-		block, err := flatBlock(answers, suffixes, []routeCond{dialledCond(port)})
+		block, err := flatBlock(levels, portAnswers[i], suffixes, []routeCond{dialledCond(strconv.Itoa(int(p)))})
 		if err != nil {
 			return nil, fmt.Errorf("virtual host %s, dialled port %d: %w", name, p, err)
 		}
 		routes = append(routes, block...)
 	}
-	block, err := flatBlock(otherAnswers, suffixes, nil)
+	block, err := flatBlock(levels, otherAnswers, suffixes, nil)
 	if err != nil {
 		return nil, fmt.Errorf("virtual host %s, any other port: %w", name, err)
 	}
-	return &routev3.VirtualHost{Name: name, Domains: mergeDomains(doms), Routes: append(routes, block...)}, nil
+	return &routev3.VirtualHost{Name: name, Domains: mergeDomains(doms), Routes: append(routes, block...), TypedPerFilterConfig: levels.cfg}, nil
 }
 
 // A group's domains are its names, each with a SUFFIX: "" (no port), ":<P>"
@@ -404,7 +524,7 @@ func sameAnswers(a, b map[string]mergeAnswer) bool {
 // default, each route also under conds. The default is the answer of ":*"
 // when the group has it (it stands for every port spelling no exact domain
 // names, which no regex lists), else the answer most suffixes get.
-func flatBlock(answers map[string]mergeAnswer, suffixes []string, conds []routeCond) ([]*routev3.Route, error) {
+func flatBlock(levels groupLevels, answers map[string]mergeAnswer, suffixes []string, conds []routeCond) ([]*routev3.Route, error) {
 	bySuffix := map[string][]string{}
 	var keys []string
 	for _, s := range suffixes {
@@ -424,13 +544,13 @@ func flatBlock(answers map[string]mergeAnswer, suffixes []string, conds []routeC
 		if err != nil {
 			return nil, err
 		}
-		routes, err := flattenOnMatch(answers[bySuffix[k][0]].onMatch, append(slices.Clone(conds), auth))
+		routes, err := levels.routes(answers[bySuffix[k][0]], append(slices.Clone(conds), auth))
 		if err != nil {
 			return nil, err
 		}
 		out = append(out, routes...)
 	}
-	routes, err := flattenOnMatch(answers[bySuffix[def][0]].onMatch, conds)
+	routes, err := levels.routes(answers[bySuffix[def][0]], conds)
 	if err != nil {
 		return nil, err
 	}

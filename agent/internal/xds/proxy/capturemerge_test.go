@@ -5,10 +5,13 @@ import (
 	"testing"
 
 	"aethermesh.dev/agent/test/xdseval"
+	mutation_rulesv3 "github.com/envoyproxy/go-control-plane/envoy/config/common/mutation_rules/v3"
 	corev3 "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
 	routev3 "github.com/envoyproxy/go-control-plane/envoy/config/route/v3"
+	header_mutationv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/http/header_mutation/v3"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/anypb"
 	"google.golang.org/protobuf/types/known/wrapperspb"
 )
@@ -60,7 +63,16 @@ func TestMergeCaptureRouteTables_OneVirtualHostPerName(t *testing.T) {
 	for _, vh := range merged.GetVirtualHosts() {
 		assert.Nil(t, vh.GetMatcher(), "a plain route list, no matcher: %s", vh.GetName())
 	}
-	assert.Empty(t, merged.GetVirtualHosts()[0].GetTypedPerFilterConfig(), "the filter config moves onto the routes it was in force on")
+	// The service-wide filter stays a virtual-host config (the proxy combines
+	// it with a route's own as on the per-port table); the refusals of the
+	// same virtual host disable it.
+	vhCfg := merged.GetVirtualHosts()[0].GetTypedPerFilterConfig()
+	assert.Contains(t, vhCfg, "test.filter", "the service's filter config stays on its virtual host")
+	for _, r := range merged.GetVirtualHosts()[0].GetRoutes() {
+		_, isRefusal := r.GetAction().(*routev3.Route_DirectResponse)
+		_, routeSaysSo := r.GetTypedPerFilterConfig()["test.filter"]
+		assert.Equal(t, isRefusal, routeSaysSo, "only a refusal route sets the service's filter (to disable it): %v", r)
+	}
 
 	at := func(host string, dialled string) []*routev3.Route {
 		fs := map[string]string{}
@@ -99,8 +111,9 @@ func TestMergeCaptureRouteTables_OneVirtualHostPerName(t *testing.T) {
 		} else {
 			assert.Equal(t, tc.want, o.Cluster, "%s dialled %s", tc.host, tc.dialled)
 		}
-		_, has := routes[0].GetTypedPerFilterConfig()["test.filter"]
-		assert.Equal(t, tc.filter, has, "%s dialled %s: the service's filter", tc.host, tc.dialled)
+		vh := xdseval.PickVirtualHost(merged, tc.host)
+		_, has := xdseval.FilterLevels(vh.GetTypedPerFilterConfig(), routes[0])["test.filter"]
+		assert.Equal(t, tc.filter, has, "%s dialled %s: the service's filter runs", tc.host, tc.dialled)
 	}
 	// The catch-all names a cluster on demand only for the dialled port.
 	for _, d := range []string{"80", "8080", "9090", "7777"} {
@@ -112,6 +125,56 @@ func TestMergeCaptureRouteTables_OneVirtualHostPerName(t *testing.T) {
 			assert.Empty(t, other[0].GetRoute().GetClusterHeader(), "dialled %s, Host :8080: no cluster on demand", d)
 		}
 	}
+}
+
+// When one compiled virtual host's answers disagree on the virtual-host
+// config (here, port 9090's service-wide filter is another config), it cannot
+// stay on the virtual host: each route carries its answer's config folded
+// (CombineLevels), and a route that cannot be folded exactly is refused with
+// filter-levels rather than run in another order.
+func TestMergeCaptureRouteTables_FoldsWhenTheVirtualHostConfigsDiffer(t *testing.T) {
+	hm := func(t *testing.T, req, query bool) *anypb.Any {
+		t.Helper()
+		m := &header_mutationv3.Mutations{}
+		if req {
+			m.RequestMutations = []*mutation_rulesv3.HeaderMutation{{Action: &mutation_rulesv3.HeaderMutation_Remove{Remove: "x-a"}}}
+		}
+		if query {
+			m.QueryParameterMutations = []*corev3.KeyValueMutation{{Remove: "q"}}
+		}
+		a, err := anypb.New(&header_mutationv3.HeaderMutationPerRoute{Mutations: m})
+		require.NoError(t, err)
+		return a
+	}
+	const name = "envoy.filters.http.header_mutation"
+	perPort, other := mergeTestTables()
+	for p, rc := range perPort {
+		vh := rc.GetVirtualHosts()[0]
+		if len(vh.GetTypedPerFilterConfig()) == 0 {
+			continue
+		}
+		vh.TypedPerFilterConfig = map[string]*anypb.Any{name: hm(t, true, p == 9090)}
+		if p == 8080 {
+			// A rule that mutates the query, under a service that mutates a
+			// request header: no single config applies the two in order.
+			vh.Routes[0].TypedPerFilterConfig = map[string]*anypb.Any{name: hm(t, false, true)}
+		}
+	}
+	merged, err := MergeCaptureRouteTables(CaptureHTTPChainName, perPort, other)
+	require.NoError(t, err)
+	vh := merged.GetVirtualHosts()[0]
+	assert.Empty(t, vh.GetTypedPerFilterConfig(), "two virtual-host configs: folded into the routes")
+	first := func(dialled string) *routev3.Route {
+		req := xdseval.Request{Host: "a.ns.mesh", FilterState: map[string]string{DialledPortFilterStateKey: dialled}}
+		r, err := xdseval.FirstRoute(vh.GetRoutes(), req)
+		require.NoError(t, err)
+		require.NotNil(t, r)
+		return r
+	}
+	assert.Equal(t, RefusalFilterLevels, xdseval.OutcomeOf(first("8080")).Reason, "an inexact fold is refused")
+	served := first("9090")
+	assert.Equal(t, "a.ns.mesh:9090", xdseval.OutcomeOf(served).Cluster)
+	assert.True(t, proto.Equal(hm(t, true, true), served.GetTypedPerFilterConfig()[name]), "9090's service config, folded onto its route")
 }
 
 func TestMergeCaptureRouteTables_RefusesWhatItDoesNotModel(t *testing.T) {

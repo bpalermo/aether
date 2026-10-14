@@ -4872,6 +4872,19 @@ leaves the service's value (the route's mutations apply first), and an
 service override. Earlier builds put the route's write last on a short name,
 and sent its check to the service-wide override.
 
+On a full name the two levels are the proxy's own: the service-wide filter
+stays on the service's virtual host in `cap_http`, exactly as on the proxy
+port, and the 421 refusals of that virtual host disable it per route, so a
+refusal runs no service-wide filter (no rbac 403, no ext_authz check, no
+header mutation). On a short name, whose virtual host several services share,
+the two levels are folded onto each route; a pair that no single config
+applies in the proxy's order is answered **500 with `x-aether-error:
+filter-levels`** on the short name, while the full name is served: today that
+is a rule whose `header_mutation` mutates query parameters under a
+service-wide `header_mutation` that mutates request headers or query
+parameters. Address the service by its full name, or move the query mutation
+to the service-wide filter.
+
 Two counters watch the compile. `aether_agent_capture_table_compile_failures_total`
 counts the times the agent could not compile `cap_http` from the per-port
 tables; it then publishes a table that refuses every mesh name with 421

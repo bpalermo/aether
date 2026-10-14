@@ -340,6 +340,9 @@ func ppStart(t *testing.T, hcmChain string) *ppRig {
 	require.NoError(t, err)
 	srv := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 		hits.Add(1)
+		// Says whether the request still carried x-fl-probe when it got here
+		// (a filter can remove it: TestOneHCM_LiveHeaderToMetadataBothLevels).
+		w.Header().Set("X-Fl-Probe-Seen", req.Header.Get("X-Fl-Probe"))
 		_, _ = io.WriteString(w, req.Host)
 	})}
 	go func() { _ = srv.Serve(ln) }()

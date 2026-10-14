@@ -18,10 +18,12 @@ import (
 	registryv1 "aethermesh.dev/api/aether/registry/v1"
 	bootstrapv3 "github.com/envoyproxy/go-control-plane/envoy/config/bootstrap/v3"
 	clusterv3 "github.com/envoyproxy/go-control-plane/envoy/config/cluster/v3"
+	mutation_rulesv3 "github.com/envoyproxy/go-control-plane/envoy/config/common/mutation_rules/v3"
 	corev3 "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
 	endpointv3 "github.com/envoyproxy/go-control-plane/envoy/config/endpoint/v3"
 	listenerv3 "github.com/envoyproxy/go-control-plane/envoy/config/listener/v3"
 	routev3 "github.com/envoyproxy/go-control-plane/envoy/config/route/v3"
+	header_mutationv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/http/header_mutation/v3"
 	routerv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/http/router/v3"
 	http_connection_managerv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/network/http_connection_manager/v3"
 	resourcev3 "github.com/envoyproxy/go-control-plane/pkg/resource/v3"
@@ -114,8 +116,21 @@ func agentCaptureBootstrap(t *testing.T) []byte {
 		"demo/mixed":   {{SNIHostnames: []string{"mixed.example", "*.wild.example"}, Backends: []proxy.L4Backend{{Service: "demo/tcponly", Cluster: proxy.TCPClusterName("demo/tcponly", meshDomain), Weight: 1}}}},
 		"demo/tcponly": {{SNIHostnames: []string{"tcponly.example"}, Backends: []proxy.L4Backend{{Service: "demo/tcponly", Cluster: proxy.TCPClusterName("demo/tcponly", meshDomain), Weight: 1}}}},
 	})
+	// A service-wide filter (a virtual-host config of multi's compiled
+	// virtual host, disabled on its refusals) and a rule's own of the same
+	// kind (a route config the proxy combines with it).
+	hm := func(key string) *anypb.Any {
+		return mustAny(&header_mutationv3.HeaderMutationPerRoute{Mutations: &header_mutationv3.Mutations{
+			RequestMutations: []*mutation_rulesv3.HeaderMutation{{Action: &mutation_rulesv3.HeaderMutation_Remove{Remove: key}}},
+		}})
+	}
+	c.SetServiceChainFilters(map[string]proxy.ExtensionFilter{"demo/multi": {Name: ohvHeaderMutation, Config: hm("x-service")}})
 	c.SetServiceRoutes(map[string][]proxy.GammaRoute{"demo/multi": {
-		{Matches: []proxy.GammaMatch{{Prefix: "/v2"}}, Backends: []proxy.GammaBackend{{Service: "demo/eighty", Cluster: proxy.ServiceClusterName("demo/eighty", meshDomain), Weight: 1, Port: 80}}},
+		{
+			Matches:          []proxy.GammaMatch{{Prefix: "/v2"}},
+			Backends:         []proxy.GammaBackend{{Service: "demo/eighty", Cluster: proxy.ServiceClusterName("demo/eighty", meshDomain), Weight: 1, Port: 80}},
+			ExtensionFilters: []proxy.ExtensionFilter{{Name: ohvHeaderMutation, Config: hm("x-rule")}},
+		},
 	}})
 	require.NoError(t, c.LoadClustersFromRegistry(ctx, "cluster-1", "node-1", &ohvRegistry{services: services}))
 	snap, err := c.GetSnapshot("node-1")
@@ -154,16 +169,33 @@ func agentCaptureBootstrap(t *testing.T) []byte {
 	return data
 }
 
+const ohvHeaderMutation = "envoy.filters.http.header_mutation"
+
+// ohvDisables: a route-level FilterConfig that disables the filter.
+func ohvDisables(a *anypb.Any) bool {
+	fc := &routev3.FilterConfig{}
+	return a != nil && a.MessageIs(fc) && a.UnmarshalTo(fc) == nil && fc.GetDisabled()
+}
+
 // inlineTableListener serves rc inline on a loopback port, so that validate
 // mode parses it.
 func inlineTableListener(rc *routev3.RouteConfiguration, port uint32) *listenerv3.Listener {
 	hcm := &http_connection_managerv3.HttpConnectionManager{
 		StatPrefix:     rc.GetName() + "_validate",
 		RouteSpecifier: &http_connection_managerv3.HttpConnectionManager_RouteConfig{RouteConfig: rc},
-		HttpFilters: []*http_connection_managerv3.HttpFilter{{
-			Name:       "envoy.filters.http.router",
-			ConfigType: &http_connection_managerv3.HttpFilter_TypedConfig{TypedConfig: mustAny(&routerv3.Router{})},
-		}},
+		HttpFilters: []*http_connection_managerv3.HttpFilter{
+			// As in the capture chain: present, disabled by default, enabled
+			// per virtual host or route.
+			{
+				Name:       ohvHeaderMutation,
+				Disabled:   true,
+				ConfigType: &http_connection_managerv3.HttpFilter_TypedConfig{TypedConfig: mustAny(&header_mutationv3.HeaderMutation{})},
+			},
+			{
+				Name:       "envoy.filters.http.router",
+				ConfigType: &http_connection_managerv3.HttpFilter_TypedConfig{TypedConfig: mustAny(&routerv3.Router{})},
+			},
+		},
 	}
 	return &listenerv3.Listener{
 		Name: rc.GetName() + "_validate",
@@ -195,7 +227,7 @@ func TestAgentCaptureListenerAndTableValidate(t *testing.T) {
 	// the routes of a port match the dialled port's filter state.
 	bs := &bootstrapv3.Bootstrap{}
 	require.NoError(t, protojson.Unmarshal(data, bs))
-	fsRoutes := 0
+	fsRoutes, vhostFilters, routeDisables := 0, 0, 0
 	for _, l := range bs.GetStaticResources().GetListeners() {
 		if l.GetName() != proxy.CaptureHTTPChainName+"_validate" {
 			continue
@@ -204,7 +236,13 @@ func TestAgentCaptureListenerAndTableValidate(t *testing.T) {
 		require.NoError(t, l.GetFilterChains()[0].GetFilters()[0].GetTypedConfig().UnmarshalTo(hcm))
 		for _, vh := range hcm.GetRouteConfig().GetVirtualHosts() {
 			require.Nil(t, vh.GetMatcher(), "virtual host %s has a matcher", vh.GetName())
+			if _, ok := vh.GetTypedPerFilterConfig()[ohvHeaderMutation]; ok {
+				vhostFilters++
+			}
 			for _, r := range vh.GetRoutes() {
+				if ohvDisables(r.GetTypedPerFilterConfig()[ohvHeaderMutation]) {
+					routeDisables++
+				}
 				for _, fs := range r.GetMatch().GetFilterState() {
 					if fs.GetKey() == proxy.DialledPortFilterStateKey {
 						fsRoutes++
@@ -214,11 +252,29 @@ func TestAgentCaptureListenerAndTableValidate(t *testing.T) {
 		}
 	}
 	require.Positive(t, fsRoutes, "anti-vacuity: the validated table has routes on the dialled port")
+	require.Positive(t, vhostFilters, "anti-vacuity: the service-wide filter is a virtual-host config of the validated table")
+	require.Positive(t, routeDisables, "anti-vacuity: the refusals of that virtual host disable it per route")
+
+	// Seen red: a route-level FilterConfig that neither disables nor
+	// configures the filter. The gate must refuse it, or it would not be
+	// reading the routes' per-filter entries.
+	bad := mutateCompiledTable(t, data, func(vh *routev3.VirtualHost) bool {
+		for _, r := range vh.GetRoutes() {
+			if ohvDisables(r.GetTypedPerFilterConfig()[ohvHeaderMutation]) {
+				r.TypedPerFilterConfig[ohvHeaderMutation] = mustAny(&routev3.FilterConfig{})
+				return true
+			}
+		}
+		return false
+	})
+	out, err = runValidate(t, bad)
+	require.Error(t, err, "validate accepted a route-level FilterConfig with neither disabled nor config:\n%s", out)
+	t.Logf("refused as it must be:\n%s", out)
 
 	// Seen red: the same bootstrap with one dialled-port match whose key is
 	// empty. The gate must refuse it, or it would not be reading the
 	// table's route matches at all.
-	bad := mutateCompiledTable(t, data, func(vh *routev3.VirtualHost) bool {
+	bad = mutateCompiledTable(t, data, func(vh *routev3.VirtualHost) bool {
 		for _, r := range vh.GetRoutes() {
 			for _, fs := range r.GetMatch().GetFilterState() {
 				if fs.GetKey() == proxy.DialledPortFilterStateKey {

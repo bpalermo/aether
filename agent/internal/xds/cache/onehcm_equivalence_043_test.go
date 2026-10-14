@@ -11,6 +11,9 @@ import (
 	"aethermesh.dev/agent/internal/xds/proxy"
 	"aethermesh.dev/agent/test/xdseval"
 	registryv1 "aethermesh.dev/api/aether/registry/v1"
+	"aethermesh.dev/common/extensionfilter"
+	mutation_rulesv3 "github.com/envoyproxy/go-control-plane/envoy/config/common/mutation_rules/v3"
+	corev3 "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
 	routev3 "github.com/envoyproxy/go-control-plane/envoy/config/route/v3"
 	header_mutationv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/http/header_mutation/v3"
 	typematcherv3 "github.com/envoyproxy/go-control-plane/envoy/type/matcher/v3"
@@ -40,20 +43,31 @@ import (
 func oneHCMFixtures(t *testing.T) map[string]*SnapshotCache {
 	t.Helper()
 	ctx := context.Background()
-	cfg, err := anypb.New(&header_mutationv3.HeaderMutationPerRoute{})
-	require.NoError(t, err)
+	stamp := func(key string) *anypb.Any {
+		a, err := anypb.New(&header_mutationv3.HeaderMutationPerRoute{Mutations: &header_mutationv3.Mutations{
+			RequestMutations: []*mutation_rulesv3.HeaderMutation{{Action: &mutation_rulesv3.HeaderMutation_Remove{Remove: key}}},
+		}})
+		require.NoError(t, err)
+		return a
+	}
+	cfg := stamp("x-service")
 	const filter = "envoy.filters.http.header_mutation"
 	out := map[string]*SnapshotCache{}
 
 	full := a043Cache(t, a043Fixture())
 	full.SetServiceRoutes(map[string][]proxy.GammaRoute{
-		"demo/multi":  {{Matches: []proxy.GammaMatch{{Prefix: "/x"}}, HeaderMutation: rtpMark("x")}, {ParentPort: 9090, Matches: []proxy.GammaMatch{{Prefix: "/"}}, HeaderMutation: rtpMark("9090")}},
-		"demo/eighty": {{Backends: []proxy.GammaBackend{{Service: "demo/multi", Cluster: "multi.demo." + a043Mesh, Weight: 1, Port: 9090}}}},
+		"demo/multi": {
+			// A rule's ExtensionRef of the service-wide filter's kind: the
+			// proxy combines the two levels.
+			{Matches: []proxy.GammaMatch{{Prefix: "/x"}}, HeaderMutation: rtpMark("x"), ExtensionFilters: []proxy.ExtensionFilter{{Name: filter, Config: stamp("x-rule")}}},
+			{ParentPort: 9090, Matches: []proxy.GammaMatch{{Prefix: "/"}}, HeaderMutation: rtpMark("9090")},
+		},
+		"demo/eighty":    {{Backends: []proxy.GammaBackend{{Service: "demo/multi", Cluster: "multi.demo." + a043Mesh, Weight: 1, Port: 9090}}}},
+		"demo/userowned": {{Matches: []proxy.GammaMatch{{Prefix: "/"}}, HeaderMutation: rtpMark("user")}},
 	})
 	full.SetImportedServiceRoutes(map[string][]proxy.GammaRoute{"demo/httponly": {{Imported: true, Matches: []proxy.GammaMatch{{Prefix: "/"}}, HeaderMutation: rtpMark("imported")}}})
 	full.SetServiceChainFilters(map[string]proxy.ExtensionFilter{"demo/multi": {Name: filter, Config: cfg}, "demo/tcpfirst": {Name: filter, Config: cfg}})
 	full.SetServicePortMaps(map[string]map[uint32]uint32{"demo/userowned": {80: 8080, 8000: 0}})
-	full.SetServiceRoutes(map[string][]proxy.GammaRoute{"demo/userowned": {{Matches: []proxy.GammaMatch{{Prefix: "/"}}, HeaderMutation: rtpMark("user")}}})
 	out["fixture with rules, a filter, imports and a user Service"] = full
 
 	hostile := a043Cache(t, append(a043Fixture(), shpHostileFixture()...))
@@ -177,7 +191,9 @@ func TestOneHCM_EquivalenceCheckSeesAWrongCompiledTable(t *testing.T) {
 	mutate("a route of port 9090 shadows port 8080", func(rc *routev3.RouteConfiguration) bool {
 		vh := vhost(rc, multi)
 		for _, r := range vh.GetRoutes() {
-			if dialled(r) == "9090" && r.GetRoute() != nil {
+			// The rule only port 9090 has (the "/x" rule is on both ports,
+			// alike: one shadowing the other would change nothing).
+			if dialled(r) == "9090" && r.GetRoute() != nil && slices.ContainsFunc(r.GetResponseHeadersToAdd(), func(h *corev3.HeaderValueOption) bool { return h.GetHeader().GetValue() == "9090" }) {
 				shadow := proto.Clone(r).(*routev3.Route)
 				setDialled(shadow, "8080")
 				vh.Routes = append([]*routev3.Route{shadow}, vh.Routes...)
@@ -187,13 +203,19 @@ func TestOneHCM_EquivalenceCheckSeesAWrongCompiledTable(t *testing.T) {
 		return false
 	})
 	mutate("the dialled-port predicate dropped from one route", func(rc *routev3.RouteConfiguration) bool {
+		// 8080's fallback route: without the predicate it takes 9090's
+		// requests, which port 9090's own rule answers otherwise.
+		var last *routev3.Route
 		for _, r := range vhost(rc, multi).GetRoutes() {
 			if dialled(r) == "8080" && r.GetRoute() != nil {
-				r.Match.FilterState = nil
-				return true
+				last = r
 			}
 		}
-		return false
+		if last == nil {
+			return false
+		}
+		last.Match.FilterState = nil
+		return true
 	})
 	mutate("the Host checked by suffix (the prototype's check): <name>:8080:8080 is served", func(rc *routev3.RouteConfiguration) bool {
 		changed := false
@@ -213,6 +235,48 @@ func TestOneHCM_EquivalenceCheckSeesAWrongCompiledTable(t *testing.T) {
 			if dialled(r) == "8080" && len(r.GetMatch().GetHeaders()) > 0 {
 				r.Match.Headers = slices.DeleteFunc(r.Match.Headers, func(h *routev3.HeaderMatcher) bool { return h.GetName() == ":authority" })
 				changed = true
+			}
+		}
+		return changed
+	})
+	// The service-wide filter: a virtual-host config, which each refusal
+	// route of the same virtual host disables.
+	disables := func(a *anypb.Any) bool {
+		fc := &routev3.FilterConfig{}
+		return a.MessageIs(fc) && a.UnmarshalTo(fc) == nil && fc.GetDisabled()
+	}
+	mutate("the service-wide filter folded into each route (the levels as one config)", func(rc *routev3.RouteConfiguration) bool {
+		changed := false
+		for _, vh := range rc.GetVirtualHosts() {
+			for name, cfg := range vh.GetTypedPerFilterConfig() {
+				for _, r := range vh.GetRoutes() {
+					if own := r.GetTypedPerFilterConfig()[name]; own != nil && disables(own) {
+						delete(r.TypedPerFilterConfig, name)
+						continue
+					}
+					folded, err := extensionfilter.CombineLevels(name, cfg, r.GetTypedPerFilterConfig()[name])
+					require.NoError(t, err)
+					if r.TypedPerFilterConfig == nil {
+						r.TypedPerFilterConfig = map[string]*anypb.Any{}
+					}
+					r.TypedPerFilterConfig[name] = folded
+				}
+				changed = true
+			}
+			vh.TypedPerFilterConfig = nil
+		}
+		return changed
+	})
+	mutate("a refusal runs the service-wide filter (its disable dropped)", func(rc *routev3.RouteConfiguration) bool {
+		changed := false
+		for _, vh := range rc.GetVirtualHosts() {
+			for _, r := range vh.GetRoutes() {
+				for name, a := range r.GetTypedPerFilterConfig() {
+					if disables(a) {
+						delete(r.TypedPerFilterConfig, name)
+						changed = true
+					}
+				}
 			}
 		}
 		return changed

@@ -6,9 +6,10 @@ package mtlspool
 // route) the pinned proxy applies the levels most-specific FIRST
 // (header_mutation.cc reverses getAllPerFilterConfig unless
 // most_specific_header_mutations_wins), so the service's write lands last.
-// cap_http carries both levels on the route (extensionfilter.CombineLevels),
-// which must put the route's mutations first: the captured path, the proxy
-// port (cap_http_18081, native levels) and the short name must agree.
+// cap_http keeps the two levels native under the full name; the short name
+// folds them onto the route (extensionfilter.CombineLevels), which must put
+// the route's mutations first: the captured path, the proxy port
+// (cap_http_18081, native levels) and the short name must agree.
 
 import (
 	"testing"

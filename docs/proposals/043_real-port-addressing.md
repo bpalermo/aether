@@ -564,12 +564,31 @@ The `*` virtual host branches on the dialled port the same way (each port's
 on-demand spelling). A short name's caller-namespace matcher is flattened
 too: each namespace's routes under a filter-state match on the caller's
 namespace. Every list ends in a route every request takes, so no port's
-routes can take another port's requests. A service-wide filter's config is
-on each of the service's routes rather than on the virtual host, so the
-refusals in the same virtual host do not run it; its two levels are combined
-as the proxy combines them (`extensionfilter.CombineLevels`: header_mutation
-applies the route's mutations before the virtual host's; ext_authz never
-inherits the virtual host's service override).
+routes can take another port's requests.
+
+A service-wide filter's config stays a **virtual-host** config: a full
+name's compiled virtual host belongs to one service, so it carries the
+filter as the per-port virtual host (and the proxy port's) does, and the
+proxy combines it with a rule's own config itself. The refusals in that
+virtual host (port-mismatch, port-not-declared) disable it per route with a
+route-level `FilterConfig{disabled: true}`: the route's answer to "is this
+filter disabled" wins over the virtual host's
+(`RouteEntryImplBase::filterDisabled`, `source/common/router/config_impl.cc`),
+and a disabled filter is not created for the stream
+(`source/common/http/filter_chain_helper.cc`); measured live for
+header_mutation, rbac and ext_authz, with a red control
+(`mtlspool/onehcm_levels_live_test.go`). A short name's virtual host is
+shared by several namespaces' services, so there the two levels are folded
+onto each route (`extensionfilter.CombineLevels`: header_mutation applies the
+route's mutations before the virtual host's; ext_authz never inherits the
+virtual host's service override), and a pair no single config can carry in
+the proxy's order is refused 500 `filter-levels` rather than run differently:
+header_mutation applies each level whole, route first, and within a level its
+request mutations before its query mutations, each query mutation parsing and
+re-rendering `:path` (`header_mutation.cc`), so a rule that mutates the query
+under a service that mutates a request header or the query cannot be folded.
+A full name is never folded (the compiler folds only a virtual host whose
+answers disagree on the virtual-host config, which no builder produces).
 
 The answer for every (name, dialled port, Host spelling) is the per-port
 table's: status, `x-aether-error`, the route's target and the filters and

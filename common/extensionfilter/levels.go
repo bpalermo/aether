@@ -1,12 +1,12 @@
 package extensionfilter
 
 import (
+	"errors"
 	"fmt"
 
 	ext_authzv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/http/ext_authz/v3"
 	header_mutationv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/http/header_mutation/v3"
 	"google.golang.org/protobuf/proto"
-	"google.golang.org/protobuf/reflect/protoreflect"
 	"google.golang.org/protobuf/types/known/anypb"
 )
 
@@ -28,7 +28,8 @@ import (
 //   - ext_authz: the levels are MERGED (FilterConfigPerRoute(less, more),
 //     source/extensions/filters/http/ext_authz/ext_authz.cc):
 //     context_extensions are the union, the route's entry winning a key;
-//     emit_client_span is the route's when set, else the virtual host's;
+//     emit_client_span is the route's when set, else the virtual host's
+//     (a field the linked go-control-plane does not have);
 //     disabled and the rest of check_settings are the route's; a service
 //     override (grpc_service, http_service) is the route's ONLY: "Do not
 //     inherit overrides from less specific configuration".
@@ -102,7 +103,17 @@ func CombineLevels(name string, vhost, route *anypb.Any) (*anypb.Any, error) {
 
 // combineHeaderMutation: every list of mutations, the route's entries first
 // and the virtual host's after them, the order the filter applies the levels
-// in.
+// in. That is exact only while one Mutations can stand for the two: the proxy
+// applies each LEVEL as a unit, route first (header_mutation.cc,
+// mutateRequestHeaders over the levels), and within a level its
+// request_mutations and then its query_parameter_mutations, the second
+// parsing :path and rendering it again (decoding what it parses). One merged
+// Mutations runs every request mutation of both levels before any query
+// mutation, and parses the path once. So when the route level mutates the
+// query and the virtual host's mutates a request header or the query, the two
+// levels are not one config: this returns ErrHeaderMutationLevelsInexact, and
+// the caller answers the route with its filter-levels refusal rather than run
+// a different order.
 func combineHeaderMutation(vhost, route *anypb.Any) (*anypb.Any, error) {
 	var vh, rt header_mutationv3.HeaderMutationPerRoute
 	if err := vhost.UnmarshalTo(&vh); err != nil {
@@ -110,6 +121,10 @@ func combineHeaderMutation(vhost, route *anypb.Any) (*anypb.Any, error) {
 	}
 	if err := route.UnmarshalTo(&rt); err != nil {
 		return nil, fmt.Errorf("header_mutation, route level: %w", err)
+	}
+	if len(rt.GetMutations().GetQueryParameterMutations()) > 0 &&
+		(len(vh.GetMutations().GetRequestMutations()) > 0 || len(vh.GetMutations().GetQueryParameterMutations()) > 0) {
+		return nil, ErrHeaderMutationLevelsInexact
 	}
 	out := &header_mutationv3.HeaderMutationPerRoute{Mutations: &header_mutationv3.Mutations{}}
 	// proto.Merge appends repeated fields: the route's, then the virtual host's.
@@ -121,6 +136,12 @@ func combineHeaderMutation(vhost, route *anypb.Any) (*anypb.Any, error) {
 	}
 	return packCombined(out)
 }
+
+// ErrHeaderMutationLevelsInexact: a route's header_mutation mutates the query
+// and the virtual host's mutates a request header or the query, which no
+// single config applies in the proxy's order (combineHeaderMutation).
+var ErrHeaderMutationLevelsInexact = errors.New("header_mutation: the route mutates the query and the virtual host mutates request headers or the query; " +
+	"the proxy applies each level whole, route first, which one config cannot")
 
 // packCombined packs a combined config DETERMINISTICALLY. The result goes
 // into a route table, whose bytes are its version: a map field marshalled in
@@ -166,23 +187,8 @@ func combineExtAuthz(vhost, route *anypb.Any) (*anypb.Any, error) {
 	if len(merged) > 0 {
 		settings.ContextExtensions = merged
 	}
-	// emit_client_span: the route's when it sets it, else the virtual
-	// host's. By field name, so this holds whichever version of the API is
-	// linked. The service override is NOT inherited: the route's or none.
-	if less := vh.GetCheckSettings(); less != nil {
-		inheritUnset(settings.ProtoReflect(), less.ProtoReflect(), "emit_client_span")
-	}
+	// The service override is NOT inherited: the route's or none. (The
+	// proxy also inherits emit_client_span; the linked API has no such
+	// field, so no config aether builds sets it.)
 	return packCombined(&ext_authzv3.ExtAuthzPerRoute{Override: &ext_authzv3.ExtAuthzPerRoute_CheckSettings{CheckSettings: settings}})
-}
-
-// inheritUnset copies each named message field from src to dst when dst does
-// not set it and src does. A name the message does not have is skipped.
-func inheritUnset(dst, src protoreflect.Message, names ...protoreflect.Name) {
-	for _, name := range names {
-		fd := dst.Descriptor().Fields().ByName(name)
-		if fd == nil || dst.Has(fd) || !src.Has(fd) {
-			continue
-		}
-		dst.Set(fd, protoreflect.ValueOfMessage(proto.Clone(src.Get(fd).Message().Interface()).ProtoReflect()))
-	}
 }

@@ -837,6 +837,40 @@ func TestAddressing_EndpointChurnDoesNotRebuildListeners(t *testing.T) {
 	assert.Contains(t, chainNames(after), "cap_tcp_tcp:httponly.demo.aether.internal_5555")
 }
 
+// TestAddressing_HTTPPortChangeRebuildsOnlyWhatTheListenerReads: the derived
+// ports still trigger a listener rebuild (refreshCaptureServicePorts) when a
+// service's HTTP ports change, and the trigger is still needed: a service
+// with a TLSRoute matches TLS on every port it does NOT serve HTTP on, so its
+// HTTP ports are in the listener. For a service without one they are not,
+// and the rebuilt listener is the same message (nothing new for the proxy).
+func TestAddressing_HTTPPortChangeRebuildsOnlyWhatTheListenerReads(t *testing.T) {
+	ctx := context.Background()
+	h := registryv1.PortProtocol_PORT_PROTOCOL_HTTP
+	services := a043Fixture()
+	c := a043Cache(t, services)
+	c.SetTLSServiceRoutes(shpTLSRoutes("demo/multi"))
+	require.NoError(t, c.LoadClustersFromRegistry(ctx, "cluster-1", "node-1", a043Registry(services)))
+	before := a043CaptureListener(t, c)
+
+	grow := func(name string) []a043Service {
+		out := slices.Clone(services)
+		for i := range out {
+			if out[i].name == name {
+				out[i].ports = maps.Clone(out[i].ports)
+				out[i].ports[6061] = h
+			}
+		}
+		return out
+	}
+	// httponly has no TLSRoute: its new HTTP port is not in the listener.
+	require.NoError(t, c.LoadClustersFromRegistry(ctx, "cluster-1", "node-1", a043Registry(grow("httponly"))))
+	assert.True(t, proto.Equal(before, a043CaptureListener(t, c)), "an HTTP port of a service without a TLSRoute changed the capture listener")
+
+	// multi has one: TLS on 6061 is no longer matched against its SNI names.
+	require.NoError(t, c.LoadClustersFromRegistry(ctx, "cluster-1", "node-1", a043Registry(grow("multi"))))
+	assert.False(t, proto.Equal(before, a043CaptureListener(t, c)), "control: a TLSRoute parent's HTTP ports are in the listener")
+}
+
 // TestAddressing_RulesFollowTheParentPort is leg A4: a rule whose parentRef
 // names no port applies on every HTTP port of the service, on both paths; a
 // rule that names a port applies on that port only.

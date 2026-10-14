@@ -1202,6 +1202,11 @@ type captureTablesKey struct {
 	redirectAll bool
 }
 
+// mergeCaptureTables compiles the per-port capture tables into cap_http. A
+// variable only so that a test can make the compile fail, which no table the
+// agent builds does.
+var mergeCaptureTables = proxy.MergeCaptureRouteTables
+
 // captureTablesMemo is the last set of capture route tables and what it was
 // built from. Guarded by snapshotMu (generateSnapshot is the only caller on
 // the serving path).
@@ -1251,7 +1256,7 @@ func (c *SnapshotCache) captureRouteTables(ports []uint32) []types.Resource {
 	}
 
 	perPort, other := c.capturePerPortTables(c.captureTableInputsFor(deps, arms), ports)
-	merged, err := proxy.MergeCaptureRouteTables(proxy.CaptureHTTPChainName, perPort, other)
+	merged, err := mergeCaptureTables(proxy.CaptureHTTPChainName, perPort, other)
 	if err != nil {
 		// A construct the compiler does not model: a defect of the builders,
 		// which the tests forbid. Fail closed: every name any per-port table

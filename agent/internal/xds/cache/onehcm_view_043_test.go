@@ -180,12 +180,9 @@ func sameFirstRoute(want, got *xdseval.Table, req xdseval.Request) string {
 	if errA != nil || errB != nil {
 		return fmt.Sprintf("%v / %v", errA, errB)
 	}
-	ra, err := a.Effective()
-	if err != nil {
-		return err.Error()
-	}
-	if a.NoVhost {
-		ra = nil
+	var ra []*routev3.Route
+	if !a.NoVhost {
+		ra = a.Routes
 	}
 	fa, errA := xdseval.FirstRoute(ra, req)
 	var rb []*routev3.Route
@@ -196,7 +193,7 @@ func sameFirstRoute(want, got *xdseval.Table, req xdseval.Request) string {
 	if errA != nil || errB != nil {
 		return fmt.Sprintf("%v / %v", errA, errB)
 	}
-	if same, why := xdseval.SameTreatment(fa, fb); !same {
+	if same, why := xdseval.SameTreatmentIn(a.VhostConfig, fa, b.VhostConfig, fb); !same {
 		return fmt.Sprintf("per-port vhost %s, compiled vhost %s:%s", a.Vhost, b.Vhost, why)
 	}
 	return ""
