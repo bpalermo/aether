@@ -4850,9 +4850,36 @@ The capture listener of every pod has two HTTP filter chains, `cap_http` and
 `cap_http` alone. Which chain a connection takes is decided by the listener's
 `filter_chain_matcher`, Envoy's generic matching tree, and no chain carries a
 `filter_chain_match` any more. `cap_http` records the port the client dialled
-(filter state `aether.dialled_port`) and its one route table branches on it:
-a request is answered by the rules of the port it was dialled on, whatever
-port number the mesh declares elsewhere.
+(filter state `aether.dialled_port`) and its one route table selects a
+port's routes with it (`RouteMatch.filter_state`): a request is answered by
+the rules of the port it was dialled on, whatever port number the mesh
+declares elsewhere. The table has one virtual host per mesh name, with a
+plain route list.
+
+Two refusals changed with it. **A 421's body no longer names the dialled
+port** (the `x-aether-error` reason is the contract; the body is a
+diagnostic), and **on a port a name is not served on, the answer is
+`port-not-declared` whatever port the Host names**: a dial to `<address>:9000`
+with `Host: <name>:8080`, for a name not served on 9000, answered
+`port-mismatch` in the first 3.0.0 builds. `port-mismatch` stays for a port
+the name is served on, with a Host that names another.
+
+A service-wide HTTPFilter and an HTTPRoute rule's ExtensionRef of the same
+kind now combine on a short name (and on `cap_http`) as they do under the
+service's own virtual host: a `header_mutation` that both levels write
+leaves the service's value (the route's mutations apply first), and an
+`ext_authz` rule does not inherit the service-wide filter's authorization
+service override. Earlier builds put the route's write last on a short name,
+and sent its check to the service-wide override.
+
+Two counters watch the compile. `aether_agent_capture_table_compile_failures_total`
+counts the times the agent could not compile `cap_http` from the per-port
+tables; it then publishes a table that refuses every mesh name with 421
+`port-not-declared` (no mesh name is delivered by a wrong port's rules) and
+logs the error. It should be 0; anything else is a bug to report.
+`aether_agent_capture_duplicate_service_address_total` counts two services
+claiming one address on a capture listener; the agent keeps one, logs a
+warning naming both, and the other is not reachable through capture there.
 
 A port number entering or leaving the mesh changes `cap_http`'s table and
 nothing else: no listener is rebuilt for it. For 200 services on three HTTP

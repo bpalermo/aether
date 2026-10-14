@@ -536,22 +536,51 @@ an answer that does not need a chain per port:
   filter state.** The HTTP chain stores the connection's destination port
   (`%DOWNSTREAM_LOCAL_PORT%`, the restored original destination) in filter
   state under `aether.dialled_port`, connection-level and never shared
-  upstream, and the table's virtual hosts branch on it with
-  `FilterStateInput`. A client cannot set it. A chain that does not set it
-  gets the answer of a port no service declares: every mesh name is refused,
-  none is delivered (control 2).
+  upstream, and each route of the table matches it with
+  `RouteMatch.filter_state`: a stream's filter state falls back to the
+  connection's (`source/stream_info/filter_state_impl.cc`,
+  `getDataReadOnlyGeneric`; the route reads it in `RouteEntryImplBase`,
+  `source/common/router/config_impl.cc`), measured on the pinned proxy
+  (`mtlspool/onehcm_filterstate_route_test.go`). A client cannot set it. A
+  chain that does not set it gets the answer of a port no service declares:
+  every mesh name is refused, none is delivered (control 2).
 
 The agent still builds the per-port tables `cap_http_<P>` and
 `cap_http_other`: they state the rule, port by port. What it publishes is one
 table, `cap_http`, compiled from them (`proxy.MergeCaptureRouteTables`): one
 virtual host per mesh name (and per short name), whose domains are its
-spellings port-less and `:*`, and whose matcher branches on the dialled port,
-then on the exact `:authority` (case-insensitively, as the proxy compares
-domains), to the routes the per-port table of that port has for that Host.
+spellings port-less and `:*`, with a plain, ordered route list and no
+matcher:
+
+- for each port D the name is served on, the name's routes for D (its route
+  rules, ExtensionRef and service-wide filters, imported rules, the HTTP/3
+  selection: everything the per-port table has), each also matching
+  `filter_state aether.dialled_port == "D"` and an `:authority` regex on the
+  Host's port suffix (none, or exactly `:D`; `<name>:8080:8080` is no such
+  suffix); then a route for `filter_state == "D"` alone: 421 port-mismatch;
+- last, every other port: 421 port-not-declared for a name the node knows.
+
+The `*` virtual host branches on the dialled port the same way (each port's
+on-demand spelling). A short name's caller-namespace matcher is flattened
+too: each namespace's routes under a filter-state match on the caller's
+namespace. Every list ends in a route every request takes, so no port's
+routes can take another port's requests. A service-wide filter's config is
+on each of the service's routes rather than on the virtual host, so the
+refusals in the same virtual host do not run it; its two levels are combined
+as the proxy combines them (`extensionfilter.CombineLevels`: header_mutation
+applies the route's mutations before the virtual host's; ext_authz never
+inherits the virtual host's service override).
+
 The answer for every (name, dialled port, Host spelling) is the per-port
-table's: a test compares the two on every spelling of every name, every port
-of the mesh, one other and none (`cache/onehcm_equivalence_043_test.go`), and
-every table the agent's tests read is checked the same way.
+table's: status, `x-aether-error`, the route's target and the filters and
+rules applied to it (a test compares the first route every request takes,
+on every spelling of every name, every port of the mesh, one other and none,
+for every path and header a route matches: `cache/onehcm_equivalence_043_test.go`),
+and every table the agent's tests read is checked the same way. Two answers
+changed on purpose with this amendment: a refusal's body names no dialled
+port (the reason header is the contract), and on a port the name is not
+served on the answer is port-not-declared whatever port the Host names (it
+was port-mismatch when the Host named another port).
 
 The proxy port keeps its own chain and table (`cap_http_18081`, the loopback
 table's virtual hosts); folding it in is a later change.
