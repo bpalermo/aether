@@ -13,10 +13,11 @@
 #                       every other `.envoy`-suffixed bazel_dep (protobuf, rules_rust, ...)
 #   proxy/.bazelrc      common --registry=https://raw.githubusercontent.com/envoyproxy/bazel-registry/<C>
 #
-# The envoy bazel-registry keeps a rolling dev snapshot per module and DELETES
-# the previous version directory when it moves on, so <V> resolves only at a
-# registry commit <C> that still carries it. A branch name (`main`) in place of
-# <C> builds today and breaks the day upstream publishes; two registry lines let
+# Until its first tagged release (2026-10-13) the envoy bazel-registry kept one
+# rolling dev snapshot per module and DELETED the previous version directory when
+# it moved on; it now keeps published versions, but <C> still fixes the
+# .envoy-suffixed closure <V> resolves against. A branch name (`main`) in place of
+# <C> drifts with every sibling bump; two registry lines let
 # whichever answers first win. See proxy/README.md, "Envoy version bumps".
 #
 # THE ENVOY SOURCE COMMIT is recorded in the workspace only as the short sha in
@@ -357,7 +358,7 @@ ep_rc_diff() {
 }
 
 # ep_patch_report <tree> <patch>... — applies the carried patches IN ORDER to a
-# scratch tree (they stack: 47740 sits on 47743, 1054b on 1054, ...) and prints
+# scratch tree (they stack: 1054 sits on 1050, 1054c on 1054, ...) and prints
 # per patch: `applies` (still needed, applied for the next one), `UPSTREAM`
 # (reverse-applies cleanly: already in this Envoy, drop it) or `CONFLICT` (needs
 # a refresh; not applied, so a later patch stacked on it may conflict too).

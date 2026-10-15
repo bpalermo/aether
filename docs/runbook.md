@@ -8039,11 +8039,12 @@ outlasts the 15 s parent-shutdown window.
   (4/8/0 per roll vs 1–3 per run under gradual): more parent connections close inside
   the drain window, and those closes are what sources then see reset. It is also
   server-wide (h2 and h3 reconnections bunch at drain start; LDS and pod-termination
-  drains switch too). Three carried Envoy patches are the fix under `gradual`:
+  drains switch too). Three Envoy changes are the fix under `gradual`:
   #1064 (`envoy-aether1054-hotrestart-terminate-wait-h3-goaway.patch`: the child
-  unpauses its UDP listeners only after the parent exits), #1066
-  (`envoy-aether1054b-quic-time-wait-before-forward.patch`: the draining parent
-  answers its own time-wait connections) and #1069
+  unpauses its UDP listeners only after the parent exits), #1066 (the draining
+  parent answers its own time-wait connections; carried as a patch until the
+  `1.40.0.envoy` pin, which contains it upstream as Envoy PR 48206, behind the same
+  `envoy.reloadable_features.quic_hot_restart_time_wait_before_forward`) and #1069
   (`envoy-aether1054c-paused-udp-listener-no-read.patch`, chart 1.0.11), the actual
   root cause: a **paused** child UDP listener still read the inherited socket when
   the parent forwarded it a CHLO, because the QUIC listener injects a read event to

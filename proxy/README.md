@@ -40,7 +40,7 @@ bazel test //:image_test
 > locally, and worth running before pushing, is module resolution:
 >
 > ```bash
-> # No unresolved modules; envoy/envoy_api at the pinned snapshot.
+> # No unresolved modules; envoy/envoy_api at the pinned version.
 > bazel mod graph --depth=1
 >
 > # The single assertion that override_repo took: this MUST print our
@@ -120,24 +120,29 @@ symbol upload is keyed by (#653).
 
 Applied in this order (`single_version_override` in `MODULE.bazel`, which also
 says what each one changes in detail). `scripts/bump-envoy-pin.sh` reports, for a
-new pin, which of them the snapshot already contains.
+new pin, which of them the new Envoy already contains.
 
 | Patch (`bazel/patches/envoy-…`) | What it fixes | Upstream |
 |---|---|---|
 | `47740-quic-hostname-check-explicit-san` | The QUIC client defers its hostname check to explicit SAN matchers (aether#957); behind `envoy.reloadable_features.quic_hostname_check_deferred_to_explicit_san_match`. | envoyproxy/envoy#47740, open |
 | `aether1050-hotrestart-nonblocking-forward` | The hot-restart main-thread deadlock (aether#1050): parent UDP/QUIC forwarding to the child no longer blocks the parent's main thread, and the child keeps servicing forwarded packets while it waits, with a bound, for the parent's replies. Counts what it forwards in `server.hot_restart_udp_forwarding_{datagrams,retries,dropped}`. | envoyproxy/envoy#47834, open (the patch is that pull request's diff) |
 | `aether1054-hotrestart-terminate-wait-h3-goaway` | The hot-restart child keeps its inherited UDP listeners paused until the parent has exited, and idle HTTP/3 connections drain themselves inside the drain window (aether#1054); the second half is behind `envoy.reloadable_features.http3_drain_idle_connections` and sits beside upstream's own proactive drain (envoyproxy/envoy#47991), which arms nothing at the chart's 10s drain time. | not proposed |
-| `aether1054b-quic-time-wait-before-forward` | A draining hot-restart parent answers packets for its own recently closed QUIC connections from its time-wait list instead of forwarding them to the child, which stateless-reset them (aether#1054); behind `envoy.reloadable_features.quic_hot_restart_time_wait_before_forward`. | envoyproxy/envoy#48206, open |
-| `aether1054c-paused-udp-listener-no-read` | A paused hot-restart child UDP listener no longer reads the parent's socket when the QUIC listener injects a read to process forwarded handshakes (aether#1054). | envoyproxy/envoy#47868, open |
+| `aether1054c-paused-udp-listener-no-read` | A paused hot-restart child UDP listener no longer reads the parent's socket when the QUIC listener injects a read to process forwarded handshakes (aether#1054). | envoyproxy/envoy#47868, merged on Envoy main after v1.40.0 (a later pin drops it) |
 | `aether1074-quic-persistent-info-lifetime` | HTTP/3 pools keep the per-cluster persistent QUIC info alive after a CDS removal, instead of their draining connections reading its freed clock (aether#1074). | envoyproxy/envoy#47893, open |
 | `aether1126-forwarded-udp-worker-index` | A hot-restart child with fewer workers than its parent no longer indexes past its worker table when the parent forwards a UDP/QUIC datagram tagged with one of its extra workers: the index is mapped onto `index % concurrency` (aether#1126). | not reported |
 
-No longer carried, because the pinned snapshot contains them (aether#980):
+No longer carried, because the pinned release contains them:
 envoyproxy/envoy#47743 (UDP hot-restart forwarding keyed by listener address +
 network namespace, aether#967) and envoyproxy/envoy#47776
 (`execInNetworkNamespace` restores the calling thread's netns via
 `/proc/thread-self/ns/net`, aether#1022; the carried patch also fell back to
-`/proc/self/task/<tid>/ns/net` on kernels older than 3.17, upstream does not).
+`/proc/self/task/<tid>/ns/net` on kernels older than 3.17, upstream does not),
+both dropped at the `189f198` snapshot (aether#980); and envoyproxy/envoy#48206
+(a draining hot-restart parent answers packets for its own recently closed QUIC
+connections from its time-wait list instead of forwarding them to the child,
+aether#1054; behind the same
+`envoy.reloadable_features.quic_hot_restart_time_wait_before_forward`), dropped
+at the `1.40.0.envoy` release, which contains it as `69ff216f86`.
 
 ## Which Envoy is this? (`envoy_server_version`, and the image labels)
 
@@ -191,7 +196,7 @@ envoy_server_version = 3121738 = 0x2FA24A -> aether commit 2fa24a8
 
 That is a genuinely useful fact — it tells you which aether tree cut the proxy —
 but it is only 24 bits of it, and it is *not* the Envoy revision. `189f19`, the
-first six digits of the Envoy commit in the pinned
+first six digits of the Envoy commit in a dev-snapshot pin such as
 `1.40.0-dev.20261009.189f198.envoy`, is what you would be looking for and it is
 nowhere in the process.
 
@@ -205,8 +210,8 @@ config) and **annotations** (manifest):
 |---|---|
 | `org.opencontainers.image.source` | `https://github.com/bpalermo/aether` — **overrides** the `GoogleContainerTools/distroless` value inherited from the base, which used to be the image's only annotation |
 | `org.opencontainers.image.revision` | the aether commit; the same sha the gauge reports the first six digits of |
-| `dev.aethermesh.envoy.module-version` | e.g. `1.40.0-dev.20261009.189f198.envoy` |
-| `dev.aethermesh.envoy.revision` | e.g. `189f198` — the upstream Envoy commit |
+| `dev.aethermesh.envoy.module-version` | e.g. `1.40.0.envoy` (a release) or `1.40.0-dev.20261009.189f198.envoy` (a `main` snapshot) |
+| `dev.aethermesh.envoy.revision` | e.g. `189f198` — the upstream Envoy commit; only on a `-dev` snapshot pin, whose version carries it. A release pin (`1.40.0.envoy`) has no such label: the version names the release tag (`v1.40.0`) instead |
 | `dev.aethermesh.envoy.bazel-registry` | the `envoyproxy/bazel-registry` commit; the other half of the pin (see "Envoy version bumps") |
 
 To read them off a published image, without pulling it:
@@ -227,10 +232,14 @@ on, so a cacheable action would re-stamp a stale commit.
 **The module version and the registry commit are ONE pin and must move
 together.** The envoy bazel-registry
 ([`envoyproxy/bazel-registry`](https://github.com/envoyproxy/bazel-registry))
-publishes a rolling `main` dev snapshot and keeps **exactly one version per
-module** — it *deletes* the previous version directory on every bump. An
-unpinned (or mismatched) registry commit therefore does not merely drift; it
-makes the module unresolvable the next time upstream publishes.
+publishes `main` dev snapshots and, since its first tagged release (`v0.0.1`,
+2026-10-13), Envoy releases. Until then it kept exactly one version per module
+and *deleted* the previous version directory on every bump; it now keeps
+published versions side by side (at tag `v0.0.3`, `modules/envoy` holds both
+`1.40.0-dev.20261009.189f198.envoy` and `1.40.0.envoy`) and its CI enforces that
+a published module is immutable. Pin the commit anyway: the `.envoy`-suffixed
+closure a version resolves against is only fixed by the commit, and an unpinned
+(or mismatched) registry commit drifts with every sibling bump.
 
 Worse, registry HEAD is frequently **not self-consistent**: sibling modules get
 bumped before `modules/envoy/<version>/MODULE.bazel` is updated to match, so at
@@ -281,10 +290,11 @@ Two traps when checking a candidate commit:
   rather than the requested one.
 
 If the loop finds no commit newer than the current pin, that is the normal
-steady state between snapshots, **not** a failed bump: the registry keeps one
-version per module and bumps siblings ahead of `modules/envoy/<version>`, so
-after a snapshot publishes it is usually resolvable for only a handful of
-commits. Do not "fix" the misses with `single_version_override` — forcing a
+steady state between snapshots, **not** a failed bump: the registry bumps
+siblings ahead of `modules/envoy/<version>`, so after a snapshot publishes it
+was (while the registry kept one version per module) usually resolvable for
+only a handful of commits. For a release, prefer the commit that added it (the
+release tag's commit) over a later HEAD. Do not "fix" the misses with `single_version_override` — forcing a
 sibling past what the `envoy` module was published against buys an unvalidated
 combination that only a multi-hour CI build can disprove. Wait for the next
 snapshot.
@@ -304,9 +314,12 @@ Then, in one commit:
 5. Run the local `bazel mod` checks above, then push and let CI build both
    arches.
 
-When a stable release publishes a `1.40.0.envoy` (etc.) module, move to it. As of
-2026-10-10 no such module exists — `modules/envoy/metadata.json` lists only
-`-dev` snapshots, the newest being `1.40.0-dev.20261009.189f198.envoy`.
+When a stable release publishes a `1.NN.0.envoy` module, move to it. The pin is
+`1.40.0.envoy` at registry tag `v0.0.3` (`a1264b53`, the commit that added it);
+it replaced the `1.40.0-dev.20261009.189f198.envoy` snapshot. A release pin needs
+the matching `go-control-plane/envoy` bindings (`v1.NN.0`) on `main` first:
+`scripts/check-envoy-api-parity.sh` accepts bindings one minor behind only for a
+`-dev` pin.
 
 Nothing in the root workspace needs re-pinning alongside it any more. The root
 `MODULE.bazel` used to carry `@envoy_binary_linux_*`, a stock Envoy release asset
@@ -322,7 +335,8 @@ is no separate SDK version to keep in sync.
 ## Status
 
 **Custom Envoy + `aether_stats` C++ extension building on CI** (proposals 010 /
-012), on bzlmod against an Envoy `main` dev snapshot (#697). The Envoy compile
+012), on bzlmod against the Envoy `1.40.0.envoy` release (`main` dev snapshots
+from #697 until the 1.40.0 release). The Envoy compile
 runs on BuildBuddy RBE — amd64 driven from an x64 runner, arm64 driven from a
 native `ubuntu-24.04-arm` runner (`@clang_platform` and `@llvm_toolchain` derive
 their exec constraints from the *driver* host's arch, so an x64 driver cannot

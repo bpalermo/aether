@@ -19,23 +19,25 @@ common --enable_bzlmod
 common --noenable_workspace
 
 # The registry commit and the envoy/envoy_api versions in MODULE.bazel are ONE
-# pin. The envoy bazel-registry keeps a single rolling dev snapshot per module and
-# DELETES the previous version directory on every bump, so an unpinned registry
-# breaks the build the next time upstream publishes. 5db29c09 is the commit at
-# which envoy@1.40.0-dev.20261009.189f198.envoy, envoy_api at the same snapshot,
-# and the full transitive .envoy-suffixed closure all resolve (registry #269/#270,
-# 2026-10-09). See README.md "Envoy version bumps" for the recipe.
+# pin: the commit fixes the whole .envoy-suffixed closure the module version
+# resolves against. Until its first tagged release (v0.0.1, 2026-10-13) the envoy
+# bazel-registry kept a single rolling dev snapshot per module and DELETED the
+# previous version directory on every bump; it now keeps published versions
+# (its CI enforces their immutability), but HEAD still moves siblings ahead of
+# the envoy module, so the pin stays a full commit. a1264b53 (tag v0.0.3,
+# 2026-10-13) is the commit that added envoy@1.40.0.envoy and envoy_api at the
+# same release, with the full transitive .envoy-suffixed closure resolving. See
+# README.md "Envoy version bumps" for the recipe.
 #
-# Why this bump (2026-10-10, aether#980): 189f198 is the first snapshot cut after
-# the 2026-09-30 upstream merges of envoyproxy/envoy#47743 (UDP hot-restart
-# forwarding keyed by listener address + network namespace) and #47776
-# (execInNetworkNamespace restores the calling thread's namespace), so the two
-# patches carried for them are dropped; it also brings #47492 (a hot-restart
-# successor inherits its listen sockets before entering the network namespace).
-# The previous pin moved for envoyproxy/envoy#47623 (QUIC downstream mTLS from
-# SDS), which every later snapshot contains.
+# Why this bump (2026-10-15): 1.40.0.envoy is the v1.40.0 release (Envoy
+# 9e55809337), the first release pin after a run of main dev snapshots. It
+# contains envoyproxy/envoy#48206 (69ff216f86; a draining hot-restart parent
+# leaves time-wait connection IDs to quiche instead of forwarding them), so the
+# patch carried for it (aether#1054's second) is dropped. The previous pin (189f198,
+# 2026-10-10, aether#980) moved for envoyproxy/envoy#47743 and #47776, which
+# this release also contains.
 common --registry=https://bcr.bazel.build/
-common --registry=https://raw.githubusercontent.com/envoyproxy/bazel-registry/5db29c09de17218d24f58c665be38208284754d8
+common --registry=https://raw.githubusercontent.com/envoyproxy/bazel-registry/a1264b53cec00abbc8399a20a3669fdffb94cc81
 
 #############################################################################
 # UPSTREAM: global
