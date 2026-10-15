@@ -36,9 +36,9 @@ envoy_version="$(sed -n -E 's/^bazel_dep\(name = "envoy", version = "([^"]+)"\).
 # from. Absent on a hypothetical tagged release, which is not an error.
 envoy_revision="$(printf '%s' "$envoy_version" | sed -n -E 's/^.*-dev\.[0-9]+\.([0-9a-f]+)\.envoy$/\1/p')"
 
-# The envoyproxy/bazel-registry commit. Half of the pin, not a nicety: the
-# registry keeps one version directory per module and deletes the previous one
-# on every bump, so the module version alone does not resolve without it.
+# The envoyproxy/bazel-registry commit. Half of the pin, not a nicety: it fixes
+# the .envoy-suffixed closure the module version resolves against (and until
+# 2026-10-13 the registry deleted the previous version directory on every bump).
 envoy_registry="$(sed -n -E 's#^common --registry=https://raw\.githubusercontent\.com/envoyproxy/bazel-registry/([0-9a-f]{40})$#\1#p' <"$bazelrc" | head -1)"
 [ -n "$envoy_registry" ] || die "no envoyproxy/bazel-registry --registry pin in $bazelrc"
 

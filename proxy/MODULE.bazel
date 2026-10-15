@@ -7,9 +7,12 @@
 #
 # ENVOY PIN: the `envoy`/`envoy_api` versions below and the
 # `--registry=…/bazel-registry/<commit>` line in .bazelrc are ONE pin and must
-# move together. The envoy bazel-registry keeps exactly one version per module
-# and DELETES the old directory on every bump, so an unpinned (or mismatched)
-# registry commit makes this module unresolvable. See README.md "Envoy bumps".
+# move together: the registry commit fixes the .envoy-suffixed closure the
+# version resolves against, and an unpinned (or mismatched) commit can leave this
+# module unresolvable. Before its first tagged release (2026-10-13) the envoy
+# bazel-registry kept one rolling dev snapshot per module and deleted the old
+# directory on every bump; it now keeps published versions. See README.md
+# "Envoy version bumps".
 module(
     name = "aether_proxy",
     version = "0.0.0",
@@ -19,17 +22,23 @@ module(
 # Envoy
 ####################################################################################
 
-bazel_dep(name = "envoy", version = "1.40.0-dev.20261009.189f198.envoy")
-bazel_dep(name = "envoy_api", version = "1.40.0-dev.20261009.189f198.envoy")
+bazel_dep(name = "envoy", version = "1.40.0.envoy")
+bazel_dep(name = "envoy_api", version = "1.40.0.envoy")
 
 # Carried fixes, applied to the registry module at fetch time
 # (README "Customizing": a patch is the exception, not the mechanism).
-# No longer carried, because the pinned snapshot contains them (aether#980):
+# No longer carried, because the pinned release contains them:
 # envoyproxy/envoy#47743 (UDP hot-restart forwarding keyed by listener address +
 # network namespace, aether#967; a644fc670e) and envoyproxy/envoy#47776
 # (execInNetworkNamespace restores the calling thread's namespace, aether#1022;
-# 7d6ca3273c). The snapshot also brings envoyproxy/envoy#47492 (a hot-restart
-# successor inherits its listen sockets before entering the network namespace).
+# 7d6ca3273c), both dropped at the 189f198 snapshot (aether#980); and
+# envoyproxy/envoy#48206 (a draining hot-restart parent leaves connection IDs in
+# its QUIC time-wait list to the time-wait manager instead of forwarding them to
+# the child, aether#1054; 69ff216f86, in v1.40.0, the same source change behind
+# the same runtime guard, envoy.reloadable_features.quic_hot_restart_time_wait_before_forward),
+# carried as aether#1054's second patch until this pin. The release also brings
+# envoyproxy/envoy#47492 (a hot-restart successor inherits its listen sockets
+# before entering the network namespace).
 #   envoyproxy/envoy#47740 "quic: defer the upstream hostname check to explicit
 #   SAN matchers" (67af4c692c + 01c09223bd; still open upstream): the QUIC client no
 #   longer requires the server leaf's DNS SAN to match the SNI when an explicit
@@ -64,7 +73,7 @@ bazel_dep(name = "envoy_api", version = "1.40.0-dev.20261009.189f198.envoy")
 #   notified of a drain starts its own drain sequence (GOAWAY, then close) inside
 #   the drain window even when idle, behind
 #   envoy.reloadable_features.http3_drain_idle_connections (default true). Since
-#   envoyproxy/envoy#47991 (in the pinned snapshot) the connection manager also
+#   envoyproxy/envoy#47991 (in the pinned release) the connection manager also
 #   drains idle connections of every protocol on its own, but only in the last
 #   third of the drain time and not at all when the drain time leaves no room
 #   after the drain timeout -- the chart's 10s drain time with the default 5s
@@ -73,23 +82,9 @@ bazel_dep(name = "envoy_api", version = "1.40.0-dev.20261009.189f198.envoy")
 #   the drain sequence. Carries its tests (test/server:hot_restarting_child_test,
 #   test/common/http:conn_manager_impl_test), run by //bazel/patches:carried_patch_tests;
 #   its quic_http_integration_test case only builds in the Envoy workspace.
-#   aether#1054, second patch (proposed upstream as envoyproxy/envoy#48206, still
-#   open: the same source change behind the same runtime guard; it goes away with
-#   the first pin that contains it), applied AFTER aether1054: a draining
-#   hot-restart parent (QUIC dispatcher not accepting) forwarded EVERY packet
-#   without a live session to the child, before
-#   quiche's own time-wait check, so packets for connections the parent had just
-#   closed reached the child, which never knew them and answered with a stateless
-#   reset. EnvoyQuicDispatcher::OnFailedToDispatchPacket now leaves connection IDs
-#   in the time-wait list to the time-wait manager (which re-sends the stored
-#   CONNECTION_CLOSE) and forwards only genuinely unknown ones. Behind
-#   envoy.reloadable_features.quic_hot_restart_time_wait_before_forward (default
-#   true). Parent-side, so it takes effect from the second roll on. Its test
-#   (test/common/quic:envoy_quic_dispatcher_test) only builds in the Envoy workspace
-#   (quiche test tooling), so it is not in //bazel/patches:carried_patch_tests.
-#   aether#1054, third patch (an upstream bug; proposed as envoyproxy/envoy#47868,
-#   still open), applied AFTER aether1054b: a paused hot-restart child UDP listener
-#   (inherited socket,
+#   aether#1054, third patch (an upstream bug; envoyproxy/envoy#47868, merged on
+#   Envoy main after v1.40.0 as 2eff6e8ccf, so a later pin drops it), applied AFTER
+#   aether1054: a paused hot-restart child UDP listener (inherited socket,
 #   read events disabled until the parent is gone) still READ the shared socket
 #   whenever the QUIC listener injected a read activation to process handshakes
 #   buffered from forwarded packets (injected activations bypass the enabled-event
@@ -106,7 +101,10 @@ bazel_dep(name = "envoy_api", version = "1.40.0-dev.20261009.189f198.envoy")
 #   removal destroys the entry after only DRAINING its pools, so a pool with live
 #   streams outlived the info and the next write/alarm read the freed clock (the
 #   SIGBUS in QuicConnection::CanWrite). PersistentQuicInfoPtr is now shared and each
-#   HTTP/3 pool and connectivity grid holds a reference. Its test
+#   HTTP/3 pool and connectivity grid holds a reference. (Refreshed for v1.40.0, whose
+#   envoyproxy/envoy#48241 renamed the pool's sni() to effectiveSni() and re-indented the test fixture's
+#   allocateConnPool() call: context and indentation only, the change is the same.)
+#   Its test
 #   (test/common/http/http3:conn_pool_test) needs quiche's test tooling, so it runs in
 #   the Envoy workspace only, not in //bazel/patches:carried_patch_tests.
 #   aether#1126 (an upstream bug in the #47743 forwarding; to be reported upstream on
@@ -130,12 +128,11 @@ single_version_override(
         "//bazel/patches:envoy-47740-quic-hostname-check-explicit-san.patch",
         "//bazel/patches:envoy-aether1050-hotrestart-nonblocking-forward.patch",
         "//bazel/patches:envoy-aether1054-hotrestart-terminate-wait-h3-goaway.patch",
-        "//bazel/patches:envoy-aether1054b-quic-time-wait-before-forward.patch",
         "//bazel/patches:envoy-aether1054c-paused-udp-listener-no-read.patch",
         "//bazel/patches:envoy-aether1074-quic-persistent-info-lifetime.patch",
         "//bazel/patches:envoy-aether1126-forwarded-udp-worker-index.patch",
     ],
-    version = "1.40.0-dev.20261009.189f198.envoy",
+    version = "1.40.0.envoy",
 )
 
 ####################################################################################

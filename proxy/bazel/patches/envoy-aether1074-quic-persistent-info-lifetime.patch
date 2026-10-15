@@ -1,5 +1,5 @@
 diff --git a/envoy/http/persistent_quic_info.h b/envoy/http/persistent_quic_info.h
-index 9a81840e35..2a0177a46d 100644
+index 9a81840e..2a0177a4 100644
 --- a/envoy/http/persistent_quic_info.h
 +++ b/envoy/http/persistent_quic_info.h
 @@ -6,15 +6,25 @@ namespace Envoy {
@@ -32,10 +32,10 @@ index 9a81840e35..2a0177a46d 100644
  } // namespace Http
  } // namespace Envoy
 diff --git a/source/common/http/conn_pool_grid.cc b/source/common/http/conn_pool_grid.cc
-index 8b1f4a5306..c8b3d46d07 100644
+index 45a9f4b4..89e0951a 100644
 --- a/source/common/http/conn_pool_grid.cc
 +++ b/source/common/http/conn_pool_grid.cc
-@@ -341,7 +341,7 @@ ConnectivityGrid::ConnectivityGrid(
+@@ -337,7 +337,7 @@ ConnectivityGrid::ConnectivityGrid(
        // TODO(RyanTheOptimist): Figure out how scheme gets plumbed in here.
        origin_("https", getTargetHostname(transport_socket_options, host_),
                host_->address()->ip()->port()),
@@ -45,11 +45,11 @@ index 8b1f4a5306..c8b3d46d07 100644
    // ProdClusterManagerFactory::allocateConnPool verifies the protocols are HTTP/1, HTTP/2 and
    // HTTP/3.
 diff --git a/source/common/http/conn_pool_grid.h b/source/common/http/conn_pool_grid.h
-index 6a47a5763e..cca66905e2 100644
+index 62b853eb..4da15ace 100644
 --- a/source/common/http/conn_pool_grid.h
 +++ b/source/common/http/conn_pool_grid.h
-@@ -293,6 +293,9 @@ private:
-   // may be from the cluster config, or the request headers for auto-sni.
+@@ -294,6 +294,9 @@ private:
+   // headers for auto-sni.
    HttpServerPropertiesCache::Origin origin_;
  
 +  // Keeps quic_info_ alive for the HTTP/3 pools this grid creates, even if the cluster that created
@@ -59,19 +59,19 @@ index 6a47a5763e..cca66905e2 100644
    Upstream::ResourcePriority priority_;
    Server::OverloadManager& overload_manager_;
 diff --git a/source/common/http/http3/conn_pool.cc b/source/common/http/http3/conn_pool.cc
-index f0449e31aa..4028e5fdba 100644
+index dc031d9a..fda4ac71 100644
 --- a/source/common/http/http3/conn_pool.cc
 +++ b/source/common/http/http3/conn_pool.cc
-@@ -123,6 +123,7 @@ Http3ConnPoolImpl::Http3ConnPoolImpl(
+@@ -130,6 +130,7 @@ Http3ConnPoolImpl::Http3ConnPoolImpl(
      : FixedHttpConnPoolImpl(host, priority, dispatcher, options, transport_socket_options,
                              random_generator, state, client_fn, codec_fn, protocol,
                              overload_manager, {}, nullptr),
 +      quic_info_keep_alive_(quic_info.keepAlive()),
        quic_info_(dynamic_cast<Quic::PersistentQuicInfoImpl&>(quic_info)),
-       server_id_(sni(transport_socket_options, host),
+       server_id_(effectiveSni(transport_socket_options, *host),
                   static_cast<uint16_t>(host_->address()->ip()->port())),
 diff --git a/source/common/http/http3/conn_pool.h b/source/common/http/http3/conn_pool.h
-index e5696fbb2a..245f7b116a 100644
+index a133455f..5d7e1b70 100644
 --- a/source/common/http/http3/conn_pool.h
 +++ b/source/common/http/http3/conn_pool.h
 @@ -196,6 +196,9 @@ protected:
@@ -85,20 +85,20 @@ index e5696fbb2a..245f7b116a 100644
    Quic::PersistentQuicInfoImpl& quic_info_;
    // server-id can change over the lifetime of Envoy but will be consistent for a
 diff --git a/test/common/http/http3/conn_pool_test.cc b/test/common/http/http3/conn_pool_test.cc
-index 358b6a5df2..469cb2e328 100644
+index 804dd957..bf9a03db 100644
 --- a/test/common/http/http3/conn_pool_test.cc
 +++ b/test/common/http/http3/conn_pool_test.cc
-@@ -90,7 +90,8 @@ public:
-         allocateConnPool(dispatcher_, random_, host_, Upstream::ResourcePriority::Default, options,
-                          transport_options, state_, quic_stat_names_, {}, *store_.rootScope(),
-                          makeOptRef<PoolConnectResultCallback>(connect_result_callback_),
--                         *quic_info_, {observers_}, overload_manager_, happy_eyeballs_);
-+                         shared_quic_info_ != nullptr ? *shared_quic_info_ : *quic_info_,
-+                         {observers_}, overload_manager_, happy_eyeballs_);
+@@ -92,7 +92,8 @@ public:
+                              options, transport_socket_options_, state_, quic_stat_names_, {},
+                              *store_.rootScope(),
+                              makeOptRef<PoolConnectResultCallback>(connect_result_callback_),
+-                             *quic_info_, {observers_}, overload_manager_, happy_eyeballs_);
++                             shared_quic_info_ != nullptr ? *shared_quic_info_ : *quic_info_,
++                             {observers_}, overload_manager_, happy_eyeballs_);
      EXPECT_EQ(test_address_->ip()->port(), Http3ConnPoolImplPeer::getServerId(*pool_).port());
    }
  
-@@ -101,6 +102,8 @@ public:
+@@ -103,6 +104,8 @@ public:
    testing::NiceMock<ThreadLocal::MockInstance> thread_local_;
    NiceMock<Event::MockDispatcher> dispatcher_;
    std::unique_ptr<Quic::PersistentQuicInfoImpl> quic_info_;
@@ -107,7 +107,7 @@ index 358b6a5df2..469cb2e328 100644
    Upstream::HostSharedPtr host_{new NiceMock<Upstream::MockHost>};
    NiceMock<Random::MockRandomGenerator> random_;
    Upstream::ClusterConnectivityState state_;
-@@ -240,6 +243,26 @@ void Http3ConnPoolImplTest::createNewStream() {
+@@ -245,6 +248,26 @@ void Http3ConnPoolImplTest::createNewStream() {
  
  TEST_F(Http3ConnPoolImplTest, CreationAndNewStream) { createNewStream(); }
  

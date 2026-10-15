@@ -62,10 +62,19 @@ self_test() {
 	local ver reg short
 	ver="$(ep_dep_version "$MOD" envoy)"
 	reg="$(ep_registry_commit "$RC")"
-	short="$(ep_short_sha "$ver")"
-	if [ -z "$ver" ] || [ -z "$reg" ] || [ -z "$short" ]; then
-		echo "::error::the real pin does not parse (envoy=[${ver}] registry=[${reg}] short=[${short}]); the cases below would test nothing" >&2
+	if [ -z "$ver" ] || [ -z "$reg" ]; then
+		echo "::error::the real pin does not parse (envoy=[${ver}] registry=[${reg}]); the cases below would test nothing" >&2
 		exit 2
+	fi
+	# A -dev snapshot pin names its Envoy commit, which the online check matches
+	# against source.json. A release pin (<x.y.z>.envoy) names none, so the
+	# commit-matching cases run against a -dev copy of the real pin (devver),
+	# and the release itself is checked to pass whatever source.json archives.
+	local devver="$ver"
+	short="$(ep_short_sha "$ver")"
+	if [ -z "$short" ]; then
+		devver="${ver%.envoy}-dev.20261001.abcdef0.envoy"
+		short="$(ep_short_sha "$devver")"
 	fi
 	local full
 	full="${short}$(printf '0%.0s' $(seq 1 $((40 - ${#short}))))"
@@ -92,9 +101,12 @@ self_test() {
 	echo "offline (a) (b) (d):"
 	fixture real
 	offline_case "the real proxy/MODULE.bazel + proxy/.bazelrc" pass real
+	# The real pin as a -dev snapshot (identical to real when it already is one).
+	fixture dev "s/${ver//./\\.}/${devver}/g" "s/${ver//./\\.}/${devver}/g"
+	offline_case "the real pin as a -dev snapshot" pass dev
 	fixture api_skew "s/^bazel_dep(name = \"envoy_api\", version = \"[^\"]*\")/bazel_dep(name = \"envoy_api\", version = \"1.40.0-dev.20260904.13144fb.envoy\")/"
 	offline_case "envoy_api on a different snapshot than envoy" fail api_skew
-	fixture ovr_skew "/^single_version_override(/,/^)/ s/^    version = \"[^\"]*\"/    version = \"1.40.0.envoy\"/"
+	fixture ovr_skew "/^single_version_override(/,/^)/ s/^    version = \"[^\"]*\"/    version = \"0.0.1.envoy\"/"
 	offline_case "single_version_override(envoy) on another version" fail ovr_skew
 	fixture branch "" "s#envoyproxy/bazel-registry/[0-9a-f]\{40\}#envoyproxy/bazel-registry/main#"
 	offline_case "registry pinned by a branch name" fail branch
@@ -107,12 +119,12 @@ self_test() {
 	fixture stale "1s/^/# was envoy@1.40.0-dev.20260904.13144fb.envoy\n/"
 	offline_case "a stale snapshot version left in a comment" fail stale
 
-	# online_case <name> <want> <missing url substring|''> <source.json archive sha>
+	# online_case <name> <want> <missing url substring|''> <source.json archive sha> [<fixture>]
 	online_case() {
-		local out rc=0
+		local out rc=0 fx="${5:-real}"
 		n=$((n + 1))
 		FAKE_MISSING="$3" FAKE_SHA="$4"
-		out="$(ep_check_online "$work/real/MODULE.bazel" "$work/real/bazelrc")" || rc=$?
+		out="$(ep_check_online "$work/$fx/MODULE.bazel" "$work/$fx/bazelrc")" || rc=$?
 		if { [ "$2" = pass ] && [ "$rc" = 0 ]; } || { [ "$2" = fail ] && [ "$rc" != 0 ]; }; then
 			ok "$1 ($2)"
 		else
@@ -124,7 +136,7 @@ self_test() {
 	# ones whose URL contains $FAKE_MISSING (404), or `5xx` for all of them.
 	# FAKE_* are globals: ep_check_online's own locals (reg, ver) shadow the
 	# harness's under bash's dynamic scoping.
-	FAKE_MISSING="" FAKE_SHA="" FAKE_REG="$reg" FAKE_VER="$ver"
+	FAKE_MISSING="" FAKE_SHA="" FAKE_REG="$reg" FAKE_VER="$devver"
 	ep_http_status() {
 		case "$1" in
 		"${EP_REGISTRY_RAW}/${FAKE_REG}/modules/"*) ;;
@@ -152,19 +164,27 @@ self_test() {
 	local sibling
 	sibling="$(ep_deps "$MOD" | awk '$1 != "envoy" && $1 != "envoy_api" && $2 ~ /\.envoy$/ { print $1 "/" $2; exit }')"
 	echo "online (c) (d), fake registry:"
-	online_case "every module served, source.json matches the short sha" pass "" "$full"
+	online_case "every module served (the real pin)" pass "" "$full"
+	online_case "every module served, source.json matches the short sha" pass "" "$full" dev
 	online_case "the envoy module dir is gone (registry moved on)" fail "/modules/envoy/${ver}/" "$full"
 	online_case "the envoy_api module dir is gone" fail "/modules/envoy_api/${ver}/" "$full"
 	online_case "a .envoy sibling (${sibling}) is gone" fail "/modules/${sibling}/" "$full"
 	online_case "registry unreachable (503): fail closed" fail 5xx "$full"
-	online_case "source.json archives a different Envoy commit" fail "" "$(printf 'f%.0s' $(seq 1 40))"
+	online_case "source.json archives a different Envoy commit" fail "" "$(printf 'f%.0s' $(seq 1 40))" dev
+	if [ "$devver" != "$ver" ]; then
+		online_case "a release pin names no Envoy commit to match against source.json" pass "" "$(printf 'f%.0s' $(seq 1 40))"
+	fi
 
 	echo "bump: ep_rewrite:"
 	local newver="1.40.0-dev.20261001.abcdef0.envoy" newreg
 	newreg="$(printf 'b%.0s' $(seq 1 40))"
 	fixture rw
-	local proto_old
+	local proto_old oldtok
 	proto_old="$(ep_dep_version "$MOD" protobuf)"
+	# What must be gone after the rewrite: a -dev pin's snapshot name (with or
+	# without .envoy); a release's full version (its x.y.z prefixes the new one).
+	oldtok="${ver%.envoy}"
+	[ "$devver" = "$ver" ] || oldtok="$ver"
 	n=$((n + 1))
 	if ep_rewrite "$work/rw/MODULE.bazel" "$work/rw/bazelrc" "$ver" "$newver" "$newreg" protobuf=99.0.envoy >/dev/null &&
 		[ "$(ep_dep_version "$work/rw/MODULE.bazel" envoy)" = "$newver" ] &&
@@ -172,7 +192,7 @@ self_test() {
 		[ "$(ep_override_version "$work/rw/MODULE.bazel" envoy)" = "$newver" ] &&
 		[ "$(ep_registry_commit "$work/rw/bazelrc")" = "$newreg" ] &&
 		[ "$(ep_dep_version "$work/rw/MODULE.bazel" protobuf)" = 99.0.envoy ] &&
-		! grep -qF "${ver%.envoy}" "$work/rw/MODULE.bazel" "$work/rw/bazelrc" &&
+		! grep -qF "$oldtok" "$work/rw/MODULE.bazel" "$work/rw/bazelrc" &&
 		ep_check_offline "$work/rw/MODULE.bazel" "$work/rw/bazelrc" >/dev/null &&
 		[ "$(diff "$MOD" "$work/rw/MODULE.bazel" | grep -c '^>' || true)" -ge 4 ]; then
 		ok "moves registry + envoy + envoy_api + override + sibling (protobuf ${proto_old} -> 99.0.envoy) together; result passes the offline check"
@@ -261,8 +281,11 @@ self_test() {
 	n=$((n + 1))
 	if [ "$report" = "$want" ]; then ok "changed / removed / added, mirrored flags tagged, other configs ignored"; else bad "rc diff: want [$want] got [$report]"; fi
 
-	if [ "$n" -ne 27 ]; then
-		echo "::error::ran ${n} cases, expected 27 -- a gate that checks nothing passes" >&2
+	# 29 cases, plus the release-only one when the real pin is a release.
+	local want_n=29
+	[ "$devver" = "$ver" ] || want_n=30
+	if [ "$n" -ne "$want_n" ]; then
+		echo "::error::ran ${n} cases, expected ${want_n} -- a gate that checks nothing passes" >&2
 		exit 2
 	fi
 	if [ "$fail" -ne 0 ]; then

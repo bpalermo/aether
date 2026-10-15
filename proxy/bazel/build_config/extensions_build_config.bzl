@@ -30,7 +30,8 @@ load(
 )
 
 # Substrings matched against the extension NAME (not the target label). At the
-# pinned 1.40.0-dev.20261009.189f198 snapshot: 349 upstream extensions
+# pinned 1.40.0 release (its extensions_build_config.bzl is unchanged from the
+# 1.40.0-dev.20261009.189f198 snapshot): 349 upstream extensions
 # - 34 dropped = 315 compiled in. (At 20260926.726d7ac it was 345 - 32 = 313; at
 # 20260904.13144fb, 338 - 29 = 309; at v1.39.0, 330 - 27 = 303, against the 317
 # the stale verbatim copy carried.)
