@@ -24,12 +24,22 @@ func TestPerPortFixtureIsNotVacuous(t *testing.T) {
 	for _, fc := range listeners[0].GetFilterChains() {
 		chains[fc.GetName()] = true
 	}
-	// Two HTTP chains whatever the mesh declares (the one-HCM capture
-	// listener), and the tables the proxy is given to validate: every
-	// per-port table and the compiled one.
+	// One HTTP chain whatever the mesh declares (the one-HCM capture
+	// listener; the proxy port's own chain went in chart 3.0.2), and the
+	// tables the proxy is given to validate: every per-port table, the proxy
+	// port's, and the compiled one.
 	assert.True(t, chains[proxy.CaptureHTTPChainName])
-	assert.True(t, chains[proxy.CaptureHTTPRouteName(18081)])
+	assert.False(t, chains[proxy.CaptureHTTPRouteName(18081)], "no chain of the proxy port")
 	assert.False(t, chains["cap_http_8080"], "no per-port chain")
+	hcms := 0
+	for _, fc := range listeners[0].GetFilterChains() {
+		for _, f := range fc.GetFilters() {
+			if strings.HasSuffix(f.GetName(), "http_connection_manager") {
+				hcms++
+			}
+		}
+	}
+	assert.Equal(t, 1, hcms, "one connection manager on the capture listener")
 	validated := map[string]bool{}
 	for _, l := range listeners[1:] {
 		validated[strings.TrimSuffix(l.GetName(), "_validate")] = true

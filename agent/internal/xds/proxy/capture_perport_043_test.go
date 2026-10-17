@@ -155,29 +155,37 @@ func chainTCPProxy(fc *listenerv3.FilterChain) *tcp_proxyv3.TcpProxy {
 // typical mesh, raw-TCP ones, the mesh's own two and a port nothing names.
 var testPorts = []uint32{80, 443, 5432, 7777, 8080, 9000, 9090, 9100, meshconst.ProxyOutboundPort, meshconst.ProxyL4OutboundPort}
 
-// TestCaptureHTTPChains_TwoChainsWhateverTheMesh: the listener has two HTTP
-// chains, cap_http and the proxy port's cap_http_18081, each serving the
-// route table of its own name; cleartext HTTP to any port but 18081 reaches
-// cap_http, which records the dialled port for its table. Nothing about the
-// HTTP port numbers of the mesh is in the listener any more: a port number
-// entering or leaving the mesh does not rebuild it.
-func TestCaptureHTTPChains_TwoChainsWhateverTheMesh(t *testing.T) {
-	l := perPortListener(t, nil, true)
-
-	var httpChains []string
-	for _, fc := range l.GetFilterChains() {
-		if strings.HasPrefix(fc.GetName(), CaptureHTTPChainName) {
-			httpChains = append(httpChains, fc.GetName())
-			assert.Equal(t, fc.GetName(), hcmRouteName(t, fc), "chain %s must serve the table of its own name", fc.GetName())
+// TestCaptureHTTPChains_OneChainWhateverTheMesh: the listener has ONE HTTP
+// chain, cap_http, serving the route table of its own name; cleartext HTTP
+// to any port, the proxy port 18081 included, reaches it, and it records the
+// dialled port for its table. (Through chart 3.0.1 the proxy port had a chain
+// of its own, cap_http_18081.) Nothing about the HTTP port numbers of the
+// mesh is in the listener: a port number entering or leaving the mesh does
+// not rebuild it.
+func TestCaptureHTTPChains_OneChainWhateverTheMesh(t *testing.T) {
+	for _, redirectAll := range []bool{true, false} {
+		l := perPortListener(t, nil, redirectAll)
+		var httpChains []string
+		hcms := 0
+		for _, fc := range l.GetFilterChains() {
+			if strings.HasPrefix(fc.GetName(), CaptureHTTPChainName) {
+				httpChains = append(httpChains, fc.GetName())
+				assert.Equal(t, fc.GetName(), hcmRouteName(t, fc), "chain %s must serve the table of its own name", fc.GetName())
+			}
+			for _, f := range fc.GetFilters() {
+				if strings.HasSuffix(f.GetName(), "http_connection_manager") {
+					hcms++
+				}
+			}
 		}
+		assert.Equal(t, []string{CaptureHTTPChainName}, httpChains, "redirect-all %v", redirectAll)
+		assert.Equal(t, 1, hcms, "one connection manager per capture listener (redirect-all %v)", redirectAll)
+		assert.True(t, chainHasDialledPort(chainByName(l.GetFilterChains(), CaptureHTTPChainName)))
 	}
-	assert.Equal(t, []string{CaptureHTTPChainName, "cap_http_18081"}, httpChains)
 
+	l := perPortListener(t, nil, true)
 	for _, p := range testPorts {
 		want := CaptureHTTPChainName
-		if p == meshconst.ProxyOutboundPort {
-			want = "cap_http_18081"
-		}
 		assert.Equal(t, want, sel(t, l, httpConn("10.96.0.9", p)), "HTTP to port %d", p)
 		h2c := httpConn("10.96.0.9", p)
 		h2c.App = []string{"h2c"}
@@ -188,9 +196,10 @@ func TestCaptureHTTPChains_TwoChainsWhateverTheMesh(t *testing.T) {
 	}
 
 	// The dialled port is recorded by cap_http, connection-level, never
-	// shared upstream; cap_http_18081 does not need it.
+	// shared upstream, for every port: a dial to the proxy port is one more
+	// branch of its table.
 	assert.True(t, chainHasDialledPort(chainByName(l.GetFilterChains(), CaptureHTTPChainName)))
-	assert.False(t, chainHasDialledPort(chainByName(l.GetFilterChains(), "cap_http_18081")))
+	assert.Nil(t, chainByName(l.GetFilterChains(), "cap_http_18081"))
 }
 
 func chainHasDialledPort(fc *listenerv3.FilterChain) bool {
@@ -211,7 +220,8 @@ func TestCaptureHTTPChains_ScopedMode(t *testing.T) {
 	require.NotNil(t, chainByName(l.GetFilterChains(), "cap_tcp_blackhole"))
 	assert.Equal(t, CaptureHTTPChainName, sel(t, l, httpConn("10.96.0.9", 8080)))
 	assert.Equal(t, CaptureHTTPChainName, sel(t, l, rawConn("10.96.0.9", 8080)), "scoped: the port alone decides")
-	assert.Equal(t, "cap_http_18081", sel(t, l, rawConn("10.96.0.9", 18081)))
+	assert.Equal(t, CaptureHTTPChainName, sel(t, l, rawConn("10.96.0.9", 18081)), "scoped: the proxy port is cap_http's too")
+	assert.Equal(t, CaptureHTTPChainName, sel(t, l, httpConn("10.96.0.9", 18081)))
 	assert.Equal(t, "cap_tcp_blackhole", sel(t, l, rawConn("10.96.0.9", meshconst.ProxyL4OutboundPort)))
 	assert.Equal(t, "cap_tcp_blackhole", sel(t, l, httpConn("10.96.0.9", meshconst.ProxyL4OutboundPort)))
 }
@@ -539,11 +549,7 @@ func TestCaptureChains_TLSRouteOnEveryPortButTheServicesHTTP(t *testing.T) {
 			if slices.Contains(rawReach(t, l, "10.96.0.1"), p) {
 				continue
 			}
-			want := CaptureHTTPChainName
-			if p == meshconst.ProxyOutboundPort {
-				want = "cap_http_18081"
-			}
-			assert.Equal(t, want, sel(t, l, httpConn("10.96.0.1", p)), "%s: HTTP to %d", name, p)
+			assert.Equal(t, CaptureHTTPChainName, sel(t, l, httpConn("10.96.0.1", p)), "%s: HTTP to %d", name, p)
 		}
 	}
 }

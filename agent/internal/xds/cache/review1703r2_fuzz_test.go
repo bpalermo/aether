@@ -165,7 +165,7 @@ func TestReview1703R2_FuzzCompiledTable(t *testing.T) {
 					}
 				}
 			}
-			perPort, other := c.capturePerPortTables(c.captureTableInputs(), c.captureHTTPPorts())
+			perPort, other := c.capturePerPortTables(c.captureTableInputs(), c.captureHTTPPorts(), c.proxyPortTableNow(c.captureHTTPPorts()))
 			bad := compiledMismatches(merged, perPort, other, 5, true)
 			require.Empty(t, bad, "seed %d: services %+v", seed, services)
 		})

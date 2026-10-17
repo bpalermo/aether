@@ -320,12 +320,13 @@ func BuildCaptureCatchAllVirtualHost(meshDomain string, port uint32, portless, r
 	return buildOnDemandCatchAllVirtualHost(regex, redirectAll)
 }
 
-// BuildProxyPortCaptureRouteConfiguration builds the route table of the
-// capture listener's chain for the mesh's HTTP proxy port (a captured dial to
-// "<anything>:18081"): the LOOPBACK table's virtual hosts under the capture
-// table's name. 18081 is not a port of any service, so nothing was dialled
-// that could decide: as on the loopback listener, the port in Host is the
-// port, and a Host that names 18081 itself is a port the service does not
+// BuildProxyPortCaptureRouteConfiguration builds the per-port capture table
+// of the mesh's HTTP proxy port (a captured dial to "<anything>:18081"),
+// cap_http_18081: the LOOPBACK table's virtual hosts under that name. It is
+// one of the per-port tables MergeCaptureRouteTables compiles into cap_http,
+// never published itself. 18081 is not a port of any service, so nothing was
+// dialled that could decide: as on the loopback listener, the port in Host is
+// the port, and a Host that names 18081 itself is a port the service does not
 // declare. This is how a pod that is not on redirect-all, which has only the
 // mesh ports diverted, reaches a service by name.
 //

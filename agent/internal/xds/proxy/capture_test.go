@@ -57,8 +57,8 @@ func TestGenerateCaptureListener(t *testing.T) {
 	assert.Equal(t, listenerFilterHTTPInspectorName, l.GetListenerFilters()[1].GetName())
 	assert.Equal(t, listenerFilterTLSInspectorName, l.GetListenerFilters()[2].GetName())
 
-	// No TCP service: the two HTTP chains every listener has, cap_http and
-	// the proxy port's cap_http_18081, and cap_tcp_blackhole: scoped mode
+	// No TCP service: the one HTTP chain every listener has, cap_http (for
+	// every port, the proxy port included), and cap_tcp_blackhole: scoped mode
 	// catches raw TCP to the TCP mesh port that no service chain claimed,
 	// before the HCM fabricates a 400 for it (proposal 037). No
 	// DefaultFilterChain (withPassthrough=false).
@@ -67,10 +67,10 @@ func TestGenerateCaptureListener(t *testing.T) {
 	for _, fc := range l.GetFilterChains() {
 		names[fc.GetName()] = true
 	}
-	assert.Equal(t, map[string]bool{CaptureHTTPChainName: true, "cap_http_18081": true, "cap_tcp_blackhole": true}, names)
+	assert.Equal(t, map[string]bool{CaptureHTTPChainName: true, "cap_tcp_blackhole": true}, names)
 	assert.Nil(t, l.GetDefaultFilterChain(), "no DefaultFilterChain when withPassthrough=false")
-	// Each HTTP chain serves the route table of its own name.
-	for _, name := range []string{CaptureHTTPChainName, "cap_http_18081"} {
+	// The HTTP chain serves the route table of its own name.
+	for _, name := range []string{CaptureHTTPChainName} {
 		filters := chainByName(l.GetFilterChains(), name).GetFilters()
 		var hcm http_connection_managerv3.HttpConnectionManager
 		require.NoError(t, filters[len(filters)-1].GetTypedConfig().UnmarshalTo(&hcm))
@@ -97,8 +97,8 @@ func TestGenerateCaptureListener_WithTCPServices(t *testing.T) {
 	// Each service whose legacy target is raw TCP yields TWO chains
 	// (proposals 037 and 043): the well-known :18082 spelling and its own
 	// port. There is no third: the any-port chain (cap_tcp_anyport_<cluster>)
-	// was removed in chart 3.0.0. Plus the two HTTP chains and the
-	// scoped-mode blackhole.
+	// was removed in chart 3.0.0. Plus the HTTP chain and the scoped-mode
+	// blackhole.
 	requireMatcherNamesChains(t, l)
 	names := map[string]bool{}
 	for _, fc := range l.GetFilterChains() {
@@ -112,7 +112,7 @@ func TestGenerateCaptureListener_WithTCPServices(t *testing.T) {
 	assert.True(t, names["cap_tcp_blackhole"])
 	assert.True(t, names[CaptureHTTPChainName])
 	assert.False(t, names["capture_default_p1"])
-	require.Len(t, l.GetFilterChains(), 7, "2 per TCP service + cap_http + cap_http_18081 + blackhole")
+	require.Len(t, l.GetFilterChains(), 6, "2 per TCP service + cap_http + blackhole")
 
 	// Each service's address reaches its own chains on its two ports, and
 	// every one is a single tcp_proxy behind the source filter states.
@@ -143,10 +143,10 @@ func TestGenerateCaptureListener_InvalidTCPService(t *testing.T) {
 	require.NoError(t, err)
 
 	// Only the valid service produces chains: its per-port chain, its :18082
-	// spelling and its own port, plus the two HTTP chains and the scoped-mode
+	// spelling and its own port, plus the HTTP chain and the scoped-mode
 	// blackhole.
 	requireMatcherNamesChains(t, l)
-	require.Len(t, l.GetFilterChains(), 6)
+	require.Len(t, l.GetFilterChains(), 5)
 	for _, fc := range l.GetFilterChains() {
 		if strings.HasPrefix(fc.GetName(), "cap_tcp_tcp:") {
 			assert.Contains(t, fc.GetName(), "svc-c", "chain %s", fc.GetName())
@@ -163,9 +163,9 @@ func TestGenerateCaptureListener_WithPassthrough(t *testing.T) {
 	l, err := GenerateCaptureListener(pod, "spiffe://aether.internal/ns/default/sa/test", 15001, "aether.internal", false, nil, true, nil)
 	require.NoError(t, err)
 
-	// Named filter_chains: the two HTTP chains (no TCP services).
+	// Named filter_chains: the one HTTP chain (no TCP services).
 	requireMatcherNamesChains(t, l)
-	require.Len(t, l.GetFilterChains(), 2, "the HTTP chains, passthrough is in DefaultFilterChain")
+	require.Len(t, l.GetFilterChains(), 1, "the HTTP chain, passthrough is in DefaultFilterChain")
 
 	// With passthrough, an HTTP chain takes only cleartext (transport_protocol
 	// raw_buffer) so TLS egress (transport_protocol tls) falls to the
@@ -208,11 +208,11 @@ func TestGenerateCaptureListener_WithPassthroughAndTCPServices(t *testing.T) {
 	l, err := GenerateCaptureListener(pod, "spiffe://aether.internal/ns/default/sa/test", 15001, "aether.internal", false, tcpSvcs, true, nil)
 	require.NoError(t, err)
 
-	// Named chains: the service's :18082 spelling, its own port, and the two
-	// HTTP chains. No blackhole here — redirect-all uses passthrough ->
+	// Named chains: the service's :18082 spelling, its own port, and the
+	// HTTP chain. No blackhole here — redirect-all uses passthrough ->
 	// kube-proxy REJECT, which is already attributable (proposal 037).
 	requireMatcherNamesChains(t, l)
-	require.Len(t, l.GetFilterChains(), 4)
+	require.Len(t, l.GetFilterChains(), 3)
 	assert.Equal(t, "cap_passthrough", sel(t, l, rawConn("10.96.1.10", 7777)), "another port of the address: the passthrough")
 	assert.Equal(t, "cap_tcp_tcp:svc-a.aether.internal_9000", sel(t, l, rawConn("10.96.1.10", 9000)))
 	// DefaultFilterChain carries the passthrough.

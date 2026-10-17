@@ -477,10 +477,10 @@ func ppEachRoute(t *testing.T, rc *routev3.RouteConfiguration, f func(*routev3.R
 }
 
 // ppDialledChain maps a chain name these tests use onto the listener's chain
-// and the dialled port to record on it (ppTranslate). The proxy port's chain
-// records none.
+// and the dialled port to record on it (ppTranslate). "cap_http_18081" is the
+// proxy port, a dialled port of cap_http like any other since chart 3.0.2.
 func ppDialledChain(hcmChain string) (chain, dialled string) {
-	if rest, ok := strings.CutPrefix(hcmChain, "cap_http_"); ok && rest != "18081" {
+	if rest, ok := strings.CutPrefix(hcmChain, "cap_http_"); ok {
 		return proxy.CaptureHTTPChainName, rest
 	}
 	if hcmChain == proxy.CaptureHTTPChainName {

@@ -4844,6 +4844,9 @@ versions (see "During the roll").
 
 ##### BREAKING for dashboards: the capture chain is renamed, and the proxy port gets a chain and a table of its own
 
+(Chart 3.0.2 folds the proxy port's chain and table back into `cap_http`:
+see "Chart 3.0.2" below.)
+
 The capture listener of every pod has two HTTP filter chains, `cap_http` and
 `cap_http_18081` (the mesh's HTTP proxy port), where it had one
 (`capture_<pod>`); the node has a route table of each name, where it had
@@ -4919,7 +4922,8 @@ A dashboard, an alert or a query that names the filter chain `capture_<pod>`
 (the access log's `filter_chain_name`) needs the new names. The route table
 of captured HTTP is still `cap_http`, and the HTTP stat prefix
 (`capture_http`) is unchanged; the RDS stats of the proxy port's table are
-under `cap_http_18081`. A TLSRoute's chain no longer has per-port copies
+under `cap_http_18081` (until chart 3.0.2, which compiles that table into
+`cap_http`). A TLSRoute's chain no longer has per-port copies
 (`cap_tls_<cluster>_<rule>_p<port>`): its L4 access log and `tcp_proxy` stats
 are under `cap_tls_<cluster>_<rule>` on every port.
 
@@ -5035,6 +5039,49 @@ that holds all of it.
 Do it in a maintenance window, clients moved first (see the two BREAKING
 sections above and "Prober chart 1.1.1"), and expect raw-TCP services to be
 unreachable from not-yet-rolled nodes for the duration of the agent roll.
+
+#### Chart 3.0.2: one HTTP chain per capture listener; the proxy port is a branch of `cap_http`
+
+The capture listener of every pod has **one** HTTP filter chain, `cap_http`,
+where chart 3.0.0 gave it two (`cap_http` and `cap_http_18081`), and the node
+publishes one capture route table, `cap_http`, where it published two. A
+captured dial to the mesh's HTTP proxy port (18081) is one more dialled-port
+branch of `cap_http`'s table: `cap_http` records the dialled port for every
+connection (filter state `aether.dialled_port`), and the routes of the 18081
+branch are compiled from the same table `cap_http_18081` held (the loopback
+table's virtual hosts, where the port in `Host` decides). Port 18081 itself
+is unchanged and stays, permanently, the mesh's HTTP proxy port (proposal
+043, the ruling of 2026-10-12). Proposal 043, "Folding the proxy port into
+`cap_http`", has the design and the gates.
+
+**What a request gets is unchanged.** Every request dialled to 18081 gets the
+answer `cap_http_18081` gave it, and every request dialled to any other port
+the answer it got before, for every `Host` spelling, caller namespace, path
+and header a route matches; the agent's tests hold the compiled table to it
+(`cache/onehcm_equivalence_043_test.go`), and the live probes drive the pinned
+proxy through it (`agent/test/mtlspool/onehcm_probe_test.go`, cases X1-X9).
+
+**For dashboards.** A connection to `:18081` on the captured path is logged
+and counted under the chain `cap_http` (the access log's
+`filter_chain_name`), not `cap_http_18081`. The RDS stats of
+`cap_http_18081` (`http.capture_http.rds.cap_http_18081.*`) are gone; those
+of `cap_http` cover the whole table. The HTTP stat prefix (`capture_http`) is
+unchanged: both chains already shared it. Nothing else is renamed.
+
+**During the roll, and rolling back.** Only the agent changes; the proxy image
+and its configuration outside the capture listener are the same. Each node's
+agent publishes, in one snapshot, the capture listener without the chain and
+`cap_http` with the 18081 branch, and no `cap_http_18081`. The listener is
+updated in place (Envoy compares listeners without their filter chains and
+their `filter_chain_matcher`), so the `cap_http` chain and every connection on
+it are untouched; connections that `cap_http_18081` holds are drained over the
+proxy's drain time (`--drain-time-s`), as on any change of a listener's
+chains, and their next connection takes `cap_http` with the same answer.
+Envoy ignores the removal of a route table it still uses (a delta RDS removal
+is logged and dropped), so the draining chain keeps its table until it is
+gone, in whichever order the listener and the route table updates arrive. A
+rollback to 3.0.1 is the same in reverse: the chain comes back with its table
+in one snapshot.
 
 #### Prober chart 1.1.1: targets name a declared port (proposal 043)
 

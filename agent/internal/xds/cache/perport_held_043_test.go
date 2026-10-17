@@ -7,6 +7,7 @@ import (
 
 	"aethermesh.dev/agent/internal/xds/proxy"
 	"aethermesh.dev/agent/test/xdseval"
+	cniv1 "aethermesh.dev/api/aether/cni/v1"
 	registryv1 "aethermesh.dev/api/aether/registry/v1"
 	listenerv3 "github.com/envoyproxy/go-control-plane/envoy/config/listener/v3"
 	routev3 "github.com/envoyproxy/go-control-plane/envoy/config/route/v3"
@@ -20,17 +21,27 @@ import (
 // TestPerPort_SnapshotPublishesATableForEveryChainItPublishes: every route
 // table an HTTP chain of a published capture listener names is in the same
 // snapshot. A chain whose table is missing warms for the whole initial-fetch
-// timeout (#817). With the one-HCM capture listener the names are fixed
-// (cap_http, cap_http_18081), so no port entering or leaving the mesh can
-// leave a chain without its table; this holds the snapshot to it whatever the
-// port set is.
+// timeout (#817). With the one-HCM capture listener the name is fixed
+// (cap_http, the proxy port included since chart 3.0.2), so no port entering
+// or leaving the mesh can leave a chain without its table; this holds the
+// snapshot to it whatever the port set is, in both capture modes.
 func TestPerPort_SnapshotPublishesATableForEveryChainItPublishes(t *testing.T) {
 	ctx := context.Background()
 	c := a043Cache(t, a043Fixture())
-	for _, step := range []string{"fixture", "a port number leaves the mesh"} {
+	for _, step := range []string{"fixture", "a port number leaves the mesh", "scoped capture"} {
 		if step != "fixture" {
 			c.SetServiceRoutes(nil)
 			c.SetServicePortMaps(nil)
+		}
+		if step == "scoped capture" {
+			// A cache that builds its listener in scoped mode from the start.
+			c = newTestCache("node-1")
+			c.SetCaptureEnabled(true)
+			c.SetCaptureRedirectAll(false)
+			require.NoError(t, c.AddPod(ctx, &cniv1.CNIPod{Name: "client-0", Namespace: a043NS, ServiceAccount: "client", NetworkNamespace: "/var/run/netns/cni-client"}, a043Mesh))
+			require.NoError(t, c.SetNodeIdentity(ctx, nodeIdentity))
+			a043Project(c, a043Fixture())
+			require.NoError(t, c.LoadClustersFromRegistry(ctx, "cluster-1", "node-1", a043Registry(a043Fixture())))
 		}
 		require.NoError(t, c.generateSnapshot(ctx))
 		snap, err := c.GetSnapshot("node-1")
@@ -53,12 +64,13 @@ func TestPerPort_SnapshotPublishesATableForEveryChainItPublishes(t *testing.T) {
 				}
 			}
 		}
-		require.Equal(t, 2, named, "%s: one capture listener with its two HTTP chains", step)
+		require.Equal(t, 1, named, "%s: one capture listener with its one HTTP chain", step)
 		for name := range routes {
 			_, perPort := capturePortOf(name)
-			assert.False(t, perPort && name != "cap_http_18081", "%s: a per-port table %s is published", step, name)
+			assert.False(t, perPort, "%s: a per-port table %s is published", step, name)
 			assert.NotEqual(t, proxy.CaptureHTTPOtherRouteName, name, step)
 		}
+		assert.NotContains(t, routes, "cap_http_18081", "%s: the proxy port's table is compiled into cap_http, never published", step)
 	}
 }
 
@@ -95,19 +107,19 @@ func TestPerPort_TablesFollowADependencyThatExpiresByTheClock(t *testing.T) {
 	// the tables only while something depends on it. Here, an observation.
 	c.SetCaptureAuthorities(map[string]string{"demo/obs": "obs.demo.svc.cluster.local"})
 	const host = "obs.demo." + a043Mesh + ":8080"
-	require.False(t, capTableHas(c.captureRouteTables([]uint32{8080}), 8080, host), "not a dependency yet")
+	require.False(t, capTableHas(c.captureRouteTables([]uint32{8080}, nil), 8080, host), "not a dependency yet")
 
 	c.ObserveDependency(ctx, "demo/obs")
-	first := c.captureRouteTables([]uint32{8080})
+	first := c.captureRouteTables([]uint32{8080}, nil)
 	require.True(t, capTableHas(first, 8080, host), "observed: the name is in the table")
-	again := c.captureRouteTables([]uint32{8080})
+	again := c.captureRouteTables([]uint32{8080}, nil)
 	require.Same(t, first[0], again[0], "unchanged inputs: the kept tables are returned")
 
 	c.depMu.RLock()
 	gen := c.depGen
 	c.depMu.RUnlock()
 	time.Sleep(300 * time.Millisecond)
-	after := c.captureRouteTables([]uint32{8080})
+	after := c.captureRouteTables([]uint32{8080}, nil)
 	c.depMu.RLock()
 	assert.Equal(t, gen, c.depGen, "nothing mutated: the expiry is the clock's alone")
 	c.depMu.RUnlock()

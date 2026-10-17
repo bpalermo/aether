@@ -15,8 +15,9 @@ import (
 )
 
 // The per-port capture listener of proposal 043, in front of the real pinned
-// proxy: one HTTP chain and one route table per HTTP port number, on a listener
-// that also carries raw-TCP chains for the same port numbers.
+// proxy: one HTTP chain for every port, whose one route table is compiled from
+// a table per HTTP port number (and the proxy port's), on a listener that also
+// carries raw-TCP chains for the same port numbers.
 //
 // The fixture is the smallest mesh that has every shape the layout exists for:
 //
@@ -116,13 +117,17 @@ func (s PerPortService) captureInput() (proxy.CaptureTCPService, bool) {
 
 // PerPortRouteTable builds the fixture's capture route table of dialled port
 // port (0 for cap_http_other) with the agent's own virtual-host builders, in
-// the shape cache.appendNameVhosts gives it.
+// the shape cache.appendNameVhosts gives it. The proxy port's is the
+// loopback-shaped table (ProxyPortRouteTable).
 func PerPortRouteTable(port uint32) *routev3.RouteConfiguration {
+	if port == meshconst.ProxyOutboundPort {
+		return ProxyPortRouteTable()
+	}
 	name := proxy.CaptureHTTPOtherRouteName
 	if port != 0 {
 		name = proxy.CaptureHTTPRouteName(port)
 	}
-	legacyTable := port == meshconst.ProxyOutboundPort || port == 80
+	legacyTable := port == 80
 	var vhosts []*routev3.VirtualHost
 	for _, s := range PerPortServices() {
 		vhosts = append(vhosts, s.tableVhosts(port, legacyTable)...)
@@ -162,6 +167,40 @@ func (s PerPortService) tableVhosts(port uint32, legacyTable bool) []*routev3.Vi
 	return append(vhosts, refusal("mismatch", proxy.RefusalPortMismatch, withSuffix(names, ":*")))
 }
 
+// ProxyPortRouteTable builds the fixture's table of the mesh's HTTP proxy
+// port, cap_http_18081, as the agent does (proxy.BuildProxyPortCaptureRouteConfiguration
+// over the loopback table's virtual hosts): the mesh name alone, by the port
+// in Host (a port-less Host is port 80, or refused when the service has no
+// port 80), with its short names and its own floor. Since chart 3.0.2 it is
+// compiled into cap_http as one more dialled port; until then a chain of its
+// own served it.
+func ProxyPortRouteTable() *routev3.RouteConfiguration {
+	var vhosts []*routev3.VirtualHost
+	var known []string
+	for _, s := range PerPortServices() {
+		mesh := s.mesh()
+		known = append(known, mesh)
+		portless := false
+		for _, p := range s.HTTPPorts {
+			doms := []string{fmt.Sprintf("%s:%d", mesh, p)}
+			if p == 80 {
+				doms = append(doms, mesh)
+				portless = true
+			}
+			vhosts = append(vhosts, proxy.BuildServiceVirtualHost(fmt.Sprintf("%s:%d", mesh, p), s.httpCluster(p), doms, nil))
+		}
+		switch {
+		case len(s.HTTPPorts) == 0:
+			vhosts = append(vhosts, proxy.BuildRefusalVirtualHost(mesh+"|nohttp", []string{mesh, mesh + ":*"}, proxy.RefusalNoHTTPPort, "aether: refused\n"))
+			continue
+		case !portless:
+			vhosts = append(vhosts, proxy.BuildRefusalVirtualHost(mesh+"|portless", []string{mesh}, proxy.RefusalPortRequired, "aether: refused\n"))
+		}
+		vhosts = append(vhosts, proxy.BuildRefusalVirtualHost(mesh+"|undeclared", []string{mesh + ":*"}, proxy.RefusalPortNotDeclared, "aether: refused\n"))
+	}
+	return proxy.BuildProxyPortCaptureRouteConfiguration(proxy.CaptureHTTPRouteName(meshconst.ProxyOutboundPort), vhosts, meshDomain, true, known)
+}
+
 // legacyVhost is the service's virtual host for a legacy spelling: its legacy
 // target when that is HTTP, a refusal otherwise.
 func (s PerPortService) legacyVhost(doms []string) *routev3.VirtualHost {
@@ -175,17 +214,15 @@ func (s PerPortService) legacyVhost(doms []string) *routev3.VirtualHost {
 	}
 }
 
-// perPortTablesAndCompiled returns the per-port tables of the fixture, and the
-// one table the agent compiles from them and publishes
-// (proxy.MergeCaptureRouteTables).
+// perPortTablesAndCompiled returns the per-port tables of the fixture, the
+// proxy port's included, and the one table the agent compiles from them and
+// publishes (proxy.MergeCaptureRouteTables).
 func perPortTablesAndCompiled() ([]*routev3.RouteConfiguration, error) {
 	tables := make([]*routev3.RouteConfiguration, 0, len(PerPortHTTPPorts())+2)
 	perPort := map[uint32]*routev3.RouteConfiguration{}
 	for _, port := range PerPortHTTPPorts() {
 		tables = append(tables, PerPortRouteTable(port))
-		if port != meshconst.ProxyOutboundPort {
-			perPort[port] = PerPortRouteTable(port)
-		}
+		perPort[port] = PerPortRouteTable(port)
 	}
 	tables = append(tables, PerPortRouteTable(0))
 	merged, err := proxy.MergeCaptureRouteTables(proxy.CaptureHTTPChainName, perPort, PerPortRouteTable(0))

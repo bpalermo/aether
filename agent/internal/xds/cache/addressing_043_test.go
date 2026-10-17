@@ -8,6 +8,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 
 	"aethermesh.dev/agent/internal/capture"
@@ -701,7 +702,7 @@ func chainNames(l *listenerv3.Listener) []string {
 }
 
 // TestAddressing_ListenerChains holds the capture listener's chain set against
-// the fixture: the two HTTP chains, a raw-TCP chain per (service, raw-TCP
+// the fixture: the one HTTP chain, a raw-TCP chain per (service, raw-TCP
 // port), the two legacy chains of a raw-TCP legacy target, and no chain that
 // takes "any other port" of an address.
 func TestAddressing_ListenerChains(t *testing.T) {
@@ -710,8 +711,9 @@ func TestAddressing_ListenerChains(t *testing.T) {
 	l := a043CaptureListener(t, c)
 	names := chainNames(l)
 
+	assert.NotContains(t, names, "cap_http_18081", "the proxy port is a branch of cap_http's table, not a chain (until chart 3.0.2 it was)")
 	for _, want := range []string{
-		proxy.CaptureHTTPChainName, "cap_http_18081",
+		proxy.CaptureHTTPChainName,
 		// mixed: 9000 is raw TCP, and its legacy target is HTTP.
 		"cap_tcp_tcp:mixed.demo.aether.internal_9000",
 		// tcpfirst: a raw-TCP legacy target on its own port and on :18082.
@@ -728,7 +730,7 @@ func TestAddressing_ListenerChains(t *testing.T) {
 		assert.NotContains(t, name, "cap_tcp_tcp:mixed.demo.aether.internal_18082", "the TCP mesh port names nothing on a service whose legacy target is HTTP")
 		assert.NotContains(t, name, "cap_tcp_tcp:nine", "a port declared HTTP gets no raw-TCP chain, whatever another service declares for the number")
 		_, perPort := capturePortOf(name)
-		assert.False(t, perPort && name != "cap_http_18081", "no per-port HTTP chain: %s", name)
+		assert.False(t, perPort, "no per-port HTTP chain: %s", name)
 	}
 
 	// A10: nine's HTTP on 9000 and mixed's raw TCP on 9000 are told apart by
@@ -747,6 +749,8 @@ func TestAddressing_ListenerChains(t *testing.T) {
 	assert.Equal(t, "cap_tcp_tcp:tcpfirst.demo.aether.internal_9000", sel("10.96.1.5", 9000, false))
 	assert.Equal(t, "cap_tcp_tcp:tcponly.demo.aether.internal_9000", sel("10.96.1.7", 9000, false))
 	assert.Equal(t, proxy.CaptureHTTPChainName, sel("10.96.1.4", 8080, true), "mixed's own HTTP")
+	assert.Equal(t, proxy.CaptureHTTPChainName, sel("10.96.1.4", 18081, true), "the proxy port")
+	assert.Equal(t, proxy.CaptureHTTPChainName, sel("10.96.1.99", 18081, true), "the proxy port, at an address no service has")
 
 	// Every action of the matcher names a chain of the listener, and no name
 	// is used twice: the proxy closes the connection for the first and
@@ -789,7 +793,7 @@ func TestAddressing_ChainAndTableTravelTogether(t *testing.T) {
 			named++
 			assert.Containsf(t, published, fc.GetName(), "chain %s names a route table the snapshot does not carry", fc.GetName())
 		}
-		require.Equal(t, 2, named)
+		require.Equal(t, 1, named)
 		assert.True(t, proto.Equal(first, l), "a port number entering or leaving the mesh changed the capture listener")
 		_, hasTable := tables[proxy.CaptureHTTPRouteName(wantPort)]
 		assert.Equal(t, present, hasTable, "the per-port table of %d", wantPort)
@@ -1247,12 +1251,20 @@ func TestServicePorts_RetainedWithTheClusters(t *testing.T) {
 	assert.False(t, kept)
 }
 
+// mustRegexp compiles pattern once per pattern (the walks ask the same few
+// millions of times; compiling each time was a large share of their CPU).
 func mustRegexp(t *testing.T, pattern string) *regexp.Regexp {
 	t.Helper()
+	if re, ok := mustRegexps.Load(pattern); ok {
+		return re.(*regexp.Regexp)
+	}
 	re, err := regexp.Compile(pattern)
 	require.NoError(t, err, "pattern %q", pattern)
+	mustRegexps.Store(pattern, re)
 	return re
 }
+
+var mustRegexps sync.Map
 
 // quicSelectionDefault returns the h2 cluster of a route action rewritten by
 // the per-source HTTP/3 selection: the cluster a request with no arm takes.
@@ -1361,10 +1373,10 @@ func TestAddressing_ScaleWorkedExample(t *testing.T) {
 		tcpOnly    bool
 		wantChains int
 	}{
-		// The two HTTP chains (cap_http, cap_http_18081) + 20.
-		{"20 raw-TCP ports beside an HTTP legacy target", false, 2 + 20},
+		// The one HTTP chain (cap_http) + 20.
+		{"20 raw-TCP ports beside an HTTP legacy target", false, 1 + 20},
 		// Per raw-TCP-only service: its port and :18082.
-		{"20 raw-TCP legacy targets with no HTTP port", true, 2 + 20*2},
+		{"20 raw-TCP legacy targets with no HTTP port", true, 1 + 20*2},
 	} {
 		t.Run(shape.name, func(t *testing.T) {
 			c, _ := build(shape.tcpOnly)
@@ -1389,7 +1401,7 @@ func TestAddressing_ScaleWorkedExample(t *testing.T) {
 				assert.NotNil(t, l.GetDefaultFilterChain(), "plus the passthrough default chain")
 			}
 			require.Equal(t, 50, captureListeners)
-			assert.Equal(t, 50*2, hcms, "two HCM configs per pod, whatever the number of HTTP port numbers")
+			assert.Equal(t, 50, hcms, "one HCM config per pod, whatever the number of HTTP port numbers")
 
 			tables, vhosts, tableBytes := 0, 0, 0
 			for name, res := range snap.GetResources(resourcev3.RouteType) {
@@ -1400,8 +1412,8 @@ func TestAddressing_ScaleWorkedExample(t *testing.T) {
 					tableBytes += proto.Size(rc)
 				}
 			}
-			assert.Equal(t, 3, tables, "cap_http, cap_http_18081 and out_http")
-			t.Logf("%s: chains per pod listener=%d (+1 default), per node=%d; HCM configs per pod=2, per node=%d; route tables per node=%d; capture virtual hosts=%d; capture listeners=%d KiB total (%d KiB each); capture route tables=%d KiB total; clusters=%d",
+			assert.Equal(t, 2, tables, "cap_http and out_http")
+			t.Logf("%s: chains per pod listener=%d (+1 default), per node=%d; HCM configs per pod=1, per node=%d; route tables per node=%d; capture virtual hosts=%d; capture listeners=%d KiB total (%d KiB each); capture route tables=%d KiB total; clusters=%d",
 				shape.name, shape.wantChains, chains, hcms, tables, vhosts, listenerBytes/1024, listenerBytes/1024/50, tableBytes/1024, len(snap.GetResources(resourcev3.ClusterType)))
 		})
 	}
