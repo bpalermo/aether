@@ -16,11 +16,13 @@ WALKS = "^(" + "|".join([
     "TestPerPort_SixthWalk",
     "TestPerPort_SixthWalkUnscoped",
     "TestPerPort_SnapshotDoesNotDependOnRowOrder",
+    "TestPerPort_StampsNeverVouchForAStaleVirtualHost",
     "TestPerPort_Walk",
     "TestPerPort_WalkIsHistoryIndependent",
     "TestPerPort_WalkOverEveryInput",
     "TestPerPort_WalkOverEveryInput_UnscopedListing",
     "TestPerPort_WalkWithRemovalsAndReplacements",
+    "TestReview1703R2_FuzzCompiledTable",
     "TestStatus_AgreesWithTheTables_OnEveryNode",
     "TestStatus_AgreesWithTheTables_OverAHistory",
 ]) + ")$$"  # "$$": a test's args are subject to "Make variable" substitution

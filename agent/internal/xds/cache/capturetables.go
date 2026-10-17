@@ -1115,10 +1115,9 @@ func (c *SnapshotCache) kubernetesNames(routes map[string][]proxy.GammaRoute) ma
 		if !ok || mesh == "" {
 			return
 		}
-		names, only := addressNames(ref, svc, mesh, authorities, routes)
-		if only {
-			return
-		}
+		// A meshOnly name (addressNames' only) is the mesh name alone: no
+		// Kubernetes name is left of it.
+		names, _ := addressNames(ref, svc, mesh, authorities, routes)
 		if kube := slices.DeleteFunc(names, func(n string) bool { return n == mesh }); len(kube) > 0 {
 			out[mesh] = kube
 		}

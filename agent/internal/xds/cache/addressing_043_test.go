@@ -487,8 +487,13 @@ func TestAddressing_ProxyPortOnTheCapturedPath(t *testing.T) {
 			for _, name := range kube {
 				for _, suffix := range []string{"", ":80", ":8080", ":9000", ":9090", ":18081"} {
 					got, want := a043Resolve(t, table, name+suffix), a043Resolve(t, table, mesh+suffix)
+					// A Kubernetes name spells no cluster: it is never parked
+					// for one named after itself. Where the mesh name is asked
+					// for on demand, the Kubernetes name gets the floor.
+					assert.Falsef(t, got.onDemand, "Host %s asks for a cluster named by its authority", name+suffix)
 					if want.onDemand {
-						want.cluster = name + suffix
+						assert.Equalf(t, a043Resolve(t, table, "example.com"+suffix), got, "Host %s gets the floor", name+suffix)
+						continue
 					}
 					assert.Equalf(t, want, got, "Host %s answers as %s", name+suffix, mesh+suffix)
 					assert.NotEqualf(t, proxy.PassthroughClusterName, got.cluster, "Host %s", name+suffix)
@@ -644,8 +649,12 @@ func TestAddressing_Loopback(t *testing.T) {
 			for _, name := range kube {
 				for _, suffix := range []string{"", ":80", ":8080", ":9000", ":9090", ":18081"} {
 					got, want := a043Resolve(t, out, name+suffix), a043Resolve(t, out, mesh+suffix)
+					// Never parked for a cluster named after itself: where the
+					// mesh name is asked for on demand, the floor.
+					assert.Falsef(t, got.onDemand, "Host %s asks for a cluster named by its authority", name+suffix)
 					if want.onDemand {
-						want.cluster = name + suffix // the on-demand route names the Host's own authority
+						assert.Equalf(t, a043Resolve(t, out, "example.com"+suffix), got, "Host %s gets the floor", name+suffix)
+						continue
 					}
 					assert.Equalf(t, want, got, "Host %s answers as %s", name+suffix, mesh+suffix)
 				}

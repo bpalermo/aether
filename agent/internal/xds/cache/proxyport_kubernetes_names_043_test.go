@@ -292,3 +292,92 @@ func TestProxyPort_PublishedTablesClaimEachDomainOnce(t *testing.T) {
 		check(t, c)
 	})
 }
+
+// pkKubeNeverNamesClusterByAuthority: no Kubernetes name of svc reaches a
+// route that asks for the cluster its own authority spells (no such cluster
+// exists; the request would be parked until the on-demand timeout).
+func pkKubeNeverNamesClusterByAuthority(t *testing.T, c *SnapshotCache, svc, ns, label string) {
+	t.Helper()
+	for tname, tb := range pkTables(t, c) {
+		for _, k := range pkKubernetesNames(svc, ns) {
+			for _, suffix := range []string{"", ":80", ":8080", ":9090", ":7777"} {
+				r, _ := pkFirst(t, tb.tbl, xdseval.Request{Host: k + suffix, Path: "/", FilterState: tb.fs})
+				if r == nil {
+					continue
+				}
+				assert.Empty(t, xdseval.OutcomeOf(r).ClusterHeader, "%s %s: Host %s names its cluster by authority", label, tname, k+suffix)
+			}
+		}
+	}
+}
+
+// TestProxyPort_ColdRoutedServiceThenWarm: a service with a GAMMA rule (local,
+// with a service-wide filter; or imported), no generated Service, no port map
+// and no endpoint on the node: its loopback virtual hosts ask for the cluster
+// the authority spells. Its Kubernetes names are never parked for a cluster
+// named after themselves (the floor instead); once the node holds an endpoint
+// they answer as the mesh name, on out_http and on the proxy port's block.
+// (Adopted from the adversarial review of the change: it fails with the cold
+// guard of withKubernetesNames removed, and with kubernetesNames ignoring the
+// routed services.)
+func TestProxyPort_ColdRoutedServiceThenWarm(t *testing.T) {
+	ctx := context.Background()
+	h := registryv1.PortProtocol_PORT_PROTOCOL_HTTP
+	ghost := a043Service{name: "ghost", ns: "demo", legacy: 8080, ports: map[uint32]registryv1.PortProtocol{8080: h, 9090: h}, ip: "10.0.9.9"}
+	for _, imported := range []bool{false, true} {
+		label := "cold"
+		if imported {
+			label = "cold imported"
+		}
+		c := a043Cache(t, a043Fixture())
+		c.SetStaticDependencies([]string{"demo/ghost"})
+		rules := map[string][]proxy.GammaRoute{"demo/ghost": {{Matches: []proxy.GammaMatch{{Prefix: "/"}}, HeaderMutation: rtpMark("ghost")}}}
+		if imported {
+			c.SetImportedServiceRoutes(rules)
+		} else {
+			c.SetServiceRoutes(rules)
+			c.SetServiceChainFilters(map[string]proxy.ExtensionFilter{"demo/ghost": r3ChainCfg(t)})
+		}
+		require.NoError(t, c.generateSnapshot(ctx))
+		loop := pkTables(t, c)["out_http"].tbl
+		require.True(t, pkOnDemand(t, loop, xdseval.Request{Host: "ghost.demo." + a043Mesh + ":8080", Path: "/"}), "%s: the fixture is not cold", label)
+		pkKubeNeverNamesClusterByAuthority(t, c, "ghost", "demo", label)
+
+		// Warm: the node now holds an endpoint of ghost.
+		require.NoError(t, c.LoadClustersFromRegistry(ctx, "cluster-1", "node-1", a043Registry(append(a043Fixture(), ghost))))
+		require.NoError(t, c.generateSnapshot(ctx))
+		for tname, tb := range pkTables(t, c) {
+			for _, suffix := range []string{"", ":8080", ":9090", ":7777"} {
+				for _, k := range pkKubernetesNames("ghost", "demo") {
+					assert.Empty(t, pkSameAs(t, tb.tbl, tb.fs, "ghost.demo."+a043Mesh+suffix, k+suffix, "/"), "%s, warm, %s: Host %s unlike the mesh name", label, tname, k+suffix)
+				}
+			}
+		}
+		pkKubeNeverNamesClusterByAuthority(t, c, "ghost", "demo", label+", warm")
+	}
+}
+
+// TestWithKubernetesNames_KeepsEveryFieldAndWritesNoVirtualHost: a virtual
+// host that gains domains is a new one. One that sets only what a loopback
+// virtual host sets shares its routes; one that sets anything else (here a
+// retry policy) is a full copy, so nothing it sets is lost. Neither given
+// virtual host is written to (the cluster entries' are reused across
+// snapshots).
+func TestWithKubernetesNames_KeepsEveryFieldAndWritesNoVirtualHost(t *testing.T) {
+	const mesh = "a.ns." + a043Mesh
+	kube := map[string][]string{mesh: {"a.ns.svc.cluster.local", "a.ns"}}
+	plain := proxy.BuildOutboundClusterVirtualHost(mesh+":8080", []string{mesh + ":8080"})
+	rich := proxy.BuildOutboundClusterVirtualHost(mesh+":9090", []string{mesh + ":9090"})
+	rich.RetryPolicy = &routev3.RetryPolicy{RetryOn: "5xx"}
+	other := proxy.BuildOutboundClusterVirtualHost("x.y."+a043Mesh+":8080", []string{"x.y." + a043Mesh + ":8080"})
+	out := withKubernetesNames([]*routev3.VirtualHost{plain, rich, other}, kube)
+
+	assert.Equal(t, []string{mesh + ":8080", "a.ns.svc.cluster.local:8080", "a.ns:8080"}, out[0].GetDomains())
+	assert.NotSame(t, plain, out[0])
+	assert.Same(t, plain.GetRoutes()[0], out[0].GetRoutes()[0], "the routes are shared")
+	assert.Equal(t, []string{mesh + ":9090", "a.ns.svc.cluster.local:9090", "a.ns:9090"}, out[1].GetDomains())
+	assert.Equal(t, "5xx", out[1].GetRetryPolicy().GetRetryOn(), "a field a loopback virtual host does not set is kept")
+	assert.Same(t, other, out[2], "a name with no Kubernetes names is left as it is")
+	assert.Equal(t, []string{mesh + ":8080"}, plain.GetDomains(), "the given virtual host is not written to")
+	assert.Equal(t, []string{mesh + ":9090"}, rich.GetDomains())
+}
