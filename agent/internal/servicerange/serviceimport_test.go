@@ -140,19 +140,38 @@ func TestImports_OutsideTheRangeAddsASlash32(t *testing.T) {
 	assert.Equal(t, prefixes(t, "10.96.0.0/12", "192.168.7.1/32"), h.sink.last(t))
 }
 
-// The imports can reconcile before the ServiceCIDRs: the /32 is delivered on
-// its own, and folded away once a block that covers it is known.
+// The imports can reconcile before the ServiceCIDRs. Nothing reaches the sink
+// until the ServiceCIDR part is decided: its first delivery is what lets the
+// xDS server serve (cache.ServiceRangeDelivered), and a set of /32s alone
+// would serve the capture listener without the Service range. The imports
+// merge in when the ServiceCIDRs arrive.
 func TestImports_BeforeTheServiceCIDRs(t *testing.T) {
 	h := newImportHarness(t,
-		serviceCIDR("kubernetes", "192.168.0.0/16"),
+		serviceCIDR("kubernetes", "10.96.0.0/12"),
 		serviceImport("ns", "far", mcsv1alpha1.ClusterSetIP, nil, "192.168.7.1"),
+		serviceImport("ns", "near", mcsv1alpha1.ClusterSetIP, nil, "10.96.0.7"),
 	)
 	h.reconcileImports(t)
-	assert.Equal(t, prefixes(t, "192.168.7.1/32"), h.sink.last(t))
+	assert.Empty(t, h.sink.calls, "an import seen first must not be delivered alone")
 	h.reconcileCIDRs(t)
-	assert.Equal(t, prefixes(t, "192.168.0.0/16"), h.sink.last(t))
+	assert.Equal(t, [][]netip.Prefix{prefixes(t, "10.96.0.0/12", "192.168.7.1/32")}, h.sink.calls)
 	assert.Zero(t, strings.Count(h.logs.String(), "level=WARN"),
-		"a ClusterSetIP delivered first is not a missing Service range")
+		"a ClusterSetIP seen first is not a missing Service range")
+}
+
+// Reconciled first, imports that add nothing (all aether's own here) must not
+// make the first delivery "no range" while a ServiceCIDR exists.
+func TestImports_FirstReconcileOfOnlyManagedImportsDeliversNoNilRange(t *testing.T) {
+	h := newImportHarness(t,
+		serviceCIDR("kubernetes", "10.96.0.0/12"),
+		serviceImport("ns", "mesh", mcsv1alpha1.ClusterSetIP, managed, "10.96.5.5"),
+	)
+	h.reconcileImports(t)
+	h.reconcileCIDRs(t)
+	require.NotEmpty(t, h.sink.calls)
+	assert.Equal(t, prefixes(t, "10.96.0.0/12"), h.sink.calls[0],
+		"the first delivery must carry the ServiceCIDR range, not nil")
+	assert.Len(t, h.sink.calls, 1)
 }
 
 func TestImports_ManagedAndHeadlessAreSkipped(t *testing.T) {

@@ -16,10 +16,14 @@ import (
 	"go.opentelemetry.io/otel/metric"
 	networkingv1 "k8s.io/api/networking/v1"
 	"k8s.io/apimachinery/pkg/api/meta"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/event"
+	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
+	"sigs.k8s.io/controller-runtime/pkg/source"
 	mcsv1alpha1 "sigs.k8s.io/mcs-api/pkg/apis/v1alpha1"
 )
 
@@ -67,6 +71,7 @@ func Setup(mgr ctrl.Manager, opts Options) error {
 		r.Client = mgr.GetClient()
 		return ctrl.NewControllerManagedBy(mgr).
 			For(&networkingv1.ServiceCIDR{}).
+			WatchesRawSource(source.Channel(initialReconcile(), &handler.EnqueueRequestForObject{})).
 			Named("servicerange").
 			WithOptions(ctrlqueue.Options()).
 			Complete(r)
@@ -81,6 +86,23 @@ func Setup(mgr ctrl.Manager, opts Options) error {
 			WithOptions(ctrlqueue.Options()).
 			Complete(r)
 	}, opts)
+}
+
+// initialReconcile returns a source holding exactly one event, so the
+// ServiceCIDR reconciler runs once after its cache syncs even when there is no
+// ServiceCIDR object to trigger it, and the range is decided (as none).
+//
+// The xDS server holds its first serve until the sink's first delivery
+// (cache.ServiceRangeDelivered), and a surge standby waits for it with no
+// bound: a cluster that serves the API with no object in it would otherwise
+// never deliver. Going through the controller's own workqueue, rather than
+// calling Reconcile from a side goroutine, keeps the re-lists serialized, as
+// capture.initialProjection does. Reconcile ignores the request, so the
+// object only has to be a valid key.
+func initialReconcile() <-chan event.GenericEvent {
+	ch := make(chan event.GenericEvent, 1)
+	ch <- event.GenericEvent{Object: &networkingv1.ServiceCIDR{ObjectMeta: metav1.ObjectMeta{Name: "aether-initial-service-range"}}}
+	return ch
 }
 
 // serviceImportGVK is the MCS ServiceImport, whose CRD gates the import half.
@@ -191,6 +213,10 @@ type state struct {
 	warned bool
 	// cidrs is the ServiceCIDR part (the objects or the override), canonical.
 	cidrs []netip.Prefix
+	// cidrsDecided is set by the first setCIDRs. Nothing reaches the sink
+	// before it: the first delivery opens the xDS server's first serve, and
+	// must carry the Service range, not a set of ClusterSetIPs alone.
+	cidrsDecided bool
 	// clusterSetIPs are the IPv4 ClusterSetIPs of the ServiceImports, sorted
 	// and deduplicated, whether or not cidrs covers them.
 	clusterSetIPs []netip.Addr
@@ -221,6 +247,7 @@ func (s *state) setCIDRs(ctx context.Context, sink Sink, ranges []netip.Prefix, 
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.cidrs = ranges
+	s.cidrsDecided = true
 	s.flushLocked(sink)
 
 	if len(ranges) > 0 {
@@ -251,11 +278,15 @@ func (s *state) setClusterSetIPs(ctx context.Context, sink Sink, ips []netip.Add
 	s.flushLocked(sink)
 }
 
-// flushLocked hands the sink the combined range, unless it is the set the sink
-// already has. The first call always hands it one, nil included, so the sink
-// learns that no range is known. Called with mu held, so two reconcilers never
-// deliver out of order.
+// flushLocked hands the sink the combined range, unless the ServiceCIDR part
+// is not decided yet or it is the set the sink already has. The first call
+// after the ServiceCIDR part is decided always hands it one, nil included, so
+// the sink learns that no range is known. Called with mu held, so two
+// reconcilers never deliver out of order.
 func (s *state) flushLocked(sink Sink) {
+	if !s.cidrsDecided {
+		return
+	}
 	set := Combine(s.cidrs, s.clusterSetIPs)
 	if s.published && slices.Equal(set, s.last) {
 		return
