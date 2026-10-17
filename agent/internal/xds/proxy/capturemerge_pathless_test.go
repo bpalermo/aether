@@ -9,7 +9,6 @@ import (
 
 	"aethermesh.dev/agent/test/xdseval"
 	routev3 "github.com/envoyproxy/go-control-plane/envoy/config/route/v3"
-	typematcherv3 "github.com/envoyproxy/go-control-plane/envoy/type/matcher/v3"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/protobuf/proto"
@@ -18,16 +17,16 @@ import (
 // TestMergeCaptureRouteTables_APathlessRequestNeverTakesTheOtherPortsBlock:
 // the dialled port's table answers "a.ns.mesh" and "a.ns.mesh:8080" with
 // "/"-prefixed routes only, and cap_http_other answers the name (any port)
-// with a regex rule. A CONNECT with no path dialled to 8080 gets no route
+// with a CONNECT route. A CONNECT with no path dialled to 8080 gets no route
 // from its own table; compiled, it falls out of the 8080 block into the other
-// ports' block, which matches no dialled port, and took the regex rule there
+// ports' block, which matches no dialled port, and took the CONNECT route there
 // (adversarial review of the change). Dialled to a port with no block of its
 // own, it still takes it, and a request with a path is answered as before.
 func TestMergeCaptureRouteTables_APathlessRequestNeverTakesTheOtherPortsBlock(t *testing.T) {
 	const mesh = "a.ns.mesh"
 	rule := &routev3.Route{
-		Match:  &routev3.RouteMatch{PathSpecifier: &routev3.RouteMatch_SafeRegex{SafeRegex: &typematcherv3.RegexMatcher{Regex: ".*"}}},
-		Action: &routev3.Route_Route{Route: &routev3.RouteAction{ClusterSpecifier: &routev3.RouteAction_Cluster{Cluster: "other-by-regex"}}},
+		Match:  &routev3.RouteMatch{PathSpecifier: &routev3.RouteMatch_ConnectMatcher_{ConnectMatcher: &routev3.RouteMatch_ConnectMatcher{}}},
+		Action: &routev3.Route_Route{Route: &routev3.RouteAction{ClusterSpecifier: &routev3.RouteAction_Cluster{Cluster: "other-by-connect"}}},
 	}
 	routed := BuildServiceVirtualHost(mesh+"|8080", mesh+":8080", []string{mesh, mesh + ":8080"}, nil)
 	perPort := map[uint32]*routev3.RouteConfiguration{
@@ -54,7 +53,7 @@ func TestMergeCaptureRouteTables_APathlessRequestNeverTakesTheOtherPortsBlock(t 
 	hosts := []string{mesh, mesh + ":8080", mesh + ":9090", "A.NS.MESH:8080"}
 	// Every dialled port but none: a connection with no dialled port gets no
 	// route for a request with no path, where cap_http_other's table gives
-	// the regex rule (closeToPathlessOfPorts says why), so "" is held with a
+	// the CONNECT route (closeToPathlessOfPorts says why), so "" is held with a
 	// path only.
 	assert.Empty(t, mergeMismatches(t, merged, perPort, other, hosts, []string{"8080", "80", "808", "80800", "9090", "1"}, []string{""}, "/", "/x", ""))
 	assert.Empty(t, mergeMismatches(t, merged, perPort, other, hosts, []string{""}, []string{""}, "/", "/x"))

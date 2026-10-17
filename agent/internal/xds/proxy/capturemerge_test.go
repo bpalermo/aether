@@ -9,7 +9,6 @@ import (
 	corev3 "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
 	routev3 "github.com/envoyproxy/go-control-plane/envoy/config/route/v3"
 	header_mutationv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/http/header_mutation/v3"
-	typematcherv3 "github.com/envoyproxy/go-control-plane/envoy/type/matcher/v3"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/protobuf/proto"
@@ -349,15 +348,15 @@ func TestMergeCaptureRouteTables_AWildcardOnlyPortIsAnsweredByTheWildcard(t *tes
 // TestMergeCaptureRouteTables_APathlessRequestNeverTakesAnotherNamesRoutes: a
 // request with no path (a CONNECT without one) matches no "/"-prefixed route,
 // so it falls out of its own name's routes. When the largest class of names
-// answers with a route that can take it (a regex path), that class is
+// answers with a route that can take it (a CONNECT matcher), that class is
 // conditioned on its names too: the request gets what its own table gives it
 // (here no route), never another name's answer. Port 8080's table answers
-// "a.ns.mesh" with a refusal and its other names with a regex rule.
+// "a.ns.mesh" with a refusal and its other names with a CONNECT route.
 func TestMergeCaptureRouteTables_APathlessRequestNeverTakesAnotherNamesRoutes(t *testing.T) {
 	const mesh = "a.ns.mesh"
 	rule := &routev3.Route{
-		Match:  &routev3.RouteMatch{PathSpecifier: &routev3.RouteMatch_SafeRegex{SafeRegex: &typematcherv3.RegexMatcher{Regex: ".*"}}},
-		Action: &routev3.Route_Route{Route: &routev3.RouteAction{ClusterSpecifier: &routev3.RouteAction_Cluster{Cluster: "by-regex"}}},
+		Match:  &routev3.RouteMatch{PathSpecifier: &routev3.RouteMatch_ConnectMatcher_{ConnectMatcher: &routev3.RouteMatch_ConnectMatcher{}}},
+		Action: &routev3.Route_Route{Route: &routev3.RouteAction{ClusterSpecifier: &routev3.RouteAction_Cluster{Cluster: "by-connect"}}},
 	}
 	routed := BuildServiceVirtualHost(mesh+"|8080", mesh+":8080", []string{"a.ns", "a.ns:8080", "a.ns.svc", "a.ns.svc:8080"}, nil)
 	routed.Routes = append([]*routev3.Route{rule}, routed.Routes...)
@@ -395,14 +394,14 @@ func TestMergeCaptureRouteTables_APathlessRequestNeverTakesAnotherNamesRoutes(t 
 // the same fall-through as above, between the answers one name gets by the
 // port in its Host. Port 8080's table answers "a.ns.mesh:8080" with
 // "/"-prefixed routes only, and the name's other spellings (the default
-// answer, the one most suffixes get, or the one of ":*") with a regex rule. A
+// answer, the one most suffixes get, or the one of ":*") with a CONNECT route. A
 // CONNECT to "a.ns.mesh:8080" without a path gets no route from that table,
-// and must get none compiled, never the regex rule of the default.
+// and must get none compiled, never the CONNECT route of the default.
 func TestMergeCaptureRouteTables_APathlessRequestNeverTakesAnotherPortsAnswer(t *testing.T) {
 	const mesh = "a.ns.mesh"
 	rule := &routev3.Route{
-		Match:  &routev3.RouteMatch{PathSpecifier: &routev3.RouteMatch_SafeRegex{SafeRegex: &typematcherv3.RegexMatcher{Regex: ".*"}}},
-		Action: &routev3.Route_Route{Route: &routev3.RouteAction{ClusterSpecifier: &routev3.RouteAction_Cluster{Cluster: "by-regex"}}},
+		Match:  &routev3.RouteMatch{PathSpecifier: &routev3.RouteMatch_ConnectMatcher_{ConnectMatcher: &routev3.RouteMatch_ConnectMatcher{}}},
+		Action: &routev3.Route_Route{Route: &routev3.RouteAction{ClusterSpecifier: &routev3.RouteAction_Cluster{Cluster: "by-connect"}}},
 	}
 	for name, otherDoms := range map[string][]string{
 		"the default most suffixes get": {mesh, mesh + ":9090", mesh + ":7070"},

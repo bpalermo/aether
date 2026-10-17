@@ -819,13 +819,17 @@ func prefixTrie(values []string) (set map[string]bool, next map[string]map[byte]
 	return set, next
 }
 
-// takesAPathlessRequest: the route's path match can take a request with an
-// empty path (a regex, an empty prefix, a CONNECT matcher, a path-match
-// extension). A non-empty prefix, an exact path and a separated prefix
-// cannot. Conservative: a regex that never matches "" counts.
+// takesAPathlessRequest: the route can take a request with no :path, which
+// only a CONNECT matcher route does. The proxy skips every other route when
+// :path is absent (VirtualHostImpl::getRouteFromRoutes,
+// source/common/router/config_impl.cc; ConnectRouteEntryImpl is the only
+// route entry that supports pathless headers), a regex or an empty prefix
+// included. No route the agent builds is one today, so the guards that ask
+// this (flatBlock, defaultBlock, closeToPathlessOfPorts) add nothing to its
+// tables; they keep a CONNECT route, should one be built, from answering
+// another name's or another port's request.
 func takesAPathlessRequest(r *routev3.Route) bool {
-	m := r.GetMatch()
-	return m.GetPrefix() == "" && m.GetPath() == "" && m.GetPathSeparatedPrefix() == ""
+	return r.GetMatch().GetConnectMatcher() != nil
 }
 
 // nameBlock is one name's own answers as routes under conds and a condition

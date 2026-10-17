@@ -10,7 +10,6 @@ import (
 	bootstrapv3 "github.com/envoyproxy/go-control-plane/envoy/config/bootstrap/v3"
 	listenerv3 "github.com/envoyproxy/go-control-plane/envoy/config/listener/v3"
 	routev3 "github.com/envoyproxy/go-control-plane/envoy/config/route/v3"
-	typematcherv3 "github.com/envoyproxy/go-control-plane/envoy/type/matcher/v3"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/protobuf/encoding/protojson"
 	"google.golang.org/protobuf/proto"
@@ -32,11 +31,11 @@ func pathlessBudgetPorts(n int) []int {
 	return out
 }
 
-// pathlessRegexRule is a GAMMA RegularExpression path match: a route that can
-// take a request with no path.
-func pathlessRegexRule(cluster string) *routev3.Route {
+// pathlessConnectRule is a CONNECT matcher route: the one route that can
+// take a request with no path (no route the agent builds is one today).
+func pathlessConnectRule(cluster string) *routev3.Route {
 	return &routev3.Route{
-		Match:  &routev3.RouteMatch{PathSpecifier: &routev3.RouteMatch_SafeRegex{SafeRegex: &typematcherv3.RegexMatcher{Regex: "/api/.*"}}},
+		Match:  &routev3.RouteMatch{PathSpecifier: &routev3.RouteMatch_ConnectMatcher_{ConnectMatcher: &routev3.RouteMatch_ConnectMatcher{}}},
 		Action: &routev3.Route_Route{Route: &routev3.RouteAction{ClusterSpecifier: &routev3.RouteAction_Cluster{Cluster: cluster}}},
 	}
 }
@@ -65,7 +64,7 @@ func lastLines(s string, n int) string {
 
 // TestCaptureTable_InvertedSuffixConditionsFitTheProxysBudget: one service
 // with n HTTP ports in the proxy port's shape (the port in Host decides),
-// each port's virtual host with a regex path rule, so the default port answer
+// each port's virtual host with a CONNECT route, so the default port answer
 // is conditioned on the Host's suffix being none of the other answers'. One
 // inverted regex over every other answer's suffixes was refused by the proxy
 // from about two dozen ports (adversarial review of the change); one inverted
@@ -80,7 +79,7 @@ func TestCaptureTable_InvertedSuffixConditionsFitTheProxysBudget(t *testing.T) {
 				doms = append(doms, mesh)
 			}
 			vh := proxy.BuildServiceVirtualHost(mesh+"|"+strconv.Itoa(p), mesh+":"+strconv.Itoa(p), doms, nil)
-			vh.Routes = append([]*routev3.Route{pathlessRegexRule("by-regex")}, vh.Routes...)
+			vh.Routes = append([]*routev3.Route{pathlessConnectRule("by-connect")}, vh.Routes...)
 			vhs = append(vhs, vh)
 		}
 		perPort := map[uint32]*routev3.RouteConfiguration{
@@ -108,7 +107,7 @@ func TestCaptureTable_InvertedSuffixConditionsFitTheProxysBudget(t *testing.T) {
 
 // TestCaptureTable_DialledPortComplementFitsTheProxysBudget: a service
 // declared on n dialled ports whose tables answer it with "/"-prefixed routes
-// only, while cap_http_other answers it with a regex rule. The other ports'
+// only, while cap_http_other answers it with a CONNECT route. The other ports'
 // block then takes a request with no path only when its dialled port is none
 // of the n, by one small regex per piece of that complement.
 func TestCaptureTable_DialledPortComplementFitsTheProxysBudget(t *testing.T) {
@@ -120,7 +119,7 @@ func TestCaptureTable_DialledPortComplementFitsTheProxysBudget(t *testing.T) {
 			perPort[uint32(p)] = proxy.BuildCaptureRouteConfiguration(proxy.CaptureHTTPRouteName(uint32(p)), []*routev3.VirtualHost{vh}, proxy.BuildCaptureCatchAllVirtualHost("mesh", uint32(p), false, true), nil)
 		}
 		otherVH := proxy.BuildServiceVirtualHost(mesh+"|other", mesh, []string{mesh, mesh + ":*"}, nil)
-		otherVH.Routes = append([]*routev3.Route{pathlessRegexRule("other-by-regex")}, otherVH.Routes...)
+		otherVH.Routes = append([]*routev3.Route{pathlessConnectRule("other-by-connect")}, otherVH.Routes...)
 		other := proxy.BuildCaptureRouteConfiguration(proxy.CaptureHTTPOtherRouteName, []*routev3.VirtualHost{otherVH}, proxy.BuildCaptureCatchAllVirtualHost("mesh", 0, false, true), nil)
 		merged, err := proxy.MergeCaptureRouteTables(proxy.CaptureHTTPChainName, perPort, other)
 		require.NoError(t, err)
@@ -134,7 +133,7 @@ func TestCaptureTable_DialledPortComplementFitsTheProxysBudget(t *testing.T) {
 				}
 			}
 		}
-		require.Positive(t, pieces, "ports=%d: the other ports' regex rule is conditioned on the dialled port", n)
+		require.Positive(t, pieces, "ports=%d: the other ports' CONNECT route is conditioned on the dialled port", n)
 		if out, err := validateTable(t, merged); err != nil {
 			t.Errorf("ports=%d: the pinned proxy refuses the compiled cap_http:\n%s", n, lastLines(out, 4))
 		}
