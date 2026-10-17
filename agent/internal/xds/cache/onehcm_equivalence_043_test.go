@@ -294,14 +294,18 @@ func TestOneHCM_EquivalenceCheckSeesAWrongCompiledTable(t *testing.T) {
 		vh.Routes = slices.Delete(vh.Routes, i, i+1)
 		return true
 	})
-	mutate("the proxy port's block loses the name condition (its other names answered as the mesh name)", func(rc *routev3.RouteConfiguration) bool {
+	// Since chart 3.0.3 the proxy port's table answers a service's Kubernetes
+	// names as its mesh name, so they are one class of names and its block
+	// has no name condition to lose (through chart 3.0.2 this mutation took
+	// it away). It tells the ports in Host apart by suffix, as every block.
+	mutate("the proxy port's block loses the port condition (every port in Host answered as one)", func(rc *routev3.RouteConfiguration) bool {
 		changed := false
 		for _, r := range vhost(rc, multi).GetRoutes() {
 			if dialled(r) != proxyPort {
 				continue
 			}
 			kept := slices.DeleteFunc(slices.Clone(r.GetMatch().GetHeaders()), func(h *routev3.HeaderMatcher) bool {
-				return h.GetName() == ":authority" && (h.GetStringMatch().GetPrefix() != "" || h.GetStringMatch().GetExact() != "")
+				return h.GetName() == ":authority"
 			})
 			if len(kept) != len(r.GetMatch().GetHeaders()) {
 				r.Match.Headers = kept

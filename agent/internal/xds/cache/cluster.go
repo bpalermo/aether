@@ -116,6 +116,12 @@ func (c *SnapshotCache) clustersEndpointsVhostsAndPinsInto(buf []entryClass, mtl
 	c.depMu.RUnlock()
 	rules := ruleInputs{routes: c.serviceRoutesSnapshot(), chainFilters: c.serviceChainFiltersSnapshot(), portMaps: c.servicePortMapsSnapshot(), declared: c.declaredByService()}
 	c.refreshEntryVhosts(ruleGen, rules)
+	// The Kubernetes names the loopback virtual hosts claim beside the mesh
+	// name; captureMu is taken and released before clusterMu.
+	var kube map[string][]string
+	if !c.edge {
+		kube = c.kubernetesNames(rules.routes)
+	}
 
 	c.clusterMu.RLock()
 	defer c.clusterMu.RUnlock()
@@ -165,6 +171,11 @@ func (c *SnapshotCache) clustersEndpointsVhostsAndPinsInto(buf []entryClass, mtl
 	// what their ports are: routed and refused by those ports, like a
 	// service it knows.
 	vhosts = append(vhosts, c.outboundDeclaredVhostsLocked(rules)...)
+	// Every one of them answers a service's Kubernetes names as its mesh
+	// name. Here, once, and not in out_http's builder: the proxy port's table
+	// on the captured path is built from these same virtual hosts
+	// (proxyPortCaptureTable), so the two cannot disagree.
+	vhosts = withKubernetesNames(vhosts, kube)
 	c.noteQUICFanout(quicClusters, len(quic.pairs), len(quic.identities), len(quic.awaitingCert))
 	sortResourcesByName(clusters)
 	sortResourcesByName(clas)

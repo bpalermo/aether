@@ -623,7 +623,7 @@ What the compiler had to learn. Until then every per-port table answered all
 the names of one compiled virtual host alike for one suffix (`<name>`,
 `<name>:<P>`, `<name>:*`), so a route told suffixes apart by a small
 `:authority` regex and nothing else, and a group whose names disagreed was
-refused. The proxy port's table does not: it knows a service by its mesh
+refused. The proxy port's table did not (through chart 3.0.2): it knew a service by its mesh
 name only, so for the same suffix the mesh name gets the service and its
 `cluster.local` and namespace names get the floor. The compiler now
 partitions a group's names, per dialled port, into classes a suffix-only
@@ -663,7 +663,7 @@ service-wide filter and rules (`cache/onehcm_equivalence_043_test.go`,
 walks included); the listener's shape (one connection manager, no
 `cap_http_18081` anywhere in the snapshot); the agent's listener and table
 under `envoy --mode validate`; and the live probe through the pinned proxy
-(`mtlspool/onehcm_probe_test.go`, X1-X9).
+(`mtlspool/onehcm_probe_test.go`, X1-X9; X10 since chart 3.0.3).
 
 The worked example (200 services, HTTP on 80, 8080 and 9090, 20 raw-TCP
 ports beside an HTTP declared port, 50 pods), measured: 21 chains per pod
@@ -676,6 +676,77 @@ TLS carrying a TLSRoute's server name to a port the service itself serves as
 HTTP (or to 18081, when it serves any HTTP) leaves through the passthrough,
 as it did with the per-port chains: the tree does not test the server name on
 those ports. That is the owner's ruling for this change, kept from 3.0.0.
+
+A request with no path (a `CONNECT` without `:path`) matches no `/`-prefixed
+route, so it falls out of its own answer's routes when they are all
+`/`-prefixed. Two guards keep it from taking another answer's route that
+can take it (a regex path, an empty prefix, a `CONNECT` matcher): between
+name classes, the largest class is name-conditioned too (chart 3.0.2); within
+a class, the default port answer is conditioned on the Host's suffix being
+none of the other answers' (an inverted `:authority` regex, chart 3.0.3). Its
+own per-port table gives it no route, and neither does the compiled one.
+
+#### Kubernetes names on the proxy port (chart 3.0.3)
+
+Through chart 3.0.2 the proxy port answered a service by its mesh name only.
+On the reference cluster, from a meshed pod,
+`Host: <svc>.<ns>.svc.cluster.local:8080` sent to `<mesh name>:18081`
+answered 503 (the passthrough), where `<svc>.<ns>.<mesh domain>:8080`
+answered 200. The owner's decision: the proxy port answers the Kubernetes
+names exactly as the mesh name.
+
+- *Where.* The loopback table's virtual hosts claim, for every domain
+  `<mesh name><suffix>`, the service's Kubernetes names with the same suffix
+  (`withKubernetesNames`, applied once where the snapshot build assembles
+  them). `out_http` and the proxy port's block of `cap_http` are both built
+  from those virtual hosts, so they cannot disagree.
+- *Which names.* The ones a dial honors (`addressNames`, which the dialled
+  ports' tables use as well): `<svc>.<ns>.svc.cluster.local`, `<svc>.<ns>.svc`
+  and `<svc>.<ns>`, for a service whose Service the mesh generated or that a
+  route names. The short name keeps its own virtual host (by the caller's
+  namespace), as before.
+- *Ports.* A generated Service's ports are the mesh ports: `<k8s name>:<P>`
+  is port `P`'s answer, and a name without a port is the mesh name's (port
+  80, or `421 port-not-declared`). A user's Service with a known port map: the
+  port in `Host` is the Service's port, translated through the map, exactly
+  as on a dial (the mesh name's domains already spell the Service's ports).
+- *Unanswered.* A mesh service behind a user's Service that no route names
+  (`meshOnly`) keeps its Kubernetes names unanswered on the proxy port: they
+  get the floor, as on a dial (owner's decision). So does a service the node
+  holds no endpoint of and knows no ports of: its mesh name is parked for the
+  cluster it spells, and a Kubernetes name spells none, so its Kubernetes
+  names get the floor until the node knows the ports.
+- *One class.* In the proxy port's block of `cap_http` a service's mesh and
+  Kubernetes names now get the same answer for every suffix. They fall into
+  one name class (`nameClasses`) and need no name condition, so `cap_http`
+  shrinks.
+
+Measured with the unit-test harness: services with HTTP on 8080 and 9090,
+generated Services, redirect-all, one run each, chart 3.0.3 against the
+compiler of chart 3.0.3 without this change.
+
+| services | `cap_http` | `out_http` | `out_http` domains | `cap_http` compile |
+|---|---|---|---|---|
+| 60 | 1,027,794 → 953,014 bytes (−7.3%) | 518,985 → 535,665 bytes (+3.2%) | 481 → 1,201 | 128 → 145 ms |
+| 2,000 | 34,366,034 → 31,860,474 bytes (−7.3%) | 17,390,785 → 17,985,465 bytes (+3.4%) | 16,001 → 40,001 | 2.49 → 2.46 s |
+
+The compile times include the constant-time wildcard lookup of chart 3.0.3
+(`mergeTable.pick`), which took the 2,000-service compile from 25.2 s to
+2.49 s, byte-identical output.
+
+Gates, each seen red first: on both tables, every Kubernetes name of every
+fixture service with every port suffix (`:8080`, none, `:18081`, an undeclared
+port, mixed case) answers as the mesh name (`cache/proxyport_kubernetes_names_043_test.go`);
+`<svc>.<ns>.svc.cluster.local:8080` reaches port 8080; a user's Service's
+`:8000` reaches pod port 8080 and its `:8080` is refused; `meshOnly` names
+get the floor; and every published table claims each domain once with no
+claim dropped. The fold's equivalence oracle (the proxy port's block against
+the proxy port's own table) stays green, with its mutation on the name
+condition replaced by one on the port condition. Through the pinned proxy,
+a dial to 18081 with the `cluster.local` name reaches the service's port, in
+upper case too (`mtlspool/onehcm_probe_test.go`, X7 and X10; X7 expected the
+passthrough through chart 3.0.2). `envoy --mode validate` accepts the agent's
+tables; the per-port fixture keeps the name-conditioned shape in front of it.
 
 #### The chains of a capture listener
 

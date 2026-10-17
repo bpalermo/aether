@@ -541,7 +541,10 @@ func ohCases(p *ohPorts) []ohCase {
 			ohCase{id: "X4 the proxy port, Host names the proxy port", send: func() string { return ohHTTP1(ohLocal, 18081, a+":18081") }, want: undeclared},
 			ohCase{id: "X5 the proxy port, port-less Host", send: func() string { return ohHTTP1(ohLocal, 18081, a) }, want: "x-aether-error: port-required"},
 			ohCase{id: "X6 the proxy port, a Host that is no mesh name", send: func() string { return ohHTTP1(ohLocal, 18081, "example.com") }, want: "PASSTHROUGH"},
-			ohCase{id: "X7 the proxy port, the cluster.local name (not the loopback table's)", send: func() string { return ohHTTP1(ohLocal, 18081, fmt.Sprintf("%s:%d", aKube, p.a)) }, want: "PASSTHROUGH"},
+			// The Kubernetes names are answered as the mesh name (chart
+			// 3.0.3; through 3.0.2 they passed through here).
+			ohCase{id: "X7 the proxy port, the cluster.local name", send: func() string { return ohHTTP1(ohLocal, 18081, fmt.Sprintf("%s:%d", aKube, p.a)) }, want: aDefault},
+			ohCase{id: "X10 the proxy port, the cluster.local name in upper case, a's other port", send: func() string { return ohHTTP1(ohLocal, 18081, fmt.Sprintf("%s:%d", strings.ToUpper(aKube), p.a2)) }, want: a2},
 			ohCase{id: "X8 the proxy port, the short name of the caller's namespace", send: func() string { return ohHTTP1(ohLocal, 18081, fmt.Sprintf("a:%d", p.a)) }, want: aDefault},
 			ohCase{id: "X9 the proxy port, h2c", send: func() string { return ohH2C(ohLocal, 18081, fmt.Sprintf("%s:%d", a, p.a2)) }, want: a2},
 		)

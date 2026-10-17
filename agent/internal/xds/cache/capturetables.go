@@ -16,6 +16,8 @@ import (
 	"aethermesh.dev/common/serviceref"
 	routev3 "github.com/envoyproxy/go-control-plane/envoy/config/route/v3"
 	"github.com/envoyproxy/go-control-plane/pkg/cache/types"
+	"google.golang.org/protobuf/proto"
+	"google.golang.org/protobuf/reflect/protoreflect"
 )
 
 // This file builds what proposal 043 calls "the addressing rule" on the
@@ -1062,10 +1064,6 @@ func (c *SnapshotCache) captureTableInputsFor(deps map[string]struct{}, quicArms
 		if !ok {
 			continue
 		}
-		fqdn, generated := authorities[svc]
-		if !generated {
-			fqdn = ref.ClusterLocalFQDN()
-		}
 		n := meshName{
 			svc:         svc,
 			mesh:        proxy.ServiceClusterName(svc, c.meshDomain),
@@ -1074,14 +1072,168 @@ func (c *SnapshotCache) captureTableInputsFor(deps map[string]struct{}, quicArms
 			arms:        quicArms[svc],
 		}
 		n.portMap, n.mapped = in.rules.portMaps[svc]
-		if _, routed := in.rules.routes[svc]; generated || routed {
-			n.names = serviceNames(ref, fqdn, n.mesh)
-		} else {
-			n.names, n.only = []string{n.mesh}, true
-		}
+		n.names, n.only = addressNames(ref, svc, n.mesh, authorities, in.rules.routes)
 		in.names = append(in.names, n)
 	}
 	return in
+}
+
+// addressNames returns the names service svc (ref) is addressed by
+// (serviceNames), and only true when that is its mesh name alone
+// (meshName.meshOnly). Its Kubernetes names are the mesh's when the mesh
+// generated its Service (authorities has it) or a route names it (the agent
+// then has the port map of the user's Service that owns them). Otherwise a
+// user's Service owns them, or no Service was seen yet, and they are not the
+// mesh's to answer. The dialled ports' tables and the proxy port's
+// (kubernetesNames) both ask this one function, so they cannot disagree about
+// a name.
+func addressNames(ref serviceref.ServiceRef, svc, mesh string, authorities map[string]string, routes map[string][]proxy.GammaRoute) (names []string, only bool) {
+	fqdn, generated := authorities[svc]
+	if !generated {
+		fqdn = ref.ClusterLocalFQDN()
+	}
+	if _, routed := routes[svc]; generated || routed {
+		return serviceNames(ref, fqdn, mesh), false
+	}
+	return []string{mesh}, true
+}
+
+// kubernetesNames returns, per mesh name ("<svc>.<ns>.<meshDomain>"), the
+// service's other names (addressNames without the mesh name: its
+// cluster.local, "<svc>.<ns>.svc" and "<svc>.<ns>" names), for every service
+// whose Kubernetes names are the mesh's. The loopback table's virtual hosts
+// claim them beside the mesh name (withKubernetesNames). routes are the
+// services' GAMMA rules (ruleInputs.routes).
+func (c *SnapshotCache) kubernetesNames(routes map[string][]proxy.GammaRoute) map[string][]string {
+	c.captureMu.RLock()
+	authorities := c.captureAuthorities
+	c.captureMu.RUnlock()
+	out := make(map[string][]string, len(authorities)+len(routes))
+	add := func(svc string) {
+		ref, ok := serviceref.ParseKey(svc)
+		mesh := proxy.ServiceClusterName(svc, c.meshDomain)
+		if !ok || mesh == "" {
+			return
+		}
+		names, only := addressNames(ref, svc, mesh, authorities, routes)
+		if only {
+			return
+		}
+		if kube := slices.DeleteFunc(names, func(n string) bool { return n == mesh }); len(kube) > 0 {
+			out[mesh] = kube
+		}
+	}
+	for svc := range authorities {
+		add(svc)
+	}
+	for svc := range routes {
+		add(svc)
+	}
+	return out
+}
+
+// withKubernetesNames makes each of vhosts (the loopback table's) claim, for
+// every domain "<mesh name><suffix>" it claims, the service's Kubernetes names
+// with the same suffix (kube, from kubernetesNames): on the loopback listener
+// and on a captured dial to the HTTP proxy port, a Kubernetes name is
+// answered exactly as the mesh name, by the port in Host. The mesh name's
+// domains of a service behind a user's Service already spell that Service's
+// ports (outboundPortVhostLocked), so its Kubernetes names do too. A service
+// one of whose virtual hosts names its cluster by the authority keeps the
+// mesh name alone on every one of them (namesClusterByAuthority).
+//
+// No virtual host is changed: one that gains domains is replaced by a copy
+// that shares its routes (the cluster entries' virtual hosts are reused
+// across snapshots, #1115).
+func withKubernetesNames(vhosts []*routev3.VirtualHost, kube map[string][]string) []*routev3.VirtualHost {
+	if len(kube) == 0 {
+		return vhosts
+	}
+	cold := map[string]bool{}
+	for _, vh := range vhosts {
+		if namesClusterByAuthority(vh) {
+			for _, d := range vh.GetDomains() {
+				name, _, _ := strings.Cut(d, ":")
+				cold[name] = true
+			}
+		}
+	}
+	for i, vh := range vhosts {
+		if doms := kubernetesDomains(vh.GetDomains(), kube, cold); doms != nil {
+			vhosts[i] = withDomains(vh, doms)
+		}
+	}
+	return vhosts
+}
+
+// kubernetesDomains returns doms with the Kubernetes names of each mesh name
+// in kube (and not in cold) added with its suffix, or nil when none is added.
+func kubernetesDomains(doms []string, kube map[string][]string, cold map[string]bool) []string {
+	var out []string
+	for _, d := range doms {
+		name, suffix := d, ""
+		if j := strings.IndexByte(d, ':'); j >= 0 {
+			name, suffix = d[:j], d[j:]
+		}
+		names, ok := kube[name]
+		if !ok || cold[name] {
+			continue
+		}
+		if out == nil {
+			out = slices.Clone(doms)
+		}
+		for _, k := range names {
+			if !slices.Contains(out, k+suffix) {
+				out = append(out, k+suffix)
+			}
+		}
+	}
+	return out
+}
+
+// namesClusterByAuthority reports whether a route of vh names its cluster by
+// the request's authority (the on-demand route of a service the node holds no
+// cluster of and does not know the ports of, BuildOnDemandServiceVirtualHost).
+// Such a route asks for the cluster the Host spells: "<mesh name>:<port>" is
+// one, a Kubernetes name is none, and a request would be parked for a cluster
+// that never comes. Its Kubernetes names are left to the floor until the node
+// knows the service's ports and the virtual host names its clusters.
+func namesClusterByAuthority(vh *routev3.VirtualHost) bool {
+	for _, r := range vh.GetRoutes() {
+		if r.GetRoute().GetClusterHeader() != "" {
+			return true
+		}
+	}
+	return false
+}
+
+// withDomains returns vh with domains doms, as a new virtual host that shares
+// every other field of vh. A loopback virtual host sets its name, domains,
+// routes or matcher, and per-filter config (the capture compiler refuses
+// anything else, MergeCaptureRouteTables); one that sets more is deep-copied,
+// so nothing it sets is lost.
+func withDomains(vh *routev3.VirtualHost, doms []string) *routev3.VirtualHost {
+	plain := true
+	vh.ProtoReflect().Range(func(fd protoreflect.FieldDescriptor, _ protoreflect.Value) bool {
+		switch fd.Name() {
+		case "name", "domains", "routes", "matcher", "typed_per_filter_config":
+			return true
+		}
+		plain = false
+		return false
+	})
+	if !plain {
+		c := proto.Clone(vh).(*routev3.VirtualHost)
+		c.Domains = doms
+		return c
+	}
+	return &routev3.VirtualHost{
+		Name:                 vh.GetName(),
+		Domains:              doms,
+		Routes:               vh.GetRoutes(),
+		Matcher:              vh.GetMatcher(),
+		TypedPerFilterConfig: vh.GetTypedPerFilterConfig(),
+	}
 }
 
 // serviceNames returns every authority, without a port, a client can address

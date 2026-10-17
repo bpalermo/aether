@@ -5083,6 +5083,29 @@ gone, in whichever order the listener and the route table updates arrive. A
 rollback to 3.0.1 is the same in reverse: the chain comes back with its table
 in one snapshot.
 
+#### Chart 3.0.3: the HTTP proxy port answers Kubernetes names
+
+The mesh's HTTP proxy port (`127.0.0.1:18081`, `http_proxy`, or a captured
+dial to `<name>:18081`) answers a service's Kubernetes names
+(`<svc>.<ns>.svc.cluster.local`, `<svc>.<ns>.svc`, `<svc>.<ns>`) exactly as
+its mesh name `<svc>.<ns>.<meshDomain>`, by the port in `Host`. Through chart
+3.0.2 it answered the mesh name only: `Host: <svc>.<ns>.svc.cluster.local:8080`
+got the floor (the passthrough on a captured dial to 18081, 404 on the
+loopback listener). Proposal 043, "Kubernetes names on the proxy port", has
+the design, the gates and the sizes.
+
+- A Service the mesh generated: its ports are the mesh ports. A user's
+  Service that a route names: the port in `Host` is the Service's port,
+  through its port map, as on a dial.
+- Not answered, as on a dial: the Kubernetes names of a mesh service behind a
+  user's Service that no route names. Also not answered: those of a service
+  this node holds no endpoint of and knows no ports of, until it does. Its
+  mesh name is answered on demand in the meantime.
+- Rolling: each node's agent changes `out_http` and `cap_http` in one
+  snapshot. A client that sends a Kubernetes name to 18081 is answered by the
+  service on an upgraded node and gets the floor on a node not yet upgraded.
+  A rollback to 3.0.2 brings the floor back.
+
 #### Prober chart 1.1.1: targets name a declared port (proposal 043)
 
 Deploy prober chart **1.1.1 before** `aether` chart 3.0.0. It works against

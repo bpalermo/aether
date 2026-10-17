@@ -427,10 +427,13 @@ func TestPerPort_ColdService_EveryNameOnARealPortTable(t *testing.T) {
 		assert.Equalf(t, "cluster", got.kind, "%s, Host %s: %s", tc.table, tc.host, got)
 		assert.Equalf(t, eighty+":80", got.cluster, "%s, Host %s", tc.table, tc.host)
 	}
-	// The proxy port serves mesh names only: a Kubernetes name there is not
-	// the mesh's, cold or warm.
+	// The proxy port answers a Kubernetes name as the mesh name (since chart
+	// 3.0.3; through 3.0.2 it passed through): ":18081" is a port of no
+	// service, refused.
 	got := spResolve(t, tables["cap_http_18081"], "multi.demo.svc.cluster.local:18081")
-	assert.Equal(t, "passthrough", got.kind, got.String())
+	want := spResolve(t, tables["cap_http_18081"], "multi.demo."+a043Mesh+":18081")
+	assert.Equal(t, want.String(), got.String())
+	assert.Equal(t, "refuse", got.kind, got.String())
 }
 
 // 2. A service with a service-wide filter and endpoints, whose generated

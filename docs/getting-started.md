@@ -529,7 +529,8 @@ export NO_PROXY=localhost,127.0.0.1,.svc,.cluster.local   # whatever must not go
 export no_proxy="$NO_PROXY"
 ```
 
-- It carries **HTTP to mesh names only**. A name outside the mesh answers
+- It carries **HTTP to mesh services only**, by their mesh name or their
+  Kubernetes names. A name outside the mesh answers
   `404`, and `CONNECT` (what a client sends for an `https://` URL through an
   HTTP proxy) answers `404`: do not set `HTTPS_PROXY` to it.
 - The port in the authority is the service's declared port. `18081` itself is
@@ -537,7 +538,10 @@ export no_proxy="$NO_PROXY"
 
 The authority names the service and the port: `<service>.<namespace>.<meshDomain>:<port>`,
 with a port the pods declare. The port is never stripped, and a name without
-one is port 80. A name without a namespace is the service of that name in the
+one is port 80. The Kubernetes names of the service's Service
+(`<service>.<namespace>.svc.cluster.local`, `<service>.<namespace>.svc`,
+`<service>.<namespace>`) are answered exactly as the mesh name, with the
+Service's port (since chart 3.0.3). A name without a namespace is the service of that name in the
 caller's own namespace. A name that is not a mesh service answers **404** here
 (on a captured dial it passes through to the address dialled), and a port the
 service does not serve as HTTP answers **421** with an `x-aether-error` header
