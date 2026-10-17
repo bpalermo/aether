@@ -4,9 +4,12 @@
 // The range comes from the cluster's networking.k8s.io/v1 ServiceCIDR objects,
 // watched by a reconciler, or from the --service-cidrs override, which wins
 // when set (the reconciler is then not started). Only IPv4 blocks are kept for
-// now. When no range is known the agent logs one WARN and reports
-// aether.agent.service_range.known = 0, and the later phases build no
-// Service-range branch: every non-mesh destination stays on the passthrough.
+// now. Where the multicluster.x-k8s.io ServiceImport CRD is installed, a /32
+// for each IPv4 ClusterSetIP outside those blocks joins the range too, under
+// the override as well (ImportReconciler). When no ServiceCIDR range is known
+// the agent logs one WARN and reports aether.agent.service_range.known = 0, and
+// the later phases build no Service-range branch for ClusterIPs: every non-mesh
+// destination outside the ClusterSetIP /32s stays on the passthrough.
 package servicerange
 
 import (

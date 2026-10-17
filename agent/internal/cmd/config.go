@@ -177,7 +177,8 @@ type AgentConfig struct {
 	// the range from the networking.k8s.io/v1 ServiceCIDR objects (Kubernetes
 	// >= 1.33); when set, it wins and the ServiceCIDR watch is not started.
 	// Every entry must be a CIDR, or the agent fails at start; IPv6 entries
-	// are ignored for now.
+	// are ignored for now. It replaces only the ServiceCIDR objects: the
+	// ClusterSetIPs of MCS ServiceImports outside it are still added.
 	ServiceCIDRs []string
 	// EastWestQUICPairFetchWindow bounds how long after the agent starts a
 	// PERSISTED QUIC pair with no evidence of use -- never fetched on demand,
