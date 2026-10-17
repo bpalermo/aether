@@ -20,6 +20,7 @@ import (
 	"context"
 	"log/slog"
 	"maps"
+	"net/netip"
 	"slices"
 	"sync"
 	"time"
@@ -564,7 +565,8 @@ type SnapshotCache struct {
 	// also emitted into the xDS snapshot. Set once before the manager starts
 	// (SetCaptureRedirectAll); read without locking. Default off.
 	captureRedirectAll bool
-	// captureMu guards captureAuthorities and captureTCPServices.
+	// captureMu guards captureAuthorities, captureTCPServices and
+	// serviceRanges.
 	// captureAuthorities: mesh service -> its cluster.local FQDN, fed by the
 	// mesh-Service reconciler, for the capture route tables (cap_http_<port>).
 	// captureTCPServices: non-HTTP services that need per-ClusterIP TCP floor
@@ -579,6 +581,12 @@ type SnapshotCache struct {
 	// name, that need per-ClusterIP TCP-proxy floor chains on the capture listener.
 	// A nil/empty slice means all captured traffic goes through the HCM chain.
 	captureTCPServices []captureTCPEntry
+	// serviceRanges is the cluster's IPv4 Service range (proposal 044), in
+	// canonical form (servicerange.Canonicalize); nil while none is known.
+	// serviceRangesGen counts its content changes. Both guarded by captureMu;
+	// see SetServiceRanges.
+	serviceRanges    []netip.Prefix
+	serviceRangesGen uint64
 	// captureDerived is the last derivation from the registry endpoints
 	// (refreshCaptureServicePorts), keyed by service and guarded by captureMu.
 	// It is kept apart from captureTCPServices because the two halves of an

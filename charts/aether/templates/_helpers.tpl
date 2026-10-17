@@ -1218,3 +1218,25 @@ app.kubernetes.io/version: {{ . | quote }}
 {{- define "aether.edge.defaultConfigName" -}}
 {{- default "aether-edge-defaults" .Values.edge.config.name -}}
 {{- end -}}
+
+{{/*
+agent.serviceCIDRs (proposal 044) as the comma-separated --service-cidrs value,
+empty when the list is. Every entry must look like an IPv4 or IPv6 CIDR, or the
+render fails: a mistyped range would otherwise reach the agent, which refuses
+to start on it, on every node at once. The agent does the exact parse.
+*/}}
+{{- define "aether.agent.serviceCIDRs" -}}
+{{- $cidrs := .Values.agent.serviceCIDRs | default list -}}
+{{- if not (kindIs "slice" $cidrs) -}}
+{{- fail (printf "agent.serviceCIDRs must be a list of CIDRs, got %v" $cidrs) -}}
+{{- end -}}
+{{- $out := list -}}
+{{- range $cidrs -}}
+{{- $c := toString . | trim -}}
+{{- if not (or (regexMatch "^([0-9]{1,3}\\.){3}[0-9]{1,3}/[0-9]{1,2}$" $c) (regexMatch "^[0-9a-fA-F:.]*:[0-9a-fA-F:.]*/[0-9]{1,3}$" $c)) -}}
+{{- fail (printf "agent.serviceCIDRs: %q is not a CIDR (e.g. 10.96.0.0/12)" $c) -}}
+{{- end -}}
+{{- $out = append $out $c -}}
+{{- end -}}
+{{- join "," $out -}}
+{{- end -}}

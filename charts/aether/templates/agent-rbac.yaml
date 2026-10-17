@@ -83,6 +83,12 @@ rules:
   - apiGroups: ["discovery.k8s.io"]
     resources: ["endpointslices"]
     verbs: ["list", "get", "watch"]
+  # The cluster's Service range (proposal 044): the agent watches the
+  # ServiceCIDR objects unless agent.serviceCIDRs overrides them. Granted either
+  # way, so that removing the override needs no RBAC change. Read-only.
+  - apiGroups: ["networking.k8s.io"]
+    resources: ["servicecidrs"]
+    verbs: ["list", "get", "watch"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
