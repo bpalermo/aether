@@ -181,28 +181,50 @@ func agentCaptureBootstrap(t *testing.T) []byte {
 }
 
 // requireProxyPortBranch: the compiled table carries routes for a dial to the
-// proxy port (18081), among them some that tell the mesh name apart from the
-// service's other names by an exact or prefix :authority match, so validate
-// mode parses those shapes too.
+// proxy port (18081). (Until chart 3.0.3 some of them told the mesh name
+// apart from the service's Kubernetes names by an exact or prefix :authority
+// match; the proxy port answers those names as the mesh name now, one class.
+// The per-port fixture still has that shape: TestPerPortFixtureIsNotVacuous.)
 func requireProxyPortBranch(t *testing.T, rc *routev3.RouteConfiguration) {
 	t.Helper()
-	proxyPort, byName := 0, 0
+	proxyPort := 0
 	for _, vh := range rc.GetVirtualHosts() {
 		for _, r := range vh.GetRoutes() {
-			for _, fs := range r.GetMatch().GetFilterState() {
-				if fs.GetKey() == proxy.DialledPortFilterStateKey && fs.GetStringMatch().GetExact() == "18081" {
-					proxyPort++
-					for _, h := range r.GetMatch().GetHeaders() {
-						if h.GetName() == ":authority" && (h.GetStringMatch().GetExact() != "" || h.GetStringMatch().GetPrefix() != "") {
-							byName++
-						}
-					}
-				}
+			if isProxyPortRoute(r) {
+				proxyPort++
 			}
 		}
 	}
 	require.Positive(t, proxyPort, "no route of the proxy port in cap_http")
-	require.Positive(t, byName, "no route of the proxy port told apart by name")
+}
+
+// isProxyPortRoute: the route is of the proxy port's block (dialled 18081).
+func isProxyPortRoute(r *routev3.Route) bool {
+	for _, fs := range r.GetMatch().GetFilterState() {
+		if fs.GetKey() == proxy.DialledPortFilterStateKey && fs.GetStringMatch().GetExact() == "18081" {
+			return true
+		}
+	}
+	return false
+}
+
+// proxyPortRoutesByName counts the routes of the proxy port's block that tell
+// a name apart by an exact or prefix :authority match.
+func proxyPortRoutesByName(rc *routev3.RouteConfiguration) int {
+	n := 0
+	for _, vh := range rc.GetVirtualHosts() {
+		for _, r := range vh.GetRoutes() {
+			if !isProxyPortRoute(r) {
+				continue
+			}
+			for _, h := range r.GetMatch().GetHeaders() {
+				if h.GetName() == ":authority" && (h.GetStringMatch().GetExact() != "" || h.GetStringMatch().GetPrefix() != "") {
+					n++
+				}
+			}
+		}
+	}
+	return n
 }
 
 const ohvHeaderMutation = "envoy.filters.http.header_mutation"

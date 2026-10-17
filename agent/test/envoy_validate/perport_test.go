@@ -92,4 +92,14 @@ func TestPerPortFixtureIsNotVacuous(t *testing.T) {
 		}
 	}
 	assert.True(t, found)
+
+	// The compiled table tells names apart by an exact or prefix :authority
+	// match somewhere in the proxy port's block (this fixture's proxy-port
+	// table knows mesh names only, so its other names are another class), so
+	// validate mode parses that shape. The agent's own tables no longer need
+	// it there since chart 3.0.3: the proxy port answers the Kubernetes names
+	// as the mesh name, one class.
+	tables, err := perPortTablesAndCompiled()
+	require.NoError(t, err)
+	assert.Positive(t, proxyPortRoutesByName(tables[len(tables)-1]), "no route of the proxy port told apart by name")
 }

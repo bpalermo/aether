@@ -481,15 +481,22 @@ func TestAddressing_ProxyPortOnTheCapturedPath(t *testing.T) {
 				want := a043Resolve(t, out, host)
 				assert.Equalf(t, want, got, "Host %s: the proxy port answers alike on both paths", host)
 			}
-			// Mesh names only, as on the loopback listener: a cluster.local or
-			// bare name has no virtual host here. Under redirect-all it
-			// leaves through the passthrough to what was dialled (something
-			// else may listen on 18081); it reaches no mesh cluster.
+			// A Kubernetes name is answered as the mesh name, as on the
+			// loopback listener (through chart 3.0.2 it had no virtual host
+			// here and left through the passthrough).
 			for _, name := range kube {
-				for _, host := range []string{name, name + ":8080", name + ":18081"} {
-					got := a043Resolve(t, table, host)
-					assert.Equalf(t, "on_demand_catch_all", got.vhost, "Host %s: %+v", host, got)
-					assert.Equalf(t, proxy.PassthroughClusterName, got.cluster, "Host %s: %+v", host, got)
+				for _, suffix := range []string{"", ":80", ":8080", ":9000", ":9090", ":18081"} {
+					got, want := a043Resolve(t, table, name+suffix), a043Resolve(t, table, mesh+suffix)
+					// A Kubernetes name spells no cluster: it is never parked
+					// for one named after itself. Where the mesh name is asked
+					// for on demand, the Kubernetes name gets the floor.
+					assert.Falsef(t, got.onDemand, "Host %s asks for a cluster named by its authority", name+suffix)
+					if want.onDemand {
+						assert.Equalf(t, a043Resolve(t, table, "example.com"+suffix), got, "Host %s gets the floor", name+suffix)
+						continue
+					}
+					assert.Equalf(t, want, got, "Host %s answers as %s", name+suffix, mesh+suffix)
+					assert.NotEqualf(t, proxy.PassthroughClusterName, got.cluster, "Host %s", name+suffix)
 				}
 			}
 		})
@@ -635,10 +642,22 @@ func TestAddressing_Loopback(t *testing.T) {
 		_, kube := a043Names(s, false)
 		t.Run(s.key(), func(t *testing.T) {
 			a043HostDecides(t, out, s)
-			// The loopback listener answers mesh names only.
+			// A Kubernetes name of a generated mesh Service is answered as
+			// its mesh name, by the port in Host (through chart 3.0.2 the
+			// loopback listener answered mesh names only, and these 404).
+			mesh, _ := a043Names(s, false)
 			for _, name := range kube {
-				got := a043Resolve(t, out, name+":8080")
-				assert.Equalf(t, uint32(404), got.status, "%s: %+v", name, got)
+				for _, suffix := range []string{"", ":80", ":8080", ":9000", ":9090", ":18081"} {
+					got, want := a043Resolve(t, out, name+suffix), a043Resolve(t, out, mesh+suffix)
+					// Never parked for a cluster named after itself: where the
+					// mesh name is asked for on demand, the floor.
+					assert.Falsef(t, got.onDemand, "Host %s asks for a cluster named by its authority", name+suffix)
+					if want.onDemand {
+						assert.Equalf(t, a043Resolve(t, out, "example.com"+suffix), got, "Host %s gets the floor", name+suffix)
+						continue
+					}
+					assert.Equalf(t, want, got, "Host %s answers as %s", name+suffix, mesh+suffix)
+				}
 			}
 		})
 	}
