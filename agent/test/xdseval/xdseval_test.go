@@ -146,6 +146,37 @@ func TestResolve_PicksAndMatches(t *testing.T) {
 	assert.Equal(t, uint32(404), OutcomeOf(nil).Status)
 }
 
+// TestFirstRoute_APathlessRequestTakesOnlyAConnectRoute pins the proxy's
+// behaviour: with no :path, VirtualHostImpl::getRouteFromRoutes
+// (source/common/router/config_impl.cc) skips every route whose
+// supportsPathlessHeaders() is false, and only ConnectRouteEntryImpl's is
+// true (config_impl.h). A regex ".*", an empty prefix and "/" take a request
+// with a path and not one without; a CONNECT matcher takes the CONNECT. Seen
+// on the pinned proxy: on such a virtual host "GET /x" took the regex route
+// and "CONNECT a.ns.mesh:8080" got 404 no route.
+func TestFirstRoute_APathlessRequestTakesOnlyAConnectRoute(t *testing.T) {
+	route := func(name string, m *routev3.RouteMatch) *routev3.Route {
+		return &routev3.Route{Name: name, Match: m}
+	}
+	regex := route("regex", &routev3.RouteMatch{PathSpecifier: &routev3.RouteMatch_SafeRegex{SafeRegex: &typematcherv3.RegexMatcher{Regex: ".*"}}})
+	empty := route("empty-prefix", &routev3.RouteMatch{PathSpecifier: &routev3.RouteMatch_Prefix{Prefix: ""}})
+	slash := route("slash", &routev3.RouteMatch{PathSpecifier: &routev3.RouteMatch_Prefix{Prefix: "/"}})
+	connect := route("connect", &routev3.RouteMatch{PathSpecifier: &routev3.RouteMatch_ConnectMatcher_{ConnectMatcher: &routev3.RouteMatch_ConnectMatcher{}}})
+	first := func(routes []*routev3.Route, r Request) string {
+		t.Helper()
+		got, err := FirstRoute(routes, r)
+		require.NoError(t, err)
+		return got.GetName()
+	}
+	plain := []*routev3.Route{regex, empty, slash}
+	assert.Equal(t, "regex", first(plain, Request{Host: "a.ns.mesh:8080", Path: "/x"}))
+	assert.Empty(t, first(plain, Request{Host: "a.ns.mesh:8080", NoPath: true}), "no route takes a request with no path")
+	withConnect := []*routev3.Route{regex, empty, slash, connect}
+	assert.Equal(t, "connect", first(withConnect, Request{Host: "a.ns.mesh:8080", NoPath: true}))
+	assert.Equal(t, "regex", first(withConnect, Request{Host: "a.ns.mesh:8080", Path: "/x"}), "a CONNECT route takes no other request")
+	assert.Equal(t, "connect", first([]*routev3.Route{connect, slash}, Request{Host: "a.ns.mesh:8080", Path: "/x", Connect: true}), "an extended CONNECT with a path")
+}
+
 func TestMatchString(t *testing.T) {
 	for _, tc := range []struct {
 		sm   *xdsmatcherv3.StringMatcher

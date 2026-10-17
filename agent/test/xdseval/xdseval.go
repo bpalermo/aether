@@ -358,8 +358,11 @@ type Request struct {
 	// NoPath: the request has no path at all (a CONNECT without one). The
 	// connection manager answers any other path that does not begin with
 	// "/" before routing, so this is the one request with a path no
-	// "/"-prefixed route takes that reaches the routes.
+	// "/"-prefixed route takes that reaches the routes. Only a CONNECT
+	// matcher route takes it (FirstRoute).
 	NoPath bool
+	// Connect: the method is CONNECT (implied by NoPath).
+	Connect bool
 	// Headers are other request headers, lower-case names.
 	Headers map[string]string
 	// FilterState is the connection's filter state, as strings. A key that is

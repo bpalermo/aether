@@ -4,6 +4,7 @@ import (
 	"cmp"
 	"fmt"
 	"maps"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -292,16 +293,15 @@ func (t *mergeTable) pick(host string) *routev3.VirtualHost {
 	if vh, ok := t.exact[host]; ok {
 		return vh
 	}
-	// A wildcard needs at least one character where its "*" stands.
-	var best *routev3.VirtualHost
-	bestLen := -1
-	for prefix, vh := range t.wild {
-		if len(host) > len(prefix) && strings.HasPrefix(host, prefix) && len(prefix) > bestLen {
-			best, bestLen = vh, len(prefix)
+	// A wildcard needs at least one character where its "*" stands. Every
+	// wildcard's prefix is "<name>:" with no ":" in the name
+	// (indexMergeTable), so the only one that can be a prefix of host is the
+	// part of host up to its first ":". One lookup: a scan of every wildcard
+	// per domain made the compiler quadratic in the services.
+	if i := strings.IndexByte(host, ':'); i >= 0 && len(host) > i+1 {
+		if vh, ok := t.wild[host[:i+1]]; ok {
+			return vh
 		}
-	}
-	if best != nil {
-		return best
 	}
 	return t.star
 }
@@ -464,11 +464,13 @@ func mergeGroup(name string, doms []string, ports []uint32, tables []*mergeTable
 	}
 	levels := levelsOf(all)
 	var routes []*routev3.Route
+	var dialled []string
 	for i, p := range ports {
 		if sameAnswers(portAnswers[i], otherAnswers) {
 			continue // the port gets what every other port gets
 		}
-		block, err := flatBlock(levels, portAnswers[i], []routeCond{dialledCond(strconv.Itoa(int(p)))})
+		dialled = append(dialled, strconv.Itoa(int(p)))
+		block, err := flatBlock(levels, portAnswers[i], []routeCond{dialledCond(dialled[len(dialled)-1])})
 		if err != nil {
 			return nil, fmt.Errorf("virtual host %s, dialled port %d: %w", name, p, err)
 		}
@@ -478,6 +480,7 @@ func mergeGroup(name string, doms []string, ports []uint32, tables []*mergeTable
 	if err != nil {
 		return nil, fmt.Errorf("virtual host %s, any other port: %w", name, err)
 	}
+	block = closeToPathlessOfPorts(block, dialled)
 	return &routev3.VirtualHost{Name: name, Domains: mergeDomains(doms), Routes: append(routes, block...), TypedPerFilterConfig: levels.cfg}, nil
 }
 
@@ -714,13 +717,119 @@ func namesBlock(levels groupLevels, names []string, answers groupAnswers, conds 
 	return out, nil
 }
 
-// takesAPathlessRequest: the route's path match can take a request with an
-// empty path (a regex, an empty prefix, a CONNECT matcher, a path-match
-// extension). A non-empty prefix, an exact path and a separated prefix
-// cannot. Conservative: a regex that never matches "" counts.
+// closeToPathlessOfPorts makes the other ports' block (block, which matches
+// no dialled port) take no request with no path that was dialled to one of
+// dialled, the ports whose blocks come before it. Every route of a dialled
+// port's block that a request with a path reaches ends in one it takes, but a
+// request with no path can fall out of that block (its routes are all
+// "/"-prefixed), and must then get no route, as on its own port's table, not
+// a route of the other ports' table that takes it (takesAPathlessRequest).
+//
+// A filter-state match cannot be inverted, so each such route r becomes:
+//
+//   - r for a request with a :path (a header presence match), whatever was
+//     dialled: such a request never falls out of a dialled port's block;
+//   - r for a request with no :path, once per piece of the complement of
+//     dialled (complementPatterns), each a small regex on the dialled port.
+//
+// A request with no path on a connection with NO dialled port (a chain that
+// does not record it; the agent's one HTTP chain always does) gets no route
+// from r then, where cap_http_other's table may give it r: it fails closed.
+// No route of any table the agent builds today takes a request with no path,
+// and then nothing changes: the block is returned as it was.
+func closeToPathlessOfPorts(block []*routev3.Route, dialled []string) []*routev3.Route {
+	if len(dialled) == 0 || !slices.ContainsFunc(block, takesAPathlessRequest) {
+		return block
+	}
+	pieces := complementPatterns(dialled)
+	out := make([]*routev3.Route, 0, len(block)+len(pieces))
+	for _, r := range block {
+		if !takesAPathlessRequest(r) {
+			out = append(out, r)
+			continue
+		}
+		withPath := proto.Clone(r).(*routev3.Route)
+		pathCond(true).apply(withPath)
+		out = append(out, withPath)
+		for _, re := range pieces {
+			c := proto.Clone(r).(*routev3.Route)
+			pathCond(false).apply(c)
+			routeCond{filterState: &typematcherv3.FilterStateMatcher{
+				Key: DialledPortFilterStateKey,
+				Matcher: &typematcherv3.FilterStateMatcher_StringMatch{StringMatch: &typematcherv3.StringMatcher{
+					MatchPattern: &typematcherv3.StringMatcher_SafeRegex{SafeRegex: &typematcherv3.RegexMatcher{Regex: re}},
+				}},
+			}}.apply(c)
+			out = append(out, c)
+		}
+	}
+	return out
+}
+
+// pathCond: the request has a :path (present), or has none.
+func pathCond(present bool) routeCond {
+	return routeCond{header: &routev3.HeaderMatcher{
+		Name:                 ":path",
+		HeaderMatchSpecifier: &routev3.HeaderMatcher_PresentMatch{PresentMatch: true},
+		InvertMatch:          !present,
+	}}
+}
+
+// complementPatterns returns regexes that, together, match exactly the
+// strings that are none of values, each string by exactly one of them, and
+// each regex small (a prefix of one of values, then one character class): one
+// per node of the trie of values. At a node with prefix p, a string that is p
+// itself (when p is none of values) or that goes on with a character no value
+// goes on with after p.
+func complementPatterns(values []string) []string {
+	set, next := prefixTrie(values)
+	out := make([]string, 0, len(next))
+	for _, p := range slices.Sorted(maps.Keys(next)) {
+		rest := ".+"
+		if len(next[p]) > 0 {
+			class := ""
+			for _, c := range slices.Sorted(maps.Keys(next[p])) {
+				class += regexp.QuoteMeta(string(c))
+			}
+			rest = "[^" + class + "].*"
+		}
+		if !set[p] {
+			rest = "(" + rest + ")?"
+		}
+		out = append(out, "^"+regexp.QuoteMeta(p)+rest+"$")
+	}
+	return out
+}
+
+// prefixTrie returns the set of values, and per prefix of any of them (""
+// included) the characters a value goes on with after it.
+func prefixTrie(values []string) (set map[string]bool, next map[string]map[byte]bool) {
+	set, next = map[string]bool{}, map[string]map[byte]bool{}
+	for _, v := range values {
+		set[v] = true
+		for i := 0; i <= len(v); i++ {
+			if next[v[:i]] == nil {
+				next[v[:i]] = map[byte]bool{}
+			}
+			if i < len(v) {
+				next[v[:i]][v[i]] = true
+			}
+		}
+	}
+	return set, next
+}
+
+// takesAPathlessRequest: the route can take a request with no :path, which
+// only a CONNECT matcher route does. The proxy skips every other route when
+// :path is absent (VirtualHostImpl::getRouteFromRoutes,
+// source/common/router/config_impl.cc; ConnectRouteEntryImpl is the only
+// route entry that supports pathless headers), a regex or an empty prefix
+// included. No route the agent builds is one today, so the guards that ask
+// this (flatBlock, defaultBlock, closeToPathlessOfPorts) add nothing to its
+// tables; they keep a CONNECT route, should one be built, from answering
+// another name's or another port's request.
 func takesAPathlessRequest(r *routev3.Route) bool {
-	m := r.GetMatch()
-	return m.GetPrefix() == "" && m.GetPath() == "" && m.GetPathSeparatedPrefix() == ""
+	return r.GetMatch().GetConnectMatcher() != nil
 }
 
 // nameBlock is one name's own answers as routes under conds and a condition
@@ -767,6 +876,9 @@ func nameCond(n string, ported bool) routeCond {
 // the default, each route also under conds. The default is the answer of
 // ":*" when the class has it (it stands for every port spelling no exact
 // domain names, which no regex lists), else the answer most suffixes get.
+// When the default has a route that can take a request with no path
+// (takesAPathlessRequest), it is also conditioned on the Host's suffix being
+// none of the other answers'.
 func suffixBlock(levels groupLevels, answers map[string]mergeAnswer, conds []routeCond) ([]*routev3.Route, error) {
 	suffixes := slices.Sorted(maps.Keys(answers))
 	bySuffix := map[string][]string{}
@@ -794,11 +906,46 @@ func suffixBlock(levels groupLevels, answers map[string]mergeAnswer, conds []rou
 		}
 		out = append(out, routes...)
 	}
-	routes, err := levels.routes(answers[bySuffix[def][0]], conds)
+	routes, err := defaultBlock(levels, answers, keys, bySuffix, def, conds)
 	if err != nil {
 		return nil, err
 	}
 	return append(out, routes...), nil
+}
+
+// defaultBlock is the routes of the default answer def of a suffixBlock,
+// under conds. A request with no path falls out of its own suffix's routes
+// when they are all "/"-prefixed (see flatBlock). Unconditioned on the
+// suffix, a route of the default that takes it (takesAPathlessRequest) would
+// give it another suffix's answer, where its own table gives it none. The
+// default is then taken only by a Host whose suffix is none of the other
+// answers': not by a regex of its own suffixes, which ":*" has none of, and a
+// Host no regex accepts ("<name>:8080:8080") keeps the default it had.
+//
+// One inverted condition per other answer, each the very regex that answer's
+// own routes carry (header matchers are ANDed: not k1 and not k2 is not (k1
+// or k2)). One regex over every other answer's suffixes was larger than any
+// the table already holds, and past about two dozen ports the proxy refused
+// the whole table (RE2 program size over its budget of 100).
+func defaultBlock(levels groupLevels, answers map[string]mergeAnswer, keys []string, bySuffix map[string][]string, def string, conds []routeCond) ([]*routev3.Route, error) {
+	a := answers[bySuffix[def][0]]
+	routes, err := levels.routes(a, conds)
+	if err != nil || len(keys) == 1 || !slices.ContainsFunc(routes, takesAPathlessRequest) {
+		return routes, err
+	}
+	more := slices.Clone(conds)
+	for _, k := range keys {
+		if k == def {
+			continue
+		}
+		notK, err := authorityCond(bySuffix[k])
+		if err != nil {
+			return nil, err
+		}
+		notK.header.InvertMatch = true
+		more = append(more, notK)
+	}
+	return levels.routes(a, more)
 }
 
 // defaultAnswer is the answer of ":*" when there is one, else the one most

@@ -173,12 +173,22 @@ func SameAnswer(a, b Answer) (same bool, why string, err error) {
 
 // FirstRoute returns the first of routes that r matches (path and request
 // header matchers), nil for none.
+//
+// A request with no :path (NoPath) is matched by a CONNECT matcher route and
+// by no other: the proxy skips every route that does not support pathless
+// headers when :path is absent (VirtualHostImpl::getRouteFromRoutes,
+// source/common/router/config_impl.cc), and only the CONNECT route entry
+// does (ConnectRouteEntryImpl::supportsPathlessHeaders, config_impl.h). A
+// regex or an empty prefix does not take such a request.
 func FirstRoute(routes []*routev3.Route, r Request) (*routev3.Route, error) {
 	path := r.Path
 	if path == "" && !r.NoPath {
 		path = "/"
 	}
 	for _, rt := range routes {
+		if r.NoPath && rt.GetMatch().GetConnectMatcher() == nil {
+			continue
+		}
 		ok, err := routeMatches(rt.GetMatch(), path, r)
 		if err != nil {
 			return nil, err
@@ -195,7 +205,7 @@ func routeMatches(m *routev3.RouteMatch, path string, r Request) (bool, error) {
 	if i := strings.IndexByte(p, '?'); i >= 0 {
 		p = p[:i]
 	}
-	if ok, err := pathMatches(m, p); err != nil || !ok {
+	if ok, err := pathMatches(m, p, r); err != nil || !ok {
 		return false, err
 	}
 	for _, h := range m.GetHeaders() {
@@ -219,8 +229,12 @@ func routeMatches(m *routev3.RouteMatch, path string, r Request) (bool, error) {
 	return true, nil
 }
 
-func pathMatches(m *routev3.RouteMatch, p string) (bool, error) {
+func pathMatches(m *routev3.RouteMatch, p string, r Request) (bool, error) {
 	switch ps := m.GetPathSpecifier().(type) {
+	case *routev3.RouteMatch_ConnectMatcher_:
+		// A CONNECT route takes a CONNECT request (ConnectRouteEntryImpl),
+		// whatever its path; NoPath is one.
+		return r.Connect || r.NoPath, nil
 	case *routev3.RouteMatch_Prefix:
 		return strings.HasPrefix(p, ps.Prefix), nil
 	case *routev3.RouteMatch_Path:
@@ -261,8 +275,15 @@ func filterStateMatches(m *routev3.RouteMatch, r Request) (bool, error) {
 func headerMatches(h *routev3.HeaderMatcher, r Request) (bool, error) {
 	name := strings.ToLower(h.GetName())
 	v, present := r.Headers[name]
-	if name == ":authority" || name == "host" {
+	switch name {
+	case ":authority", "host":
 		v, present = r.Host, true
+	case ":path":
+		// The request's path, as FirstRoute reads it; absent with NoPath.
+		v, present = r.Path, !r.NoPath
+		if v == "" && present {
+			v = "/"
+		}
 	}
 	var hit bool
 	switch {
