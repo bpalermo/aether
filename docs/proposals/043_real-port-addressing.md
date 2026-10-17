@@ -677,14 +677,36 @@ HTTP (or to 18081, when it serves any HTTP) leaves through the passthrough,
 as it did with the per-port chains: the tree does not test the server name on
 those ports. That is the owner's ruling for this change, kept from 3.0.0.
 
-A request with no path (a `CONNECT` without `:path`) matches no `/`-prefixed
-route, so it falls out of its own answer's routes when they are all
-`/`-prefixed. Two guards keep it from taking another answer's route that
-can take it (a regex path, an empty prefix, a `CONNECT` matcher): between
-name classes, the largest class is name-conditioned too (chart 3.0.2); within
-a class, the default port answer is conditioned on the Host's suffix being
-none of the other answers' (an inverted `:authority` regex, chart 3.0.3). Its
-own per-port table gives it no route, and neither does the compiled one.
+A request with no path (a `CONNECT` without `:path`) is matched by a
+`CONNECT` matcher route and by no other on the pinned proxy: with `:path`
+absent, `VirtualHostImpl::getRouteFromRoutes` skips every route whose
+`supportsPathlessHeaders()` is false, and only `ConnectRouteEntryImpl`'s is
+true. A regex or an empty prefix does not take it (seen with the pinned
+binary). No route the agent builds is a `CONNECT` route, so no such request
+takes any route of a compiled table, as of its own per-port table. Until
+chart 3.0.3 the test evaluator (`xdseval`) let a regex or an empty prefix
+take it; the "fall-through" chart 3.0.2 guarded against was that model's.
+
+Three guards stay, for a `CONNECT` route should one be built
+(`takesAPathlessRequest`); none adds anything to a table the agent builds
+today:
+
+- between name classes, the largest class is name-conditioned too (chart
+  3.0.2);
+- within a class, the default port answer is conditioned on the Host's suffix
+  being none of the other answers' (chart 3.0.3): one inverted `:authority`
+  matcher per other answer, each the regex that answer's routes already
+  carry. One regex over all of them exceeded the proxy's RE2 budget of 100 at
+  about two dozen ports, and the proxy refused the whole table;
+- the other ports' block, which matches no dialled port, takes a request
+  without a `:path` by such a route only when the dialled port is none of the
+  ports with a block of their own (chart 3.0.3). A filter-state match cannot
+  be inverted, so this is one small regex per piece of the complement of
+  those ports (`complementPatterns`). On a connection with no dialled port
+  (no chain the agent builds) such a request gets no route: it fails closed.
+
+`envoy --mode validate` accepts both chart-3.0.3 shapes at 32 ports
+(`envoy_validate/capture_pathless_budget_test.go`).
 
 #### Kubernetes names on the proxy port (chart 3.0.3)
 
