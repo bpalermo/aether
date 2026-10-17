@@ -176,7 +176,7 @@ func SameAnswer(a, b Answer) (same bool, why string, err error) {
 // header matchers), nil for none.
 func FirstRoute(routes []*routev3.Route, r Request) (*routev3.Route, error) {
 	path := r.Path
-	if path == "" {
+	if path == "" && !r.NoPath {
 		path = "/"
 	}
 	for _, rt := range routes {

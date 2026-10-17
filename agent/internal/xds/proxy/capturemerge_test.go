@@ -9,6 +9,7 @@ import (
 	corev3 "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
 	routev3 "github.com/envoyproxy/go-control-plane/envoy/config/route/v3"
 	header_mutationv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/http/header_mutation/v3"
+	typematcherv3 "github.com/envoyproxy/go-control-plane/envoy/type/matcher/v3"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/protobuf/proto"
@@ -241,7 +242,19 @@ func TestMergeCaptureRouteTables_RefusesWhatItDoesNotModel(t *testing.T) {
 // dialled port ("" and any port without a table: other), for every Host,
 // dialled port and caller given: the same first route (action, filters,
 // status and x-aether-error), or why not.
-func mergeMismatches(t *testing.T, merged *routev3.RouteConfiguration, perPort map[uint32]*routev3.RouteConfiguration, other *routev3.RouteConfiguration, hosts []string, dialled []string, callers []string) []string {
+func mergeMismatches(t *testing.T, merged *routev3.RouteConfiguration, perPort map[uint32]*routev3.RouteConfiguration, other *routev3.RouteConfiguration, hosts []string, dialled []string, callers []string, paths ...string) []string {
+	t.Helper()
+	if len(paths) == 0 {
+		paths = []string{"/"}
+	}
+	var out []string
+	for _, p := range paths {
+		out = append(out, mergeMismatchesAt(t, merged, perPort, other, hosts, dialled, callers, p)...)
+	}
+	return out
+}
+
+func mergeMismatchesAt(t *testing.T, merged *routev3.RouteConfiguration, perPort map[uint32]*routev3.RouteConfiguration, other *routev3.RouteConfiguration, hosts []string, dialled []string, callers []string, path string) []string {
 	t.Helper()
 	compiled := xdseval.NewTable(merged)
 	first := func(tbl *xdseval.Table, req xdseval.Request) (*routev3.Route, map[string]*anypb.Any) {
@@ -272,11 +285,12 @@ func mergeMismatches(t *testing.T, merged *routev3.RouteConfiguration, perPort m
 				if caller != "" {
 					fs[CallerNamespaceFilterStateKey] = caller
 				}
-				req := xdseval.Request{Host: host, Path: "/", FilterState: fs}
+				// "" stands for a request with no path at all.
+				req := xdseval.Request{Host: host, Path: path, NoPath: path == "", FilterState: fs}
 				ra, ca := first(want, req)
 				rb, cb := first(compiled, req)
 				if same, why := xdseval.SameTreatmentIn(ca, ra, cb, rb); !same {
-					out = append(out, "Host "+host+" dialled "+d+" caller "+caller+": "+why)
+					out = append(out, "Host "+host+" dialled "+d+" caller "+caller+" path "+strconv.Quote(path)+": "+why)
 				}
 			}
 		}
@@ -313,6 +327,70 @@ func TestMergeCaptureRouteTables_TellsNamesApartWhereATableDoes(t *testing.T) {
 	assert.Empty(t, mergeMismatches(t, merged, perPort, other, hosts, []string{"80", "8080", "9090", "7777", ""}, []string{""}))
 }
 
+// TestMergeCaptureRouteTables_AWildcardOnlyPortIsAnsweredByTheWildcard: two
+// names of one compiled virtual host, "a" with an exact ":9090" and "b" whose
+// ":9090" only its ":*" selects, answered differently there. They must not
+// share a class (nameClass.fits, wildcardAgrees): a suffix-only block would
+// give "b:9090" a's answer. (Found by the adversarial review of #1709: no
+// other test failed with the check made to always pass.)
+func TestMergeCaptureRouteTables_AWildcardOnlyPortIsAnsweredByTheWildcard(t *testing.T) {
+	x := BuildRefusalVirtualHost("a.ns.mesh|x", []string{"a.ns.mesh", "a.ns.mesh:9090", "b.ns.mesh"}, "reason-x", "x\n")
+	y := BuildRefusalVirtualHost("a.ns.mesh|y", []string{"b.ns.mesh:*"}, "reason-y", "y\n")
+	perPort := map[uint32]*routev3.RouteConfiguration{
+		8080: BuildCaptureRouteConfiguration(CaptureHTTPRouteName(8080), []*routev3.VirtualHost{x, y}, BuildCaptureCatchAllVirtualHost("mesh", 8080, false, true), nil),
+	}
+	other := BuildCaptureRouteConfiguration(CaptureHTTPOtherRouteName, nil, BuildCaptureCatchAllVirtualHost("mesh", 0, false, true), nil)
+	merged, err := MergeCaptureRouteTables(CaptureHTTPChainName, perPort, other)
+	require.NoError(t, err)
+	hosts := []string{"a.ns.mesh", "a.ns.mesh:9090", "a.ns.mesh:7", "b.ns.mesh", "b.ns.mesh:9090", "b.ns.mesh:7", "B.NS.MESH:9090"}
+	assert.Empty(t, mergeMismatches(t, merged, perPort, other, hosts, []string{"8080", "9090", ""}, []string{""}))
+}
+
+// TestMergeCaptureRouteTables_APathlessRequestNeverTakesAnotherNamesRoutes: a
+// request with no path (a CONNECT without one) matches no "/"-prefixed route,
+// so it falls out of its own name's routes. When the largest class of names
+// answers with a route that can take it (a regex path), that class is
+// conditioned on its names too: the request gets what its own table gives it
+// (here no route), never another name's answer. Port 8080's table answers
+// "a.ns.mesh" with a refusal and its other names with a regex rule.
+func TestMergeCaptureRouteTables_APathlessRequestNeverTakesAnotherNamesRoutes(t *testing.T) {
+	const mesh = "a.ns.mesh"
+	rule := &routev3.Route{
+		Match:  &routev3.RouteMatch{PathSpecifier: &routev3.RouteMatch_SafeRegex{SafeRegex: &typematcherv3.RegexMatcher{Regex: ".*"}}},
+		Action: &routev3.Route_Route{Route: &routev3.RouteAction{ClusterSpecifier: &routev3.RouteAction_Cluster{Cluster: "by-regex"}}},
+	}
+	routed := BuildServiceVirtualHost(mesh+"|8080", mesh+":8080", []string{"a.ns", "a.ns:8080", "a.ns.svc", "a.ns.svc:8080"}, nil)
+	routed.Routes = append([]*routev3.Route{rule}, routed.Routes...)
+	refused := BuildRefusalVirtualHost(mesh+"|refused", []string{mesh, mesh + ":8080"}, RefusalPortRequired, "refused\n")
+	perPort := map[uint32]*routev3.RouteConfiguration{
+		8080: BuildCaptureRouteConfiguration(CaptureHTTPRouteName(8080), []*routev3.VirtualHost{routed, refused}, BuildCaptureCatchAllVirtualHost("mesh", 8080, false, true), nil),
+	}
+	other := BuildCaptureRouteConfiguration(CaptureHTTPOtherRouteName, nil, BuildCaptureCatchAllVirtualHost("mesh", 0, false, true), nil)
+	merged, err := MergeCaptureRouteTables(CaptureHTTPChainName, perPort, other)
+	require.NoError(t, err)
+	hosts := []string{mesh, mesh + ":8080", "a.ns", "a.ns:8080", "a.ns.svc:8080", "A.NS:8080"}
+	assert.Empty(t, mergeMismatches(t, merged, perPort, other, hosts, []string{"8080", "9090", ""}, []string{""}, "/", "/x", ""))
+
+	// Without a route that takes a pathless request, the largest class keeps
+	// no name condition (no cost).
+	routed.Routes = routed.Routes[1:]
+	plain, err := MergeCaptureRouteTables(CaptureHTTPChainName, perPort, other)
+	require.NoError(t, err)
+	byName := func(rc *routev3.RouteConfiguration) int {
+		n := 0
+		for _, r := range rc.GetVirtualHosts()[0].GetRoutes() {
+			for _, h := range r.GetMatch().GetHeaders() {
+				if h.GetStringMatch().GetExact() != "" || h.GetStringMatch().GetPrefix() != "" {
+					n++
+				}
+			}
+		}
+		return n
+	}
+	assert.Greater(t, byName(merged), byName(plain), "the largest class is told apart by name only when it must be")
+	assert.Empty(t, mergeMismatches(t, plain, perPort, other, hosts, []string{"8080", "9090", ""}, []string{""}, "/", ""))
+}
+
 // proxyPortTestTable is the shape of the proxy port's table
 // (BuildProxyPortCaptureRouteConfiguration over the loopback table's virtual
 // hosts) for the service of mergeTestTables: its mesh name only, by the port
@@ -331,9 +409,20 @@ func proxyPortTestTable(redirectAll bool) *routev3.RouteConfiguration {
 		routed(mesh+":9090", mesh+":9090"),
 		BuildRefusalVirtualHost(mesh+"|portless", []string{mesh}, RefusalPortRequired, "port required\n"),
 		BuildRefusalVirtualHost(mesh+"|undeclared", []string{mesh + ":*"}, RefusalPortNotDeclared, "undeclared\n"),
+		// A service the node holds endpoints of but has no generated Service
+		// for: on the loopback table (by its endpoints) and in no per-port
+		// table, so its compiled virtual hosts are built from the proxy
+		// port's domains alone, one of them named after a virtual host with
+		// no "|" ("e.ns.mesh:8080").
+		BuildOutboundClusterVirtualHost(endpointOnly+":8080", []string{endpointOnly + ":8080"}),
+		BuildRefusalVirtualHost(endpointOnly+"|portless", []string{endpointOnly}, RefusalPortRequired, "port required\n"),
+		BuildRefusalVirtualHost(endpointOnly+"|undeclared", []string{endpointOnly + ":*"}, RefusalPortNotDeclared, "undeclared\n"),
 	}
 	return BuildProxyPortCaptureRouteConfiguration(CaptureHTTPRouteName(18081), loopback, "mesh", redirectAll, []string{mesh})
 }
+
+// endpointOnly is a service of proxyPortTestTable with no generated Service.
+const endpointOnly = "e.ns.mesh"
 
 // TestMergeCaptureRouteTables_ProxyPortIsOneMoreDialledPort: the proxy port's
 // table (until chart 3.0.2 served by a chain of its own) compiles into the one
@@ -360,7 +449,7 @@ func TestMergeCaptureRouteTables_ProxyPortIsOneMoreDialledPort(t *testing.T) {
 		require.NoError(t, err, "redirect-all %v", redirectAll)
 
 		var hosts []string
-		for _, n := range []string{"a.ns.mesh", "A.NS.MESH", "a.ns", "a", "x.y.mesh", "example.com"} {
+		for _, n := range []string{"a.ns.mesh", "A.NS.MESH", "a.ns", "a", "x.y.mesh", "example.com", endpointOnly, "E.NS.MESH", "e.ns", "e"} {
 			for _, s := range []string{"", ":80", ":8080", ":9090", ":18081", ":18082", ":30080", ":7777", ":8080:8080"} {
 				hosts = append(hosts, n+s)
 			}
@@ -368,6 +457,23 @@ func TestMergeCaptureRouteTables_ProxyPortIsOneMoreDialledPort(t *testing.T) {
 		dialled := []string{"80", "8080", "9090", "18081", "30080", "7777", ""}
 		callers := []string{"", "ns", "other"}
 		require.Empty(t, mergeMismatches(t, merged, perPort, other, hosts, dialled, callers), "redirect-all %v", redirectAll)
+
+		// The proxy accepts the table only with unique virtual-host names
+		// and each domain in one virtual host; the endpoint-only service's
+		// groups come from the proxy port's domains alone.
+		vhosts, domains := map[string]bool{}, map[string]string{}
+		for _, vh := range merged.GetVirtualHosts() {
+			assert.False(t, vhosts[vh.GetName()], "virtual host %s twice", vh.GetName())
+			vhosts[vh.GetName()] = true
+			for _, d := range vh.GetDomains() {
+				prev, dup := domains[d]
+				assert.False(t, dup, "domain %s in %s and %s", d, prev, vh.GetName())
+				domains[d] = vh.GetName()
+			}
+		}
+		assert.Equal(t, endpointOnly+":8080", domains[endpointOnly+":8080"], "a group named after a virtual host with no \"|\"")
+		assert.Equal(t, endpointOnly, domains[endpointOnly])
+		assert.Equal(t, endpointOnly, domains[endpointOnly+":*"])
 
 		// The proxy port's routes follow every declared port's.
 		for _, vh := range merged.GetVirtualHosts() {

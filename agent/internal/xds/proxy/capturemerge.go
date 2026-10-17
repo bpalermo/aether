@@ -660,8 +660,9 @@ func wildcardAgrees(own, others map[string]mergeAnswer) bool {
 // One class of names (nameClasses): suffixBlock. Several: each name of every
 // class but the largest gets its own answers under a condition on the name
 // (nameCond), and the largest class's suffixBlock follows, with no such
-// condition. Every name's routes end in a route each of its Hosts takes, so a
-// Host never reaches the routes of another name.
+// condition unless one of its routes could take a request with no path
+// (takesAPathlessRequest). Every name's routes end in a route each of its
+// Hosts takes with a path, so a Host never reaches the routes of another name.
 func flatBlock(levels groupLevels, answers groupAnswers, conds []routeCond) ([]*routev3.Route, error) {
 	classes := nameClasses(answers)
 	largest := 0
@@ -675,19 +676,51 @@ func flatBlock(levels groupLevels, answers groupAnswers, conds []routeCond) ([]*
 		if i == largest {
 			continue
 		}
-		for _, n := range c.names {
-			routes, err := nameBlock(levels, n, answers[n], conds)
-			if err != nil {
-				return nil, err
-			}
-			out = append(out, routes...)
+		routes, err := namesBlock(levels, c.names, answers, conds)
+		if err != nil {
+			return nil, err
 		}
+		out = append(out, routes...)
 	}
 	routes, err := suffixBlock(levels, classes[largest].merged, conds)
 	if err != nil {
 		return nil, err
 	}
+	if len(classes) > 1 && slices.ContainsFunc(routes, takesAPathlessRequest) {
+		// A request with no path (a CONNECT without one; any other path that
+		// does not begin with "/" the connection manager answers 404 before
+		// routing) is taken by no "/"-prefixed route, so it falls out of its
+		// own name's routes. Unconditioned on the name, a route of the largest
+		// class that takes it would give it another name's answer, where its
+		// own table gives it none. The largest class is then conditioned on
+		// its names as well.
+		if routes, err = namesBlock(levels, classes[largest].names, answers, conds); err != nil {
+			return nil, err
+		}
+	}
 	return append(out, routes...), nil
+}
+
+// namesBlock is nameBlock for each of names, in order.
+func namesBlock(levels groupLevels, names []string, answers groupAnswers, conds []routeCond) ([]*routev3.Route, error) {
+	var out []*routev3.Route
+	for _, n := range names {
+		routes, err := nameBlock(levels, n, answers[n], conds)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, routes...)
+	}
+	return out, nil
+}
+
+// takesAPathlessRequest: the route's path match can take a request with an
+// empty path (a regex, an empty prefix, a CONNECT matcher, a path-match
+// extension). A non-empty prefix, an exact path and a separated prefix
+// cannot. Conservative: a regex that never matches "" counts.
+func takesAPathlessRequest(r *routev3.Route) bool {
+	m := r.GetMatch()
+	return m.GetPrefix() == "" && m.GetPath() == "" && m.GetPathSeparatedPrefix() == ""
 }
 
 // nameBlock is one name's own answers as routes under conds and a condition
