@@ -2,7 +2,6 @@ package xdseval
 
 import (
 	"fmt"
-	"regexp"
 	"strings"
 
 	"aethermesh.dev/common/extensionfilter"
@@ -229,7 +228,7 @@ func pathMatches(m *routev3.RouteMatch, p string) (bool, error) {
 	case *routev3.RouteMatch_PathSeparatedPrefix:
 		return p == ps.PathSeparatedPrefix || strings.HasPrefix(p, strings.TrimSuffix(ps.PathSeparatedPrefix, "/")+"/"), nil
 	case *routev3.RouteMatch_SafeRegex:
-		re, err := regexp.Compile("^(?:" + ps.SafeRegex.GetRegex() + ")$")
+		re, err := fullMatchRegexp(ps.SafeRegex.GetRegex())
 		if err != nil {
 			return false, err
 		}
@@ -300,7 +299,7 @@ func typeStringMatch(sm *matcherv3.StringMatcher, v string) (bool, error) {
 	case *matcherv3.StringMatcher_Contains:
 		return strings.Contains(cmp(v), cmp(p.Contains)), nil
 	case *matcherv3.StringMatcher_SafeRegex:
-		re, err := regexp.Compile("^(?:" + p.SafeRegex.GetRegex() + ")$")
+		re, err := fullMatchRegexp(p.SafeRegex.GetRegex())
 		if err != nil {
 			return false, err
 		}

@@ -8,6 +8,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 
 	"aethermesh.dev/agent/internal/capture"
@@ -1250,12 +1251,20 @@ func TestServicePorts_RetainedWithTheClusters(t *testing.T) {
 	assert.False(t, kept)
 }
 
+// mustRegexp compiles pattern once per pattern (the walks ask the same few
+// millions of times; compiling each time was a large share of their CPU).
 func mustRegexp(t *testing.T, pattern string) *regexp.Regexp {
 	t.Helper()
+	if re, ok := mustRegexps.Load(pattern); ok {
+		return re.(*regexp.Regexp)
+	}
 	re, err := regexp.Compile(pattern)
 	require.NoError(t, err, "pattern %q", pattern)
+	mustRegexps.Store(pattern, re)
 	return re
 }
+
+var mustRegexps sync.Map
 
 // quicSelectionDefault returns the h2 cluster of a route action rewritten by
 // the per-source HTTP/3 selection: the cluster a request with no arm takes.
