@@ -7,6 +7,7 @@ go_library(
     name = "xdseval",
     testonly = True,
     srcs = [
+        "ipmatcher.go",
         "routes.go",
         "treatment.go",
         "xdseval.go",
@@ -29,7 +30,10 @@ go_library(
 
 go_test(
     name = "xdseval_test",
-    srcs = ["xdseval_test.go"],
+    srcs = [
+        "ipmatcher_test.go",
+        "xdseval_test.go",
+    ],
     embed = [":xdseval"],
     deps = [
         "@com_github_cncf_xds_go//xds/core/v3:core",
