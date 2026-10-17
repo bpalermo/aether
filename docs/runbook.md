@@ -5106,6 +5106,31 @@ the design, the gates and the sizes.
   service on an upgraded node and gets the floor on a node not yet upgraded.
   A rollback to 3.0.2 brings the floor back.
 
+#### Chart 3.0.6: the passthrough counts Service-range connections apart (proposal 044, Phase 0)
+
+Measurement only: no path changes. Once the agent knows the cluster's Service
+range (chart 3.0.4), each pod's capture listener sends a connection that no
+mesh chain and not `cap_http` takes, and whose destination address is inside
+that range, to a second passthrough chain, `cap_passthrough_svc`. It is
+`cap_passthrough` under its own name: the same `passthrough_original_dst`
+cluster, so the connection goes where it went before. Only its `tcp_proxy`
+stat prefix differs, so `tcp.cap_passthrough_svc.*` beside
+`tcp.cap_passthrough.*` splits a node's passthrough egress into "a Service of
+the cluster" and "anything else". Neither chain is access-logged.
+
+- Cleartext HTTP is unchanged: the range is tried only after `cap_http`, so a
+  mesh service that serves HTTP only (inside the range, with no chain of its
+  own) still reaches `cap_http`, and so does HTTP to a non-mesh Service.
+- No range known (the agent has not read one yet, or `ServiceCIDR` is not
+  served and `--service-cidrs` is unset): the listener is the one 3.0.5
+  builds, byte for byte.
+- A change of the range rebuilds every pod's capture listener on the node; a
+  resync with the same range rebuilds nothing. The listener is updated in
+  place, so connections on its other chains are untouched. One range adds
+  about 560 bytes to each pod's capture listener, whatever the Service count.
+- Rolling or rolling back: per node, with the agent. A node not yet upgraded
+  counts all of it under `cap_passthrough`.
+
 #### Prober chart 1.1.1: targets name a declared port (proposal 043)
 
 Deploy prober chart **1.1.1 before** `aether` chart 3.0.0. It works against

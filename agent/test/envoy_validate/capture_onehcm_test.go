@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"net/netip"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -87,7 +88,10 @@ func (r *ohvRegistry) ListAllEndpoints(_ context.Context, protocol registryv1.Se
 }
 
 // agentCaptureBootstrap builds the bootstrap of gate (c) from the cache.
-func agentCaptureBootstrap(t *testing.T) []byte {
+//
+// ranges, when given, are the cluster's Service ranges (proposal 044): the
+// capture listener then carries the Service-range branch.
+func agentCaptureBootstrap(t *testing.T, ranges ...netip.Prefix) []byte {
 	t.Helper()
 	ctx := context.Background()
 	h, tcp := registryv1.PortProtocol_PORT_PROTOCOL_HTTP, registryv1.PortProtocol_PORT_PROTOCOL_TCP
@@ -132,6 +136,9 @@ func agentCaptureBootstrap(t *testing.T) []byte {
 			ExtensionFilters: []proxy.ExtensionFilter{{Name: ohvHeaderMutation, Config: hm("x-rule")}},
 		},
 	}})
+	if len(ranges) > 0 {
+		c.SetServiceRanges(ranges)
+	}
 	require.NoError(t, c.LoadClustersFromRegistry(ctx, "cluster-1", "node-1", &ohvRegistry{services: services}))
 	snap, err := c.GetSnapshot("node-1")
 	require.NoError(t, err)

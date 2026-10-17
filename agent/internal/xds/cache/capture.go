@@ -143,11 +143,14 @@ func (c *SnapshotCache) generateCaptureListener(cniPod *cniv1.CNIPod, trustDomai
 			tcpServices = append(tcpServices, svc)
 		}
 	}
+	// Never mutated in place (SetServiceRanges replaces the slice), so it is
+	// safe to hand on after the lock.
+	serviceRanges := c.serviceRanges
 	c.captureMu.RUnlock()
 
 	// The HTTP chains are NOT gated on identity: an HTTP cluster fetches its
 	// client certificate per connection and is published either way.
-	l, err := proxy.GenerateCaptureListener(cniPod, proxy.SourceIdentityForPod(cniPod, trustDomain), meshconst.ProxyCapturePort, c.meshDomain, c.emitStatsPod, tcpServices, c.captureRedirectAll, extensionFilters)
+	l, err := proxy.GenerateCaptureListener(cniPod, proxy.SourceIdentityForPod(cniPod, trustDomain), meshconst.ProxyCapturePort, c.meshDomain, c.emitStatsPod, tcpServices, c.captureRedirectAll, extensionFilters, proxy.WithServiceRanges(serviceRanges))
 	if err != nil {
 		return nil, err
 	}

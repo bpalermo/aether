@@ -28,13 +28,17 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"net/netip"
 	"strconv"
 	"strings"
 	"testing"
 	"time"
 
+	"aethermesh.dev/agent/internal/xds/proxy"
 	"aethermesh.dev/agent/test/envoybin"
 	"aethermesh.dev/agent/test/xdseval"
+	cniv1 "aethermesh.dev/api/aether/cni/v1"
+	meshconst "aethermesh.dev/common/constants/mesh"
 	xdscorev3 "github.com/cncf/xds/go/xds/core/v3"
 	xdsmatcherv3 "github.com/cncf/xds/go/xds/type/matcher/v3"
 	corev3 "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
@@ -225,5 +229,105 @@ func TestIPRangeMatcher_XdsevalAgreesWithTheProxy(t *testing.T) {
 		t.Logf("%s:%d http=%v: proxy %q, xdseval %q (%s)", c.ip, dialled, c.http, got, model, c.why)
 		assert.Equal(t, got, model, "%s:%d http=%v: xdseval disagrees with the pinned proxy (%s)", c.ip, dialled, c.http, c.why)
 		assert.Equal(t, c.want, got, "%s:%d http=%v: %s", c.ip, dialled, c.http, c.why)
+	}
+}
+
+// TestIPRangeMatcher_AgentCaptureMatcherLive: the same agreement on the
+// matching tree the agent itself builds (proposal 044, Phase 0;
+// proxy.WithServiceRanges), not a hand-built one. The capture listener is
+// generated with a raw-TCP mesh service, a Service range and a /32 outside
+// it, all on loopback addresses; its filter_chain_matcher is kept as built and
+// every chain it names, the default chain too, is replaced by one that writes
+// its name. The proxy and xdseval must name the same chain for every case.
+func TestIPRangeMatcher_AgentCaptureMatcherLive(t *testing.T) {
+	bin, err := envoybin.Path()
+	if err != nil {
+		t.Skipf("no pinned proxy: %v", err)
+	}
+	p := ohFreePorts(t)
+	port := p.a
+	const (
+		tcpVIP   = "127.96.0.10" // a mesh service with a raw-TCP port
+		httpVIP  = "127.96.0.20" // a mesh service with HTTP only: no capture service
+		otherSvc = "127.96.0.30" // a non-mesh address in the range
+		setIP    = "127.50.0.7"  // a /32 outside the range
+		outside  = "127.50.0.8"
+	)
+	pod := &cniv1.CNIPod{Name: "client-0", Namespace: "demo", NetworkNamespace: "/proc/self/ns/net"}
+	tcpCluster := proxy.TCPClusterName("demo/tcponly", "aether.internal")
+	gen, err := proxy.GenerateCaptureListener(pod, "spiffe://aether.internal/ns/demo/sa/client", meshconst.ProxyCapturePort, "aether.internal", false,
+		[]proxy.CaptureTCPService{{ClusterName: tcpCluster, ClusterIP: tcpVIP, LegacyTCPPort: port}}, true, nil,
+		proxy.WithServiceRanges([]netip.Prefix{netip.MustParsePrefix("127.96.0.0/12"), netip.MustParsePrefix(setIP + "/32")}))
+	require.NoError(t, err)
+	tcpOwn := fmt.Sprintf("cap_tcp_%s_%d", tcpCluster, port)
+	svc := proxy.CapturePassthroughServiceChainName
+	cases := []irCase{
+		{tcpVIP, false, false, tcpOwn, "a mesh address with a raw-TCP port: its own chain"},
+		{httpVIP, false, true, proxy.CaptureHTTPChainName, "a mesh address with HTTP only, over HTTP: cap_http, before the range"},
+		{httpVIP, false, false, svc, "the same address, not HTTP: the range"},
+		{otherSvc, false, false, svc, "a non-mesh address in the range"},
+		{setIP, false, false, svc, "a /32 outside the CIDR"},
+		{outside, false, false, "cap_passthrough", "outside every range: the default chain"},
+		{outside, false, true, proxy.CaptureHTTPChainName, "HTTP outside every range: cap_http"},
+	}
+
+	chain := func(name string) *listenerv3.FilterChain {
+		return &listenerv3.FilterChain{Name: name, Filters: []*listenerv3.Filter{{
+			Name: "envoy.filters.network.direct_response",
+			ConfigType: &listenerv3.Filter_TypedConfig{TypedConfig: fsAny(t, &direct_responsev3.Config{
+				Response: &corev3.DataSource{Specifier: &corev3.DataSource_InlineString{InlineString: "chain=" + name + "\n"}},
+			})},
+		}}}
+	}
+	l := &listenerv3.Listener{
+		Name: "agentcapture",
+		ListenerFilters: []*listenerv3.ListenerFilter{
+			{Name: "envoy.filters.listener.http_inspector", ConfigType: &listenerv3.ListenerFilter_TypedConfig{TypedConfig: fsAny(t, &http_inspectorv3.HttpInspector{})}},
+			{Name: "envoy.filters.listener.tls_inspector", ConfigType: &listenerv3.ListenerFilter_TypedConfig{TypedConfig: fsAny(t, &tls_inspectorv3.TlsInspector{})}},
+		},
+		ListenerFiltersTimeout:           durationpb.New(time.Second),
+		ContinueOnListenerFiltersTimeout: true,
+		FilterChainMatcher:               gen.GetFilterChainMatcher(),
+		DefaultFilterChain:               chain(gen.GetDefaultFilterChain().GetName()),
+	}
+	names := map[string]bool{}
+	for _, fc := range gen.GetFilterChains() {
+		l.FilterChains = append(l.FilterChains, chain(fc.GetName()))
+		names[fc.GetName()] = true
+	}
+	require.True(t, names[svc], "the generated listener carries %s", svc)
+	seen := map[string]bool{}
+	for _, c := range cases {
+		if seen[c.ip] {
+			continue
+		}
+		seen[c.ip] = true
+		a := socketAddress(c.ip, int(port))
+		if l.Address == nil {
+			l.Address = a
+			continue
+		}
+		l.AdditionalAddresses = append(l.AdditionalAddresses, &listenerv3.AdditionalAddress{Address: a})
+	}
+
+	cp := startADSControlPlane(t, map[resourcev3.Type][]types.Resource{})
+	launchEnvoyOverADS(t, bin, cp)
+	p.release()
+	snap, err := cachev3.NewSnapshot("v1", map[resourcev3.Type][]types.Resource{resourcev3.ListenerType: {l}})
+	require.NoError(t, err)
+	require.NoError(t, cp.cache.SetSnapshot(context.Background(), envoyNodeID, snap))
+	ppAwaitListening(t, net.JoinHostPort(cases[0].ip, strconv.Itoa(int(port))))
+
+	for _, c := range cases {
+		conn := xdseval.Conn{IP: c.ip, Port: port, Transport: "raw_buffer"}
+		if c.http {
+			conn.App = []string{"http/1.1"}
+		}
+		model, err := xdseval.SelectChain(l, conn)
+		require.NoError(t, err)
+		got := irDial(c.ip, port, c.http)
+		t.Logf("%s:%d http=%v: proxy %q, xdseval %q (%s)", c.ip, port, c.http, got, model, c.why)
+		assert.Equal(t, got, model, "%s:%d http=%v: xdseval disagrees with the pinned proxy (%s)", c.ip, port, c.http, c.why)
+		assert.Equal(t, c.want, got, "%s:%d http=%v: %s", c.ip, port, c.http, c.why)
 	}
 }

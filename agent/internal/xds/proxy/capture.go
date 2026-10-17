@@ -3,6 +3,7 @@ package proxy
 import (
 	"fmt"
 	"net"
+	"net/netip"
 	"time"
 
 	tcp_proxyv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/network/tcp_proxy/v3"
@@ -144,7 +145,20 @@ func CaptureListenerName(cniPod *cniv1.CNIPod) string {
 // chains are selected by filter_chain_matcher
 // (captureChainMatcher, which says why); no chain carries a
 // filter_chain_match.
-func GenerateCaptureListener(cniPod *cniv1.CNIPod, sourceSpiffeID string, capturePort uint32, meshDomain string, emitStatsPod bool, tcpServices []CaptureTCPService, withPassthrough bool, extensionFilters []*http_connection_managerv3.HttpFilter) (*listenerv3.Listener, error) {
+//
+// opts: WithServiceRanges adds the Service-range branch (proposal 044, Phase
+// 0) to a redirect-all listener.
+func GenerateCaptureListener(cniPod *cniv1.CNIPod, sourceSpiffeID string, capturePort uint32, meshDomain string, emitStatsPod bool, tcpServices []CaptureTCPService, withPassthrough bool, extensionFilters []*http_connection_managerv3.HttpFilter, opts ...CaptureListenerOption) (*listenerv3.Listener, error) {
+	var o captureListenerOptions
+	for _, opt := range opts {
+		opt(&o)
+	}
+	// The Service-range branch splits the passthrough: scoped capture has
+	// none, and gets no branch.
+	var serviceRanges []netip.Prefix
+	if withPassthrough {
+		serviceRanges = o.serviceRanges
+	}
 	if cniPod == nil {
 		return nil, fmt.Errorf("pod is required")
 	}
@@ -179,6 +193,13 @@ func GenerateCaptureListener(cniPod *cniv1.CNIPod, sourceSpiffeID string, captur
 	// volume the log must not carry.
 	attachL4AccessLog(chains, cniPod.GetName(), cniPod.GetNamespace())
 	chains = append(chains, buildCaptureHTTPFilterChain(cniPod, sourceSpiffeID, meshDomain, emitStatsPod, extensionFilters))
+	// The Service-range share of the passthrough (proposal 044, Phase 0):
+	// appended after attachL4AccessLog for the same reason as the default
+	// chain, which it is a copy of. It is non-mesh egress, the volume the L4
+	// log must not carry.
+	if len(serviceRanges) > 0 {
+		chains = append(chains, BuildCaptureServicePassthroughFilterChain())
+	}
 	// The matching tree decides; a filter_chain_match left on a chain would be
 	// ignored by the proxy, and would only mislead whoever reads the config.
 	for _, fc := range chains {
@@ -259,7 +280,7 @@ func GenerateCaptureListener(cniPod *cniv1.CNIPod, sourceSpiffeID string, captur
 		StatPrefix:                    podStatName(CaptureListenerName(cniPod)),
 		TrafficDirection:              corev3.TrafficDirection_OUTBOUND,
 		FilterChains:                  chains,
-		FilterChainMatcher:            captureChainMatcher(CaptureListenerName(cniPod), services, !withPassthrough),
+		FilterChainMatcher:            captureChainMatcher(CaptureListenerName(cniPod), services, !withPassthrough, serviceRanges),
 	}
 
 	// SPIKE/M2a passthrough: the DefaultFilterChain is Envoy's true "no named chain
@@ -274,6 +295,25 @@ func GenerateCaptureListener(cniPod *cniv1.CNIPod, sourceSpiffeID string, captur
 	}
 
 	return l, nil
+}
+
+// CaptureListenerOption sets an optional input of GenerateCaptureListener.
+type CaptureListenerOption func(*captureListenerOptions)
+
+type captureListenerOptions struct {
+	serviceRanges []netip.Prefix
+}
+
+// WithServiceRanges gives a redirect-all capture listener the cluster's
+// Service ranges (proposal 044, Phase 0): a connection to an address inside
+// one that no mesh chain takes leaves through cap_passthrough_svc instead of
+// cap_passthrough. Same cluster, same path; only the tcp_proxy stat prefix
+// differs, so the two counters split a node's passthrough egress into "a
+// Service of the cluster" and "anything else". Empty adds nothing: the
+// listener is then exactly the one built without the option. Ignored by
+// scoped capture, which has no passthrough.
+func WithServiceRanges(ranges []netip.Prefix) CaptureListenerOption {
+	return func(o *captureListenerOptions) { o.serviceRanges = ranges }
 }
 
 // buildCaptureListenerFilters: recover the original destination, then sniff HTTP and TLS.
@@ -445,6 +485,25 @@ func BuildCapturePassthroughFilterChain() *listenerv3.FilterChain {
 		Name: "cap_passthrough",
 		Filters: []*listenerv3.Filter{
 			buildTCPProxyNetworkFilter("cap_passthrough", PassthroughClusterName),
+		},
+	}
+}
+
+// CapturePassthroughServiceChainName is the passthrough chain of the
+// connections to a Service-range address (proposal 044, Phase 0), and its
+// tcp_proxy stat prefix.
+const CapturePassthroughServiceChainName = "cap_passthrough_svc"
+
+// BuildCaptureServicePassthroughFilterChain returns the chain the capture
+// listener's Service-range branch selects (captureServiceRangeBranch): the
+// passthrough (BuildCapturePassthroughFilterChain) under its own name and
+// stat prefix. The cluster, and so the path, is the same; the downstream
+// counters of the two stat prefixes are the split Phase 0 measures.
+func BuildCaptureServicePassthroughFilterChain() *listenerv3.FilterChain {
+	return &listenerv3.FilterChain{
+		Name: CapturePassthroughServiceChainName,
+		Filters: []*listenerv3.Filter{
+			buildTCPProxyNetworkFilter(CapturePassthroughServiceChainName, PassthroughClusterName),
 		},
 	}
 }
