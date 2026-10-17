@@ -292,16 +292,15 @@ func (t *mergeTable) pick(host string) *routev3.VirtualHost {
 	if vh, ok := t.exact[host]; ok {
 		return vh
 	}
-	// A wildcard needs at least one character where its "*" stands.
-	var best *routev3.VirtualHost
-	bestLen := -1
-	for prefix, vh := range t.wild {
-		if len(host) > len(prefix) && strings.HasPrefix(host, prefix) && len(prefix) > bestLen {
-			best, bestLen = vh, len(prefix)
+	// A wildcard needs at least one character where its "*" stands. Every
+	// wildcard's prefix is "<name>:" with no ":" in the name
+	// (indexMergeTable), so the only one that can be a prefix of host is the
+	// part of host up to its first ":". One lookup: a scan of every wildcard
+	// per domain made the compiler quadratic in the services.
+	if i := strings.IndexByte(host, ':'); i >= 0 && len(host) > i+1 {
+		if vh, ok := t.wild[host[:i+1]]; ok {
+			return vh
 		}
-	}
-	if best != nil {
-		return best
 	}
 	return t.star
 }
@@ -767,6 +766,9 @@ func nameCond(n string, ported bool) routeCond {
 // the default, each route also under conds. The default is the answer of
 // ":*" when the class has it (it stands for every port spelling no exact
 // domain names, which no regex lists), else the answer most suffixes get.
+// When the default has a route that can take a request with no path
+// (takesAPathlessRequest), it is also conditioned on the Host's suffix being
+// none of the other answers'.
 func suffixBlock(levels groupLevels, answers map[string]mergeAnswer, conds []routeCond) ([]*routev3.Route, error) {
 	suffixes := slices.Sorted(maps.Keys(answers))
 	bySuffix := map[string][]string{}
@@ -794,11 +796,39 @@ func suffixBlock(levels groupLevels, answers map[string]mergeAnswer, conds []rou
 		}
 		out = append(out, routes...)
 	}
-	routes, err := levels.routes(answers[bySuffix[def][0]], conds)
+	routes, err := defaultBlock(levels, answers, keys, bySuffix, def, conds)
 	if err != nil {
 		return nil, err
 	}
 	return append(out, routes...), nil
+}
+
+// defaultBlock is the routes of the default answer def of a suffixBlock,
+// under conds. A request with no path falls out of its own suffix's routes
+// when they are all "/"-prefixed (see flatBlock). Unconditioned on the
+// suffix, a route of the default that takes it (takesAPathlessRequest) would
+// give it another suffix's answer, where its own table gives it none. The
+// default is then taken only by a Host whose suffix is none of the other
+// answers': not by a regex of its own suffixes, which ":*" has none of, and a
+// Host no regex accepts ("<name>:8080:8080") keeps the default it had.
+func defaultBlock(levels groupLevels, answers map[string]mergeAnswer, keys []string, bySuffix map[string][]string, def string, conds []routeCond) ([]*routev3.Route, error) {
+	a := answers[bySuffix[def][0]]
+	routes, err := levels.routes(a, conds)
+	if err != nil || len(keys) == 1 || !slices.ContainsFunc(routes, takesAPathlessRequest) {
+		return routes, err
+	}
+	var others []string
+	for _, k := range keys {
+		if k != def {
+			others = append(others, bySuffix[k]...)
+		}
+	}
+	notOthers, err := authorityCond(others)
+	if err != nil {
+		return nil, err
+	}
+	notOthers.header.InvertMatch = true
+	return levels.routes(a, append(slices.Clone(conds), notOthers))
 }
 
 // defaultAnswer is the answer of ":*" when there is one, else the one most

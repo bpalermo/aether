@@ -391,6 +391,60 @@ func TestMergeCaptureRouteTables_APathlessRequestNeverTakesAnotherNamesRoutes(t 
 	assert.Empty(t, mergeMismatches(t, plain, perPort, other, hosts, []string{"8080", "9090", ""}, []string{""}, "/", ""))
 }
 
+// TestMergeCaptureRouteTables_APathlessRequestNeverTakesAnotherPortsAnswer:
+// the same fall-through as above, between the answers one name gets by the
+// port in its Host. Port 8080's table answers "a.ns.mesh:8080" with
+// "/"-prefixed routes only, and the name's other spellings (the default
+// answer, the one most suffixes get, or the one of ":*") with a regex rule. A
+// CONNECT to "a.ns.mesh:8080" without a path gets no route from that table,
+// and must get none compiled, never the regex rule of the default.
+func TestMergeCaptureRouteTables_APathlessRequestNeverTakesAnotherPortsAnswer(t *testing.T) {
+	const mesh = "a.ns.mesh"
+	rule := &routev3.Route{
+		Match:  &routev3.RouteMatch{PathSpecifier: &routev3.RouteMatch_SafeRegex{SafeRegex: &typematcherv3.RegexMatcher{Regex: ".*"}}},
+		Action: &routev3.Route_Route{Route: &routev3.RouteAction{ClusterSpecifier: &routev3.RouteAction_Cluster{Cluster: "by-regex"}}},
+	}
+	for name, otherDoms := range map[string][]string{
+		"the default most suffixes get": {mesh, mesh + ":9090", mesh + ":7070"},
+		"the default of :*":             {mesh, mesh + ":*"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			routed := BuildServiceVirtualHost(mesh+"|8080", mesh+":8080", []string{mesh + ":8080"}, nil)
+			others := BuildServiceVirtualHost(mesh+"|others", mesh+":9090", otherDoms, nil)
+			others.Routes = append([]*routev3.Route{proto.Clone(rule).(*routev3.Route)}, others.Routes...)
+			perPort := map[uint32]*routev3.RouteConfiguration{
+				8080: BuildCaptureRouteConfiguration(CaptureHTTPRouteName(8080), []*routev3.VirtualHost{routed, others}, BuildCaptureCatchAllVirtualHost("mesh", 8080, false, true), nil),
+			}
+			other := BuildCaptureRouteConfiguration(CaptureHTTPOtherRouteName, nil, BuildCaptureCatchAllVirtualHost("mesh", 0, false, true), nil)
+			merged, err := MergeCaptureRouteTables(CaptureHTTPChainName, perPort, other)
+			require.NoError(t, err)
+
+			connect := xdseval.Request{Host: mesh + ":8080", NoPath: true, FilterState: map[string]string{DialledPortFilterStateKey: "8080"}}
+			a, err := xdseval.Resolve(merged, connect)
+			require.NoError(t, err)
+			r, err := xdseval.FirstRoute(a.Routes, connect)
+			require.NoError(t, err)
+			assert.Nil(t, r, "a CONNECT to name:8080 with no path gets no route, as on its own table")
+
+			hosts := []string{mesh, "A.NS.MESH", mesh + ":8080", "A.NS.MESH:8080", mesh + ":9090", mesh + ":7070", mesh + ":7", mesh + ":8080:8080", "x.y.mesh:8080"}
+			assert.Empty(t, mergeMismatches(t, merged, perPort, other, hosts, []string{"8080", "9090", ""}, []string{""}, "/", "/x", ""))
+		})
+	}
+
+	// Without a route that takes a pathless request, the default keeps no
+	// suffix condition (no cost): mergeTestTables compiles as it always did.
+	perPort, other := mergeTestTables()
+	merged, err := MergeCaptureRouteTables(CaptureHTTPChainName, perPort, other)
+	require.NoError(t, err)
+	for _, vh := range merged.GetVirtualHosts() {
+		for _, r := range vh.GetRoutes() {
+			for _, h := range r.GetMatch().GetHeaders() {
+				assert.False(t, h.GetInvertMatch(), "virtual host %s: no inverted suffix condition", vh.GetName())
+			}
+		}
+	}
+}
+
 // proxyPortTestTable is the shape of the proxy port's table
 // (BuildProxyPortCaptureRouteConfiguration over the loopback table's virtual
 // hosts) for the service of mergeTestTables: its mesh name only, by the port
