@@ -530,9 +530,20 @@ func ohCases(p *ohPorts) []ohCase {
 		{id: "S5 HTTP to b's own HTTP port", send: func() string { return ohHTTP1(ohVIPofB, p.bh, fmt.Sprintf("b.%s.%s", ohNS, ohMesh)) }, want: fmt.Sprintf("cluster=b.%s.%s:%d", ohNS, ohMesh, p.bh), trap: true},
 	}
 	if p.proxy {
+		// The proxy port is a branch of cap_http's table since chart 3.0.2
+		// (it had a chain and a table of its own): the loopback table's
+		// answers, where the port in Host decides and only the mesh name is
+		// a service's.
 		cases = append(cases,
 			ohCase{id: "X1 dialled the proxy port (the Host's port decides)", send: func() string { return ohHTTP1(ohLocal, 18081, fmt.Sprintf("%s:%d", a, p.a)) }, want: aDefault},
 			ohCase{id: "X2 TLS to the proxy port", send: func() string { return ohTLS(ohLocal, 18081, "example.com") }, want: "PASSTHROUGH"},
+			ohCase{id: "X3 the proxy port, Host names a's other port", send: func() string { return ohHTTP1(ohLocal, 18081, fmt.Sprintf("%s:%d", a, p.a2)) }, want: a2},
+			ohCase{id: "X4 the proxy port, Host names the proxy port", send: func() string { return ohHTTP1(ohLocal, 18081, a+":18081") }, want: undeclared},
+			ohCase{id: "X5 the proxy port, port-less Host", send: func() string { return ohHTTP1(ohLocal, 18081, a) }, want: "x-aether-error: port-required"},
+			ohCase{id: "X6 the proxy port, a Host that is no mesh name", send: func() string { return ohHTTP1(ohLocal, 18081, "example.com") }, want: "PASSTHROUGH"},
+			ohCase{id: "X7 the proxy port, the cluster.local name (not the loopback table's)", send: func() string { return ohHTTP1(ohLocal, 18081, fmt.Sprintf("%s:%d", aKube, p.a)) }, want: "PASSTHROUGH"},
+			ohCase{id: "X8 the proxy port, the short name of the caller's namespace", send: func() string { return ohHTTP1(ohLocal, 18081, fmt.Sprintf("a:%d", p.a)) }, want: aDefault},
+			ohCase{id: "X9 the proxy port, h2c", send: func() string { return ohH2C(ohLocal, 18081, fmt.Sprintf("%s:%d", a, p.a2)) }, want: a2},
 		)
 	}
 	return cases
@@ -579,9 +590,6 @@ func TestOneHCM_LiveControl_LegacyChainMatch(t *testing.T) {
 			switch {
 			case name == proxy.CaptureHTTPChainName:
 				fc.FilterChainMatch = httpMatch()
-			case name == "cap_http_18081":
-				fc.FilterChainMatch = httpMatch()
-				fc.FilterChainMatch.DestinationPort = wrapperspb.UInt32(18081)
 			case strings.HasPrefix(name, "cap_tls_"):
 				fc.FilterChainMatch = &listenerv3.FilterChainMatch{PrefixRanges: vip(), ServerNames: []string{ohSNI}}
 			case strings.HasPrefix(name, "cap_tcp_"):

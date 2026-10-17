@@ -156,17 +156,53 @@ func agentCaptureBootstrap(t *testing.T) []byte {
 			LoadAssignment:       &endpointv3.ClusterLoadAssignment{ClusterName: name},
 		})
 	}
-	tables := 0
-	for i, name := range []string{proxy.CaptureHTTPChainName, proxy.CaptureHTTPRouteName(18081)} {
-		rc, ok := snap.GetResources(resourcev3.RouteType)[name].(*routev3.RouteConfiguration)
-		require.True(t, ok, "the snapshot carries %s", name)
-		listeners = append(listeners, inlineTableListener(rc, uint32(15200+i)))
-		tables++
+	// One capture table, cap_http, the proxy port's branch included: the
+	// proxy port's own table (cap_http_18081) and chain went in chart 3.0.2.
+	_, published := snap.GetResources(resourcev3.RouteType)[proxy.CaptureHTTPRouteName(18081)]
+	require.False(t, published, "the proxy port's table is compiled into cap_http, never published")
+	hcms := 0
+	for _, fc := range listeners[0].GetFilterChains() {
+		for _, f := range fc.GetFilters() {
+			hcm := &http_connection_managerv3.HttpConnectionManager{}
+			if f.GetTypedConfig().UnmarshalTo(hcm) == nil {
+				hcms++
+				require.Equal(t, proxy.CaptureHTTPChainName, hcm.GetRds().GetRouteConfigName(), "chain %s", fc.GetName())
+			}
+		}
 	}
-	require.Equal(t, 2, tables)
+	require.Equal(t, 1, hcms, "one connection manager on the capture listener")
+	rc, ok := snap.GetResources(resourcev3.RouteType)[proxy.CaptureHTTPChainName].(*routev3.RouteConfiguration)
+	require.True(t, ok, "the snapshot carries %s", proxy.CaptureHTTPChainName)
+	requireProxyPortBranch(t, rc)
+	listeners = append(listeners, inlineTableListener(rc, 15200))
 	data, err := marshalBootstrap(newBootstrap(clusters, listeners))
 	require.NoError(t, err)
 	return data
+}
+
+// requireProxyPortBranch: the compiled table carries routes for a dial to the
+// proxy port (18081), among them some that tell the mesh name apart from the
+// service's other names by an exact or prefix :authority match, so validate
+// mode parses those shapes too.
+func requireProxyPortBranch(t *testing.T, rc *routev3.RouteConfiguration) {
+	t.Helper()
+	proxyPort, byName := 0, 0
+	for _, vh := range rc.GetVirtualHosts() {
+		for _, r := range vh.GetRoutes() {
+			for _, fs := range r.GetMatch().GetFilterState() {
+				if fs.GetKey() == proxy.DialledPortFilterStateKey && fs.GetStringMatch().GetExact() == "18081" {
+					proxyPort++
+					for _, h := range r.GetMatch().GetHeaders() {
+						if h.GetName() == ":authority" && (h.GetStringMatch().GetExact() != "" || h.GetStringMatch().GetPrefix() != "") {
+							byName++
+						}
+					}
+				}
+			}
+		}
+	}
+	require.Positive(t, proxyPort, "no route of the proxy port in cap_http")
+	require.Positive(t, byName, "no route of the proxy port told apart by name")
 }
 
 const ohvHeaderMutation = "envoy.filters.http.header_mutation"

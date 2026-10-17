@@ -5,12 +5,14 @@ import (
 	"fmt"
 	"maps"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 
 	"aethermesh.dev/agent/internal/xds/proxy"
 	"aethermesh.dev/agent/test/xdseval"
 	registryv1 "aethermesh.dev/api/aether/registry/v1"
+	meshconst "aethermesh.dev/common/constants/mesh"
 	"aethermesh.dev/common/extensionfilter"
 	mutation_rulesv3 "github.com/envoyproxy/go-control-plane/envoy/config/common/mutation_rules/v3"
 	corev3 "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
@@ -97,7 +99,7 @@ func TestOneHCM_CompiledTableAnswersAsThePerPortTables(t *testing.T) {
 	for name, c := range oneHCMFixtures(t) {
 		t.Run(name, func(t *testing.T) {
 			merged := a043Published(t, c)
-			perPort, other := c.capturePerPortTables(c.captureTableInputs(), c.captureHTTPPorts())
+			perPort, other := c.capturePerPortTables(c.captureTableInputs(), c.captureHTTPPorts(), c.proxyPortTableNow(c.captureHTTPPorts()))
 			require.Greater(t, len(perPort), 2, "the fixture has HTTP port numbers")
 			requireCompiledEquivalentAllPaths(t, merged, perPort, other)
 
@@ -131,7 +133,7 @@ func sizeOfTables(perPort map[uint32]*routev3.RouteConfiguration, other *routev3
 func TestOneHCM_EquivalenceCheckSeesAWrongCompiledTable(t *testing.T) {
 	c := oneHCMFixtures(t)["fixture with rules, a filter, imports and a user Service"]
 	merged := a043Published(t, c)
-	perPort, other := c.capturePerPortTables(c.captureTableInputs(), c.captureHTTPPorts())
+	perPort, other := c.capturePerPortTables(c.captureTableInputs(), c.captureHTTPPorts(), c.proxyPortTableNow(c.captureHTTPPorts()))
 	require.Empty(t, compiledMismatches(merged, perPort, other, 1, true))
 
 	mutate := func(name string, f func(rc *routev3.RouteConfiguration) bool) {
@@ -281,6 +283,39 @@ func TestOneHCM_EquivalenceCheckSeesAWrongCompiledTable(t *testing.T) {
 		}
 		return changed
 	})
+	// The proxy port (18081), a branch of the table since chart 3.0.2.
+	proxyPort := strconv.Itoa(meshconst.ProxyOutboundPort)
+	mutate("the proxy port's block loses a route (a dial to 18081 answered as another port's)", func(rc *routev3.RouteConfiguration) bool {
+		vh := vhost(rc, multi)
+		i := slices.IndexFunc(vh.GetRoutes(), func(r *routev3.Route) bool { return dialled(r) == proxyPort })
+		if i < 0 {
+			return false
+		}
+		vh.Routes = slices.Delete(vh.Routes, i, i+1)
+		return true
+	})
+	mutate("the proxy port's block loses the name condition (its other names answered as the mesh name)", func(rc *routev3.RouteConfiguration) bool {
+		changed := false
+		for _, r := range vhost(rc, multi).GetRoutes() {
+			if dialled(r) != proxyPort {
+				continue
+			}
+			kept := slices.DeleteFunc(slices.Clone(r.GetMatch().GetHeaders()), func(h *routev3.HeaderMatcher) bool {
+				return h.GetName() == ":authority" && (h.GetStringMatch().GetPrefix() != "" || h.GetStringMatch().GetExact() != "")
+			})
+			if len(kept) != len(r.GetMatch().GetHeaders()) {
+				r.Match.Headers = kept
+				changed = true
+			}
+		}
+		return changed
+	})
+	mutate("the proxy port's floor answers as another port's", func(rc *routev3.RouteConfiguration) bool {
+		vh := vhost(rc, "on_demand_catch_all")
+		before := len(vh.GetRoutes())
+		vh.Routes = slices.DeleteFunc(vh.Routes, func(r *routev3.Route) bool { return dialled(r) == proxyPort })
+		return len(vh.GetRoutes()) < before
+	})
 	mutate("the catch-all offers every dialled port the same on-demand spelling", func(rc *routev3.RouteConfiguration) bool {
 		var want string
 		routes := vhost(rc, "on_demand_catch_all").GetRoutes()
@@ -298,6 +333,119 @@ func TestOneHCM_EquivalenceCheckSeesAWrongCompiledTable(t *testing.T) {
 		}
 		return changed
 	})
+}
+
+// TestOneHCM_ProxyPortAnswersAsItsOwnTable: a dial to the mesh's HTTP proxy
+// port (18081), which through chart 3.0.1 had a chain and a table of its own
+// (cap_http_18081, the loopback table's virtual hosts), gets from the one
+// compiled cap_http exactly that table's answer, for every class of Host: a
+// declared port, no port, the proxy port and the L4 port themselves, an
+// undeclared port, upper case, the cluster.local and namespace names, short
+// names with and without the caller's namespace, a name the node holds
+// nothing of, and a name that is not the mesh's; in redirect-all (the
+// passthrough floor) and scoped (the 404 floor) capture, with a service-wide
+// filter and route rules present. The answers seen are held to cover those
+// classes, so the check cannot pass on a fixture that never routes.
+func TestOneHCM_ProxyPortAnswersAsItsOwnTable(t *testing.T) {
+	for name, c := range oneHCMFixtures(t) {
+		t.Run(name, func(t *testing.T) {
+			merged := a043Published(t, c)
+			ports := c.captureHTTPPorts()
+			require.Contains(t, ports, uint32(meshconst.ProxyOutboundPort))
+			proxyPort := c.proxyPortTableNow(ports)
+			require.NotNil(t, proxyPort)
+			require.Equal(t, "cap_http_18081", proxyPort.GetName())
+			own, compiled := xdseval.NewTable(proxyPort), xdseval.NewTable(merged)
+
+			const mesh = "multi.demo." + a043Mesh
+			hosts := []string{
+				mesh + ":8080", mesh + ":9090", mesh, mesh + ":18081", mesh + ":18082", mesh + ":7777", mesh + ":8080:8080",
+				strings.ToUpper(mesh) + ":8080", strings.ToUpper(mesh),
+				"multi.demo.svc.cluster.local:8080", "multi.demo.svc.cluster.local", "multi.demo:9090", "multi.demo.svc",
+				"multi:8080", "multi", "multi:18081", "eighty:80", "eighty",
+				"eighty.demo." + a043Mesh, "eighty.demo." + a043Mesh + ":80", "httponly.demo." + a043Mesh + ":8080",
+				"zz-cold.demo." + a043Mesh + ":8080", "zz-cold.demo." + a043Mesh, "zz-cold.demo." + a043Mesh + ":18081",
+				"example.com", "example.com:8080", "example.com:18081",
+			}
+			seen := map[string]bool{}
+			for _, host := range hosts {
+				for _, caller := range []string{a043NS, "", "elsewhere"} {
+					for _, path := range []string{"/", "/x", "/v2"} {
+						fs := map[string]string{proxy.DialledPortFilterStateKey: strconv.Itoa(meshconst.ProxyOutboundPort)}
+						if caller != "" {
+							fs[proxy.CallerNamespaceFilterStateKey] = caller
+						}
+						req := xdseval.Request{Host: host, Path: path, FilterState: fs}
+						assert.Empty(t, sameFirstRoute(own, compiled, req), "Host %q caller %q path %s", host, caller, path)
+						a, err := own.Resolve(req)
+						require.NoError(t, err)
+						var routes []*routev3.Route
+						if !a.NoVhost {
+							routes = a.Routes
+						}
+						r, err := xdseval.FirstRoute(routes, req)
+						require.NoError(t, err)
+						switch o := xdseval.OutcomeOf(r); {
+						case o.ClusterHeader != "":
+							seen["on demand"] = true
+						case o.Cluster == proxy.PassthroughClusterName:
+							seen["passthrough"] = true
+						case o.Cluster != "" || len(o.Weighted) > 0:
+							seen["routed"] = true
+						case o.Reason != "":
+							seen["refused "+o.Reason] = true
+						default:
+							seen[fmt.Sprintf("status %d", o.Status)] = true
+						}
+					}
+				}
+			}
+			t.Logf("answers of the proxy port's table seen: %v", slices.Sorted(maps.Keys(seen)))
+			assert.True(t, seen["refused "+proxy.RefusalPortNotDeclared], "a mesh name on 18081/18082 or an undeclared port")
+			assert.True(t, seen["on demand"], "a name the node holds nothing of")
+			assert.True(t, seen["refused "+proxy.RefusalCallerUnknown], "a short name with no caller namespace")
+			if c.captureRedirectAll {
+				assert.True(t, seen["passthrough"], "a Host that is no mesh name, redirect-all")
+			} else {
+				assert.True(t, seen["status 404"], "a Host that is no mesh name, scoped capture")
+			}
+			if name != "no endpoint held, names only" {
+				assert.True(t, seen["routed"], "a mesh name and its port")
+			}
+		})
+	}
+}
+
+// TestOneHCM_ProxyPortTableIsPartOfTheMemoKey: the proxy port's table is
+// built from the loopback table's virtual hosts, which come from the cluster
+// entries and which no generation of the capture tables' memo covers. Its
+// bytes are therefore part of the key: the same bytes return the memoized
+// table (the version memo then hashes nothing), other bytes rebuild it.
+func TestOneHCM_ProxyPortTableIsPartOfTheMemoKey(t *testing.T) {
+	c := a043Cache(t, a043Fixture())
+	require.NoError(t, c.generateSnapshot(context.Background()))
+	c.snapshotMu.Lock()
+	defer c.snapshotMu.Unlock()
+	ports := c.captureHTTPPorts()
+	pp := c.proxyPortTableNow(ports)
+	first := c.captureRouteTables(ports, pp)
+	require.Len(t, first, 1)
+	assert.Same(t, first[0], c.captureRouteTables(ports, proto.Clone(pp).(*routev3.RouteConfiguration))[0], "the same bytes: the memoized table")
+
+	const fresh = "zz-new.demo." + a043Mesh
+	changed := proto.Clone(pp).(*routev3.RouteConfiguration)
+	changed.VirtualHosts = append([]*routev3.VirtualHost{
+		proxy.BuildRefusalVirtualHost(fresh+"|portless", []string{fresh}, proxy.RefusalPortRequired, "aether: refused\n"),
+	}, changed.VirtualHosts...)
+	rebuilt := c.captureRouteTables(ports, changed)
+	require.Len(t, rebuilt, 1)
+	assert.NotSame(t, first[0], rebuilt[0], "another proxy-port table: rebuilt")
+	req := xdseval.Request{Host: fresh, Path: "/", FilterState: map[string]string{proxy.DialledPortFilterStateKey: strconv.Itoa(meshconst.ProxyOutboundPort)}}
+	a, err := xdseval.NewTable(rebuilt[0].(*routev3.RouteConfiguration)).Resolve(req)
+	require.NoError(t, err)
+	r, err := xdseval.FirstRoute(a.Routes, req)
+	require.NoError(t, err)
+	assert.Equal(t, proxy.RefusalPortRequired, xdseval.OutcomeOf(r).Reason, "the rebuilt table answers as the new proxy-port table")
 }
 
 // TestOneHCM_NoDialledPortFailsClosed is control 2 at the table: on a

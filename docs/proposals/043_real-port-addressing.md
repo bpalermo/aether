@@ -601,8 +601,76 @@ port (the reason header is the contract), and on a port the name is not
 served on the answer is port-not-declared whatever port the Host names (it
 was port-mismatch when the Host named another port).
 
-The proxy port keeps its own chain and table (`cap_http_18081`, the loopback
-table's virtual hosts); folding it in is a later change.
+The proxy port kept its own chain and table (`cap_http_18081`, the loopback
+table's virtual hosts) through chart 3.0.1. **Chart 3.0.2 folds it in**: see
+"Folding the proxy port into `cap_http`" below. Port 18081 itself stays,
+permanently, the HTTP proxy port; only its separate chain and table went.
+
+#### Folding the proxy port into `cap_http` (chart 3.0.2)
+
+A dial to 18081 is one more dialled-port branch of `cap_http`'s table. The
+table of that branch is the one `cap_http_18081` was
+(`BuildProxyPortCaptureRouteConfiguration`: the loopback table's virtual
+hosts, their short names, and a floor of its own that names any port's
+cluster on demand, refuses `:18081` and `:18082` by name, and passes
+everything else through, or 404 in scoped capture), handed to the compiler
+as `perPort[18081]`; the chain records the dialled port for 18081 as for any
+other port, and the matching tree no longer has a branch for it (scoped
+capture keeps its 18082 blackhole). The listener has one HTTP connection
+manager and the node one capture route table fewer.
+
+What the compiler had to learn. Until then every per-port table answered all
+the names of one compiled virtual host alike for one suffix (`<name>`,
+`<name>:<P>`, `<name>:*`), so a route told suffixes apart by a small
+`:authority` regex and nothing else, and a group whose names disagreed was
+refused. The proxy port's table does not: it knows a service by its mesh
+name only, so for the same suffix the mesh name gets the service and its
+`cluster.local` and namespace names get the floor. The compiler now
+partitions a group's names, per dialled port, into classes a suffix-only
+block answers exactly (`nameClasses`: a name joins a class when every suffix
+they share has one answer, and a port only one of them spells is answered by
+the other's `:*` answer where that one has a wildcard). One class is the case
+of every per-port table, and its routes are what they were. With several,
+each name of every class but the largest gets its own routes under an
+`:authority` condition on the name, an exact match (`<name>`) or a prefix
+(`<name>:`), case-insensitive, never a regex: a name can be longer than the
+proxy's 100-instruction regex budget. Names hold no `:`, so no `Host` meets
+two names' conditions, and every name's routes end in a route each of its
+`Host`s takes. The largest class follows with no name condition. A construct
+the compiler does not model is still an error, and the table is then not
+published (the fail-closed `RefuseCaptureMeshNames`).
+
+The dialled-port blocks of a compiled virtual host are disjoint (each
+matches one dialled port) and each ends in a route every request of its port
+takes, so their order is free; only the other ports' block must be last. The
+proxy port's block is placed after the declared ports' (`mergePortOrder`), so
+a request to a service's own port is matched against fewer routes first.
+
+The capture tables are memoized while their inputs' generations hold
+(#1105, #1115). The proxy port's table is built from the cluster entries'
+virtual hosts, which no such generation covers, so the sha256 of its
+deterministic encoding is part of the key: one hash per build, which is what
+the version memo paid for `cap_http_18081` when it was published on its own
+(a new object every build).
+
+Gates, each seen red first: the compiled table against the proxy port's own
+table for every class of `Host` on 18081 (a declared port, none, 18081,
+18082, an undeclared port, upper case, the `cluster.local` and namespace
+names, short names with and without the caller's namespace, a cold name, a
+name that is not the mesh's), in redirect-all and scoped capture, with a
+service-wide filter and rules (`cache/onehcm_equivalence_043_test.go`,
+`proxy/capturemerge_test.go`, and every table the cache's tests read, the
+walks included); the listener's shape (one connection manager, no
+`cap_http_18081` anywhere in the snapshot); the agent's listener and table
+under `envoy --mode validate`; and the live probe through the pinned proxy
+(`mtlspool/onehcm_probe_test.go`, X1-X9).
+
+The worked example (200 services, HTTP on 80, 8080 and 9090, 20 raw-TCP
+ports beside an HTTP declared port, 50 pods), measured: 21 chains per pod
+listener with the default (22 before), 1 connection manager per pod (2), 2
+route tables per node (3); the capture listener 24 KiB per pod (26), and the
+capture tables 2,765 KiB (2,772 for `cap_http` and `cap_http_18081`), with
+401 virtual hosts where the two had 1,779.
 
 TLS carrying a TLSRoute's server name to a port the service itself serves as
 HTTP (or to 18081, when it serves any HTTP) leaves through the passthrough,
@@ -615,11 +683,13 @@ those ports. That is the owner's ruling for this change, kept from 3.0.0.
 |---|---|---|
 | `cap_tcp_<cluster>_<P>`, one per (service, raw-TCP port) | destination address is the service's, destination port `P`, and the server name is none of its TLSRoutes | `tcp_proxy` to `tcp:<fqdn>:<P>` |
 | `cap_tls_<cluster>_<i>`, one per TLSRoute rule of a service | destination address is the service's and the server name is one of the rule's, on any port the service does not serve as HTTP (and not 18081 when it serves any) | `tcp_proxy` to the rule's backends |
-| `cap_http` | anything else that is cleartext (`raw_buffer`) sniffed `http/1.0`, `http/1.1` or `h2c`, on any port but 18081 | records the dialled port; HCM with route table `cap_http`, which branches on it |
-| `cap_http_18081` | the same on port 18081 | HCM with the loopback table's virtual hosts (`cap_http_18081`) |
+| `cap_http` | anything else that is cleartext (`raw_buffer`) sniffed `http/1.0`, `http/1.1` or `h2c`, on any port, 18081 included | records the dialled port; HCM with route table `cap_http`, which branches on it (18081's branch is the loopback table's virtual hosts) |
 | default | nothing above | passthrough to the original destination |
 
-The table above is the listener since the amendment. Until then (chart
+The table above is the listener since chart 3.0.2. From the amendment
+through chart 3.0.1 it had one more chain, `cap_http_18081` (cleartext HTTP
+on port 18081, an HCM with the loopback table's virtual hosts under that
+name), and `cap_http` took every port but 18081. Until the amendment (chart
 3.0.0) it was:
 
 | Chain | Match | Does |
@@ -773,8 +843,9 @@ read).
 |---|---|---|---|
 | Today | 1 + `T'` + default (`T'` counts three chains for a TCP-primary service) | 1 | 2 (`cap_http`, `out_http`) |
 | One HCM chain (first version) | 1 + `T` + default | 1 | 2 |
-| Per port (chart 3.0.0) | `H` + 1 + `T` + default | `H` + 1 | `H` + 3 (`cap_http_<P>` × `H`, `cap_http_other`, `out_http`, and `cap_http_18081` until Phase 3) |
-| One HCM, matching tree (the amendment) | 2 + `T` + default | 2 | 3 (`cap_http`, `cap_http_18081`, `out_http`) |
+| Per port (chart 3.0.0) | `H` + 1 + `T` + default | `H` + 1 | `H` + 3 (`cap_http_<P>` × `H`, `cap_http_other`, `out_http`, and `cap_http_18081`) |
+| One HCM, matching tree (the amendment, through chart 3.0.1) | 2 + `T` + default | 2 | 3 (`cap_http`, `cap_http_18081`, `out_http`) |
+| The proxy port folded into `cap_http` (chart 3.0.2) | 1 + `T` + default | 1 | 2 (`cap_http`, `out_http`) |
 
 Worked: 200 services, 3 HTTP port numbers (80, 8080, 9090), 20 raw-TCP pairs,
 50 pods on a node. Chains per pod: 22 today (if none of the 20 is a primary),
@@ -1396,9 +1467,14 @@ counter names the client and the removal waits a minor, as 037 did.
 
 Deleted:
 
-- The `cap_http_18081` chain and table, the legacy virtual hosts in table 80,
-  the `:18082` chains and the alias clusters; the 421 body's mesh-port
-  spellings; `ProxyL4OutboundPort`; the scoped mark rules for both.
+- The `cap_http_18081` chain and table: **done in chart 3.0.2**, folded into
+  `cap_http` as a dialled-port branch ("Folding the proxy port into
+  `cap_http`"). This item never meant port 18081 itself: it stays,
+  permanently, the HTTP proxy port (the ruling of 2026-10-12), and so does the
+  scoped mark rule that diverts it.
+- The legacy virtual hosts in table 80, the `:18082` chains and the alias
+  clusters; the 421 body's spelling of `:18082`; `ProxyL4OutboundPort`; the
+  scoped mark rule for 18082.
 - The any-port chain and its contract entry (037 Phase 4).
 - The default cluster `<fqdn>`, the floor cluster `tcp:<fqdn>`, the bare EDS
   name's special owner, the default virtual host, `aliasAuthorityPorts`.

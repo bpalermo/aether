@@ -305,19 +305,13 @@ func spCaptureTables(c *SnapshotCache, ports ...uint32) map[string]*routev3.Rout
 	set = slices.Compact(set)
 	c.captureTables = captureTablesMemo{}
 	out := map[string]*routev3.RouteConfiguration{}
-	perPort, other := c.capturePerPortTables(c.captureTableInputs(), set)
+	// The proxy port's table is one of them: the loopback table's virtual
+	// hosts, built as the snapshot build does.
+	perPort, other := c.capturePerPortTables(c.captureTableInputs(), set, c.proxyPortTableNow(set))
 	for _, rc := range append(slices.Collect(maps.Values(perPort)), other) {
 		out[rc.GetName()] = rc
 	}
 	c.captureTables = captureTablesMemo{}
-	// The proxy port's table is not a per-port table: it is published with
-	// the snapshot, from the loopback table's virtual hosts.
-	if snap, err := c.GetSnapshot("node-1"); err == nil {
-		name := proxy.CaptureHTTPRouteName(meshconst.ProxyOutboundPort)
-		if rc, ok := snap.GetResources(resourcev3.RouteType)[name].(*routev3.RouteConfiguration); ok {
-			out[name] = rc
-		}
-	}
 	return out
 }
 
@@ -997,9 +991,9 @@ func TestPerPort_Walk(t *testing.T) {
 			// --- the first set of checks ---
 			c.snapshotMu.Lock()
 			ports := c.captureHTTPPorts()
-			memo := c.captureRouteTables(ports)
+			memo := c.captureRouteTables(ports, c.proxyPortTableNow(ports))
 			c.captureTables = captureTablesMemo{}
-			fresh := c.captureRouteTables(ports)
+			fresh := c.captureRouteTables(ports, c.proxyPortTableNow(ports))
 			c.snapshotMu.Unlock()
 			if name, ok := shpTablesEqual(memo, fresh); !ok {
 				fatalf("seed %d step %d: the memoized table %s differs from a fresh build", seed, step, name)

@@ -340,6 +340,13 @@ func rtpConsistent(t *testing.T, c *SnapshotCache, what string) {
 					continue
 				}
 				cluster := ra.GetCluster()
+				if cluster == "" && name == proxy.CaptureHTTPChainName && ra.GetClusterHeader() != "" {
+					// The proxy port's floor: the cluster the authority names,
+					// fetched on demand. Compiled into a service's virtual host
+					// for a dial to the proxy port where the loopback table has
+					// nothing of that name (it was cap_http_18081's catch-all).
+					continue
+				}
 				if cluster == "" {
 					cluster = quicSelectionDefault(t, ra)
 				}

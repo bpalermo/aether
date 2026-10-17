@@ -157,12 +157,9 @@ func TestPerPort_TLSRouteTwinLeavesTheServicesHTTPPorts(t *testing.T) {
 		vip       = "10.96.1.1" // httponly: 8080 HTTP
 		vipEighty = "10.96.1.3" // eighty: 80, 8080 and 9090 HTTP
 	)
-	httpChain := func(p uint32) string {
-		if p == 18081 {
-			return "cap_http_18081"
-		}
-		return proxy.CaptureHTTPChainName
-	}
+	// One HTTP chain for every port, the proxy port included (it had a chain
+	// of its own until chart 3.0.2).
+	httpChain := func(uint32) string { return proxy.CaptureHTTPChainName }
 	tlsTo := func(ip string, p uint32) shpConn {
 		sni := "tls.demo.httponly.example"
 		if ip == vipEighty {
@@ -262,8 +259,8 @@ func TestPerPort_ChainFilterOfAServiceWithNoEndpointHere(t *testing.T) {
 		rc := r.(*routev3.RouteConfiguration)
 		tables[rc.GetName()] = rc
 	}
-	// The table of the proxy port's chain, and the loopback table whose
-	// virtual hosts it is given, are built with the snapshot.
+	// The proxy port's table (a branch of cap_http since chart 3.0.2), and
+	// the loopback table whose virtual hosts it is given.
 	for _, name := range []string{"cap_http_18081", proxy.OutboundHTTPRouteName} {
 		tables[name] = a043Tables(t, c)[name]
 	}
@@ -441,9 +438,9 @@ func TestPerPort_CaptureTablesMemoEqualsFreshBuild(t *testing.T) {
 
 			c.snapshotMu.Lock()
 			ports := c.captureHTTPPorts()
-			memo := c.captureRouteTables(ports)
+			memo := c.captureRouteTables(ports, c.proxyPortTableNow(ports))
 			c.captureTables = captureTablesMemo{}
-			fresh := c.captureRouteTables(ports)
+			fresh := c.captureRouteTables(ports, c.proxyPortTableNow(ports))
 			c.snapshotMu.Unlock()
 			if name, ok := shpTablesEqual(memo, fresh); !ok {
 				t.Fatalf("seed %d step %d: the memoized table %s differs from a fresh build after:\n  %s", seed, step, name, strings.Join(trail, "\n  "))

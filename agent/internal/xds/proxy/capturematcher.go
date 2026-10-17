@@ -48,22 +48,26 @@ import (
 //	    server name = a TLSRoute hostname of it  -> that TLSRoute's chain
 //	  (nothing matched: back to the root's on_no_match)
 //	else (any address, or back from above)
-//	  cleartext, sniffed HTTP
-//	    destination port 18081                   -> cap_http_18081
-//	    any other port                           -> cap_http
+//	  cleartext, sniffed HTTP, any port          -> cap_http
 //	  (nothing matched: the default chain, the passthrough)
+//
+// (Scoped capture matches on the port alone: the TCP mesh port to the
+// blackhole chain, any other port to cap_http.)
 //
 // The port that was dialled is no longer a property of the chain: cap_http
 // stores it in filter state (DialledPortFilterStateKey) and its one route
-// table branches on it (MergeCaptureRouteTables).
+// table branches on it (MergeCaptureRouteTables). That holds for the mesh's
+// HTTP proxy port too: a dial to 18081 is one more branch of the table, where
+// the port in Host decides (BuildProxyPortCaptureRouteConfiguration). Through
+// chart 3.0.1 it had a chain of its own, cap_http_18081, with its own table.
 //
 // TLS to a port the service itself serves as HTTP never reaches its TLSRoute:
 // the chart-3.0.0 listener sent it to the passthrough, and so does this one
 // (the owner's ruling for this change). So does TLS to 18081 when the service
 // serves HTTP at all, which is where the proxy port carries its HTTP.
 const (
-	// CaptureHTTPChainName is the capture listener's one HTTP chain for every
-	// port but the proxy port, and the name of its route table.
+	// CaptureHTTPChainName is the capture listener's one HTTP chain, for
+	// every port, and the name of its route table.
 	CaptureHTTPChainName = "cap_http"
 	// DialledPortFilterStateKey holds, on cap_http, the destination port of
 	// the connection: the port the client dialled. The route table reads it.
@@ -306,26 +310,21 @@ func OnDuplicateCaptureAddress(f func(listener, address, kept, dropped string)) 
 	duplicateCaptureAddressHook.Store(&f)
 }
 
-// captureHTTPBranch is the root's on_no_match: cleartext HTTP to the proxy
-// port's chain or to cap_http. Scoped capture matches on the port alone, and
+// captureHTTPBranch is the root's on_no_match: cleartext HTTP to cap_http,
+// whatever port was dialled. Scoped capture matches on the port alone, and
 // sends the TCP mesh port to the blackhole.
 func captureHTTPBranch(scoped bool) *xdsmatcherv3.Matcher {
-	byPort := map[string]*xdsmatcherv3.Matcher_OnMatch{
-		strconv.Itoa(meshconst.ProxyOutboundPort): chainAction(CaptureHTTPRouteName(meshconst.ProxyOutboundPort)),
-	}
 	if scoped {
-		byPort[strconv.Itoa(meshconst.ProxyL4OutboundPort)] = chainAction(captureTCPBlackholeChainName)
-	}
-	ports := &xdsmatcherv3.Matcher{
-		MatcherType: exactTree(captureMatchDestinationPrt, &network_inputsv3.DestinationPortInput{}, byPort),
-		OnNoMatch:   chainAction(CaptureHTTPChainName),
-	}
-	if scoped {
-		return ports
+		return &xdsmatcherv3.Matcher{
+			MatcherType: exactTree(captureMatchDestinationPrt, &network_inputsv3.DestinationPortInput{}, map[string]*xdsmatcherv3.Matcher_OnMatch{
+				strconv.Itoa(meshconst.ProxyL4OutboundPort): chainAction(captureTCPBlackholeChainName),
+			}),
+			OnNoMatch: chainAction(CaptureHTTPChainName),
+		}
 	}
 	byApp := make(map[string]*xdsmatcherv3.Matcher_OnMatch, len(captureHTTPApplicationProtocols))
 	for _, a := range captureHTTPApplicationProtocols {
-		byApp[a] = onMatchMatcher(ports)
+		byApp[a] = chainAction(CaptureHTTPChainName)
 	}
 	return &xdsmatcherv3.Matcher{MatcherType: exactTree(captureMatchTransport, &network_inputsv3.TransportProtocolInput{}, map[string]*xdsmatcherv3.Matcher_OnMatch{
 		"raw_buffer": onMatchMatcher(&xdsmatcherv3.Matcher{

@@ -21,6 +21,12 @@ import (
 // refuses. The cache's tests hold it to the agent's real tables.
 
 func mergeTestTables() (map[uint32]*routev3.RouteConfiguration, *routev3.RouteConfiguration) {
+	return mergeTestTablesMode(true)
+}
+
+// mergeTestTablesMode is mergeTestTables with each table's floor the
+// passthrough (redirectAll) or 404 (scoped capture).
+func mergeTestTablesMode(redirectAll bool) (map[uint32]*routev3.RouteConfiguration, *routev3.RouteConfiguration) {
 	const mesh = "a.ns.mesh"
 	routed := func(p uint32) *routev3.VirtualHost {
 		vh := BuildServiceVirtualHost(mesh+"|"+strconv.Itoa(int(p)), mesh+":"+strconv.Itoa(int(p)), []string{mesh, mesh + ":" + strconv.Itoa(int(p)), "a.ns", "a.ns:" + strconv.Itoa(int(p))}, nil)
@@ -33,7 +39,7 @@ func mergeTestTables() (map[uint32]*routev3.RouteConfiguration, *routev3.RouteCo
 		return BuildRefusalVirtualHost(mesh+"|mismatch", []string{mesh + ":*", "a.ns:*"}, RefusalPortMismatch, "dialled "+strconv.Itoa(int(p))+"\n")
 	}
 	table := func(p uint32, vhs ...*routev3.VirtualHost) *routev3.RouteConfiguration {
-		return BuildCaptureRouteConfiguration(CaptureHTTPRouteName(p), vhs, BuildCaptureCatchAllVirtualHost("mesh", p, false, true), nil)
+		return BuildCaptureRouteConfiguration(CaptureHTTPRouteName(p), vhs, BuildCaptureCatchAllVirtualHost("mesh", p, false, redirectAll), nil)
 	}
 	perPort := map[uint32]*routev3.RouteConfiguration{
 		8080: table(8080, routed(8080), mismatch(8080)),
@@ -43,7 +49,7 @@ func mergeTestTables() (map[uint32]*routev3.RouteConfiguration, *routev3.RouteCo
 	}
 	other := BuildCaptureRouteConfiguration(CaptureHTTPOtherRouteName,
 		[]*routev3.VirtualHost{BuildRefusalVirtualHost(mesh+"|undeclared", []string{mesh, mesh + ":*", "a.ns", "a.ns:*"}, RefusalPortNotDeclared, "undeclared\n")},
-		BuildCaptureCatchAllVirtualHost("mesh", 0, false, true), nil)
+		BuildCaptureCatchAllVirtualHost("mesh", 0, false, redirectAll), nil)
 	return perPort, other
 }
 
@@ -219,11 +225,9 @@ func TestMergeCaptureRouteTables_RefusesWhatItDoesNotModel(t *testing.T) {
 				vh.Routes = []*routev3.Route{{Match: &routev3.RouteMatch{PathSpecifier: &routev3.RouteMatch_Prefix{Prefix: "/only"}}, Action: vh.Routes[0].Action}}
 			})
 		},
-		"two names of one virtual host answered differently for one suffix": func() (map[uint32]*routev3.RouteConfiguration, *routev3.RouteConfiguration) {
-			return mutated(func(rc *routev3.RouteConfiguration) {
-				rc.VirtualHosts[0].Domains = []string{"a.ns.mesh", "a.ns.mesh:8080"}
-			})
-		},
+		// (Two names of one virtual host that one table answers differently
+		// for one suffix were refused until chart 3.0.2; they are told apart
+		// by name now: TestMergeCaptureRouteTables_TellsNamesApartWhereATableDoes.)
 	} {
 		p, o := in()
 		_, err := MergeCaptureRouteTables(CaptureHTTPChainName, p, o)
@@ -231,6 +235,175 @@ func TestMergeCaptureRouteTables_RefusesWhatItDoesNotModel(t *testing.T) {
 	}
 	_, err := MergeCaptureRouteTables(CaptureHTTPChainName, perPort, other)
 	require.NoError(t, err, "the unmutated tables compile")
+}
+
+// mergeMismatches compares the compiled table with the per-port table of each
+// dialled port ("" and any port without a table: other), for every Host,
+// dialled port and caller given: the same first route (action, filters,
+// status and x-aether-error), or why not.
+func mergeMismatches(t *testing.T, merged *routev3.RouteConfiguration, perPort map[uint32]*routev3.RouteConfiguration, other *routev3.RouteConfiguration, hosts []string, dialled []string, callers []string) []string {
+	t.Helper()
+	compiled := xdseval.NewTable(merged)
+	first := func(tbl *xdseval.Table, req xdseval.Request) (*routev3.Route, map[string]*anypb.Any) {
+		a, err := tbl.Resolve(req)
+		require.NoError(t, err)
+		var routes []*routev3.Route
+		if !a.NoVhost {
+			routes = a.Routes
+		}
+		r, err := xdseval.FirstRoute(routes, req)
+		require.NoError(t, err)
+		return r, a.VhostConfig
+	}
+	var out []string
+	for _, host := range hosts {
+		for _, d := range dialled {
+			want := xdseval.NewTable(other)
+			if p, err := strconv.Atoi(d); err == nil {
+				if rc, ok := perPort[uint32(p)]; ok {
+					want = xdseval.NewTable(rc)
+				}
+			}
+			for _, caller := range callers {
+				fs := map[string]string{}
+				if d != "" {
+					fs[DialledPortFilterStateKey] = d
+				}
+				if caller != "" {
+					fs[CallerNamespaceFilterStateKey] = caller
+				}
+				req := xdseval.Request{Host: host, Path: "/", FilterState: fs}
+				ra, ca := first(want, req)
+				rb, cb := first(compiled, req)
+				if same, why := xdseval.SameTreatmentIn(ca, ra, cb, rb); !same {
+					out = append(out, "Host "+host+" dialled "+d+" caller "+caller+": "+why)
+				}
+			}
+		}
+	}
+	return out
+}
+
+// TestMergeCaptureRouteTables_TellsNamesApartWhereATableDoes: when one table
+// answers two names of one compiled virtual host differently for the same
+// suffix (here port 8080's table knows "a.ns.mesh" and leaves "a.ns" to its
+// catch-all), the compiled routes of that port tell the names apart by the
+// name itself (an exact or "<name>:" prefix :authority match, never a regex:
+// a name can be longer than the proxy's regex budget), and every other port
+// is compiled as before.
+func TestMergeCaptureRouteTables_TellsNamesApartWhereATableDoes(t *testing.T) {
+	perPort, other := mergeTestTables()
+	vh := perPort[8080].VirtualHosts[0]
+	vh.Domains = []string{"a.ns.mesh", "a.ns.mesh:8080"}
+	merged, err := MergeCaptureRouteTables(CaptureHTTPChainName, perPort, other)
+	require.NoError(t, err)
+	assert.Len(t, merged.GetVirtualHosts(), 2, "still one virtual host per name, and the catch-all")
+	byName := 0
+	for _, r := range merged.GetVirtualHosts()[0].GetRoutes() {
+		for _, h := range r.GetMatch().GetHeaders() {
+			if h.GetName() == ":authority" && (h.GetStringMatch().GetExact() != "" || h.GetStringMatch().GetPrefix() != "") {
+				byName++
+				assert.True(t, h.GetStringMatch().GetIgnoreCase(), "a Host's case does not matter")
+				assert.Contains(t, []string{"a.ns.mesh", "a.ns.mesh:"}, h.GetStringMatch().GetExact()+h.GetStringMatch().GetPrefix(), "the smaller class is told apart")
+			}
+		}
+	}
+	assert.Positive(t, byName, "port 8080's routes name the name")
+	hosts := []string{"a.ns.mesh", "A.NS.MESH", "a.ns.mesh:8080", "a.ns.mesh:9090", "a.ns.mesh:8080:8080", "a.ns", "a.ns:8080", "A.NS:8080", "a.ns:9090", "a.ns:7", "x.y.mesh:8080"}
+	assert.Empty(t, mergeMismatches(t, merged, perPort, other, hosts, []string{"80", "8080", "9090", "7777", ""}, []string{""}))
+}
+
+// proxyPortTestTable is the shape of the proxy port's table
+// (BuildProxyPortCaptureRouteConfiguration over the loopback table's virtual
+// hosts) for the service of mergeTestTables: its mesh name only, by the port
+// in Host, with the service-wide filter on its routed virtual hosts, and its
+// short name for callers of its namespace.
+func proxyPortTestTable(redirectAll bool) *routev3.RouteConfiguration {
+	const mesh = "a.ns.mesh"
+	cfg, _ := anypb.New(wrapperspb.String("filter-config"))
+	routed := func(cluster string, doms ...string) *routev3.VirtualHost {
+		vh := BuildOutboundClusterVirtualHost(cluster, doms)
+		vh.TypedPerFilterConfig = map[string]*anypb.Any{"test.filter": cfg}
+		return vh
+	}
+	loopback := []*routev3.VirtualHost{
+		routed(mesh+":8080", mesh+":8080"),
+		routed(mesh+":9090", mesh+":9090"),
+		BuildRefusalVirtualHost(mesh+"|portless", []string{mesh}, RefusalPortRequired, "port required\n"),
+		BuildRefusalVirtualHost(mesh+"|undeclared", []string{mesh + ":*"}, RefusalPortNotDeclared, "undeclared\n"),
+	}
+	return BuildProxyPortCaptureRouteConfiguration(CaptureHTTPRouteName(18081), loopback, "mesh", redirectAll, []string{mesh})
+}
+
+// TestMergeCaptureRouteTables_ProxyPortIsOneMoreDialledPort: the proxy port's
+// table (until chart 3.0.2 served by a chain of its own) compiles into the one
+// table as one more dialled port, and every Host class gets its answer: a
+// declared port, no port, the proxy port and the L4 port, an undeclared port,
+// the port twice, another name of the service the proxy port's table does
+// not know, the short name with its caller's namespace, another one and none,
+// a name the node knows nothing of (on demand) and a name that is not the
+// mesh's (the passthrough with redirect-all, 404 scoped), with the
+// service-wide filter in force exactly where it was. Its block follows every
+// declared port's in each virtual host. A compiled table that loses one of
+// its routes is seen.
+func TestMergeCaptureRouteTables_ProxyPortIsOneMoreDialledPort(t *testing.T) {
+	for _, redirectAll := range []bool{true, false} {
+		perPort, other := mergeTestTablesMode(redirectAll)
+		perPort[18081] = proxyPortTestTable(redirectAll)
+		// A declared port number above the proxy port's: its block still
+		// comes first.
+		perPort[30080] = BuildCaptureRouteConfiguration(CaptureHTTPRouteName(30080), []*routev3.VirtualHost{
+			BuildRefusalVirtualHost("a.ns.mesh|refused", []string{"a.ns.mesh", "a.ns.mesh:30080", "a.ns", "a.ns:30080"}, RefusalPortNotDeclared, "undeclared 30080\n"),
+			BuildRefusalVirtualHost("a.ns.mesh|mismatch", []string{"a.ns.mesh:*", "a.ns:*"}, RefusalPortMismatch, "dialled 30080\n"),
+		}, BuildCaptureCatchAllVirtualHost("mesh", 30080, false, redirectAll), nil)
+		merged, err := MergeCaptureRouteTables(CaptureHTTPChainName, perPort, other)
+		require.NoError(t, err, "redirect-all %v", redirectAll)
+
+		var hosts []string
+		for _, n := range []string{"a.ns.mesh", "A.NS.MESH", "a.ns", "a", "x.y.mesh", "example.com"} {
+			for _, s := range []string{"", ":80", ":8080", ":9090", ":18081", ":18082", ":30080", ":7777", ":8080:8080"} {
+				hosts = append(hosts, n+s)
+			}
+		}
+		dialled := []string{"80", "8080", "9090", "18081", "30080", "7777", ""}
+		callers := []string{"", "ns", "other"}
+		require.Empty(t, mergeMismatches(t, merged, perPort, other, hosts, dialled, callers), "redirect-all %v", redirectAll)
+
+		// The proxy port's routes follow every declared port's.
+		for _, vh := range merged.GetVirtualHosts() {
+			last, firstProxy := -1, -1
+			for i, r := range vh.GetRoutes() {
+				for _, fs := range r.GetMatch().GetFilterState() {
+					switch fs.GetStringMatch().GetExact() {
+					case "18081":
+						if firstProxy < 0 {
+							firstProxy = i
+						}
+					case "80", "8080", "9090", "30080":
+						last = i
+					}
+				}
+			}
+			if firstProxy >= 0 {
+				assert.Greater(t, firstProxy, last, "virtual host %s: the proxy port's block is last of the dialled ports'", vh.GetName())
+			}
+		}
+
+		// Seen red: one route of the proxy port's block dropped.
+		bad := proto.Clone(merged).(*routev3.RouteConfiguration)
+		dropped := false
+		for _, vh := range bad.GetVirtualHosts() {
+			for i, r := range vh.GetRoutes() {
+				if !dropped && len(r.GetMatch().GetFilterState()) > 0 && r.GetMatch().GetFilterState()[0].GetStringMatch().GetExact() == "18081" {
+					vh.Routes = append(vh.Routes[:i:i], vh.Routes[i+1:]...)
+					dropped = true
+					break
+				}
+			}
+		}
+		require.True(t, dropped)
+		assert.NotEmpty(t, mergeMismatches(t, bad, perPort, other, hosts, dialled, callers), "a lost route of the proxy port is seen")
+	}
 }
 
 // TestMergeCaptureRouteTables_ShortNameKeepsItsCallerMatcher: a short name's

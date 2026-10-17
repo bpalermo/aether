@@ -1,8 +1,9 @@
 package mtlspool
 
 // The route side of cap_http, live: what the captured path answers must be
-// what the proxy port (cap_http_18081, the loopback table's virtual hosts at
-// their native levels) answers, under the full name and the short name, for
+// what the proxy port (the loopback listener, out_http: the loopback table's
+// virtual hosts at their native levels) answers, under the full name and the
+// short name, for
 // the GAMMA rule shapes the compiled table carries on its routes: a header
 // match, a weighted split, and a rule imported from a peer cluster. The unit
 // equivalence gate compares the configuration; this compares the proxy's

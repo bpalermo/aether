@@ -3,6 +3,7 @@ package cache
 import (
 	"cmp"
 	"context"
+	"crypto/sha256"
 	"fmt"
 	"maps"
 	"reflect"
@@ -36,10 +37,11 @@ import (
 //
 // No port has another meaning. A dial to port 80 is port 80: served when the
 // service declares it, refused otherwise. The table of the mesh's HTTP proxy
-// port (18081) is not one of these: 18081 is not a port of any service, so
-// nothing dialled there decides, and that chain is served the LOOPBACK table,
-// where the port in Host is the port (snapshot.go,
-// BuildProxyPortCaptureRouteConfiguration).
+// port (18081) is not built by this rule: 18081 is not a port of any service,
+// so nothing dialled there decides, and its table is the LOOPBACK table's
+// virtual hosts, where the port in Host is the port
+// (BuildProxyPortCaptureRouteConfiguration, proxyPortCaptureTable). It is
+// compiled into cap_http with the others.
 
 // ruleInputs is what a virtual host's routes are built from besides the
 // service's own cluster: the GAMMA rules, the service-wide chain filters and
@@ -1197,6 +1199,14 @@ type captureTablesKey struct {
 	portsGen uint64
 	// ports is the set of tables asked for.
 	ports string
+	// proxyPort is the sha256 of the deterministic encoding of the proxy
+	// port's table (proxyPortCaptureTable), zero when there is none. That
+	// table is built from the loopback table's virtual hosts, which no
+	// generation above covers (they come from the cluster entries), so its
+	// bytes are the key: a hash per build, which is what the version memo
+	// paid for it when it was published on its own (it was a new object on
+	// every build).
+	proxyPort [sha256.Size]byte
 	// redirectAll selects the tables' fallthrough (passthrough or 404). It
 	// is set once before the manager starts; tests flip it.
 	redirectAll bool
@@ -1223,7 +1233,10 @@ type captureTablesMemo struct {
 
 // captureRouteTables returns the capture listener's route table for one
 // snapshot: cap_http, compiled from the per-port tables of every port in
-// ports and of every other port (capturePerPortTables).
+// ports and of every other port (capturePerPortTables). proxyPort is the
+// table of the proxy port (proxyPortCaptureTable), compiled in when ports
+// holds the proxy port; nil leaves a dial to it with the answer of any other
+// port, which only a test that asks for no proxy port does.
 //
 // The tables are a function of the Services, the registry's ports, the routes
 // and the QUIC arms, none of which an endpoint coming or going changes. They
@@ -1236,8 +1249,18 @@ type captureTablesMemo struct {
 // between leaves tables newer than their key; the next build then sees a
 // newer generation and rebuilds, which costs one build and never serves a
 // stale table.
-func (c *SnapshotCache) captureRouteTables(ports []uint32) []types.Resource {
+func (c *SnapshotCache) captureRouteTables(ports []uint32, proxyPort *routev3.RouteConfiguration) []types.Resource {
 	key := captureTablesKey{ports: captureHTTPPortsKey(ports), redirectAll: c.captureRedirectAll}
+	if proxyPort != nil && slices.Contains(ports, meshconst.ProxyOutboundPort) {
+		b, err := deterministic.Marshal(proxyPort)
+		if err != nil {
+			// Never for a table the builders make. Unkeyable: rebuild.
+			c.captureTables.valid = false
+		}
+		key.proxyPort = sha256.Sum256(b)
+	} else {
+		proxyPort = nil
+	}
 	c.depMu.RLock()
 	key.depGen = c.depGen
 	c.depMu.RUnlock()
@@ -1255,7 +1278,7 @@ func (c *SnapshotCache) captureRouteTables(ports []uint32) []types.Resource {
 		return m.tables
 	}
 
-	perPort, other := c.capturePerPortTables(c.captureTableInputsFor(deps, arms), ports)
+	perPort, other := c.capturePerPortTables(c.captureTableInputsFor(deps, arms), ports, proxyPort)
 	merged, err := mergeCaptureTables(proxy.CaptureHTTPChainName, perPort, other)
 	if err != nil {
 		// A construct the compiler does not model: a defect of the builders,
@@ -1272,16 +1295,21 @@ func (c *SnapshotCache) captureRouteTables(ports []uint32) []types.Resource {
 }
 
 // capturePerPortTables builds the per-port capture tables (proposal 043, "The
-// addressing rule"): cap_http_<P> for every port in ports but the proxy port,
-// and cap_http_other. They are the rule, port by port; the table the proxy is
-// given is compiled from them (MergeCaptureRouteTables).
-func (c *SnapshotCache) capturePerPortTables(in captureTableInputs, ports []uint32) (map[uint32]*routev3.RouteConfiguration, *routev3.RouteConfiguration) {
+// addressing rule"): cap_http_<P> for every port in ports, and cap_http_other.
+// They are the rule, port by port; the table the proxy is given is compiled
+// from them (MergeCaptureRouteTables).
+//
+// The proxy port's table is not built here: it is proxyPort, the loopback
+// table's virtual hosts (proxyPortCaptureTable), which the snapshot build
+// makes from the cluster entries. With proxyPort nil the proxy port has no
+// table of its own.
+func (c *SnapshotCache) capturePerPortTables(in captureTableInputs, ports []uint32, proxyPort *routev3.RouteConfiguration) (map[uint32]*routev3.RouteConfiguration, *routev3.RouteConfiguration) {
 	perPort := make(map[uint32]*routev3.RouteConfiguration, len(ports))
 	for _, p := range ports {
 		if p == meshconst.ProxyOutboundPort {
-			// The proxy port has its own chain, served the loopback table
-			// under another name (BuildProxyPortCaptureRouteConfiguration),
-			// built with the snapshot. cap_http never sees it dialled.
+			if proxyPort != nil {
+				perPort[p] = proxyPort
+			}
 			continue
 		}
 		perPort[p] = proxy.BuildCaptureRouteConfiguration(
@@ -1304,8 +1332,16 @@ func (c *SnapshotCache) capturePerPortTables(in captureTableInputs, ports []uint
 	return perPort, other
 }
 
-// captureTableVhosts builds the virtual hosts of the table of dialled port
-// port (0 for cap_http_other), in name order.
+// proxyPortCaptureTable is the per-port table of the mesh's HTTP proxy port,
+// cap_http_18081: the loopback table's virtual hosts (vhosts, as out_http has
+// them) with their short names and a floor of its own
+// (BuildProxyPortCaptureRouteConfiguration). known are the mesh names of the
+// services with a generated Service.
+func (c *SnapshotCache) proxyPortCaptureTable(vhosts []*routev3.VirtualHost, known []string) *routev3.RouteConfiguration {
+	return proxy.BuildProxyPortCaptureRouteConfiguration(
+		proxy.CaptureHTTPRouteName(meshconst.ProxyOutboundPort), vhosts, c.meshDomain, c.captureRedirectAll, known)
+}
+
 // shortNamesOf says how the table of dialled port port (0: cap_http_other)
 // builds its short names.
 func (c *SnapshotCache) shortNamesOf(in captureTableInputs, port uint32) *proxy.ShortNames {
@@ -1329,6 +1365,8 @@ func (c *SnapshotCache) shortNamesOf(in captureTableInputs, port uint32) *proxy.
 	return short
 }
 
+// captureTableVhosts builds the virtual hosts of the table of dialled port
+// port (0 for cap_http_other), in name order.
 func (c *SnapshotCache) captureTableVhosts(in captureTableInputs, port uint32) []*routev3.VirtualHost {
 	vhosts := make([]*routev3.VirtualHost, 0, 2*len(in.names))
 	for _, n := range in.names {
