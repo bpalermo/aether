@@ -159,6 +159,11 @@ spec:
             {{- if .Values.agent.eastWestWaypoint }}
             - "--east-west-waypoint"
             {{- end }}
+            {{- with include "aether.agent.serviceCIDRs" . }}
+            # The Service range override (proposal 044); absent = discover it
+            # from the ServiceCIDR objects.
+            - "--service-cidrs={{ . }}"
+            {{- end }}
             # #1054: no idle h3 twin connection may outlive a destination's
             # hot-restart parent; the helper fails the render unless it is 5s
             # shorter than proxy.hotRestart.parentShutdownTime.

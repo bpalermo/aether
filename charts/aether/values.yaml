@@ -286,6 +286,15 @@ agent:
   # visibility (shared etcd) and a shared SPIRE trust domain across clusters.
   # Default off.
   eastWestWaypoint: false
+  # The cluster's Service range (proposal 044): the IPv4 CIDRs ClusterIPs are
+  # allocated from, e.g. ["10.96.0.0/12"]. Empty (the default) lets the agent
+  # discover it from the cluster's networking.k8s.io/v1 ServiceCIDR objects
+  # (Kubernetes >= 1.33). Set it on an older cluster, or to override them:
+  # when set, the ServiceCIDR objects are not watched. An entry that is not a
+  # CIDR fails the render; IPv6 entries are accepted and ignored for now.
+  # With no range known the agent logs a warning and reports
+  # aether.agent.service_range.known = 0. Nothing reads the range yet.
+  serviceCIDRs: []
   # East-west QUIC (proposal 038 Phase 4b) has NO on/off value: it is
   # unconditional (#979). Every service in a node's dependency set is dialled
   # over HTTP/3 (mTLS over QUIC, UDP 18008) instead of HTTP/2 by each local

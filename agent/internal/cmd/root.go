@@ -44,6 +44,7 @@ import (
 	"aethermesh.dev/agent/internal/node"
 	"aethermesh.dev/agent/internal/ownership"
 	"aethermesh.dev/agent/internal/schedmetrics"
+	"aethermesh.dev/agent/internal/servicerange"
 	"aethermesh.dev/agent/internal/spire"
 	"aethermesh.dev/agent/internal/xds/ack"
 	"aethermesh.dev/agent/internal/xds/cache"
@@ -161,6 +162,7 @@ func init() {
 	rootCmd.Flags().DurationVar(&cfg.AuthzSidecarTimeout, "authz-sidecar-timeout", 200*time.Millisecond, "Per-check gRPC timeout for the authz sidecar")
 	rootCmd.Flags().BoolVar(&cfg.AuthzSidecarFailureModeAllow, "authz-sidecar-failure-mode-allow", false, "Fail-open: allow requests when the authz sidecar is unreachable (default fail-closed: deny)")
 	rootCmd.Flags().StringVar(&cfg.ControlCluster, "control-cluster", "", "Name of the single authorized config-exporting cluster (proposal 026 EM3, Option E). When set, imported config is trusted ONLY from this origin; empty = federated (trust any peer)")
+	rootCmd.Flags().StringSliceVar(&cfg.ServiceCIDRs, "service-cidrs", nil, "The cluster's Service range as a comma-separated list of CIDRs (proposal 044). Empty discovers it from the networking.k8s.io/v1 ServiceCIDR objects (Kubernetes >= 1.33); when set it wins and they are not watched. A value that is not a CIDR fails the agent at start; IPv6 entries are ignored.")
 	rootCmd.Flags().BoolVar(&cfg.EastWestWaypoint, "east-west-waypoint", false, "Enable the split-horizon east/west waypoint (proposal 019): dial cross-cluster endpoints at their node's routable IP + the fixed tunnel port (18009) instead of their pod IP, and SNI-forward to the local pod. Intra-cluster stays direct pod-to-pod. Needs cross-cluster endpoint visibility (shared etcd) and a shared SPIRE trust domain.")
 	rootCmd.Flags().DurationVar(&cfg.EastWestQUICPairFetchWindow, "east-west-quic-pair-fetch-window", cache.DefaultQUICPairFetchWindow, "How long after the agent starts a persisted east-west QUIC (source ServiceAccount, destination) pair with no evidence of use is kept before the pair and its twin are pruned (issues #1033, #1073). Evidence of use is an on-demand fetch, an on-demand subscription, or the proxy re-stating the twin as held on a fresh xDS stream, in this or any earlier agent process (persisted); a pair with any of it is never pruned by this window. A pruned pair that still has traffic is re-fetched on its next request (one ODCDS round trip). 0 disables the prune")
 	rootCmd.Flags().DurationVar(&cfg.EastWestQUICIdleTimeout, "east-west-quic-idle-timeout", xdsconfig.DefaultQUICTwinIdleTimeout, "Idle timeout of each east-west QUIC (quic:) twin's upstream connection pool (issue #1054). Shorter than the 30s h1/h2 idle timeout so no idle HTTP/3 connection outlives a destination proxy's hot-restart parent (whose exit turns its connections into stateless resets). Keep it at least 5s below the proxy's --parent-shutdown-time (the chart enforces this). The twin's QUIC transport also closes a connection with no open stream after 8s (issue #1087), so values above 8s no longer lengthen reuse. Must be > 0")
@@ -228,12 +230,24 @@ func applyMeshConfig(mc *configv1.MeshConfigSpec) {
 	cfg.EmitStatsPod = p.GetEmitStatsPod()
 }
 
+// validateAgentFlags rejects flag values the agent must not start with, before
+// it touches anything.
+func validateAgentFlags() error {
+	if err := validateEastWestQUICIdleTimeout(cfg.EastWestQUICIdleTimeout); err != nil {
+		return err
+	}
+	if _, _, err := servicerange.ParseCIDRs(cfg.ServiceCIDRs); err != nil {
+		return fmt.Errorf("--service-cidrs: %w", err)
+	}
+	return nil
+}
+
 // runAgent initializes and runs the Aether agent. It sets up the controller-runtime Manager,
 // initializes local storage and registry backends, creates and registers the xDS server,
 // CNI gRPC server, and optionally the SPIRE bridge as runnables. The agent then waits
 // for local storage to become ready before starting the manager's event loop.
 func runAgent(ctx context.Context) (retErr error) {
-	if err := validateEastWestQUICIdleTimeout(cfg.EastWestQUICIdleTimeout); err != nil {
+	if err := validateAgentFlags(); err != nil {
 		return err
 	}
 	l.InfoContext(
@@ -819,7 +833,24 @@ func wireReconcilers(m ctrl.Manager, snapshotCache *cache.SnapshotCache) error {
 	if err := wireL4Routes(m, snapshotCache); err != nil {
 		return err
 	}
+	if err := wireServiceRange(m, snapshotCache); err != nil {
+		return err
+	}
 	return wireCaptureReconciler(m, snapshotCache)
+}
+
+// wireServiceRange gives the snapshot cache the cluster's Service range
+// (proposal 044): the --service-cidrs override when it is set, otherwise the
+// ServiceCIDR objects, watched where the API is served.
+func wireServiceRange(m ctrl.Manager, snapshotCache *cache.SnapshotCache) error {
+	if err := servicerange.Setup(m, servicerange.Options{
+		Override: cfg.ServiceCIDRs,
+		Sink:     snapshotCache,
+		Log:      l,
+	}); err != nil {
+		return fmt.Errorf("failed to set up the Service range: %w", err)
+	}
+	return nil
 }
 
 // wireGAMMA registers the GAMMA east-west L7 routing reconciler when --gamma is set

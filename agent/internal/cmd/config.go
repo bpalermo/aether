@@ -172,6 +172,13 @@ type AgentConfig struct {
 	// remaining capture knobs are the per-pod capture.aether.io/* annotations
 	// and the CNI's --capture-redirect-all-default.
 	EastWestWaypoint bool
+	// ServiceCIDRs overrides the cluster's Service range (proposal 044): the
+	// IPv4 blocks ClusterIPs are allocated from. Empty (the default) discovers
+	// the range from the networking.k8s.io/v1 ServiceCIDR objects (Kubernetes
+	// >= 1.33); when set, it wins and the ServiceCIDR watch is not started.
+	// Every entry must be a CIDR, or the agent fails at start; IPv6 entries
+	// are ignored for now.
+	ServiceCIDRs []string
 	// EastWestQUICPairFetchWindow bounds how long after the agent starts a
 	// PERSISTED QUIC pair with no evidence of use -- never fetched on demand,
 	// subscribed, or re-stated as held by the proxy, in this or any earlier

@@ -1515,6 +1515,50 @@ helm_template_absent_test(
     ],
 )
 
+# The Service range override (proposal 044): agent.serviceCIDRs reaches the
+# agent as one comma-separated --service-cidrs, IPv6 entries included (the
+# agent ignores them).
+helm_template_match_test(
+    name = "aether_agent_service_cidrs_test",
+    chart = ":aether",
+    document_patterns = {
+        "DaemonSet/release-name-aether-agent": [
+            "\\n            - \"--service-cidrs=10\\.96\\.0\\.0/12,10\\.0\\.0\\.0/24,fd00::/108\"\\n",
+        ],
+    },
+    opts = [
+        "--set",
+        "agent.serviceCIDRs={10.96.0.0/12,10.0.0.0/24,fd00::/108}",
+    ],
+)
+
+# Absent by default: the agent then discovers the range from the ServiceCIDR
+# objects, which an empty --service-cidrs would also mean, but no flag keeps
+# an agent one chart minor older (which has no such flag) starting.
+helm_template_absent_test(
+    name = "aether_agent_service_cidrs_default_absent_test",
+    absent = [
+        "--service-cidrs",
+    ],
+    chart = ":aether",
+    control = "--east-west-quic-idle-timeout=",
+    opts = [
+        "--show-only",
+        "templates/agent-daemonset.yaml",
+    ],
+)
+
+# A mistyped range fails the render, not every agent at start.
+helm_template_fail_test(
+    name = "aether_agent_service_cidrs_invalid_test",
+    chart = ":aether",
+    expected_message = "agent.serviceCIDRs: \"10.96.0.0\" is not a CIDR",
+    opts = [
+        "--set",
+        "agent.serviceCIDRs={10.96.0.0/12,10.96.0.0}",
+    ],
+)
+
 # 2026-10-04 soak: agents OOMKilled at a 64Mi limit. GOMEMLIMIT came from
 # `resourceFieldRef: limits.memory` (divisor 1) -- the WHOLE cgroup limit -- so
 # the Go heap could fill the cgroup before the GC tightened, and the /agent-ready
@@ -3020,7 +3064,10 @@ helm_template_match_test(
             # The EndpointSlices of a route-named Service whose targetPort is
             # a name: read on demand, and watched (metadata only) so that a
             # name that starts to resolve is seen when its slice appears.
-            RULE % ("\"discovery\\.k8s\\.io\"", "\"endpointslices\"", READ) + "$",
+            RULE % ("\"discovery\\.k8s\\.io\"", "\"endpointslices\"", READ),
+            # The cluster's Service range (proposal 044), granted whether or
+            # not agent.serviceCIDRs overrides it.
+            RULE % ("\"networking\\.k8s\\.io\"", "\"servicecidrs\"", READ) + "$",
         ],
         "ClusterRoleBinding/release-name-aether-agent-default": [
             BINDING % ("ClusterRole", "release-name-aether-agent-default", "release-name-aether-agent", "default"),
