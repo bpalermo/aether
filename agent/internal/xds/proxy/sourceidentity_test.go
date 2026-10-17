@@ -115,8 +115,9 @@ func TestSourceIdentityStampedOnEveryMeshOriginatingChain(t *testing.T) {
 	})
 
 	t.Run("capture HCM chain", func(t *testing.T) {
-		requireBothSourceKeys(t, buildCaptureHTTPFilterChain(pod, id, testTrustDomain, false, nil, CaptureHTTPChainName, true), "capture HCM chain")
-		requireBothSourceKeys(t, buildCaptureHTTPFilterChain(pod, id, testTrustDomain, false, nil, CaptureHTTPRouteName(18081), false), "capture HCM chain of the proxy port")
+		// One chain for every port, the proxy port included (it had its
+		// own until chart 3.0.2).
+		requireBothSourceKeys(t, buildCaptureHTTPFilterChain(pod, id, testTrustDomain, false, nil), "capture HCM chain")
 	})
 
 	t.Run("capture TCP floor chain", func(t *testing.T) {

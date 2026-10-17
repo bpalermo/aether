@@ -90,6 +90,7 @@ go_test(
         "accesslog_fields_test.go",
         "ads_reconnect_test.go",
         "capture_onehcm_test.go",
+        "capture_pathless_budget_test.go",
         "capture_transparent_test.go",
         "identity_test.go",
         "idle_timeout_test.go",

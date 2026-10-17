@@ -8,7 +8,7 @@ import (
 
 	"aethermesh.dev/agent/internal/xds/cache/snapversion"
 	"aethermesh.dev/agent/internal/xds/proxy"
-	meshconst "aethermesh.dev/common/constants/mesh"
+
 	"aethermesh.dev/common/telemetry"
 	"github.com/envoyproxy/go-control-plane/pkg/cache/types"
 	cachev3 "github.com/envoyproxy/go-control-plane/pkg/cache/v3"
@@ -74,9 +74,9 @@ func (c *SnapshotCache) generateSnapshot(ctx context.Context) (retErr error) {
 	// And for the UDP capture listener, whose bindable backend depends on the
 	// cluster cache the registry fills asynchronously (#873).
 	c.reconcileUDPCaptureListeners()
-	// (The HTTP chains are not reconciled: there are two whatever the mesh
-	// declares, cap_http and cap_http_18081. The HTTP port numbers of the mesh
-	// are branches of cap_http's one route table.)
+	// (The HTTP chain is not reconciled: there is one whatever the mesh
+	// declares, cap_http. The HTTP port numbers of the mesh, and the proxy
+	// port, are branches of its one route table.)
 
 	// Who owns each per-pod listener, and the netns → identity index, for the
 	// identity-binding lines this build logs once the snapshot is set (#1621).
@@ -220,14 +220,14 @@ func (c *SnapshotCache) generateSnapshot(ctx context.Context) (retErr error) {
 		// in-scope authorities yet.
 		if c.captureEnabled {
 			// cap_http: one table, with a branch per HTTP port number of the
-			// mesh and one for every other port (proposal 043). Its name is
-			// fixed, so the chain that names it always finds it.
-			routes = append(routes, c.captureRouteTables(c.captureHTTPPorts())...)
-			// And the table of the proxy port's chain: the loopback table's
-			// virtual hosts (a captured dial to :18081 is the proxy port on
-			// the captured path, and the port in Host decides there too).
-			routes = append(routes, proxy.BuildProxyPortCaptureRouteConfiguration(
-				proxy.CaptureHTTPRouteName(meshconst.ProxyOutboundPort), vhosts, c.meshDomain, c.captureRedirectAll, known))
+			// mesh, one for the proxy port and one for every other port
+			// (proposal 043). Its name is fixed, so the chain that names it
+			// always finds it. The proxy port's branch is the loopback
+			// table's virtual hosts (a captured dial to :18081 is the proxy
+			// port on the captured path, and the port in Host decides there
+			// too); until chart 3.0.2 it was a table and a chain of its own,
+			// cap_http_18081.
+			routes = append(routes, c.captureRouteTables(c.captureHTTPPorts(), c.proxyPortCaptureTable(vhosts, known))...)
 		}
 		// Unconditional: out_http is always in `routes`, so an agent with nothing
 		// to publish still hands Envoy a RouteType set its RDS subscription can

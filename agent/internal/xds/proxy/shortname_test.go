@@ -59,7 +59,7 @@ func TestCallerNamespaceIsStoredOnTheHTTPChainsOfAPod(t *testing.T) {
 		tcpChains++
 		assert.Falsef(t, ok, "raw-TCP chain %s stores the caller's namespace, which nothing on it reads", fc.GetName())
 	}
-	assert.Equal(t, 2, httpChains, "cap_http and cap_http_18081")
+	assert.Equal(t, 1, httpChains, "cap_http, for every port")
 	assert.Positive(t, tcpChains)
 
 	// The value is the namespace itself, set by the agent: not a header, not

@@ -23,16 +23,18 @@ import (
 	"google.golang.org/protobuf/types/known/wrapperspb"
 )
 
-// The capture listener's HTTP chains (proposal 043, "The chains of a capture
-// listener"): cap_http for every port but the proxy port, with ONE route table
-// that branches on the port the client dialled (capturematcher.go,
-// MergeCaptureRouteTables), and cap_http_18081 for the proxy port, served the
-// loopback table's virtual hosts (BuildProxyPortCaptureRouteConfiguration).
+// The capture listener's HTTP chain (proposal 043, "The chains of a capture
+// listener"): cap_http, for every port, the mesh's HTTP proxy port (18081)
+// included, with ONE route table that branches on the port the client dialled
+// (capturematcher.go, MergeCaptureRouteTables).
 //
 // The agent still BUILDS one table per HTTP port number of the mesh,
 // cap_http_<P>, and cap_http_other for every other port: they state the rule
-// port by port, and the published cap_http is compiled from them. None of
-// those names is published, except cap_http_18081.
+// port by port, and the published cap_http is compiled from them. The proxy
+// port's is cap_http_18081, the loopback table's virtual hosts
+// (BuildProxyPortCaptureRouteConfiguration). None of those names is
+// published. (Through chart 3.0.1 cap_http_18081 was, and a chain of its own
+// served it.)
 const (
 	// CaptureHTTPRoutePrefix prefixes the name of a per-port table:
 	// cap_http_<P>.
@@ -46,8 +48,8 @@ const (
 )
 
 // CaptureHTTPRouteName returns the name of the per-port table of HTTP port
-// number port: cap_http_<port>. For the proxy port it is also the name of a
-// chain and of a published table.
+// number port: cap_http_<port>. No such table is published: cap_http is
+// compiled from them.
 func CaptureHTTPRouteName(port uint32) string {
 	return fmt.Sprintf("%s%d", CaptureHTTPRoutePrefix, port)
 }
@@ -136,9 +138,10 @@ func CaptureListenerName(cniPod *cniv1.CNIPod) string {
 // mesh traffic (see SourceIdentityCertMapperFilterStateKey). "" reproduces the
 // pre-#815 shape exactly.
 //
-// The listener has two HTTP chains whatever the mesh declares: cap_http and
-// cap_http_18081. The caller publishes a route table of each name in the same
-// snapshot (#817). Its chains are selected by filter_chain_matcher
+// The listener has one HTTP chain whatever the mesh declares: cap_http, for
+// every port the client dialled, the proxy port included. The caller
+// publishes the route table of that name in the same snapshot (#817). Its
+// chains are selected by filter_chain_matcher
 // (captureChainMatcher, which says why); no chain carries a
 // filter_chain_match.
 func GenerateCaptureListener(cniPod *cniv1.CNIPod, sourceSpiffeID string, capturePort uint32, meshDomain string, emitStatsPod bool, tcpServices []CaptureTCPService, withPassthrough bool, extensionFilters []*http_connection_managerv3.HttpFilter) (*listenerv3.Listener, error) {
@@ -175,10 +178,7 @@ func GenerateCaptureListener(cniPod *cniv1.CNIPod, sourceSpiffeID string, captur
 	// below and is NOT logged: it is every non-mesh egress connection, the
 	// volume the log must not carry.
 	attachL4AccessLog(chains, cniPod.GetName(), cniPod.GetNamespace())
-	chains = append(chains,
-		buildCaptureHTTPFilterChain(cniPod, sourceSpiffeID, meshDomain, emitStatsPod, extensionFilters, CaptureHTTPChainName, true),
-		buildCaptureHTTPFilterChain(cniPod, sourceSpiffeID, meshDomain, emitStatsPod, extensionFilters, CaptureHTTPRouteName(meshconst.ProxyOutboundPort), false),
-	)
+	chains = append(chains, buildCaptureHTTPFilterChain(cniPod, sourceSpiffeID, meshDomain, emitStatsPod, extensionFilters))
 	// The matching tree decides; a filter_chain_match left on a chain would be
 	// ignored by the proxy, and would only mislead whoever reads the config.
 	for _, fc := range chains {
@@ -362,12 +362,12 @@ func buildCaptureTCPFloorFilterChain(svc CaptureTCPService, sourceSpiffeID strin
 	}
 }
 
-// buildCaptureHTTPFilterChain builds one of the listener's two HTTP chains:
-// cap_http, or the proxy port's cap_http_18081. name is both the chain's name
-// and its RDS route table. dialled adds the filter state that records the
-// port the client dialled, which cap_http's table branches on.
+// buildCaptureHTTPFilterChain builds the listener's one HTTP chain, cap_http,
+// which serves the route table of the same name. It records in filter state
+// the port the client dialled, which the table branches on, for every port,
+// the proxy port included.
 //
-// Each mirrors the outbound HTTP chain (same readiness/subset/on-demand/stats
+// It mirrors the outbound HTTP chain (same readiness/subset/on-demand/stats
 // filters, same per-source mTLS egress path).
 //
 // The chain carries no match of its own: the listener's matching tree sends a
@@ -382,9 +382,10 @@ func buildCaptureTCPFloorFilterChain(svc CaptureTCPService, sourceSpiffeID strin
 //     application protocol and leaves through the passthrough too. Without
 //     that condition an HTTP chain swallowed such streams and answered a fake
 //     "HTTP/1.1 400 Bad Request" (#460).
-func buildCaptureHTTPFilterChain(cniPod *cniv1.CNIPod, sourceSpiffeID, meshDomain string, emitStatsPod bool, extensionFilters []*http_connection_managerv3.HttpFilter, name string, dialled bool) *listenerv3.FilterChain {
-	// One stat prefix for both chains: the HTTP stats of a pod's captured
-	// traffic stay one family whatever port was dialled.
+func buildCaptureHTTPFilterChain(cniPod *cniv1.CNIPod, sourceSpiffeID, meshDomain string, emitStatsPod bool, extensionFilters []*http_connection_managerv3.HttpFilter) *listenerv3.FilterChain {
+	// The stat prefix the two chains this one replaced already shared: the
+	// HTTP stats of a pod's captured traffic are one family whatever port was
+	// dialled.
 	hcm := buildHTTPConnectionManager("capture_http", ReporterSource, cniPod.GetName(), cniPod.GetNamespace(), nil, appFacingIdleTimeout)
 
 	prefix := []*http_connection_managerv3.HttpFilter{
@@ -402,7 +403,7 @@ func buildCaptureHTTPFilterChain(cniPod *cniv1.CNIPod, sourceSpiffeID, meshDomai
 
 	hcm.RouteSpecifier = &http_connection_managerv3.HttpConnectionManager_Rds{
 		Rds: &http_connection_managerv3.Rds{
-			RouteConfigName: name,
+			RouteConfigName: CaptureHTTPChainName,
 			ConfigSource:    config.XDSConfigSourceADS(),
 		},
 	}
@@ -412,11 +413,9 @@ func buildCaptureHTTPFilterChain(cniPod *cniv1.CNIPod, sourceSpiffeID, meshDomai
 	if ns := cniPod.GetNamespace(); ns != "" {
 		networkFilters = append(networkFilters, BuildCallerNamespaceFilterState(ns))
 	}
-	if dialled {
-		networkFilters = append(networkFilters, BuildDialledPortFilterState())
-	}
+	networkFilters = append(networkFilters, BuildDialledPortFilterState())
 	return &listenerv3.FilterChain{
-		Name:    name,
+		Name:    CaptureHTTPChainName,
 		Filters: append(networkFilters, buildHTTPConnectionManagerFilter(hcm)),
 	}
 }

@@ -249,7 +249,8 @@ needs two DNS SANs on every workload SVID and UDP `18008` open beside TCP
 **A service has a name and ports; a request names both.**
 `<service>.<namespace>.<mesh-domain>` (default domain `aether.internal`,
 agent `--mesh-domain` / chart `meshDomain`; proposal 020) is the mesh form.
-A captured dial also honors the Kubernetes names of the generated Service
+A captured dial and the HTTP proxy port (since chart 3.0.3) also honor the
+Kubernetes names of the generated Service
 (`<service>.<namespace>.svc.cluster.local`, `<service>.<namespace>`), and a
 name without a namespace (`Host: my-svc:8080`) is `my-svc` in the caller's own
 namespace, as the cluster's DNS search makes it. A name that is not a mesh

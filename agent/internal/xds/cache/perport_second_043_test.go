@@ -305,19 +305,13 @@ func spCaptureTables(c *SnapshotCache, ports ...uint32) map[string]*routev3.Rout
 	set = slices.Compact(set)
 	c.captureTables = captureTablesMemo{}
 	out := map[string]*routev3.RouteConfiguration{}
-	perPort, other := c.capturePerPortTables(c.captureTableInputs(), set)
+	// The proxy port's table is one of them: the loopback table's virtual
+	// hosts, built as the snapshot build does.
+	perPort, other := c.capturePerPortTables(c.captureTableInputs(), set, c.proxyPortTableNow(set))
 	for _, rc := range append(slices.Collect(maps.Values(perPort)), other) {
 		out[rc.GetName()] = rc
 	}
 	c.captureTables = captureTablesMemo{}
-	// The proxy port's table is not a per-port table: it is published with
-	// the snapshot, from the loopback table's virtual hosts.
-	if snap, err := c.GetSnapshot("node-1"); err == nil {
-		name := proxy.CaptureHTTPRouteName(meshconst.ProxyOutboundPort)
-		if rc, ok := snap.GetResources(resourcev3.RouteType)[name].(*routev3.RouteConfiguration); ok {
-			out[name] = rc
-		}
-	}
 	return out
 }
 
@@ -433,10 +427,13 @@ func TestPerPort_ColdService_EveryNameOnARealPortTable(t *testing.T) {
 		assert.Equalf(t, "cluster", got.kind, "%s, Host %s: %s", tc.table, tc.host, got)
 		assert.Equalf(t, eighty+":80", got.cluster, "%s, Host %s", tc.table, tc.host)
 	}
-	// The proxy port serves mesh names only: a Kubernetes name there is not
-	// the mesh's, cold or warm.
+	// The proxy port answers a Kubernetes name as the mesh name (since chart
+	// 3.0.3; through 3.0.2 it passed through): ":18081" is a port of no
+	// service, refused.
 	got := spResolve(t, tables["cap_http_18081"], "multi.demo.svc.cluster.local:18081")
-	assert.Equal(t, "passthrough", got.kind, got.String())
+	want := spResolve(t, tables["cap_http_18081"], "multi.demo."+a043Mesh+":18081")
+	assert.Equal(t, want.String(), got.String())
+	assert.Equal(t, "refuse", got.kind, got.String())
 }
 
 // 2. A service with a service-wide filter and endpoints, whose generated
@@ -997,9 +994,9 @@ func TestPerPort_Walk(t *testing.T) {
 			// --- the first set of checks ---
 			c.snapshotMu.Lock()
 			ports := c.captureHTTPPorts()
-			memo := c.captureRouteTables(ports)
+			memo := c.captureRouteTables(ports, c.proxyPortTableNow(ports))
 			c.captureTables = captureTablesMemo{}
-			fresh := c.captureRouteTables(ports)
+			fresh := c.captureRouteTables(ports, c.proxyPortTableNow(ports))
 			c.snapshotMu.Unlock()
 			if name, ok := shpTablesEqual(memo, fresh); !ok {
 				fatalf("seed %d step %d: the memoized table %s differs from a fresh build", seed, step, name)

@@ -16,6 +16,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 
 	xdscorev3 "github.com/cncf/xds/go/xds/core/v3"
 	xdsmatcherv3 "github.com/cncf/xds/go/xds/type/matcher/v3"
@@ -163,7 +164,7 @@ func MatchString(sm *xdsmatcherv3.StringMatcher, v string) (bool, error) {
 	case *xdsmatcherv3.StringMatcher_Contains:
 		return strings.Contains(cmp(v), cmp(p.Contains)), nil
 	case *xdsmatcherv3.StringMatcher_SafeRegex:
-		re, err := regexp.Compile("^(?:" + p.SafeRegex.GetRegex() + ")$")
+		re, err := fullMatchRegexp(p.SafeRegex.GetRegex())
 		if err != nil {
 			return false, err
 		}
@@ -328,11 +329,40 @@ func legacyByPrefix(chains []*listenerv3.FilterChain, ip net.IP) []*listenerv3.F
 }
 
 // Request is one HTTP request as a route table sees it.
+// fullMatchRegexp compiles pattern as a full match (RE2 anchored at both
+// ends, as the proxy matches a safe_regex), once per pattern: the cache's
+// equivalence checks and seeded walks ask the same few patterns millions of
+// times, and compiling them each time was most of those tests' CPU (and of
+// their time under the race detector).
+func fullMatchRegexp(pattern string) (*regexp.Regexp, error) {
+	if re, ok := compiledRegexps.Load(pattern); ok {
+		return re.(*regexp.Regexp), nil
+	}
+	re, err := regexp.Compile("^(?:" + pattern + ")$")
+	if err != nil {
+		return nil, err
+	}
+	compiledRegexps.Store(pattern, re)
+	return re, nil
+}
+
+// compiledRegexps memoizes fullMatchRegexp. A *regexp.Regexp is safe for
+// concurrent use.
+var compiledRegexps sync.Map
+
 type Request struct {
 	// Host is the :authority.
 	Host string
-	// Path is the :path; "/" when empty.
+	// Path is the :path; "/" when empty, unless NoPath.
 	Path string
+	// NoPath: the request has no path at all (a CONNECT without one). The
+	// connection manager answers any other path that does not begin with
+	// "/" before routing, so this is the one request with a path no
+	// "/"-prefixed route takes that reaches the routes. Only a CONNECT
+	// matcher route takes it (FirstRoute).
+	NoPath bool
+	// Connect: the method is CONNECT (implied by NoPath).
+	Connect bool
 	// Headers are other request headers, lower-case names.
 	Headers map[string]string
 	// FilterState is the connection's filter state, as strings. A key that is

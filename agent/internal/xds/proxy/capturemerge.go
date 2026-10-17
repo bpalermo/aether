@@ -1,12 +1,15 @@
 package proxy
 
 import (
+	"cmp"
 	"fmt"
 	"maps"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
 
+	meshconst "aethermesh.dev/common/constants/mesh"
 	xdsmatcherv3 "github.com/cncf/xds/go/xds/type/matcher/v3"
 	routev3 "github.com/envoyproxy/go-control-plane/envoy/config/route/v3"
 	network_inputsv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/matching/common_inputs/network/v3"
@@ -20,10 +23,12 @@ import (
 // chain serves.
 //
 // The per-port tables are the rule: perPort[D] is what a request dialled to
-// port D gets, for every HTTP port number D of the mesh, and other is what a
-// request dialled to any other port gets. The compiled table must give every
-// request the answer the table of its dialled port gives it, and does so by
-// construction:
+// port D gets, for every HTTP port number D of the mesh and for the mesh's
+// HTTP proxy port (18081, whose table is the loopback table's virtual hosts,
+// BuildProxyPortCaptureRouteConfiguration: the port in Host decides there),
+// and other is what a request dialled to any other port gets. The compiled
+// table must give every request the answer the table of its dialled port
+// gives it, and does so by construction:
 //
 //   - its domains are every domain of every per-port table, so the proxy
 //     selects, for any Host, a virtual host holding the domain that is the
@@ -41,6 +46,13 @@ import (
 // fallback, a refusal), so a request a block's conditions take never reaches
 // a later block, and first-match gives each request its dialled port's answer.
 // "<name>:8080:8080" has no suffix the regex accepts: a mismatch, as it was.
+//
+// The order of the dialled-port blocks is therefore free: their conditions
+// are disjoint (one dialled port each), and each ends in a route every request
+// of its port takes. Only the other ports' block, which matches no dialled
+// port, must come after all of them. The proxy port's block is placed after
+// the declared ports' (mergePortOrder), so that a request to a service's own
+// port, the common case, is matched against fewer routes first.
 //
 // An answer is the per-port virtual host's routes, or, for a short name, its
 // caller-namespace matcher flattened: each namespace's routes under a
@@ -80,7 +92,7 @@ import (
 // request can fall out of). The caller must not publish the result then;
 // nothing the agent builds today does that.
 func MergeCaptureRouteTables(name string, perPort map[uint32]*routev3.RouteConfiguration, other *routev3.RouteConfiguration) (*routev3.RouteConfiguration, error) {
-	ports := slices.Sorted(maps.Keys(perPort))
+	ports := mergePortOrder(slices.Collect(maps.Keys(perPort)))
 	tables := make([]*mergeTable, 0, len(ports))
 	for _, p := range ports {
 		t, err := indexMergeTable(perPort[p])
@@ -108,6 +120,24 @@ func MergeCaptureRouteTables(name string, perPort map[uint32]*routev3.RouteConfi
 	}
 	out = append(out, star)
 	return &routev3.RouteConfiguration{Name: name, VirtualHosts: out}, nil
+}
+
+// mergePortOrder is the order of the dialled-port blocks of a compiled
+// virtual host: the ports in ascending order, the mesh's HTTP proxy port
+// last. Any order gives every request the same answer (see
+// MergeCaptureRouteTables); this one puts a service's own ports first.
+func mergePortOrder(ports []uint32) []uint32 {
+	slices.SortFunc(ports, func(a, b uint32) int {
+		aProxy, bProxy := a == meshconst.ProxyOutboundPort, b == meshconst.ProxyOutboundPort
+		switch {
+		case aProxy && !bProxy:
+			return 1
+		case bProxy && !aProxy:
+			return -1
+		}
+		return cmp.Compare(a, b)
+	})
+	return ports
 }
 
 // mergeMembers returns, per compiled virtual host, its domains, sorted: every
@@ -263,16 +293,15 @@ func (t *mergeTable) pick(host string) *routev3.VirtualHost {
 	if vh, ok := t.exact[host]; ok {
 		return vh
 	}
-	// A wildcard needs at least one character where its "*" stands.
-	var best *routev3.VirtualHost
-	bestLen := -1
-	for prefix, vh := range t.wild {
-		if len(host) > len(prefix) && strings.HasPrefix(host, prefix) && len(prefix) > bestLen {
-			best, bestLen = vh, len(prefix)
+	// A wildcard needs at least one character where its "*" stands. Every
+	// wildcard's prefix is "<name>:" with no ":" in the name
+	// (indexMergeTable), so the only one that can be a prefix of host is the
+	// part of host up to its first ":". One lookup: a scan of every wildcard
+	// per domain made the compiler quadratic in the services.
+	if i := strings.IndexByte(host, ':'); i >= 0 && len(host) > i+1 {
+		if vh, ok := t.wild[host[:i+1]]; ok {
+			return vh
 		}
-	}
-	if best != nil {
-		return best
 	}
 	return t.star
 }
@@ -418,46 +447,52 @@ var disabledFilterConfig = func() *anypb.Any {
 // the other ports', each route conditioned on that dialled port, and the
 // other ports' block last, unconditioned on the port.
 func mergeGroup(name string, doms []string, ports []uint32, tables []*mergeTable, other *mergeTable) (*routev3.VirtualHost, error) {
-	suffixes, err := groupSuffixes(doms)
+	if _, err := groupSuffixes(doms); err != nil {
+		return nil, err
+	}
+	otherAnswers, err := nameAnswers(doms, other)
 	if err != nil {
 		return nil, err
 	}
-	otherAnswers, err := suffixAnswers(name, doms, other)
-	if err != nil {
-		return nil, err
-	}
-	portAnswers := make([]map[string]mergeAnswer, len(ports))
-	all := slices.Collect(maps.Values(otherAnswers))
+	portAnswers := make([]groupAnswers, len(ports))
+	all := otherAnswers.all()
 	for i := range ports {
-		if portAnswers[i], err = suffixAnswers(name, doms, tables[i]); err != nil {
+		if portAnswers[i], err = nameAnswers(doms, tables[i]); err != nil {
 			return nil, err
 		}
-		all = append(all, slices.Collect(maps.Values(portAnswers[i]))...)
+		all = append(all, portAnswers[i].all()...)
 	}
 	levels := levelsOf(all)
 	var routes []*routev3.Route
+	var dialled []string
 	for i, p := range ports {
 		if sameAnswers(portAnswers[i], otherAnswers) {
 			continue // the port gets what every other port gets
 		}
-		block, err := flatBlock(levels, portAnswers[i], suffixes, []routeCond{dialledCond(strconv.Itoa(int(p)))})
+		dialled = append(dialled, strconv.Itoa(int(p)))
+		block, err := flatBlock(levels, portAnswers[i], []routeCond{dialledCond(dialled[len(dialled)-1])})
 		if err != nil {
 			return nil, fmt.Errorf("virtual host %s, dialled port %d: %w", name, p, err)
 		}
 		routes = append(routes, block...)
 	}
-	block, err := flatBlock(levels, otherAnswers, suffixes, nil)
+	block, err := flatBlock(levels, otherAnswers, nil)
 	if err != nil {
 		return nil, fmt.Errorf("virtual host %s, any other port: %w", name, err)
 	}
+	block = closeToPathlessOfPorts(block, dialled)
 	return &routev3.VirtualHost{Name: name, Domains: mergeDomains(doms), Routes: append(routes, block...), TypedPerFilterConfig: levels.cfg}, nil
 }
 
 // A group's domains are its names, each with a SUFFIX: "" (no port), ":<P>"
 // or ":*". The virtual host's domains already restrict a Host to the group's
 // names, so a route need only tell suffixes apart, which a small regex on
-// :authority does. That is right only if every name of the group gets the
-// same answer for the same suffix in every table; suffixAnswers checks it.
+// :authority does, as long as every name of the group gets the same answer
+// for the same suffix in the table of the block (one CLASS of names,
+// nameClasses). Where the names of one table do not (the proxy port's table
+// answers a mesh name by the port in Host, and its other names as any Host
+// that is no mesh name), each class but the largest is told apart by the
+// name itself as well (nameCond), and the largest takes what is left.
 const (
 	suffixNone = ""
 	suffixAny  = ":*"
@@ -489,42 +524,363 @@ func groupSuffixes(doms []string) ([]string, error) {
 	return slices.Sorted(maps.Keys(seen)), nil
 }
 
-// suffixAnswers returns, per suffix, what t answers the group's domains with
-// that suffix, and refuses a group whose names disagree on one.
-func suffixAnswers(group string, doms []string, t *mergeTable) (map[string]mergeAnswer, error) {
-	out := map[string]mergeAnswer{}
+// groupAnswers is what one table answers the domains of one compiled virtual
+// host: per name (a domain without its suffix), per suffix.
+type groupAnswers map[string]map[string]mergeAnswer
+
+// nameAnswers returns what t answers each of the group's domains.
+func nameAnswers(doms []string, t *mergeTable) (groupAnswers, error) {
+	out := groupAnswers{}
 	for _, d := range doms {
 		a, err := t.answer(d)
 		if err != nil {
 			return nil, err
 		}
-		s := domainSuffix(d)
-		if prev, ok := out[s]; ok && prev.key != a.key {
-			return nil, fmt.Errorf("table %s, virtual host %s: two names answer the suffix %q differently", t.rc.GetName(), group, s)
+		n := domainName(d)
+		if out[n] == nil {
+			out[n] = map[string]mergeAnswer{}
 		}
-		out[s] = a
+		out[n][domainSuffix(d)] = a
 	}
 	return out, nil
 }
 
-func sameAnswers(a, b map[string]mergeAnswer) bool {
+// domainName is a domain without its suffix ("*" is its own name).
+func domainName(d string) string {
+	n, _, _ := strings.Cut(d, ":")
+	return n
+}
+
+// all returns every answer of g.
+func (g groupAnswers) all() []mergeAnswer {
+	var out []mergeAnswer
+	for _, n := range slices.Sorted(maps.Keys(g)) {
+		for _, s := range slices.Sorted(maps.Keys(g[n])) {
+			out = append(out, g[n][s])
+		}
+	}
+	return out
+}
+
+func sameAnswers(a, b groupAnswers) bool {
 	if len(a) != len(b) {
 		return false
 	}
-	for s, x := range a {
-		if y, ok := b[s]; !ok || y.key != x.key {
+	for n, x := range a {
+		y, ok := b[n]
+		if !ok || len(x) != len(y) {
+			return false
+		}
+		for s, ax := range x {
+			if ay, ok := y[s]; !ok || ay.key != ax.key {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+// nameClass is a set of names of a group that one block of routes, told
+// apart by suffix alone, answers exactly: merged is the answer of each suffix
+// any of them has.
+type nameClass struct {
+	names  []string
+	merged map[string]mergeAnswer
+}
+
+// nameClasses partitions the names of g, in name order, each into the first
+// class it agrees with (fits), a new one otherwise. One class is the common
+// case: every per-port table answers all the names of a service alike.
+func nameClasses(g groupAnswers) []nameClass {
+	var out []nameClass
+	for _, n := range slices.Sorted(maps.Keys(g)) {
+		placed := false
+		for i := range out {
+			if out[i].fits(g, n) {
+				out[i].names = append(out[i].names, n)
+				for s, a := range g[n] {
+					out[i].merged[s] = a
+				}
+				placed = true
+				break
+			}
+		}
+		if !placed {
+			out = append(out, nameClass{names: []string{n}, merged: maps.Clone(g[n])})
+		}
+	}
+	return out
+}
+
+// fits reports whether name n can join the class: a block that tells
+// suffixes apart and nothing else then still gives every Host of every name
+// of the class the answer of its table. It must, for a Host of n:
+//
+//   - "<n><s>" with s a suffix of n: the class's answer of s is n's;
+//   - "<n>:<P>" that only n's ":*" selects (":<P>" is a suffix of the class,
+//     not of n): the class's answer of ":<P>" is n's answer of ":*";
+//
+// and the same for every Host of a name already in the class, with n's
+// suffixes added.
+func (c nameClass) fits(g groupAnswers, n string) bool {
+	own := g[n]
+	for s, a := range own {
+		if b, ok := c.merged[s]; ok && b.key != a.key {
+			return false
+		}
+	}
+	if !wildcardAgrees(own, c.merged) {
+		return false
+	}
+	for _, m := range c.names {
+		if !wildcardAgrees(g[m], own) {
 			return false
 		}
 	}
 	return true
 }
 
-// flatBlock is one table's answers for the group as routes: every answer but
-// the default one conditioned on the :authority suffixes it is for, then the
-// default, each route also under conds. The default is the answer of ":*"
-// when the group has it (it stands for every port spelling no exact domain
-// names, which no regex lists), else the answer most suffixes get.
-func flatBlock(levels groupLevels, answers map[string]mergeAnswer, suffixes []string, conds []routeCond) ([]*routev3.Route, error) {
+// wildcardAgrees: every port suffix of others that own does not have is
+// answered as own's ":*" answers it (vacuous when own has no ":*": no Host of
+// that name reaches the virtual host with such a suffix).
+func wildcardAgrees(own, others map[string]mergeAnswer) bool {
+	w, ok := own[suffixAny]
+	if !ok {
+		return true
+	}
+	for s, b := range others {
+		if s == suffixNone || s == suffixAny {
+			continue
+		}
+		if _, has := own[s]; !has && b.key != w.key {
+			return false
+		}
+	}
+	return true
+}
+
+// flatBlock is one table's answers for the group as routes, each under conds.
+// One class of names (nameClasses): suffixBlock. Several: each name of every
+// class but the largest gets its own answers under a condition on the name
+// (nameCond), and the largest class's suffixBlock follows, with no such
+// condition unless one of its routes could take a request with no path
+// (takesAPathlessRequest). Every name's routes end in a route each of its
+// Hosts takes with a path, so a Host never reaches the routes of another name.
+func flatBlock(levels groupLevels, answers groupAnswers, conds []routeCond) ([]*routev3.Route, error) {
+	classes := nameClasses(answers)
+	largest := 0
+	for i, c := range classes {
+		if len(c.names) > len(classes[largest].names) {
+			largest = i
+		}
+	}
+	var out []*routev3.Route
+	for i, c := range classes {
+		if i == largest {
+			continue
+		}
+		routes, err := namesBlock(levels, c.names, answers, conds)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, routes...)
+	}
+	routes, err := suffixBlock(levels, classes[largest].merged, conds)
+	if err != nil {
+		return nil, err
+	}
+	if len(classes) > 1 && slices.ContainsFunc(routes, takesAPathlessRequest) {
+		// A request with no path (a CONNECT without one; any other path that
+		// does not begin with "/" the connection manager answers 404 before
+		// routing) is taken by no "/"-prefixed route, so it falls out of its
+		// own name's routes. Unconditioned on the name, a route of the largest
+		// class that takes it would give it another name's answer, where its
+		// own table gives it none. The largest class is then conditioned on
+		// its names as well.
+		if routes, err = namesBlock(levels, classes[largest].names, answers, conds); err != nil {
+			return nil, err
+		}
+	}
+	return append(out, routes...), nil
+}
+
+// namesBlock is nameBlock for each of names, in order.
+func namesBlock(levels groupLevels, names []string, answers groupAnswers, conds []routeCond) ([]*routev3.Route, error) {
+	var out []*routev3.Route
+	for _, n := range names {
+		routes, err := nameBlock(levels, n, answers[n], conds)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, routes...)
+	}
+	return out, nil
+}
+
+// closeToPathlessOfPorts makes the other ports' block (block, which matches
+// no dialled port) take no request with no path that was dialled to one of
+// dialled, the ports whose blocks come before it. Every route of a dialled
+// port's block that a request with a path reaches ends in one it takes, but a
+// request with no path can fall out of that block (its routes are all
+// "/"-prefixed), and must then get no route, as on its own port's table, not
+// a route of the other ports' table that takes it (takesAPathlessRequest).
+//
+// A filter-state match cannot be inverted, so each such route r becomes:
+//
+//   - r for a request with a :path (a header presence match), whatever was
+//     dialled: such a request never falls out of a dialled port's block;
+//   - r for a request with no :path, once per piece of the complement of
+//     dialled (complementPatterns), each a small regex on the dialled port.
+//
+// A request with no path on a connection with NO dialled port (a chain that
+// does not record it; the agent's one HTTP chain always does) gets no route
+// from r then, where cap_http_other's table may give it r: it fails closed.
+// No route of any table the agent builds today takes a request with no path,
+// and then nothing changes: the block is returned as it was.
+func closeToPathlessOfPorts(block []*routev3.Route, dialled []string) []*routev3.Route {
+	if len(dialled) == 0 || !slices.ContainsFunc(block, takesAPathlessRequest) {
+		return block
+	}
+	pieces := complementPatterns(dialled)
+	out := make([]*routev3.Route, 0, len(block)+len(pieces))
+	for _, r := range block {
+		if !takesAPathlessRequest(r) {
+			out = append(out, r)
+			continue
+		}
+		withPath := proto.Clone(r).(*routev3.Route)
+		pathCond(true).apply(withPath)
+		out = append(out, withPath)
+		for _, re := range pieces {
+			c := proto.Clone(r).(*routev3.Route)
+			pathCond(false).apply(c)
+			routeCond{filterState: &typematcherv3.FilterStateMatcher{
+				Key: DialledPortFilterStateKey,
+				Matcher: &typematcherv3.FilterStateMatcher_StringMatch{StringMatch: &typematcherv3.StringMatcher{
+					MatchPattern: &typematcherv3.StringMatcher_SafeRegex{SafeRegex: &typematcherv3.RegexMatcher{Regex: re}},
+				}},
+			}}.apply(c)
+			out = append(out, c)
+		}
+	}
+	return out
+}
+
+// pathCond: the request has a :path (present), or has none.
+func pathCond(present bool) routeCond {
+	return routeCond{header: &routev3.HeaderMatcher{
+		Name:                 ":path",
+		HeaderMatchSpecifier: &routev3.HeaderMatcher_PresentMatch{PresentMatch: true},
+		InvertMatch:          !present,
+	}}
+}
+
+// complementPatterns returns regexes that, together, match exactly the
+// strings that are none of values, each string by exactly one of them, and
+// each regex small (a prefix of one of values, then one character class): one
+// per node of the trie of values. At a node with prefix p, a string that is p
+// itself (when p is none of values) or that goes on with a character no value
+// goes on with after p.
+func complementPatterns(values []string) []string {
+	set, next := prefixTrie(values)
+	out := make([]string, 0, len(next))
+	for _, p := range slices.Sorted(maps.Keys(next)) {
+		rest := ".+"
+		if len(next[p]) > 0 {
+			class := ""
+			for _, c := range slices.Sorted(maps.Keys(next[p])) {
+				class += regexp.QuoteMeta(string(c))
+			}
+			rest = "[^" + class + "].*"
+		}
+		if !set[p] {
+			rest = "(" + rest + ")?"
+		}
+		out = append(out, "^"+regexp.QuoteMeta(p)+rest+"$")
+	}
+	return out
+}
+
+// prefixTrie returns the set of values, and per prefix of any of them (""
+// included) the characters a value goes on with after it.
+func prefixTrie(values []string) (set map[string]bool, next map[string]map[byte]bool) {
+	set, next = map[string]bool{}, map[string]map[byte]bool{}
+	for _, v := range values {
+		set[v] = true
+		for i := 0; i <= len(v); i++ {
+			if next[v[:i]] == nil {
+				next[v[:i]] = map[byte]bool{}
+			}
+			if i < len(v) {
+				next[v[:i]][v[i]] = true
+			}
+		}
+	}
+	return set, next
+}
+
+// takesAPathlessRequest: the route can take a request with no :path, which
+// only a CONNECT matcher route does. The proxy skips every other route when
+// :path is absent (VirtualHostImpl::getRouteFromRoutes,
+// source/common/router/config_impl.cc; ConnectRouteEntryImpl is the only
+// route entry that supports pathless headers), a regex or an empty prefix
+// included. No route the agent builds is one today, so the guards that ask
+// this (flatBlock, defaultBlock, closeToPathlessOfPorts) add nothing to its
+// tables; they keep a CONNECT route, should one be built, from answering
+// another name's or another port's request.
+func takesAPathlessRequest(r *routev3.Route) bool {
+	return r.GetMatch().GetConnectMatcher() != nil
+}
+
+// nameBlock is one name's own answers as routes under conds and a condition
+// on the name: its port-less answer for a Host that is exactly the name, and
+// a suffixBlock of the rest for a Host "<name>:...".
+func nameBlock(levels groupLevels, n string, own map[string]mergeAnswer, conds []routeCond) ([]*routev3.Route, error) {
+	var out []*routev3.Route
+	if a, ok := own[suffixNone]; ok {
+		routes, err := levels.routes(a, append(slices.Clone(conds), nameCond(n, false)))
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, routes...)
+	}
+	ported := maps.Clone(own)
+	delete(ported, suffixNone)
+	if len(ported) == 0 {
+		return out, nil
+	}
+	routes, err := suffixBlock(levels, ported, append(slices.Clone(conds), nameCond(n, true)))
+	if err != nil {
+		return nil, err
+	}
+	return append(out, routes...), nil
+}
+
+// nameCond: the Host's name is n, with no port (ported false: the Host is
+// exactly n) or with one (ported: it begins "<n>:"). Names hold no ":", so no
+// Host meets the condition of two names. Not a regex: a name is as long as a
+// DNS name, and the proxy refuses a regex of more than 100 instructions.
+func nameCond(n string, ported bool) routeCond {
+	sm := &typematcherv3.StringMatcher{MatchPattern: &typematcherv3.StringMatcher_Exact{Exact: n}, IgnoreCase: true}
+	if ported {
+		sm = &typematcherv3.StringMatcher{MatchPattern: &typematcherv3.StringMatcher_Prefix{Prefix: n + ":"}, IgnoreCase: true}
+	}
+	return routeCond{header: &routev3.HeaderMatcher{
+		Name:                 ":authority",
+		HeaderMatchSpecifier: &routev3.HeaderMatcher_StringMatch{StringMatch: sm},
+	}}
+}
+
+// suffixBlock is the answers of one class of names as routes: every answer
+// but the default one conditioned on the :authority suffixes it is for, then
+// the default, each route also under conds. The default is the answer of
+// ":*" when the class has it (it stands for every port spelling no exact
+// domain names, which no regex lists), else the answer most suffixes get.
+// When the default has a route that can take a request with no path
+// (takesAPathlessRequest), it is also conditioned on the Host's suffix being
+// none of the other answers'.
+func suffixBlock(levels groupLevels, answers map[string]mergeAnswer, conds []routeCond) ([]*routev3.Route, error) {
+	suffixes := slices.Sorted(maps.Keys(answers))
 	bySuffix := map[string][]string{}
 	var keys []string
 	for _, s := range suffixes {
@@ -550,11 +906,46 @@ func flatBlock(levels groupLevels, answers map[string]mergeAnswer, suffixes []st
 		}
 		out = append(out, routes...)
 	}
-	routes, err := levels.routes(answers[bySuffix[def][0]], conds)
+	routes, err := defaultBlock(levels, answers, keys, bySuffix, def, conds)
 	if err != nil {
 		return nil, err
 	}
 	return append(out, routes...), nil
+}
+
+// defaultBlock is the routes of the default answer def of a suffixBlock,
+// under conds. A request with no path falls out of its own suffix's routes
+// when they are all "/"-prefixed (see flatBlock). Unconditioned on the
+// suffix, a route of the default that takes it (takesAPathlessRequest) would
+// give it another suffix's answer, where its own table gives it none. The
+// default is then taken only by a Host whose suffix is none of the other
+// answers': not by a regex of its own suffixes, which ":*" has none of, and a
+// Host no regex accepts ("<name>:8080:8080") keeps the default it had.
+//
+// One inverted condition per other answer, each the very regex that answer's
+// own routes carry (header matchers are ANDed: not k1 and not k2 is not (k1
+// or k2)). One regex over every other answer's suffixes was larger than any
+// the table already holds, and past about two dozen ports the proxy refused
+// the whole table (RE2 program size over its budget of 100).
+func defaultBlock(levels groupLevels, answers map[string]mergeAnswer, keys []string, bySuffix map[string][]string, def string, conds []routeCond) ([]*routev3.Route, error) {
+	a := answers[bySuffix[def][0]]
+	routes, err := levels.routes(a, conds)
+	if err != nil || len(keys) == 1 || !slices.ContainsFunc(routes, takesAPathlessRequest) {
+		return routes, err
+	}
+	more := slices.Clone(conds)
+	for _, k := range keys {
+		if k == def {
+			continue
+		}
+		notK, err := authorityCond(bySuffix[k])
+		if err != nil {
+			return nil, err
+		}
+		notK.header.InvertMatch = true
+		more = append(more, notK)
+	}
+	return levels.routes(a, more)
 }
 
 // defaultAnswer is the answer of ":*" when there is one, else the one most

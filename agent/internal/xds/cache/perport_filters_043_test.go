@@ -65,8 +65,8 @@ func TestPerPort_ServiceFiltersOnEveryVirtualHost(t *testing.T) {
 				tables[rc.GetName()] = rc
 			}
 			tables[proxy.OutboundHTTPRouteName] = a043Tables(t, c)[proxy.OutboundHTTPRouteName]
-			// The table of the proxy port's chain is built with the snapshot,
-			// from the loopback table's virtual hosts.
+			// The proxy port's table (a branch of cap_http since chart
+			// 3.0.2), from the loopback table's virtual hosts.
 			tables["cap_http_18081"] = a043Tables(t, c)["cap_http_18081"]
 
 			delivering := 0

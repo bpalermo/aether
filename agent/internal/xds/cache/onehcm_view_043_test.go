@@ -9,6 +9,11 @@ package cache
 // published table to the same answers for every request (gate (b) of the
 // change, compiledMismatches). A test that asserts a per-port table therefore
 // asserts what the proxy does with the published one.
+//
+// The proxy port's table, cap_http_18081 (the loopback table's virtual
+// hosts), is one of them: it had a chain of its own, and was published, until
+// chart 3.0.2. The view rebuilds it as the snapshot build does
+// (proxyPortTableNow).
 
 import (
 	"fmt"
@@ -53,10 +58,17 @@ func compiledMismatches(merged *routev3.RouteConfiguration, perPort map[uint32]*
 
 	hosts := map[string]struct{}{"example.com": {}, "example.com:8080": {}, "": {}}
 	namespaces := map[string]struct{}{}
-	suffixes := []string{"", ":" + strconv.Itoa(otherDialled), ":0"}
+	// The mesh's own two ports are spelled in every Host as well: the proxy
+	// port's table refuses them by name.
+	suffixes := []string{
+		"", ":" + strconv.Itoa(otherDialled), ":0",
+		":" + strconv.Itoa(meshconst.ProxyOutboundPort), ":" + strconv.Itoa(meshconst.ProxyL4OutboundPort),
+	}
 	for _, p := range ports {
 		suffixes = append(suffixes, ":"+strconv.Itoa(int(p)), fmt.Sprintf(":%d:%d", p, p))
 	}
+	slices.Sort(suffixes)
+	suffixes = slices.Compact(suffixes)
 	addName := func(name string) {
 		for _, s := range suffixes {
 			hosts[name+s] = struct{}{}
@@ -92,7 +104,7 @@ func compiledMismatches(merged *routev3.RouteConfiguration, perPort map[uint32]*
 		callers = append(callers, ns)
 	}
 	slices.Sort(callers)
-	dialled := append(slices.Clone(ports), otherDialled, 0)
+	dialled := append(slices.Clone(ports), otherDialled, meshconst.ProxyL4OutboundPort, 0)
 
 	probes := []routeProbe{{path: "/"}}
 	if allPaths {
@@ -240,17 +252,30 @@ func requireCompiled(t testing.TB, merged *routev3.RouteConfiguration, perPort m
 	require.Empty(t, bad, "the compiled cap_http answers differently from the per-port tables:\n%s", strings.Join(bad, "\n"))
 }
 
+// proxyPortTableNow is the proxy port's table (cap_http_18081) as a snapshot
+// built now compiles it into cap_http, or nil when ports does not hold the
+// proxy port.
+func (c *SnapshotCache) proxyPortTableNow(ports []uint32) *routev3.RouteConfiguration {
+	if !slices.Contains(ports, meshconst.ProxyOutboundPort) {
+		return nil
+	}
+	_, _, vhosts := c.clustersEndpointsAndVhosts()
+	return c.proxyPortCaptureTable(vhosts, c.generatedMeshNames())
+}
+
 // perPortView returns the per-port tables the cache compiles cap_http from
-// for ports (cap_http_<P> for each port but the proxy port, and
-// cap_http_other), sorted by name, after checking that what captureRouteTables
-// returns for the same ports is their compilation and answers as they do.
+// for ports (cap_http_<P> for each port, the proxy port's included, and
+// cap_http_other), sorted by name, after checking that what
+// captureRouteTables returns for the same ports is their compilation and
+// answers as they do.
 func perPortView(t testing.TB, c *SnapshotCache, ports []uint32) []types.Resource {
 	t.Helper()
-	published := c.captureRouteTables(ports)
+	proxyPort := c.proxyPortTableNow(ports)
+	published := c.captureRouteTables(ports, proxyPort)
 	require.Len(t, published, 1, "one capture route table")
 	merged := published[0].(*routev3.RouteConfiguration)
 	require.Equal(t, proxy.CaptureHTTPChainName, merged.GetName())
-	perPort, other := c.capturePerPortTables(c.captureTableInputs(), ports)
+	perPort, other := c.capturePerPortTables(c.captureTableInputs(), ports, proxyPort)
 	requireCompiledEquivalent(t, merged, perPort, other)
 	out := make([]types.Resource, 0, len(perPort)+1)
 	for _, p := range slices.Sorted(maps.Keys(perPort)) {
@@ -271,7 +296,7 @@ func withPerPortView(t testing.TB, c *SnapshotCache, snapTables map[string]*rout
 		return snapTables
 	}
 	ports := c.captureHTTPPorts()
-	perPort, other := c.capturePerPortTables(c.captureTableInputs(), ports)
+	perPort, other := c.capturePerPortTables(c.captureTableInputs(), ports, c.proxyPortTableNow(ports))
 	requireCompiledEquivalent(t, merged, perPort, other)
 	delete(snapTables, proxy.CaptureHTTPChainName)
 	for _, rc := range append(slices.Collect(maps.Values(perPort)), other) {
@@ -313,5 +338,3 @@ func capturePortOf(name string) (uint32, bool) {
 	}
 	return uint32(p), true
 }
-
-var _ = meshconst.ProxyOutboundPort
