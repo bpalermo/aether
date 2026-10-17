@@ -63,10 +63,14 @@ func EvalMatcher(m *xdsmatcherv3.Matcher, in InputFunc) (*xdscorev3.TypedExtensi
 }
 
 // evalTree is an exact map: the child of the input's value, nil when there is
-// none or it does not match.
+// none or it does not match. A custom_match tree of an IPMatcher is
+// evalIPMatcher; no other tree is modelled.
 func evalTree(t *xdsmatcherv3.Matcher_MatcherTree, in InputFunc) (*xdscorev3.TypedExtensionConfig, error) {
+	if t.GetCustomMatch() != nil {
+		return evalIPMatcher(t, in)
+	}
 	if t.GetExactMatchMap() == nil {
-		return nil, Unsupported{"a matcher tree that is not an exact_match_map"}
+		return nil, Unsupported{"a matcher tree that is not an exact_match_map or an IPMatcher"}
 	}
 	v, ok, err := in(t.GetInput())
 	if err != nil || !ok {
@@ -391,9 +395,10 @@ func reqInput(input *xdscorev3.TypedExtensionConfig, r Request) (string, bool, e
 }
 
 // MatcherActionNames returns every chain name an action of a listener's
-// filter_chain_matcher selects, sorted and de-duplicated. A name the listener
-// has no chain of closes the connection (Envoy's NoopFilterChainAction), so
-// every one must be on the listener.
+// filter_chain_matcher selects (an IPMatcher tree's range matchers included),
+// sorted and de-duplicated. A name the listener has no chain of closes the
+// connection (Envoy's NoopFilterChainAction), so every one must be on the
+// listener.
 func MatcherActionNames(m *xdsmatcherv3.Matcher) []string {
 	var names []string
 	var walk func(m *xdsmatcherv3.Matcher)
@@ -419,10 +424,11 @@ func MatcherActionNames(m *xdsmatcherv3.Matcher) []string {
 		for _, fm := range m.GetMatcherList().GetMatchers() {
 			onMatch(fm.GetOnMatch())
 		}
-		for _, om := range m.GetMatcherTree().GetExactMatchMap().GetMap() {
-			onMatch(om)
+		children, undecodable := treeOnMatches(m.GetMatcherTree())
+		if undecodable != "" {
+			names = append(names, undecodable)
 		}
-		for _, om := range m.GetMatcherTree().GetPrefixMatchMap().GetMap() {
+		for _, om := range children {
 			onMatch(om)
 		}
 		onMatch(m.GetOnNoMatch())
@@ -430,4 +436,24 @@ func MatcherActionNames(m *xdsmatcherv3.Matcher) []string {
 	walk(m)
 	slices.Sort(names)
 	return slices.Compact(names)
+}
+
+// treeOnMatches returns the on_match of every child of a matcher tree: an
+// exact or prefix map's values, or an IPMatcher's range matchers. A
+// custom_match that is not a decodable IPMatcher is named in undecodable.
+func treeOnMatches(t *xdsmatcherv3.Matcher_MatcherTree) (children []*xdsmatcherv3.Matcher_OnMatch, undecodable string) {
+	for _, om := range t.GetExactMatchMap().GetMap() {
+		children = append(children, om)
+	}
+	for _, om := range t.GetPrefixMatchMap().GetMap() {
+		children = append(children, om)
+	}
+	if cm := t.GetCustomMatch(); cm != nil {
+		oms, ok := ipMatcherOnMatches(cm)
+		if !ok {
+			return children, fmt.Sprintf("<undecodable custom_match %q>", cm.GetName())
+		}
+		children = append(children, oms...)
+	}
+	return children, ""
 }
