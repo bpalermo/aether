@@ -5128,6 +5128,13 @@ the cluster" and "anything else". Neither chain is access-logged.
   resync with the same range rebuilds nothing. The listener is updated in
   place, so connections on its other chains are untouched. One range adds
   about 560 bytes to each pod's capture listener, whatever the Service count.
+- A restarted agent's first serve also waits for the Service range (the
+  flag, "API not served", or the first ServiceCIDR reconcile), within the
+  same 10 s bound as the mesh-Service projection. Serving before it would
+  publish the listener without `cap_passthrough_svc` and close that chain's
+  connections when its drain ends. A real change of the range does the same
+  to the connections on a chain it removes; a range that only grows removes
+  nothing.
 - Rolling or rolling back: per node, with the agent. A node not yet upgraded
   counts all of it under `cap_passthrough`.
 

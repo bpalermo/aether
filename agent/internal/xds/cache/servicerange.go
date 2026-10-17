@@ -19,7 +19,12 @@ import (
 // after captureMu is released) and then signalDependencyChange, so the new
 // branch reaches the proxy. The early return on an equal range is what keeps
 // a ServiceCIDR resync from rewriting every pod listener on the node.
+//
+// The first call, whatever its range, closes ServiceRangeDelivered: after the
+// rebuild below, so a waiter that goes on to serve the snapshot finds the
+// listeners built with it.
 func (c *SnapshotCache) SetServiceRanges(ranges []netip.Prefix) {
+	defer c.markServiceRangeDelivered()
 	canonical := servicerange.Canonicalize(ranges)
 	c.captureMu.Lock()
 	if slices.Equal(c.serviceRanges, canonical) {
@@ -41,6 +46,52 @@ func (c *SnapshotCache) SetServiceRanges(ranges []netip.Prefix) {
 	c.rebuildPodListenersLocked("service range change", shared)
 	c.listenerMu.Unlock()
 	c.signalDependencyChange()
+}
+
+// markServiceRangeDelivered closes ServiceRangeDelivered, and
+// CaptureInputsReady when the projection has arrived too.
+func (c *SnapshotCache) markServiceRangeDelivered() {
+	c.serviceRangeDeliveredOnce.Do(func() { close(c.serviceRangeDelivered) })
+	c.maybeCloseCaptureInputsReady()
+}
+
+// ServiceRangeDelivered returns a channel closed once SetServiceRanges has
+// been called, a nil range included. servicerange.Setup calls it once at
+// start on the override and API-not-served paths; on the ServiceCIDR path the
+// reconciler calls it on its first reconcile.
+func (c *SnapshotCache) ServiceRangeDelivered() <-chan struct{} { return c.serviceRangeDelivered }
+
+// CaptureInputsReady returns a channel closed once every input the capture
+// listener is built from has been delivered at least once: the mesh-Service
+// projection (CaptureProjected) and the Service range
+// (ServiceRangeDelivered). The xDS server holds its first serve on it
+// (bounded; AgentXdsServer.SetCaptureGate).
+//
+// The range is part of it because the listener's cap_passthrough_svc chain
+// (proposal 044) exists only while a range is known. A restarted agent that
+// served before its ServiceCIDR reconciler had run would publish a listener
+// without that chain over the proxy's listener that has it: the chain is
+// drained, and every connection on it closed when the drain ends.
+func (c *SnapshotCache) CaptureInputsReady() <-chan struct{} { return c.captureInputsReady }
+
+// maybeCloseCaptureInputsReady closes captureInputsReady once both inputs
+// have been delivered. Called after each of them is.
+func (c *SnapshotCache) maybeCloseCaptureInputsReady() {
+	for _, ch := range []chan struct{}{c.captureProjected, c.serviceRangeDelivered} {
+		select {
+		case <-ch:
+		default:
+			return
+		}
+	}
+	c.captureInputsReadyOnce.Do(func() { close(c.captureInputsReady) })
+}
+
+// serviceRangesGeneration returns the count of the range's content changes.
+func (c *SnapshotCache) serviceRangesGeneration() uint64 {
+	c.captureMu.RLock()
+	defer c.captureMu.RUnlock()
+	return c.serviceRangesGen
 }
 
 // ServiceRanges returns a copy of the Service range SetServiceRanges last

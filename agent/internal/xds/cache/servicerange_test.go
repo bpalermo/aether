@@ -136,3 +136,36 @@ func TestSetServiceRanges_RebuildsTheCaptureListener(t *testing.T) {
 	require.NoError(t, c.generateSnapshot(ctx))
 	assert.True(t, proto.Equal(before, a043CaptureListener(t, c)), "no range: the capture listener is the one built before any range")
 }
+
+func isClosed(ch <-chan struct{}) bool {
+	select {
+	case <-ch:
+		return true
+	default:
+		return false
+	}
+}
+
+// TestCaptureInputsReady_WaitsForBoth: the capture gate opens once the
+// mesh-Service projection and the Service range have both been delivered, in
+// either order, a nil range and an empty projection included.
+func TestCaptureInputsReady_WaitsForBoth(t *testing.T) {
+	for _, rangeFirst := range []bool{true, false} {
+		c := newTestCache("node-1")
+		assert.False(t, isClosed(c.CaptureInputsReady()))
+		if rangeFirst {
+			c.SetServiceRanges(nil)
+			assert.True(t, isClosed(c.ServiceRangeDelivered()), "a nil range is a delivery")
+			assert.False(t, isClosed(c.CaptureInputsReady()), "the range alone does not open the gate")
+			c.SetCaptureTCPServices(nil)
+		} else {
+			c.SetCaptureTCPServices(nil)
+			assert.False(t, isClosed(c.CaptureInputsReady()), "the projection alone does not open the gate")
+			c.SetServiceRanges(nil)
+		}
+		assert.True(t, isClosed(c.CaptureInputsReady()), "rangeFirst=%v", rangeFirst)
+		// Later calls are harmless.
+		c.SetServiceRanges([]netip.Prefix{netip.MustParsePrefix("10.96.0.0/12")})
+		c.SetCaptureTCPServices(nil)
+	}
+}

@@ -377,6 +377,10 @@ func (c *SnapshotCache) AddPod(ctx context.Context, cniPod *cniv1.CNIPod, trustD
 	if err != nil {
 		return err
 	}
+	// The Service range's generation goes with the build: a SetServiceRanges
+	// between here and the insert below rebuilds only the entries already
+	// inserted, so the insert rebuilds this one if the range moved.
+	rangesGen := c.serviceRangesGeneration()
 	capture, err := c.generateCaptureListener(cniPod, trustDomain, extensionFilters)
 	if err != nil {
 		return err
@@ -395,6 +399,16 @@ func (c *SnapshotCache) AddPod(ctx context.Context, cniPod *cniv1.CNIPod, trustD
 	c.listenerMu.Lock()
 	if c.listeners == nil {
 		c.listeners = make(map[string]listenerEntry)
+	}
+	if c.serviceRangesGeneration() != rangesGen {
+		// Under listenerMu, where every rebuild runs: a range set after this
+		// check rebuilds the entry inserted below.
+		rebuilt, err := c.generateCaptureListener(cniPod, trustDomain, extensionFilters)
+		if err != nil {
+			c.listenerMu.Unlock()
+			return err
+		}
+		capture = rebuilt
 	}
 	c.listeners[netns] = listenerEntry{
 		inbound:              inbound,

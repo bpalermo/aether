@@ -271,7 +271,7 @@ func (s *AgentXdsServer) waitForCaptureProjection(ctx context.Context) {
 		s.log.DebugContext(ctx, "mesh-Service projection received; capture TCP chains are complete for the first serve",
 			"waited", time.Since(started).Round(time.Millisecond).String())
 	case <-timer.C:
-		s.log.WarnContext(ctx, "mesh-Service projection not received in time; serving the capture listener without its TCP chains until it arrives",
+		s.log.WarnContext(ctx, "capture inputs (mesh-Service projection, Service range) not received in time; serving the capture listener without them until they arrive",
 			"timeout", s.captureTimeout.String(), "issue", "aether#1094")
 	case <-ctx.Done():
 	}

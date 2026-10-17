@@ -339,6 +339,8 @@ func (c *SnapshotCache) SetCaptureTCPServices(services []capture.CaptureTCPServi
 	// Closed AFTER the listener rebuild below has run when it matters: a waiter
 	// that wakes here goes on to open the xDS socket, and the snapshot it serves
 	// must already carry these chains. Deferred so every return path closes it.
+	// Deferred first, so it runs after captureProjected is closed.
+	defer c.maybeCloseCaptureInputsReady()
 	defer c.captureProjectedOnce.Do(func() { close(c.captureProjected) })
 
 	if !changed {

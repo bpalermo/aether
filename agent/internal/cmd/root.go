@@ -1053,7 +1053,10 @@ func setXDSServer(ctx context.Context, m ctrl.Manager, registry registry.Registr
 	// defines the capture listener's TCP chains, and serving before it replaces
 	// a restarted agent's still-correct capture listener with a chainless one
 	// (#1094). Capture is unconditional (proposal 031), so this is too.
-	xdsSrv.SetCaptureGate(snapshotCache.CaptureProjected())
+	// And until the Service range has been decided (proposal 044): the
+	// capture listener's cap_passthrough_svc chain exists only with a range,
+	// and serving without it would drain that chain's connections.
+	xdsSrv.SetCaptureGate(snapshotCache.CaptureInputsReady())
 	if err = m.Add(xdsSrv); err != nil {
 		return nil, fmt.Errorf("failed to add xDS server: %w", err)
 	}
