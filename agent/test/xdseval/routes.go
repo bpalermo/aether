@@ -261,8 +261,15 @@ func filterStateMatches(m *routev3.RouteMatch, r Request) (bool, error) {
 func headerMatches(h *routev3.HeaderMatcher, r Request) (bool, error) {
 	name := strings.ToLower(h.GetName())
 	v, present := r.Headers[name]
-	if name == ":authority" || name == "host" {
+	switch name {
+	case ":authority", "host":
 		v, present = r.Host, true
+	case ":path":
+		// The request's path, as FirstRoute reads it; absent with NoPath.
+		v, present = r.Path, !r.NoPath
+		if v == "" && present {
+			v = "/"
+		}
 	}
 	var hit bool
 	switch {

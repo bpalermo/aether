@@ -4,6 +4,7 @@ import (
 	"cmp"
 	"fmt"
 	"maps"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -463,11 +464,13 @@ func mergeGroup(name string, doms []string, ports []uint32, tables []*mergeTable
 	}
 	levels := levelsOf(all)
 	var routes []*routev3.Route
+	var dialled []string
 	for i, p := range ports {
 		if sameAnswers(portAnswers[i], otherAnswers) {
 			continue // the port gets what every other port gets
 		}
-		block, err := flatBlock(levels, portAnswers[i], []routeCond{dialledCond(strconv.Itoa(int(p)))})
+		dialled = append(dialled, strconv.Itoa(int(p)))
+		block, err := flatBlock(levels, portAnswers[i], []routeCond{dialledCond(dialled[len(dialled)-1])})
 		if err != nil {
 			return nil, fmt.Errorf("virtual host %s, dialled port %d: %w", name, p, err)
 		}
@@ -477,6 +480,7 @@ func mergeGroup(name string, doms []string, ports []uint32, tables []*mergeTable
 	if err != nil {
 		return nil, fmt.Errorf("virtual host %s, any other port: %w", name, err)
 	}
+	block = closeToPathlessOfPorts(block, dialled)
 	return &routev3.VirtualHost{Name: name, Domains: mergeDomains(doms), Routes: append(routes, block...), TypedPerFilterConfig: levels.cfg}, nil
 }
 
@@ -713,6 +717,108 @@ func namesBlock(levels groupLevels, names []string, answers groupAnswers, conds 
 	return out, nil
 }
 
+// closeToPathlessOfPorts makes the other ports' block (block, which matches
+// no dialled port) take no request with no path that was dialled to one of
+// dialled, the ports whose blocks come before it. Every route of a dialled
+// port's block that a request with a path reaches ends in one it takes, but a
+// request with no path can fall out of that block (its routes are all
+// "/"-prefixed), and must then get no route, as on its own port's table, not
+// a route of the other ports' table that takes it (takesAPathlessRequest).
+//
+// A filter-state match cannot be inverted, so each such route r becomes:
+//
+//   - r for a request with a :path (a header presence match), whatever was
+//     dialled: such a request never falls out of a dialled port's block;
+//   - r for a request with no :path, once per piece of the complement of
+//     dialled (complementPatterns), each a small regex on the dialled port.
+//
+// A request with no path on a connection with NO dialled port (a chain that
+// does not record it; the agent's one HTTP chain always does) gets no route
+// from r then, where cap_http_other's table may give it r: it fails closed.
+// No route of any table the agent builds today takes a request with no path,
+// and then nothing changes: the block is returned as it was.
+func closeToPathlessOfPorts(block []*routev3.Route, dialled []string) []*routev3.Route {
+	if len(dialled) == 0 || !slices.ContainsFunc(block, takesAPathlessRequest) {
+		return block
+	}
+	pieces := complementPatterns(dialled)
+	out := make([]*routev3.Route, 0, len(block)+len(pieces))
+	for _, r := range block {
+		if !takesAPathlessRequest(r) {
+			out = append(out, r)
+			continue
+		}
+		withPath := proto.Clone(r).(*routev3.Route)
+		pathCond(true).apply(withPath)
+		out = append(out, withPath)
+		for _, re := range pieces {
+			c := proto.Clone(r).(*routev3.Route)
+			pathCond(false).apply(c)
+			routeCond{filterState: &typematcherv3.FilterStateMatcher{
+				Key: DialledPortFilterStateKey,
+				Matcher: &typematcherv3.FilterStateMatcher_StringMatch{StringMatch: &typematcherv3.StringMatcher{
+					MatchPattern: &typematcherv3.StringMatcher_SafeRegex{SafeRegex: &typematcherv3.RegexMatcher{Regex: re}},
+				}},
+			}}.apply(c)
+			out = append(out, c)
+		}
+	}
+	return out
+}
+
+// pathCond: the request has a :path (present), or has none.
+func pathCond(present bool) routeCond {
+	return routeCond{header: &routev3.HeaderMatcher{
+		Name:                 ":path",
+		HeaderMatchSpecifier: &routev3.HeaderMatcher_PresentMatch{PresentMatch: true},
+		InvertMatch:          !present,
+	}}
+}
+
+// complementPatterns returns regexes that, together, match exactly the
+// strings that are none of values, each string by exactly one of them, and
+// each regex small (a prefix of one of values, then one character class): one
+// per node of the trie of values. At a node with prefix p, a string that is p
+// itself (when p is none of values) or that goes on with a character no value
+// goes on with after p.
+func complementPatterns(values []string) []string {
+	set, next := prefixTrie(values)
+	out := make([]string, 0, len(next))
+	for _, p := range slices.Sorted(maps.Keys(next)) {
+		rest := ".+"
+		if len(next[p]) > 0 {
+			class := ""
+			for _, c := range slices.Sorted(maps.Keys(next[p])) {
+				class += regexp.QuoteMeta(string(c))
+			}
+			rest = "[^" + class + "].*"
+		}
+		if !set[p] {
+			rest = "(" + rest + ")?"
+		}
+		out = append(out, "^"+regexp.QuoteMeta(p)+rest+"$")
+	}
+	return out
+}
+
+// prefixTrie returns the set of values, and per prefix of any of them (""
+// included) the characters a value goes on with after it.
+func prefixTrie(values []string) (set map[string]bool, next map[string]map[byte]bool) {
+	set, next = map[string]bool{}, map[string]map[byte]bool{}
+	for _, v := range values {
+		set[v] = true
+		for i := 0; i <= len(v); i++ {
+			if next[v[:i]] == nil {
+				next[v[:i]] = map[byte]bool{}
+			}
+			if i < len(v) {
+				next[v[:i]][v[i]] = true
+			}
+		}
+	}
+	return set, next
+}
+
 // takesAPathlessRequest: the route's path match can take a request with an
 // empty path (a regex, an empty prefix, a CONNECT matcher, a path-match
 // extension). A non-empty prefix, an exact path and a separated prefix
@@ -811,24 +917,31 @@ func suffixBlock(levels groupLevels, answers map[string]mergeAnswer, conds []rou
 // default is then taken only by a Host whose suffix is none of the other
 // answers': not by a regex of its own suffixes, which ":*" has none of, and a
 // Host no regex accepts ("<name>:8080:8080") keeps the default it had.
+//
+// One inverted condition per other answer, each the very regex that answer's
+// own routes carry (header matchers are ANDed: not k1 and not k2 is not (k1
+// or k2)). One regex over every other answer's suffixes was larger than any
+// the table already holds, and past about two dozen ports the proxy refused
+// the whole table (RE2 program size over its budget of 100).
 func defaultBlock(levels groupLevels, answers map[string]mergeAnswer, keys []string, bySuffix map[string][]string, def string, conds []routeCond) ([]*routev3.Route, error) {
 	a := answers[bySuffix[def][0]]
 	routes, err := levels.routes(a, conds)
 	if err != nil || len(keys) == 1 || !slices.ContainsFunc(routes, takesAPathlessRequest) {
 		return routes, err
 	}
-	var others []string
+	more := slices.Clone(conds)
 	for _, k := range keys {
-		if k != def {
-			others = append(others, bySuffix[k]...)
+		if k == def {
+			continue
 		}
+		notK, err := authorityCond(bySuffix[k])
+		if err != nil {
+			return nil, err
+		}
+		notK.header.InvertMatch = true
+		more = append(more, notK)
 	}
-	notOthers, err := authorityCond(others)
-	if err != nil {
-		return nil, err
-	}
-	notOthers.header.InvertMatch = true
-	return levels.routes(a, append(slices.Clone(conds), notOthers))
+	return levels.routes(a, more)
 }
 
 // defaultAnswer is the answer of ":*" when there is one, else the one most
