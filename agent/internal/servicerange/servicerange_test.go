@@ -19,6 +19,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
+	mcsv1alpha1 "sigs.k8s.io/mcs-api/pkg/apis/v1alpha1"
 )
 
 // fakeSink records every range it is handed.
@@ -200,11 +201,28 @@ func TestReconcile_TerminatingServiceCIDRStays(t *testing.T) {
 	assert.Equal(t, prefixes(t, "10.0.0.0/24", "10.96.0.0/12"), h.reconcile(t))
 }
 
-// servedMapper serves ServiceCIDR, as Kubernetes >= 1.33 does.
-func servedMapper() meta.RESTMapper {
+// withServiceImport makes servedMapper serve the MCS ServiceImport CRD too.
+const withServiceImport = true
+
+// servedMapper serves ServiceCIDR, as Kubernetes >= 1.33 does, and the MCS
+// ServiceImport when asked.
+func servedMapper(serviceImport ...bool) meta.RESTMapper {
 	m := meta.NewDefaultRESTMapper(nil)
 	m.Add(networkingv1.SchemeGroupVersion.WithKind("ServiceCIDR"), meta.RESTScopeRoot)
+	if len(serviceImport) > 0 && serviceImport[0] {
+		m.Add(serviceImportGVK, meta.RESTScopeNamespace)
+	}
 	return m
+}
+
+// noImports is the ServiceImport registration of a mapper without the CRD:
+// it must not be called.
+func noImports(t *testing.T) func(*ImportReconciler) error {
+	t.Helper()
+	return func(*ImportReconciler) error {
+		t.Error("the ServiceImport reconciler must not be registered without its CRD")
+		return nil
+	}
 }
 
 func setupOpts(sink *fakeSink, logs *bytes.Buffer, reader *sdkmetric.ManualReader, override ...string) Options {
@@ -221,7 +239,7 @@ func setupOpts(sink *fakeSink, logs *bytes.Buffer, reader *sdkmetric.ManualReade
 func TestSetup_OverrideWins(t *testing.T) {
 	sink, logs, reader := &fakeSink{}, &bytes.Buffer{}, sdkmetric.NewManualReader()
 	registered := false
-	err := setup(servedMapper(), func(*Reconciler) error { registered = true; return nil },
+	err := setup(servedMapper(), func(*Reconciler) error { registered = true; return nil }, noImports(t),
 		setupOpts(sink, logs, reader, "10.96.0.0/12", "fd00::/108"))
 	require.NoError(t, err)
 	assert.False(t, registered, "the ServiceCIDR reconciler must not run under an override")
@@ -231,11 +249,28 @@ func TestSetup_OverrideWins(t *testing.T) {
 	assert.Equal(t, int64(1), v)
 }
 
-// The public entry point never touches the manager under an override (nil here).
-func TestSetup_OverrideNeedsNoManager(t *testing.T) {
+// The override replaces only the ServiceCIDR part: where the ServiceImport
+// CRD is installed its reconciler still runs, so ClusterSetIPs outside the
+// override still join the range.
+func TestSetup_OverrideStillWatchesServiceImports(t *testing.T) {
 	sink, logs, reader := &fakeSink{}, &bytes.Buffer{}, sdkmetric.NewManualReader()
-	require.NoError(t, Setup(nil, setupOpts(sink, logs, reader, "10.96.0.0/12")))
-	assert.Equal(t, prefixes(t, "10.96.0.0/12"), sink.last(t))
+	var imports *ImportReconciler
+	require.NoError(t, setup(servedMapper(withServiceImport),
+		func(*Reconciler) error {
+			t.Fatal("the ServiceCIDR reconciler must not run under an override")
+			return nil
+		},
+		func(r *ImportReconciler) error { imports = r; return nil },
+		setupOpts(sink, logs, reader, "10.96.0.0/12")))
+	require.NotNil(t, imports, "the ServiceImport reconciler must be registered under an override too")
+	assert.Equal(t, [][]netip.Prefix{prefixes(t, "10.96.0.0/12")}, sink.calls)
+
+	// What it reconciles is added to the override's range.
+	imports.Client = fake.NewClientBuilder().WithScheme(mcsScheme(t)).
+		WithObjects(serviceImport("ns", "far", mcsv1alpha1.ClusterSetIP, nil, "192.168.7.1")).Build()
+	_, err := imports.Reconcile(context.Background(), reconcile.Request{})
+	require.NoError(t, err)
+	assert.Equal(t, prefixes(t, "10.96.0.0/12", "192.168.7.1/32"), sink.last(t))
 }
 
 func TestSetup_InvalidOverrideFails(t *testing.T) {
@@ -249,7 +284,7 @@ func TestSetup_InvalidOverrideFails(t *testing.T) {
 func TestSetup_DiscoveryWhenServed(t *testing.T) {
 	sink, logs, reader := &fakeSink{}, &bytes.Buffer{}, sdkmetric.NewManualReader()
 	var got *Reconciler
-	require.NoError(t, setup(servedMapper(), func(r *Reconciler) error { got = r; return nil },
+	require.NoError(t, setup(servedMapper(), func(r *Reconciler) error { got = r; return nil }, noImports(t),
 		setupOpts(sink, logs, reader)))
 	require.NotNil(t, got, "the reconciler must be registered where the API is served")
 	assert.Same(t, sink, got.Sink)
@@ -259,7 +294,7 @@ func TestSetup_DiscoveryWhenServed(t *testing.T) {
 func TestSetup_APINotServedIsNoRange(t *testing.T) {
 	sink, logs, reader := &fakeSink{}, &bytes.Buffer{}, sdkmetric.NewManualReader()
 	registered := false
-	require.NoError(t, setup(meta.NewDefaultRESTMapper(nil), func(*Reconciler) error { registered = true; return nil },
+	require.NoError(t, setup(meta.NewDefaultRESTMapper(nil), func(*Reconciler) error { registered = true; return nil }, noImports(t),
 		setupOpts(sink, logs, reader)))
 	assert.False(t, registered, "no watch on an API that is not served")
 	assert.Equal(t, [][]netip.Prefix{nil}, sink.calls)

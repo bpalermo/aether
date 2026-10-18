@@ -292,6 +292,9 @@ agent:
   # (Kubernetes >= 1.33). Set it on an older cluster, or to override them:
   # when set, the ServiceCIDR objects are not watched. An entry that is not a
   # CIDR fails the render; IPv6 entries are accepted and ignored for now.
+  # Either way, where the multicluster.x-k8s.io ServiceImport CRD is installed,
+  # a /32 for each IPv4 ClusterSetIP outside the range joins it (the override
+  # replaces only the ServiceCIDR objects, not the ServiceImports).
   # With no range known the agent logs a warning and reports
   # aether.agent.service_range.known = 0. The capture listener counts
   # connections to the range apart (cap_passthrough_svc, proposal 044 Phase 0).
