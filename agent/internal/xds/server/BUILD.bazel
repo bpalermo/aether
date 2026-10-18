@@ -36,6 +36,7 @@ go_test(
     size = "small",
     srcs = [
         "capture_gate_test.go",
+        "capture_gate_timeout_test.go",
         "client_cert_wait_test.go",
         "identity_hold_test.go",
         "initial_snapshot_test.go",

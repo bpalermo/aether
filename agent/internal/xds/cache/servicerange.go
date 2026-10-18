@@ -74,6 +74,32 @@ func (c *SnapshotCache) ServiceRangeDelivered() <-chan struct{} { return c.servi
 // drained, and every connection on it closed when the drain ends.
 func (c *SnapshotCache) CaptureInputsReady() <-chan struct{} { return c.captureInputsReady }
 
+// The capture-listener inputs MissingCaptureInputs names.
+const (
+	// CaptureInputProjection is the mesh-Service projection (CaptureProjected).
+	CaptureInputProjection = "projection"
+	// CaptureInputServiceRange is the Service range (ServiceRangeDelivered).
+	CaptureInputServiceRange = "service_range"
+)
+
+// MissingCaptureInputs names the capture-listener inputs not delivered yet,
+// CaptureInputProjection and CaptureInputServiceRange; empty once
+// CaptureInputsReady is closed.
+func (c *SnapshotCache) MissingCaptureInputs() []string {
+	var out []string
+	for _, in := range []struct {
+		name string
+		ch   chan struct{}
+	}{{CaptureInputProjection, c.captureProjected}, {CaptureInputServiceRange, c.serviceRangeDelivered}} {
+		select {
+		case <-in.ch:
+		default:
+			out = append(out, in.name)
+		}
+	}
+	return out
+}
+
 // maybeCloseCaptureInputsReady closes captureInputsReady once both inputs
 // have been delivered. Called after each of them is.
 func (c *SnapshotCache) maybeCloseCaptureInputsReady() {

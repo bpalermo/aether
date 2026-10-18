@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/netip"
 	"testing"
+	"time"
 
 	"aethermesh.dev/agent/internal/xds/proxy"
 	listenerv3 "github.com/envoyproxy/go-control-plane/envoy/config/listener/v3"
@@ -153,6 +154,7 @@ func TestCaptureInputsReady_WaitsForBoth(t *testing.T) {
 	for _, rangeFirst := range []bool{true, false} {
 		c := newTestCache("node-1")
 		assert.False(t, isClosed(c.CaptureInputsReady()))
+		assert.Equal(t, []string{CaptureInputProjection, CaptureInputServiceRange}, c.MissingCaptureInputs())
 		if rangeFirst {
 			c.SetServiceRanges(nil)
 			assert.True(t, isClosed(c.ServiceRangeDelivered()), "a nil range is a delivery")
@@ -164,8 +166,35 @@ func TestCaptureInputsReady_WaitsForBoth(t *testing.T) {
 			c.SetServiceRanges(nil)
 		}
 		assert.True(t, isClosed(c.CaptureInputsReady()), "rangeFirst=%v", rangeFirst)
+		assert.Empty(t, c.MissingCaptureInputs())
 		// Later calls are harmless.
 		c.SetServiceRanges([]netip.Prefix{netip.MustParsePrefix("10.96.0.0/12")})
 		c.SetCaptureTCPServices(nil)
 	}
+}
+
+// TestServiceRangeDelivered_AfterTheRebuild: the first SetServiceRanges
+// closes ServiceRangeDelivered only after the pod listeners are rebuilt with
+// the range, so a waiter that goes on to serve finds the Service-range chain.
+// The rebuild is held on listenerMu: while it is, the channel must stay open.
+func TestServiceRangeDelivered_AfterTheRebuild(t *testing.T) {
+	c := a043Cache(t, a043Fixture())
+	require.NoError(t, c.generateSnapshot(context.Background()))
+	assert.Equal(t, []string{CaptureInputServiceRange}, c.MissingCaptureInputs())
+
+	c.listenerMu.RLock()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		c.SetServiceRanges([]netip.Prefix{netip.MustParsePrefix("10.96.0.0/12")})
+	}()
+	time.Sleep(200 * time.Millisecond)
+	delivered := isClosed(c.ServiceRangeDelivered())
+	c.listenerMu.RUnlock()
+	<-done
+	assert.False(t, delivered, "ServiceRangeDelivered closed while the listener rebuild was still waiting")
+
+	require.True(t, isClosed(c.ServiceRangeDelivered()))
+	assert.Empty(t, c.MissingCaptureInputs())
+	assert.Contains(t, listenerChainNames(podCapture(t, c)), proxy.CapturePassthroughServiceChainName)
 }

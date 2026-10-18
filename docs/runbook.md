@@ -5130,7 +5130,10 @@ the cluster" and "anything else". Neither chain is access-logged.
   about 560 bytes to each pod's capture listener, whatever the Service count.
 - A restarted agent's first serve also waits for the Service range (the
   flag, "API not served", or the first ServiceCIDR reconcile), within the
-  same 10 s bound as the mesh-Service projection. Serving before it would
+  same 10 s bound as the mesh-Service projection. A first serve that went
+  ahead at the bound logs a warning naming the missing input and counts
+  `aether.agent.xds.capture_gate.timeouts{input="projection"|"service_range"}`.
+  Serving before it would
   publish the listener without `cap_passthrough_svc` and close that chain's
   connections when its drain ends. A real change of the range does the same
   to the connections on a chain it removes; a range that only grows removes
