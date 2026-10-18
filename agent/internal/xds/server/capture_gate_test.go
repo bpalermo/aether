@@ -78,3 +78,34 @@ func TestPreListen_CaptureGateEndsOnShutdown(t *testing.T) {
 	}
 	assert.Zero(t, registryCalls.Load(), "a cancelled hold must not fall through to the snapshot build")
 }
+
+// TestPreListen_HoldsUntilServiceRange (proposal 044): the agent's capture
+// gate is CaptureInputsReady, which also waits for the Service range. A first
+// serve without it would publish a capture listener without
+// cap_passthrough_svc over the proxy's listener that has it, and the chain's
+// connections would be closed when its drain ends.
+func TestPreListen_HoldsUntilServiceRange(t *testing.T) {
+	srv, registryCalls := newHoldServer(t, nil)
+	srv.SetCaptureGate(srv.cache.CaptureInputsReady())
+
+	done := make(chan error, 1)
+	go func() { done <- srv.PreListen(t.Context()) }()
+
+	srv.cache.SetCaptureTCPServices(nil)
+	select {
+	case err := <-done:
+		t.Fatalf("PreListen returned before the Service range was delivered (err=%v)", err)
+	case <-time.After(250 * time.Millisecond):
+	}
+	assert.Zero(t, registryCalls.Load(), "the snapshot the socket opens on must come after the Service range")
+
+	// No range known is a delivery too: it releases the gate.
+	srv.cache.SetServiceRanges(nil)
+	select {
+	case err := <-done:
+		require.NoError(t, err)
+	case <-time.After(30 * time.Second):
+		t.Fatal("PreListen did not proceed after the Service range arrived")
+	}
+	assert.Positive(t, registryCalls.Load())
+}

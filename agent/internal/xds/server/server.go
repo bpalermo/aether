@@ -9,6 +9,10 @@ import (
 	"sync/atomic"
 	"time"
 
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/metric"
+
 	"aethermesh.dev/agent/constants"
 	"aethermesh.dev/agent/internal/xds/cache"
 	"aethermesh.dev/agent/storage"
@@ -67,6 +71,11 @@ type AgentXdsServer struct {
 	// serve waits for it, at most captureTimeout (#1094).
 	captureGate    <-chan struct{}
 	captureTimeout time.Duration
+	// captureMissing, when set, names the capture inputs not yet delivered
+	// (SetCaptureGateInputs); captureGateTimeouts counts the first serves
+	// that went ahead without them, by input.
+	captureMissing      func() []string
+	captureGateTimeouts metric.Int64Counter
 
 	// clientCertTimeout bounds the first serve's wait for the local workloads'
 	// client certificates (waitForClientCertificates, #1103). Zero means
@@ -254,6 +263,35 @@ func (s *AgentXdsServer) SetCaptureGate(ready <-chan struct{}) {
 	if s.captureTimeout == 0 {
 		s.captureTimeout = captureProjectionTimeout
 	}
+	if s.captureGateTimeouts == nil {
+		// Rides the global MeterProvider (no-op unless --otel-enabled); a
+		// registration failure only disables the counter.
+		c, err := otel.Meter("aether/agent-xds-server").Int64Counter(CaptureGateTimeoutsMetric,
+			metric.WithDescription("First xDS serves that went ahead at the capture gate's bound without a capture-listener input, by the input that was missing (projection, service_range)"))
+		if err != nil {
+			s.log.Error("failed to create the capture-gate timeout counter; continuing without it", "error", err)
+		}
+		s.captureGateTimeouts = c
+	}
+}
+
+// CaptureGateTimeoutsMetric counts the first serves that went ahead at the
+// capture gate's bound, with the attribute "input" naming each capture input
+// still missing then.
+const CaptureGateTimeoutsMetric = "aether.agent.xds.capture_gate.timeouts"
+
+// SetCaptureGateInputs gives the capture gate a way to name the inputs it is
+// still waiting for (cache.SnapshotCache.MissingCaptureInputs), for the log
+// and the counter when it times out. Without it the gate is the mesh-Service
+// projection alone, and a timeout names that.
+func (s *AgentXdsServer) SetCaptureGateInputs(missing func() []string) { s.captureMissing = missing }
+
+// missingCaptureInputs names the inputs the gate still waits for.
+func (s *AgentXdsServer) missingCaptureInputs() []string {
+	if s.captureMissing == nil {
+		return []string{cache.CaptureInputProjection}
+	}
+	return s.captureMissing()
 }
 
 // waitForCaptureProjection blocks until the capture gate opens, the bound
@@ -271,8 +309,14 @@ func (s *AgentXdsServer) waitForCaptureProjection(ctx context.Context) {
 		s.log.DebugContext(ctx, "mesh-Service projection received; capture TCP chains are complete for the first serve",
 			"waited", time.Since(started).Round(time.Millisecond).String())
 	case <-timer.C:
-		s.log.WarnContext(ctx, "mesh-Service projection not received in time; serving the capture listener without its TCP chains until it arrives",
-			"timeout", s.captureTimeout.String(), "issue", "aether#1094")
+		missing := s.missingCaptureInputs()
+		s.log.WarnContext(ctx, "capture-listener inputs not received in time; serving the capture listener without them until they arrive",
+			"missing", missing, "timeout", s.captureTimeout.String(), "issue", "aether#1094")
+		if s.captureGateTimeouts != nil {
+			for _, in := range missing {
+				s.captureGateTimeouts.Add(ctx, 1, metric.WithAttributes(attribute.String("input", in)))
+			}
+		}
 	case <-ctx.Done():
 	}
 }

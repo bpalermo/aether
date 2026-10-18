@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"net"
+	"net/netip"
 	"slices"
 	"strconv"
 	"strings"
@@ -49,6 +50,8 @@ import (
 //	  (nothing matched: back to the root's on_no_match)
 //	else (any address, or back from above)
 //	  cleartext, sniffed HTTP, any port          -> cap_http
+//	  (nothing matched:)
+//	    destination address in a Service range   -> cap_passthrough_svc
 //	  (nothing matched: the default chain, the passthrough)
 //
 // (Scoped capture matches on the port alone: the TCP mesh port to the
@@ -80,6 +83,9 @@ const (
 	captureMatchServerName     = "envoy.matching.inputs.server_name"
 	captureMatchTransport      = "envoy.matching.inputs.transport_protocol"
 	captureMatchApplication    = "envoy.matching.inputs.application_protocol"
+	// captureIPRangeMatcherName is the proxy's IP-range custom matcher; its
+	// typed config is xds.type.matcher.v3.IPMatcher.
+	captureIPRangeMatcherName = "envoy.matching.custom_matchers.ip_range_matcher"
 )
 
 // captureHTTPApplicationProtocols are the application protocols http_inspector
@@ -206,8 +212,8 @@ func sniPrecedence(tls []*listenerv3.FilterChain) []sniChain {
 // the top of this file). scoped is capture without redirect-all: no
 // passthrough, HTTP chains matched on the port alone, and the TCP mesh port's
 // blackhole chain for what no service claims there.
-func captureChainMatcher(listener string, services []captureServiceChains, scoped bool) *xdsmatcherv3.Matcher {
-	httpBranch := captureHTTPBranch(scoped)
+func captureChainMatcher(listener string, services []captureServiceChains, scoped bool, serviceRanges []netip.Prefix) *xdsmatcherv3.Matcher {
+	httpBranch := captureHTTPBranch(scoped, serviceRanges)
 	byAddress := map[string]*xdsmatcherv3.Matcher_OnMatch{}
 	owner := map[string]string{}
 	for _, s := range services {
@@ -313,7 +319,14 @@ func OnDuplicateCaptureAddress(f func(listener, address, kept, dropped string)) 
 // captureHTTPBranch is the root's on_no_match: cleartext HTTP to cap_http,
 // whatever port was dialled. Scoped capture matches on the port alone, and
 // sends the TCP mesh port to the blackhole.
-func captureHTTPBranch(scoped bool) *xdsmatcherv3.Matcher {
+//
+// With serviceRanges (redirect-all only), what the HTTP branch does not take
+// goes on to the Service-range branch (captureServiceRangeBranch) before the
+// default chain. It is the HTTP branch's on_no_match and not a branch ahead
+// of it on purpose: a mesh address that serves HTTP only has no entry in the
+// root, is inside the Service range, and reaches cap_http only through this
+// branch. A range tried first would take its HTTP to the passthrough.
+func captureHTTPBranch(scoped bool, serviceRanges []netip.Prefix) *xdsmatcherv3.Matcher {
 	if scoped {
 		return &xdsmatcherv3.Matcher{
 			MatcherType: exactTree(captureMatchDestinationPrt, &network_inputsv3.DestinationPortInput{}, map[string]*xdsmatcherv3.Matcher_OnMatch{
@@ -326,11 +339,41 @@ func captureHTTPBranch(scoped bool) *xdsmatcherv3.Matcher {
 	for _, a := range captureHTTPApplicationProtocols {
 		byApp[a] = chainAction(CaptureHTTPChainName)
 	}
-	return &xdsmatcherv3.Matcher{MatcherType: exactTree(captureMatchTransport, &network_inputsv3.TransportProtocolInput{}, map[string]*xdsmatcherv3.Matcher_OnMatch{
+	m := &xdsmatcherv3.Matcher{MatcherType: exactTree(captureMatchTransport, &network_inputsv3.TransportProtocolInput{}, map[string]*xdsmatcherv3.Matcher_OnMatch{
 		"raw_buffer": onMatchMatcher(&xdsmatcherv3.Matcher{
 			MatcherType: exactTree(captureMatchApplication, &network_inputsv3.ApplicationProtocolInput{}, byApp),
 		}),
 	})}
+	if rb := captureServiceRangeBranch(serviceRanges); rb != nil {
+		m.OnNoMatch = onMatchMatcher(rb)
+	}
+	return m
+}
+
+// captureServiceRangeBranch selects CapturePassthroughServiceChainName for a
+// destination address inside one of ranges (proposal 044, Phase 0): an
+// IP-range matcher (captureIPRangeMatcherName) with one range matcher over
+// every prefix. It has no match for any other address, which then takes the
+// default chain. nil when there is no range: the listener is then exactly
+// what it was before the branch existed.
+//
+// Only the address is matched. A prefix is a Service CIDR or a single
+// address (a /32) the agent was told is a Service's; which kind it is makes
+// no difference here, the longest prefix holding the address wins and they
+// all name the same chain.
+func captureServiceRangeBranch(ranges []netip.Prefix) *xdsmatcherv3.Matcher {
+	if len(ranges) == 0 {
+		return nil
+	}
+	rm := &xdsmatcherv3.IPMatcher_IPRangeMatcher{OnMatch: chainAction(CapturePassthroughServiceChainName)}
+	for _, p := range ranges {
+		rm.Ranges = append(rm.Ranges, &xdscorev3.CidrRange{AddressPrefix: p.Masked().Addr().String(), PrefixLen: wrapperspb.UInt32(uint32(p.Bits()))})
+	}
+	return &xdsmatcherv3.Matcher{MatcherType: &xdsmatcherv3.Matcher_MatcherTree_{MatcherTree: &xdsmatcherv3.Matcher_MatcherTree{
+		Input: typedInput(captureMatchDestinationIP, &network_inputsv3.DestinationIPInput{}),
+		TreeType: &xdsmatcherv3.Matcher_MatcherTree_CustomMatch{CustomMatch: typedInput(captureIPRangeMatcherName,
+			&xdsmatcherv3.IPMatcher{RangeMatchers: []*xdsmatcherv3.IPMatcher_IPRangeMatcher{rm}})},
+	}}}
 }
 
 // portsPredicate matches a destination port in ports.

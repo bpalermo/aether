@@ -197,6 +197,7 @@ cache_go_test(
         "review1703r2_fuzz_test.go",
         "route_filter_equality_test.go",
         "route_memo_test.go",
+        "servicerange_race_test.go",
         "servicerange_test.go",
         "shortname_043_test.go",
         "shortname_helpers_test.go",

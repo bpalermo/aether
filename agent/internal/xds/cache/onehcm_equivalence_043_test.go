@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"maps"
+	"net/netip"
 	"slices"
 	"strconv"
 	"strings"
@@ -88,6 +89,12 @@ func oneHCMFixtures(t *testing.T) map[string]*SnapshotCache {
 	scoped := a043Cache(t, a043Fixture())
 	scoped.SetCaptureRedirectAll(false)
 	out["scoped capture"] = scoped
+
+	// The Service-range branch (proposal 044) changes the capture listener's
+	// chains, never its tables: the compiled table answers as before.
+	ranged := a043Cache(t, a043Fixture())
+	ranged.SetServiceRanges([]netip.Prefix{netip.MustParsePrefix("10.96.0.0/12")})
+	out["with a Service range"] = ranged
 
 	for name, c := range out {
 		require.NoError(t, c.generateSnapshot(ctx), name)

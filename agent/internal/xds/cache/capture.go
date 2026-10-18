@@ -143,11 +143,14 @@ func (c *SnapshotCache) generateCaptureListener(cniPod *cniv1.CNIPod, trustDomai
 			tcpServices = append(tcpServices, svc)
 		}
 	}
+	// Never mutated in place (SetServiceRanges replaces the slice), so it is
+	// safe to hand on after the lock.
+	serviceRanges := c.serviceRanges
 	c.captureMu.RUnlock()
 
 	// The HTTP chains are NOT gated on identity: an HTTP cluster fetches its
 	// client certificate per connection and is published either way.
-	l, err := proxy.GenerateCaptureListener(cniPod, proxy.SourceIdentityForPod(cniPod, trustDomain), meshconst.ProxyCapturePort, c.meshDomain, c.emitStatsPod, tcpServices, c.captureRedirectAll, extensionFilters)
+	l, err := proxy.GenerateCaptureListener(cniPod, proxy.SourceIdentityForPod(cniPod, trustDomain), meshconst.ProxyCapturePort, c.meshDomain, c.emitStatsPod, tcpServices, c.captureRedirectAll, extensionFilters, proxy.WithServiceRanges(serviceRanges))
 	if err != nil {
 		return nil, err
 	}
@@ -336,6 +339,8 @@ func (c *SnapshotCache) SetCaptureTCPServices(services []capture.CaptureTCPServi
 	// Closed AFTER the listener rebuild below has run when it matters: a waiter
 	// that wakes here goes on to open the xDS socket, and the snapshot it serves
 	// must already carry these chains. Deferred so every return path closes it.
+	// Deferred first, so it runs after captureProjected is closed.
+	defer c.maybeCloseCaptureInputsReady()
 	defer c.captureProjectedOnce.Do(func() { close(c.captureProjected) })
 
 	if !changed {

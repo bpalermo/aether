@@ -296,7 +296,8 @@ agent:
   # a /32 for each IPv4 ClusterSetIP outside the range joins it (the override
   # replaces only the ServiceCIDR objects, not the ServiceImports).
   # With no range known the agent logs a warning and reports
-  # aether.agent.service_range.known = 0. Nothing reads the range yet.
+  # aether.agent.service_range.known = 0. The capture listener counts
+  # connections to the range apart (cap_passthrough_svc, proposal 044 Phase 0).
   serviceCIDRs: []
   # East-west QUIC (proposal 038 Phase 4b) has NO on/off value: it is
   # unconditional (#979). Every service in a node's dependency set is dialled

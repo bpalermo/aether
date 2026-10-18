@@ -13,23 +13,111 @@ import (
 // sorted, deduplicated, IPv4 only), so a re-delivery of the same range in
 // another order is no change. Nil means no range is known.
 //
-// Phase 0 only stores it: nothing reads the range yet, so a change rebuilds
-// nothing and the snapshot is unchanged. When the capture listener gains its
-// Service-range branch (P0-3), a change here must do what
-// SetCaptureTCPServices does: rebuild every pod's capture listener
-// (rebuildPodListenersLocked, under listenerMu, after captureMu is released)
-// and then signalDependencyChange, so the new branch reaches Envoy. Keep the
-// early return on an equal range: it is what keeps a ServiceCIDR resync from
-// rewriting every pod listener on the node.
+// The capture listener's Service-range branch (proposal 044, Phase 0) is
+// built from it, so a change does what SetCaptureTCPServices does: rebuild
+// every pod's capture listener (rebuildPodListenersLocked, under listenerMu,
+// after captureMu is released) and then signalDependencyChange, so the new
+// branch reaches the proxy. The early return on an equal range is what keeps
+// a ServiceCIDR resync from rewriting every pod listener on the node.
+//
+// The first call, whatever its range, closes ServiceRangeDelivered: after the
+// rebuild below, so a waiter that goes on to serve the snapshot finds the
+// listeners built with it.
 func (c *SnapshotCache) SetServiceRanges(ranges []netip.Prefix) {
+	defer c.markServiceRangeDelivered()
 	canonical := servicerange.Canonicalize(ranges)
 	c.captureMu.Lock()
-	defer c.captureMu.Unlock()
 	if slices.Equal(c.serviceRanges, canonical) {
+		c.captureMu.Unlock()
 		return
 	}
+	// Replaced, never mutated in place: generateCaptureListener hands the
+	// slice on after releasing captureMu.
 	c.serviceRanges = canonical
 	c.serviceRangesGen++
+	c.captureMu.Unlock()
+
+	if !c.captureEnabled {
+		return
+	}
+	c.log.Info("service range changed: rebuilding capture listeners", "ranges", canonical)
+	shared := c.extensionHTTPFilters()
+	c.listenerMu.Lock()
+	c.rebuildPodListenersLocked("service range change", shared)
+	c.listenerMu.Unlock()
+	c.signalDependencyChange()
+}
+
+// markServiceRangeDelivered closes ServiceRangeDelivered, and
+// CaptureInputsReady when the projection has arrived too.
+func (c *SnapshotCache) markServiceRangeDelivered() {
+	c.serviceRangeDeliveredOnce.Do(func() { close(c.serviceRangeDelivered) })
+	c.maybeCloseCaptureInputsReady()
+}
+
+// ServiceRangeDelivered returns a channel closed once SetServiceRanges has
+// been called, a nil range included. servicerange.Setup calls it once at
+// start on the override and API-not-served paths; on the ServiceCIDR path the
+// reconciler calls it on its first reconcile.
+func (c *SnapshotCache) ServiceRangeDelivered() <-chan struct{} { return c.serviceRangeDelivered }
+
+// CaptureInputsReady returns a channel closed once every input the capture
+// listener is built from has been delivered at least once: the mesh-Service
+// projection (CaptureProjected) and the Service range
+// (ServiceRangeDelivered). The xDS server holds its first serve on it
+// (bounded; AgentXdsServer.SetCaptureGate).
+//
+// The range is part of it because the listener's cap_passthrough_svc chain
+// (proposal 044) exists only while a range is known. A restarted agent that
+// served before its ServiceCIDR reconciler had run would publish a listener
+// without that chain over the proxy's listener that has it: the chain is
+// drained, and every connection on it closed when the drain ends.
+func (c *SnapshotCache) CaptureInputsReady() <-chan struct{} { return c.captureInputsReady }
+
+// The capture-listener inputs MissingCaptureInputs names.
+const (
+	// CaptureInputProjection is the mesh-Service projection (CaptureProjected).
+	CaptureInputProjection = "projection"
+	// CaptureInputServiceRange is the Service range (ServiceRangeDelivered).
+	CaptureInputServiceRange = "service_range"
+)
+
+// MissingCaptureInputs names the capture-listener inputs not delivered yet,
+// CaptureInputProjection and CaptureInputServiceRange; empty once
+// CaptureInputsReady is closed.
+func (c *SnapshotCache) MissingCaptureInputs() []string {
+	var out []string
+	for _, in := range []struct {
+		name string
+		ch   chan struct{}
+	}{{CaptureInputProjection, c.captureProjected}, {CaptureInputServiceRange, c.serviceRangeDelivered}} {
+		select {
+		case <-in.ch:
+		default:
+			out = append(out, in.name)
+		}
+	}
+	return out
+}
+
+// maybeCloseCaptureInputsReady closes captureInputsReady once both inputs
+// have been delivered. Called after each of them is.
+func (c *SnapshotCache) maybeCloseCaptureInputsReady() {
+	for _, ch := range []chan struct{}{c.captureProjected, c.serviceRangeDelivered} {
+		select {
+		case <-ch:
+		default:
+			return
+		}
+	}
+	c.captureInputsReadyOnce.Do(func() { close(c.captureInputsReady) })
+}
+
+// serviceRangesGeneration returns the count of the range's content changes.
+func (c *SnapshotCache) serviceRangesGeneration() uint64 {
+	c.captureMu.RLock()
+	defer c.captureMu.RUnlock()
+	return c.serviceRangesGen
 }
 
 // ServiceRanges returns a copy of the Service range SetServiceRanges last
