@@ -3067,7 +3067,11 @@ helm_template_match_test(
             RULE % ("\"discovery\\.k8s\\.io\"", "\"endpointslices\"", READ),
             # The cluster's Service range (proposal 044), granted whether or
             # not agent.serviceCIDRs overrides it.
-            RULE % ("\"networking\\.k8s\\.io\"", "\"servicecidrs\"", READ) + "$",
+            RULE % ("\"networking\\.k8s\\.io\"", "\"servicecidrs\"", READ),
+            # The ClusterSetIPs of MCS ServiceImports join that range
+            # (proposal 044): read whether or not the CRD is installed, so
+            # that installing it needs no RBAC change.
+            RULE % ("\"multicluster\\.x-k8s\\.io\"", "\"serviceimports\"", READ) + "$",
         ],
         "ClusterRoleBinding/release-name-aether-agent-default": [
             BINDING % ("ClusterRole", "release-name-aether-agent-default", "release-name-aether-agent", "default"),

@@ -200,6 +200,16 @@ chart value as the override for clusters that do not publish them. The agent
 needs the range for one reason: an address outside it is never offered to the
 on-demand path, so an external connection never waits on a lookup.
 
+The MCS API (`multicluster.x-k8s.io`) leaves the allocation of a
+`ServiceImport`'s ClusterSetIP to the implementation, so it can lie outside
+every `ServiceCIDR`. Where that CRD is installed the agent also watches the
+`ServiceImport`s and adds a `/32` for each IPv4 `spec.ips` entry of a
+`ClusterSetIP`-type import that the range does not already contain. Aether's
+own imports (labelled `aether.io/managed-service-import`, whose VIP is the
+ClusterIP of a mesh Service) and `Headless` imports are skipped. The chart
+override replaces only the `ServiceCIDR` part: ClusterSetIPs are added under it
+too.
+
 ### Matching: one branch for the range, the cluster named per connection
 
 The capture listener is per pod. Giving it a `/32` branch for every non-mesh
