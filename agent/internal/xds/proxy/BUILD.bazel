@@ -111,6 +111,7 @@ go_test(
         "accesslog_test.go",
         "authz_test.go",
         "capture_perport_043_test.go",
+        "capture_servicerange_044_test.go",
         "capture_test.go",
         "capturemerge_pathless_test.go",
         "capturemerge_test.go",
@@ -262,6 +263,7 @@ go_test(
         "capturemerge.go",
         "capturemerge_test.go",
         "capturemerge_pathless_test.go",
+        "capture_servicerange_044_test.go",
     ],
     deps = [
         "//agent/internal/xds/config",

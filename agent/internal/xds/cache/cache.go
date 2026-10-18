@@ -601,6 +601,14 @@ type SnapshotCache struct {
 	// capture listener's TCP chains at least once (CaptureProjected).
 	captureProjected     chan struct{}
 	captureProjectedOnce sync.Once
+	// serviceRangeDelivered is closed by the first SetServiceRanges call, a
+	// nil range included: whatever the Service range is, it has been decided
+	// (ServiceRangeDelivered). captureInputsReady is closed once both it and
+	// captureProjected are (CaptureInputsReady).
+	serviceRangeDelivered     chan struct{}
+	serviceRangeDeliveredOnce sync.Once
+	captureInputsReady        chan struct{}
+	captureInputsReadyOnce    sync.Once
 	// tcpFloorWarnMu/tcpFloorWarnedAt rate-limit the #877 warning: TCP mesh
 	// services configured while the node has no identity. That is also the
 	// normal startup state for a few seconds, and the listener build runs per
@@ -871,31 +879,33 @@ func NewSnapshotCache(nodeName string, log *slog.Logger) *SnapshotCache {
 		// Initialize the resource maps up front so callers never assign to a nil
 		// map. LoadListenersFromStorage assigns directly (no lazy init), which
 		// panics on agent restart when pods already exist in local storage.
-		listeners:          make(map[string]listenerEntry),
-		staleNetnsWarned:   make(map[string]struct{}),
-		udsResolveReported: make(map[string]udspath.Reason),
-		clusters:           make(map[string]clusterEntry),
-		secrets:            make(map[string]*tlsv3.Secret),
-		localWorkloads:     make(map[string]string),
-		podDeps:            make(map[string]podDependencies),
-		observedDeps:       make(map[string]time.Time),
-		quicPairs:          make(map[quicPair]time.Time),
-		quicConfirmed:      make(map[quicPair]struct{}),
-		quicLedger:         quicdemand.NewLedger[quicPair](),
-		quicStart:          time.Now(),
-		quicFetchWindow:    DefaultQUICPairFetchWindow,
-		onDemandSubs:       make(map[int64]map[string]string),
-		staticDeps:         make(map[string]struct{}),
-		serviceRoutes:      make(map[string][]proxy.GammaRoute),
-		routeTargetPorts:   make(map[string][]uint32),
-		tcpServiceRoutes:   make(map[string][]proxy.L4ServiceRoute),
-		tlsServiceRoutes:   make(map[string][]proxy.L4ServiceRoute),
-		udpServiceRoutes:   make(map[string][]proxy.L4Backend),
-		captureAuthorities: make(map[string]string),
-		depChanged:         make(chan struct{}, 1),
-		captureProjected:   make(chan struct{}),
-		version:            atomic.NewUint64(0),
-		versions:           newVersionMemo(),
+		listeners:             make(map[string]listenerEntry),
+		staleNetnsWarned:      make(map[string]struct{}),
+		udsResolveReported:    make(map[string]udspath.Reason),
+		clusters:              make(map[string]clusterEntry),
+		secrets:               make(map[string]*tlsv3.Secret),
+		localWorkloads:        make(map[string]string),
+		podDeps:               make(map[string]podDependencies),
+		observedDeps:          make(map[string]time.Time),
+		quicPairs:             make(map[quicPair]time.Time),
+		quicConfirmed:         make(map[quicPair]struct{}),
+		quicLedger:            quicdemand.NewLedger[quicPair](),
+		quicStart:             time.Now(),
+		quicFetchWindow:       DefaultQUICPairFetchWindow,
+		onDemandSubs:          make(map[int64]map[string]string),
+		staticDeps:            make(map[string]struct{}),
+		serviceRoutes:         make(map[string][]proxy.GammaRoute),
+		routeTargetPorts:      make(map[string][]uint32),
+		tcpServiceRoutes:      make(map[string][]proxy.L4ServiceRoute),
+		tlsServiceRoutes:      make(map[string][]proxy.L4ServiceRoute),
+		udpServiceRoutes:      make(map[string][]proxy.L4Backend),
+		captureAuthorities:    make(map[string]string),
+		depChanged:            make(chan struct{}, 1),
+		captureProjected:      make(chan struct{}),
+		serviceRangeDelivered: make(chan struct{}),
+		captureInputsReady:    make(chan struct{}),
+		version:               atomic.NewUint64(0),
+		versions:              newVersionMemo(),
 	}
 }
 

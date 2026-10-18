@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"net/netip"
 	"strings"
 	"testing"
 
@@ -70,7 +71,7 @@ func l4CaptureFixture(t *testing.T, withPassthrough bool) *listenerv3.Listener {
 					{Service: "aether-test/tls-a", Cluster: tlsA, Weight: 1},
 				}}},
 			},
-		}, withPassthrough, nil)
+		}, withPassthrough, nil, WithServiceRanges([]netip.Prefix{netip.MustParsePrefix("10.96.0.0/12")}))
 	require.NoError(t, err)
 	return l
 }
@@ -103,6 +104,13 @@ func TestCaptureL4ChainsCarryTheL4AccessLog(t *testing.T) {
 		for _, fc := range l.GetFilterChains() {
 			tc := tcpProxyOf(t, fc)
 			if tc == nil {
+				continue
+			}
+			if fc.GetName() == CapturePassthroughServiceChainName {
+				// The Service-range share of the passthrough (proposal 044):
+				// non-mesh egress, not logged either.
+				kinds["passthrough_svc"] = true
+				assert.Empty(t, tc.GetAccessLog(), "the Service-range passthrough (non-mesh egress) must not be logged")
 				continue
 			}
 			switch name := fc.GetName(); {
@@ -156,6 +164,8 @@ func TestCaptureL4ChainsCarryTheL4AccessLog(t *testing.T) {
 		want := map[string]bool{"tls": true, "meshport": true, "legacy": true, "port": true, "weighted": true}
 		if !withPassthrough {
 			want["blackhole"] = true
+		} else {
+			want["passthrough_svc"] = true
 		}
 		assert.Equal(t, want, kinds, "withPassthrough=%v: the fixture must carry every L4 chain kind", withPassthrough)
 

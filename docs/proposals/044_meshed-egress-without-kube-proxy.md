@@ -1,8 +1,10 @@
 # Proposal 044: Meshed pods reach non-mesh Services without kube-proxy
 
-**Status:** Proposed. Nothing here is built. Phase 0 is measurement, and every
-later phase waits on what it shows. The facts below were read from `main` at
-`bb1d1625`.
+**Status:** Proposed. Phase 0 is measurement, and every later phase waits on
+what it shows. The facts below were read from `main` at `bb1d1625`.
+Phase 0 progress: the agent learns the Service range (chart 3.0.4); the
+capture listener's Service-range branch to `cap_passthrough_svc`, the L4
+split, is built (chart 3.0.6). The cleartext-HTTP split is not.
 **Author:** Bruno Palermo
 **Date:** 2026-10-15
 **Related:** proposals [022](022_arbitrary-service-interception.md)
