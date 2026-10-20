@@ -1,5 +1,5 @@
 diff --git a/source/server/hot_restarting_base.cc b/source/server/hot_restarting_base.cc
-index 99d7352427..1a2cbaa78f 100644
+index 99d7352427..9873a0a17a 100644
 --- a/source/server/hot_restarting_base.cc
 +++ b/source/server/hot_restarting_base.cc
 @@ -67,11 +67,11 @@ void RpcStream::bindDomainSocket(uint64_t id, const std::string& role,
@@ -100,7 +100,7 @@ index 99d7352427..1a2cbaa78f 100644
        memset(control_buffer, 0, CMSG_SPACE(sizeof(int)));
        message.msg_control = control_buffer;
        message.msg_controllen = CMSG_SPACE(sizeof(int));
-@@ -112,32 +156,44 @@ bool RpcStream::sendHotRestartMessage(sockaddr_un& address, const HotRestartMess
+@@ -112,32 +156,49 @@ bool RpcStream::sendHotRestartMessage(sockaddr_un& address, const HotRestartMess
        control_message->cmsg_type = SCM_RIGHTS;
        control_message->cmsg_len = CMSG_LEN(sizeof(int));
        *reinterpret_cast<int*>(CMSG_DATA(control_message)) = proto.reply().pass_listen_socket().fd();
@@ -113,8 +113,14 @@ index 99d7352427..1a2cbaa78f 100644
      int rc = 0;
      bool sent = false;
 -    for (int i = 0; i < SENDMSG_MAX_RETRIES; i++) {
+-      auto result = os_sys_calls.sendmsg(domain_socket_, &message, 0);
 +    for (int attempt = 0; attempt < SENDMSG_MAX_RETRIES; attempt++) {
-       auto result = os_sys_calls.sendmsg(domain_socket_, &message, 0);
++      // With a send timeout set on the socket, a signal interrupts the call with EINTR even when
++      // its handler asks for restarts (see signal(7)): retry it.
++      Api::SysCallSizeResult result;
++      do {
++        result = os_sys_calls.sendmsg(domain_socket_, &message, 0);
++      } while (result.return_value_ == -1 && result.errno_ == EINTR);
        rc = result.return_value_;
        saved_errno = result.errno_;
  
@@ -149,7 +155,7 @@ index 99d7352427..1a2cbaa78f 100644
        RELEASE_ASSERT(false, fmt::format("hot restart sendmsg() failed: returned {}, errno {}", rc,
                                          saved_errno));
      }
-@@ -148,8 +204,68 @@ bool RpcStream::sendHotRestartMessage(sockaddr_un& address, const HotRestartMess
+@@ -148,8 +209,68 @@ bool RpcStream::sendHotRestartMessage(sockaddr_un& address, const HotRestartMess
      }
    }
  
@@ -220,16 +226,18 @@ index 99d7352427..1a2cbaa78f 100644
    return true;
  }
  
-@@ -230,8 +346,14 @@ std::unique_ptr<HotRestartMessage> RpcStream::receiveHotRestartMessage(Blocking
+@@ -230,8 +351,16 @@ std::unique_ptr<HotRestartMessage> RpcStream::receiveHotRestartMessage(Blocking
      message.msg_controllen = CMSG_SPACE(sizeof(int));
  
      const Api::SysCallSizeResult recv_result = os_sys_calls.recvmsg(domain_socket_, &message, 0);
 -    if (block == Blocking::No && recv_result.return_value_ == -1 &&
 -        recv_result.errno_ == SOCKET_ERROR_AGAIN) {
-+    if (recv_result.return_value_ == -1 && recv_result.errno_ == SOCKET_ERROR_AGAIN) {
-+      // Non-blocking: out of data. Blocking: RECEIVE_TIMEOUT_SLICE elapsed without data. Either
-+      // way, hand control back to the caller; any partial message stays buffered for the next
-+      // call.
++    if (recv_result.return_value_ == -1 &&
++        (recv_result.errno_ == SOCKET_ERROR_AGAIN || recv_result.errno_ == EINTR)) {
++      // Non-blocking: out of data. Blocking: RECEIVE_TIMEOUT_SLICE elapsed without data, or a
++      // signal interrupted the wait (with a receive timeout set on the socket the call is not
++      // restarted, see signal(7)). Either way, hand control back to the caller; any partial
++      // message stays buffered for the next call.
 +      if (block == Blocking::Yes) {
 +        RELEASE_ASSERT(fcntl(domain_socket_, F_SETFL, O_NONBLOCK) != -1,
 +                       fmt::format("Set domain socket nonblocking failed, errno = {}", errno));
@@ -337,19 +345,26 @@ index 21737a1209..22a085a557 100644
  
  /**
 diff --git a/source/server/hot_restarting_child.cc b/source/server/hot_restarting_child.cc
-index 095481f879..0aaadcdb47 100644
+index 095481f879..1b751a1905 100644
 --- a/source/server/hot_restarting_child.cc
 +++ b/source/server/hot_restarting_child.cc
-@@ -5,6 +5,8 @@
- #include "source/common/network/utility.h"
- #include "source/common/runtime/runtime_features.h"
+@@ -1,5 +1,7 @@
+ #include "source/server/hot_restarting_child.h"
  
-+#include "absl/time/clock.h"
++#include <chrono>
 +
- namespace Envoy {
- namespace Server {
+ #include "source/common/buffer/buffer_impl.h"
+ #include "source/common/common/utility.h"
+ #include "source/common/network/utility.h"
+@@ -92,6 +94,7 @@ bool HotRestartingChild::abortDueToFailedParentConnection() {
+ }
  
-@@ -138,7 +140,7 @@ void HotRestartingChild::onForwardedUdpPacket(uint32_t worker_index,
+ void HotRestartingChild::initialize(Event::Dispatcher& dispatcher) {
++  time_source_ = &dispatcher.timeSource();
+   if (abortDueToFailedParentConnection()) {
+     ENVOY_LOG(warn, "hot restart sendmsg() connection refused, falling back to regular restart");
+     absl::MutexLock lock(registry_mu_);
+@@ -138,7 +141,7 @@ void HotRestartingChild::onForwardedUdpPacket(uint32_t worker_index,
  int HotRestartingChild::duplicateParentListenSocket(const std::string& address,
                                                      uint32_t worker_index,
                                                      absl::string_view network_namespace) {
@@ -358,7 +373,7 @@ index 095481f879..0aaadcdb47 100644
      return -1;
    }
  
-@@ -147,10 +149,12 @@ int HotRestartingChild::duplicateParentListenSocket(const std::string& address,
+@@ -147,10 +150,12 @@ int HotRestartingChild::duplicateParentListenSocket(const std::string& address,
    wrapped_request.mutable_request()->mutable_pass_listen_socket()->set_worker_index(worker_index);
    wrapped_request.mutable_request()->mutable_pass_listen_socket()->set_network_namespace(
        network_namespace);
@@ -374,15 +389,15 @@ index 095481f879..0aaadcdb47 100644
    if (!main_rpc_stream_.replyIsExpectedType(wrapped_reply.get(),
                                              HotRestartMessage::Reply::kPassListenSocket)) {
      return -1;
-@@ -158,17 +162,93 @@ int HotRestartingChild::duplicateParentListenSocket(const std::string& address,
+@@ -158,17 +163,93 @@ int HotRestartingChild::duplicateParentListenSocket(const std::string& address,
    return wrapped_reply->reply().pass_listen_socket().fd();
  }
  
 +std::unique_ptr<HotRestartMessage> HotRestartingChild::waitForParentReply() {
-+  const absl::Time start = absl::Now();
-+  const absl::Duration reply_timeout = absl::FromChrono(parent_reply_timeout_);
-+  const absl::Duration probe_interval = absl::FromChrono(parent_probe_interval_);
-+  absl::Time next_probe = start + probe_interval;
++  // A monotonic clock, so that a step of the wall clock cannot move the deadline.
++  ASSERT(time_source_ != nullptr);
++  const MonotonicTime start = time_source_->monotonicTime();
++  auto next_probe = start + parent_probe_interval_;
 +  while (true) {
 +    // Returns after RECEIVE_TIMEOUT_SLICE without data, so the loop below runs regularly.
 +    std::unique_ptr<HotRestartMessage> reply =
@@ -398,8 +413,8 @@ index 095481f879..0aaadcdb47 100644
 +                         "parent: {}",
 +                         status.message());
 +    }
-+    const absl::Time now = absl::Now();
-+    if (now - start >= reply_timeout) {
++    const MonotonicTime now = time_source_->monotonicTime();
++    if (now - start >= parent_reply_timeout_) {
 +      onParentUnreachable(fmt::format("no reply within {}ms", parent_reply_timeout_.count()));
 +      return nullptr;
 +    }
@@ -410,7 +425,7 @@ index 095481f879..0aaadcdb47 100644
 +      probe.mutable_request()->mutable_test_connection();
 +      switch (main_rpc_stream_.trySendHotRestartMessage(parent_address_, probe)) {
 +      case RpcStream::SendResult::Sent:
-+        next_probe = now + probe_interval;
++        next_probe = now + parent_probe_interval_;
 +        break;
 +      case RpcStream::SendResult::ConnectionRefused:
 +        onParentGone("its socket refused a liveness probe while a reply was pending");
@@ -472,7 +487,7 @@ index 095481f879..0aaadcdb47 100644
    RELEASE_ASSERT(
        main_rpc_stream_.replyIsExpectedType(wrapped_reply.get(), HotRestartMessage::Reply::kStats),
        "Hot restart parent did not respond as expected to get stats request.");
-@@ -177,10 +257,11 @@ std::unique_ptr<HotRestartMessage> HotRestartingChild::getParentStats() {
+@@ -177,10 +258,11 @@ std::unique_ptr<HotRestartMessage> HotRestartingChild::getParentStats() {
  
  void HotRestartingChild::drainParentListeners() {
    if (!parent_terminated_) {
@@ -486,7 +501,7 @@ index 095481f879..0aaadcdb47 100644
    }
  
    // Latch that the drain-listeners request was sent. The parent stops its listeners synchronously
-@@ -218,16 +299,21 @@ void HotRestartingChild::allDrainsImplicitlyComplete() {
+@@ -218,16 +300,21 @@ void HotRestartingChild::allDrainsImplicitlyComplete() {
  
  std::optional<HotRestart::AdminShutdownResponse>
  HotRestartingChild::sendParentAdminShutdownRequest() {
@@ -512,7 +527,7 @@ index 095481f879..0aaadcdb47 100644
    RELEASE_ASSERT(main_rpc_stream_.replyIsExpectedType(wrapped_reply.get(),
                                                        HotRestartMessage::Reply::kShutdownAdmin),
                   "Hot restart parent did not respond as expected to ShutdownParentAdmin.");
-@@ -245,7 +331,9 @@ void HotRestartingChild::sendParentTerminateRequest() {
+@@ -245,7 +332,9 @@ void HotRestartingChild::sendParentTerminateRequest() {
  
    HotRestartMessage wrapped_request;
    wrapped_request.mutable_request()->mutable_terminate();
@@ -524,10 +539,18 @@ index 095481f879..0aaadcdb47 100644
  
    // Note that the 'generation' counter needs to retain the contribution from
 diff --git a/source/server/hot_restarting_child.h b/source/server/hot_restarting_child.h
-index e5d1b8df20..4d5ef71e0b 100644
+index e5d1b8df20..454cef191c 100644
 --- a/source/server/hot_restarting_child.h
 +++ b/source/server/hot_restarting_child.h
-@@ -72,6 +72,13 @@ public:
+@@ -2,6 +2,7 @@
+ 
+ #include <atomic>
+ 
++#include "envoy/common/time.h"
+ #include "envoy/network/parent_drained_callback_registrar.h"
+ #include "envoy/server/instance.h"
+ 
+@@ -72,6 +73,13 @@ public:
    void mergeParentStats(Stats::Store& stats_store,
                          const envoy::HotRestartMessage::Reply::Stats& stats_proto);
  
@@ -541,7 +564,7 @@ index e5d1b8df20..4d5ef71e0b 100644
  protected:
    absl::Status onSocketEventUdpForwarding();
    // Delivers a packet forwarded by the parent to the listener bound to `listener_address`, or to
-@@ -84,10 +91,29 @@ protected:
+@@ -84,10 +92,31 @@ protected:
  
  private:
    bool abortDueToFailedParentConnection();
@@ -568,6 +591,8 @@ index e5d1b8df20..4d5ef71e0b 100644
 +  bool parent_unresponsive_{false};
 +  std::chrono::milliseconds parent_reply_timeout_{PARENT_REPLY_TIMEOUT};
 +  std::chrono::milliseconds parent_probe_interval_{PARENT_PROBE_INTERVAL};
++  // The main dispatcher's time source, set by initialize(); waitForParentReply() measures with it.
++  TimeSource* time_source_{};
    bool parent_drained_ ABSL_GUARDED_BY(registry_mu_);
    const bool skip_hot_restart_on_no_parent_;
    const bool skip_parent_stats_;
@@ -788,7 +813,7 @@ index 7cacf2c4c8..d068e7559e 100644
  } // namespace Server
  } // namespace Envoy
 diff --git a/test/server/hot_restarting_base_test.cc b/test/server/hot_restarting_base_test.cc
-index dd115a59e0..a71de18a17 100644
+index dd115a59e0..43a5048035 100644
 --- a/test/server/hot_restarting_base_test.cc
 +++ b/test/server/hot_restarting_base_test.cc
 @@ -2,6 +2,7 @@
@@ -816,7 +841,7 @@ index dd115a59e0..a71de18a17 100644
    }
  };
  
-@@ -79,6 +86,44 @@ TEST_F(HotRestartingBaseTest, SendMsgRetrySucceedsEventually) {
+@@ -79,6 +86,84 @@ TEST_F(HotRestartingBaseTest, SendMsgRetrySucceedsEventually) {
    EXPECT_TRUE(retried);
  }
  
@@ -858,11 +883,51 @@ index dd115a59e0..a71de18a17 100644
 +  EXPECT_TRUE(base_.socketIsNonBlocking());
 +}
 +
++// With a send timeout set on the socket, a signal interrupts a blocking sendmsg() with EINTR
++// even for handlers installed with SA_RESTART. The send is retried instead of asserting.
++TEST_F(HotRestartingBaseTest, SendMsgRetriesWhenInterruptedBySignal) {
++  Api::MockOsSysCalls os_sys_calls;
++  TestThreadsafeSingletonInjector<Api::OsSysCallsImpl> os_calls(&os_sys_calls);
++
++  EXPECT_CALL(os_sys_calls, sendmsg(_, _, _))
++      .WillOnce(
++          Invoke([&](os_fd_t, const msghdr*, int) { return Api::SysCallSizeResult{-1, EINTR}; }))
++      .WillOnce(Invoke([&](os_fd_t, const msghdr* msg, int) {
++        return Api::SysCallSizeResult{static_cast<ssize_t>(msg->msg_iov[0].iov_len), 0};
++      }));
++
++  std::string dst_path = "/tmp/dst";
++  sockaddr_un sun;
++  sun.sun_family = AF_UNIX;
++  StringUtil::strlcpy(&sun.sun_path[1], dst_path.data(), dst_path.size());
++  sun.sun_path[0] = '\0';
++
++  HotRestartMessage request;
++  request.mutable_request()->mutable_stats();
++
++  EXPECT_TRUE(base_.sendMessage(sun, request));
++  EXPECT_TRUE(base_.socketIsNonBlocking());
++}
++
++// Likewise, a blocking recvmsg() interrupted by a signal returns no message, as on the receive
++// timeout, instead of asserting.
++TEST_F(HotRestartingBaseTest, BlockingReceiveReturnsNothingWhenInterruptedBySignal) {
++  Api::MockOsSysCalls os_sys_calls;
++  TestThreadsafeSingletonInjector<Api::OsSysCallsImpl> os_calls(&os_sys_calls);
++
++  EXPECT_CALL(os_sys_calls, recvmsg(_, _, _)).WillOnce(Invoke([&](os_fd_t, msghdr*, int) {
++    return Api::SysCallSizeResult{-1, EINTR};
++  }));
++
++  EXPECT_EQ(base_.receiveBlocking(), nullptr);
++  EXPECT_TRUE(base_.socketIsNonBlocking());
++}
++
  } // namespace
  } // namespace Server
  } // namespace Envoy
 diff --git a/test/server/hot_restarting_child_test.cc b/test/server/hot_restarting_child_test.cc
-index 517bdc0f7d..3cb0ad87a9 100644
+index 517bdc0f7d..246876654d 100644
 --- a/test/server/hot_restarting_child_test.cc
 +++ b/test/server/hot_restarting_child_test.cc
 @@ -16,6 +16,7 @@
@@ -918,7 +983,7 @@ index 517bdc0f7d..3cb0ad87a9 100644
      fake_parent_ = std::make_unique<FakeHotRestartingParent>(os_sys_calls_, 0, 0, socket_path_);
      hot_restarting_child_ = std::make_unique<HotRestartingChild>(
          0, 1, socket_path_, 0, skipHotRestartOnNoParent(), skipParentStats());
-@@ -287,6 +319,213 @@ TEST_F(HotRestartingChildTest, ForwardsPacketToRegisteredListenerOnMatch) {
+@@ -287,6 +319,302 @@ TEST_F(HotRestartingChildTest, ForwardsPacketToRegisteredListenerOnMatch) {
    EXPECT_LOG_NOT_CONTAINS("error", "", fake_parent_->sendUdpForwardingMessage(msg));
  }
  
@@ -1035,6 +1100,32 @@ index 517bdc0f7d..3cb0ad87a9 100644
 +  EXPECT_FALSE(helper_->parentUnresponsive());
 +}
 +
++// A signal that interrupts the wait for the parent's reply (e.g. the SIGUSR1 a hot restart
++// wrapper forwards to reopen logs) does not end the wait: the reply is still received.
++TEST_F(HotRestartingChildWaitingForParentTest, KeepsWaitingForParentReplyWhenInterruptedBySignal) {
++  EXPECT_CALL(os_sys_calls_, sendmsg(_, _, _)).WillOnce([](int, const msghdr* msg, int) {
++    EXPECT_EQ(FakeHotRestartingParent::requestCase(msg), envoy::HotRestartMessage::Request::kStats);
++    return Api::SysCallSizeResult{static_cast<ssize_t>(msg->msg_iov[0].iov_len), 0};
++  });
++  bool interrupted = false;
++  EXPECT_CALL(os_sys_calls_, recvmsg(_, _, _)).WillRepeatedly([&](int fd, msghdr* msg, int) {
++    if (fd == helper_->udpForwardingSocketFd()) {
++      return FakeHotRestartingParent::wouldBlock();
++    }
++    if (!interrupted) {
++      interrupted = true;
++      return Api::SysCallSizeResult{-1, EINTR};
++    }
++    return FakeHotRestartingParent::deliver(stats_reply_wire_, msg);
++  });
++
++  std::unique_ptr<envoy::HotRestartMessage> reply = hot_restarting_child_->getParentStats();
++  ASSERT_NE(reply, nullptr);
++  EXPECT_EQ(reply->reply().stats().gauges().at("parent.gauge"), 7);
++  EXPECT_TRUE(interrupted);
++  EXPECT_FALSE(helper_->parentUnresponsive());
++}
++
 +TEST_F(HotRestartingChildWaitingForParentTest, WritesParentOffAfterReplyTimeout) {
 +  helper_->setParentReplyTimeout(std::chrono::milliseconds(0));
 +  EXPECT_CALL(os_sys_calls_, sendmsg(_, _, _)).WillOnce([](int, const msghdr* msg, int) {
@@ -1129,11 +1220,74 @@ index 517bdc0f7d..3cb0ad87a9 100644
 +  EXPECT_FALSE(helper_->parentTerminated());
 +}
 +
++TEST_F(HotRestartingChildWaitingForParentTest, WritesParentOffWhenListenSocketRequestCannotBeSent) {
++  EXPECT_CALL(os_sys_calls_, sendmsg(_, _, _)).WillOnce([](int, const msghdr*, int) {
++    return Api::SysCallSizeResult{-1, EAGAIN};
++  });
++  EXPECT_LOG_CONTAINS(
++      "error", "the listen socket request could not be sent",
++      EXPECT_EQ(hot_restarting_child_->duplicateParentListenSocket("udp://127.0.0.1:5678", 0, ""),
++                -1));
++  EXPECT_TRUE(helper_->parentUnresponsive());
++  EXPECT_FALSE(helper_->parentTerminated());
++  // Written off: later requests do not try the parent again.
++  EXPECT_EQ(hot_restarting_child_->duplicateParentListenSocket("udp://127.0.0.1:5678", 0, ""), -1);
++}
++
++TEST_F(HotRestartingChildWaitingForParentTest, WritesParentOffWhenAdminShutdownCannotBeSent) {
++  EXPECT_CALL(os_sys_calls_, sendmsg(_, _, _)).WillOnce([](int, const msghdr*, int) {
++    return Api::SysCallSizeResult{-1, EAGAIN};
++  });
++  EXPECT_LOG_CONTAINS("error", "the admin shutdown request could not be sent",
++                      EXPECT_FALSE(hot_restarting_child_->sendParentAdminShutdownRequest()));
++  EXPECT_TRUE(helper_->parentUnresponsive());
++  EXPECT_FALSE(helper_->parentTerminated());
++}
++
++TEST_F(HotRestartingChildWaitingForParentTest, AdminShutdownWithoutReplyReturnsNothing) {
++  helper_->setParentReplyTimeout(std::chrono::milliseconds(0));
++  EXPECT_CALL(os_sys_calls_, sendmsg(_, _, _)).WillOnce([](int, const msghdr* msg, int) {
++    EXPECT_EQ(FakeHotRestartingParent::requestCase(msg),
++              envoy::HotRestartMessage::Request::kShutdownAdmin);
++    return Api::SysCallSizeResult{static_cast<ssize_t>(msg->msg_iov[0].iov_len), 0};
++  });
++  parentNeverReplies();
++  EXPECT_LOG_CONTAINS("error", "hot restart parent is unresponsive (no reply within 0ms)",
++                      EXPECT_FALSE(hot_restarting_child_->sendParentAdminShutdownRequest()));
++  EXPECT_TRUE(helper_->parentUnresponsive());
++  EXPECT_FALSE(helper_->parentTerminated());
++}
++
++// A forwarded packet that cannot be handled while waiting is logged, and the wait goes on to the
++// parent's reply.
++TEST_F(HotRestartingChildWaitingForParentTest, LogsErrorServicingForwardedUdpWhileWaiting) {
++  envoy::HotRestartMessage bad;
++  auto* packet = bad.mutable_request()->mutable_forwarded_udp_packet();
++  packet->set_local_addr("udp://127.0.0.1:1234");
++  packet->set_peer_addr("/tmp/domainsocket");
++  packet->set_payload("hello");
++  forwarded_wire_ = FakeHotRestartingParent::serialize(bad);
++  EXPECT_CALL(os_sys_calls_, sendmsg(_, _, _)).WillOnce([](int, const msghdr* msg, int) {
++    return Api::SysCallSizeResult{static_cast<ssize_t>(msg->msg_iov[0].iov_len), 0};
++  });
++  parentRepliesOnlyAfterForwardIsRead();
++  EXPECT_CALL(mock_worker_router_, deliver(_, _)).Times(0);
++
++  std::unique_ptr<envoy::HotRestartMessage> reply;
++  EXPECT_LOG_CONTAINS("error",
++                      "error servicing forwarded udp packets while waiting for the hot restart "
++                      "parent",
++                      reply = hot_restarting_child_->getParentStats());
++  ASSERT_NE(reply, nullptr);
++  EXPECT_EQ(reply->reply().stats().gauges().at("parent.gauge"), 7);
++  EXPECT_FALSE(helper_->parentUnresponsive());
++}
++
  // A parent that does not send the listener address is matched on the packet's destination,
  // falling back to the any-address listener on the port.
  TEST_F(HotRestartingChildTest, ForwardsPacketToAnyAddressListenerByDestination) {
 diff --git a/test/server/hot_restarting_parent_test.cc b/test/server/hot_restarting_parent_test.cc
-index 2507fd77a3..b9ae72b9ae 100644
+index 2507fd77a3..3edee5f96e 100644
 --- a/test/server/hot_restarting_parent_test.cc
 +++ b/test/server/hot_restarting_parent_test.cc
 @@ -9,15 +9,22 @@
@@ -1159,7 +1313,7 @@ index 2507fd77a3..b9ae72b9ae 100644
  using testing::Return;
  using testing::ReturnRef;
  
-@@ -613,6 +620,170 @@ TEST_F(HotRestartingParentTest, UdpPacketIsForwardedWithListenerAddressAndNamesp
+@@ -613,6 +620,184 @@ TEST_F(HotRestartingParentTest, UdpPacketIsForwardedWithListenerAddressAndNamesp
    hot_restarting_parent_.handle(worker_index, *listener_address, packet);
  }
  
@@ -1254,6 +1408,20 @@ index 2507fd77a3..b9ae72b9ae 100644
 +  EXPECT_LT(sent_sizes[0], sent_sizes[1]);
 +  EXPECT_EQ(forwarded(), 2);
 +  EXPECT_EQ(retries(), 2);
++  EXPECT_EQ(dropped(), 0);
++}
++
++// After shutdown() there is no retry timer: a packet that finds the child's socket full stays
++// queued (and is dropped with the stream) without anything being scheduled.
++TEST_F(HotRestartingParentUdpForwardingTest, QueuesWithoutRetryingAfterShutdown) {
++  parent_->shutdown();
++  EXPECT_CALL(os_sys_calls_, sendmsg(_, _, _)).WillOnce([](int, const msghdr*, int) {
++    return Api::SysCallSizeResult{-1, EAGAIN};
++  });
++  parent_->sendHotRestartMessage(forwardedPacket(100));
++  EXPECT_EQ(helper_->queuedDatagrams(), 1);
++  EXPECT_EQ(forwarded(), 0);
++  EXPECT_EQ(retries(), 1);
 +  EXPECT_EQ(dropped(), 0);
 +}
 +

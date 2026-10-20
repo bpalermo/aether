@@ -49,7 +49,7 @@ bazel_dep(name = "envoy_api", version = "1.40.0.envoy")
 #   SPIFFE validator BUILD visibility line; api/ doc comment (a separate module),
 #   tests and changelog dropped.
 #   aether#1050 (proposed upstream as envoyproxy/envoy#47834, still open; this is
-#   that pull request's diff at 72408727eb, docs and changelog dropped): the hot-restart
+#   that pull request's diff at 2eae5ebf92, docs and changelog dropped): the hot-restart
 #   main-thread deadlock. The parent forwards undispatchable UDP/QUIC packets to
 #   the child from its main thread with a BLOCKING sendmsg(); the child's main
 #   thread waits for the parent's replies (stats merge every flush, listen socket
@@ -61,26 +61,41 @@ bazel_dep(name = "envoy_api", version = "1.40.0.envoy")
 #   liveness and give up after a bounded deadline, and gives the domain sockets
 #   send/receive timeouts so no blocking call can hang. The parent counts what it
 #   forwards in server.hot_restart_udp_forwarding_{datagrams,retries,dropped}.
+#   Since 2eae5ebf92 the reply deadline is measured on the main dispatcher's time
+#   source, and a signal that interrupts a send or a wait on the domain socket
+#   (EINTR, which SO_SNDTIMEO/SO_RCVTIMEO make non-restartable, see signal(7)) is
+#   retried or treated as a timeout slice instead of hitting a RELEASE_ASSERT, which
+#   aborted the child when e.g. a forwarded SIGUSR1 landed in getParentStats().
 #   Carries its tests (test/server:hot_restarting_{base,child,parent}_test,
 #   hot_restart_impl_test), run by //bazel/patches:carried_patch_tests.
+#   envoyproxy/envoy#48319 (still open, stacked on #47834; that pull request's diff
+#   at 2158574823, changelog dropped), applied AFTER aether1050: the upstream form of
+#   what was the first half of the aether#1054 patch, which it replaces. At the end of
+#   the drain the hot-restart child no longer unpauses its inherited UDP listeners
+#   while asking the parent to terminate: it sends the terminate request, retries it
+#   every 50 ms without blocking while the parent's socket is full, then probes the
+#   parent's socket and completes the drains (unpausing those listeners) once the
+#   socket refuses a probe, i.e. the parent has exited; capped at 2 s, after which it
+#   logs (error when the parent never accepted the request) and proceeds. Behind
+#   envoy.reloadable_features.hot_restart_wait_for_parent_exit (default true; the
+#   runtime_features.cc hunk registers it); false restores upstream's
+#   unpause-at-terminate. Carries its tests (test/server:hot_restarting_child_test),
+#   run by //bazel/patches:carried_patch_tests.
 #   aether#1054 (not yet proposed upstream; the maintainer's call), applied AFTER
-#   aether1050 (it builds on its liveness probe and touches the same child file):
-#   (1) the hot-restart child keeps its inherited UDP listeners paused until the
-#   parent has actually exited (its domain socket refuses a probe; 50 ms timer,
-#   2 s cap) instead of unpausing them while asking the parent to terminate, which
-#   had both processes reading the same sockets for the parent's shutdown and the
-#   child stateless-resetting parent-owned QUIC packets; (2) an HTTP/3 connection
-#   notified of a drain starts its own drain sequence (GOAWAY, then close) inside
-#   the drain window even when idle, behind
-#   envoy.reloadable_features.http3_drain_idle_connections (default true). Since
-#   envoyproxy/envoy#47991 (in the pinned release) the connection manager also
+#   envoyproxy/envoy#48319: an HTTP/3 connection notified of a drain starts its own
+#   drain sequence (GOAWAY, then close) inside the drain window even when idle,
+#   behind envoy.reloadable_features.http3_drain_idle_connections (default true).
+#   Since envoyproxy/envoy#47991 (in the pinned release) the connection manager also
 #   drains idle connections of every protocol on its own, but only in the last
 #   third of the drain time and not at all when the drain time leaves no room
 #   after the drain timeout -- the chart's 10s drain time with the default 5s
-#   drain timeout arms nothing -- so (2) is still needed and is armed beside it
+#   drain timeout arms nothing -- so this is still needed and is armed beside it
 #   (ConnectionManagerImpl::armIdleHttp3DrainTimer); whichever fires first starts
-#   the drain sequence. Carries its tests (test/server:hot_restarting_child_test,
-#   test/common/http:conn_manager_impl_test), run by //bazel/patches:carried_patch_tests;
+#   the drain sequence. Its first half (the child keeping its inherited UDP
+#   listeners paused until the parent has exited) moved to envoyproxy/envoy#48319
+#   above, which carries the same behaviour plus the terminate retry and a runtime
+#   guard; the two touch disjoint files now. Carries its tests
+#   (test/common/http:conn_manager_impl_test), run by //bazel/patches:carried_patch_tests;
 #   its quic_http_integration_test case only builds in the Envoy workspace.
 #   aether#1054, third patch (an upstream bug; envoyproxy/envoy#47868, merged on
 #   Envoy main after v1.40.0 as 2eff6e8ccf, so a later pin drops it), applied AFTER
@@ -127,7 +142,8 @@ single_version_override(
     patches = [
         "//bazel/patches:envoy-47740-quic-hostname-check-explicit-san.patch",
         "//bazel/patches:envoy-aether1050-hotrestart-nonblocking-forward.patch",
-        "//bazel/patches:envoy-aether1054-hotrestart-terminate-wait-h3-goaway.patch",
+        "//bazel/patches:envoy-48319-hotrestart-wait-for-parent-exit.patch",
+        "//bazel/patches:envoy-aether1054-http3-drain-idle-connections.patch",
         "//bazel/patches:envoy-aether1054c-paused-udp-listener-no-read.patch",
         "//bazel/patches:envoy-aether1074-quic-persistent-info-lifetime.patch",
         "//bazel/patches:envoy-aether1126-forwarded-udp-worker-index.patch",
