@@ -13,14 +13,21 @@ test_suite(
         # envoyproxy/envoy#47834):
         # non-blocking parent UDP forwarding, child keeps servicing it while waiting
         # for a reply, bounded waits. The child test's
-        # ServicesUdpForwardingWhileWaitingForParentStats is the deadlock interleaving.
+        # ServicesUdpForwardingWhileWaitingForParentStats is the deadlock interleaving;
+        # SendMsgRetriesWhenInterruptedBySignal, BlockingReceiveReturnsNothingWhenInterruptedBySignal
+        # (base test) and KeepsWaitingForParentReplyWhenInterruptedBySignal (child test) are the
+        # EINTR abort.
         "@envoy//test/server:hot_restart_impl_test",
         "@envoy//test/server:hot_restarting_base_test",
         "@envoy//test/server:hot_restarting_child_test",
         "@envoy//test/server:hot_restarting_parent_test",
-        # envoy-aether1054-hotrestart-terminate-wait-h3-goaway.patch (aether#1054):
-        # the child's inherited UDP listeners stay paused until the parent has exited
-        # (hot_restarting_child_test DrainsCompleteOnlyAfterParentHasExited), and idle
+        # envoy-48319-hotrestart-wait-for-parent-exit.patch (envoyproxy/envoy#48319): the
+        # child's inherited UDP listeners stay paused until the parent has exited, the
+        # terminate request is retried while the parent's socket is full, and the wait is
+        # capped (hot_restarting_child_test DrainsCompleteOnlyAfterParentHasExited,
+        # ResendsTerminateWhileParentSocketIsFull, DrainsCompleteAtTheCap*,
+        # DrainsCompleteAtOnceWhenWaitingForParentExitIsDisabled; target listed above).
+        # envoy-aether1054-http3-drain-idle-connections.patch (aether#1054): idle
         # HTTP/3 connections drain themselves inside the drain window
         # (conn_manager_impl_test Http3IdleConnection*; the same target runs upstream's
         # ProactiveDrain* cases, which the patch has to keep green). The patch's
