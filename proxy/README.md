@@ -126,7 +126,6 @@ new pin, which of them the new Envoy already contains.
 |---|---|---|
 | `47740-quic-hostname-check-explicit-san` | The QUIC client defers its hostname check to explicit SAN matchers (aether#957); behind `envoy.reloadable_features.quic_hostname_check_deferred_to_explicit_san_match`. | envoyproxy/envoy#47740, open |
 | `aether1050-hotrestart-nonblocking-forward` | The hot-restart main-thread deadlock (aether#1050): parent UDP/QUIC forwarding to the child no longer blocks the parent's main thread, and the child keeps servicing forwarded packets while it waits, with a bound, for the parent's replies. Counts what it forwards in `server.hot_restart_udp_forwarding_{datagrams,retries,dropped}`. A signal interrupting a send or a wait on the hot-restart domain socket (EINTR, which the socket timeouts make non-restartable) is retried instead of aborting the child on a `RELEASE_ASSERT`. | envoyproxy/envoy#47834, open (the patch is that pull request's diff) |
-| `48319-hotrestart-wait-for-parent-exit` | At the end of the drain the hot-restart child keeps its inherited UDP listeners paused until the parent has actually exited, instead of unpausing them while asking it to terminate, so the two processes never read the same sockets (aether#1054); it retries the terminate request every 50 ms while the parent's socket is full, and the wait is capped at 2 s. Behind `envoy.reloadable_features.hot_restart_wait_for_parent_exit` (default on). Replaces the first half of the earlier aether1054 patch. | envoyproxy/envoy#48319, open, stacked on envoyproxy/envoy#47834 (the patch is that pull request's diff, changelog dropped) |
 | `aether1054-http3-drain-idle-connections` | Idle HTTP/3 connections drain themselves inside the drain window (aether#1054), behind `envoy.reloadable_features.http3_drain_idle_connections`, beside upstream's own proactive drain (envoyproxy/envoy#47991), which arms nothing at the chart's 10s drain time. | not proposed |
 | `aether1054c-paused-udp-listener-no-read` | A paused hot-restart child UDP listener no longer reads the parent's socket when the QUIC listener injects a read to process forwarded handshakes (aether#1054). | envoyproxy/envoy#47868, merged on Envoy main after v1.40.0 (a later pin drops it) |
 | `aether1074-quic-persistent-info-lifetime` | HTTP/3 pools keep the per-cluster persistent QUIC info alive after a CDS removal, instead of their draining connections reading its freed clock (aether#1074). | envoyproxy/envoy#47893, open |
@@ -144,6 +143,16 @@ connections from its time-wait list instead of forwarding them to the child,
 aether#1054; behind the same
 `envoy.reloadable_features.quic_hot_restart_time_wait_before_forward`), dropped
 at the `1.40.0.envoy` release, which contains it as `69ff216f86`.
+
+Dropped without an upstream merge: upstream Envoy PR 48319, which kept the
+hot-restart child's inherited UDP listeners paused until the parent had exited
+(behind `envoy.reloadable_features.hot_restart_wait_for_parent_exit`). It had
+replaced the first half of the earlier aether1054 patch, and was closed upstream
+after an A/B soak showed no measurable benefit. The child now completes its
+drains, unpausing those listeners, at Terminate, as unpatched Envoy does. An 8 h
+soak of exactly this configuration (the 48319 guard off) on the reference cluster
+showed 0 misses near handoffs and 0 QUIC stateless resets. The aether1054 patch
+stays the HTTP/3 drain only; its old hot-restart half is not restored.
 
 ## Which Envoy is this? (`envoy_server_version`, and the image labels)
 
