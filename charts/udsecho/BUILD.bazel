@@ -1,6 +1,6 @@
 load("@aether_registry//:registry.bzl", "chart_registry_url")
 load("@rules_helm//helm:defs.bzl", "helm_chart", "helm_lint_test", "helm_template_test")
-load("//bazel/helm:defs.bzl", "chart_push", "helm_mesh_names_test", "helm_pod_template_version_test", "helm_template_absent_test", "helm_template_match_test")
+load("//bazel/helm:defs.bzl", "chart_push", "helm_mesh_names_test", "helm_pod_template_version_test", "helm_template_absent_test", "helm_template_fail_test", "helm_template_match_test")
 
 # udsecho validation chart (published to chart_registry_url("udsecho"); see @aether_registry//:registry.bzl).
 #
@@ -301,5 +301,97 @@ helm_template_match_test(
     opts = [
         "--set",
         "namespace=other-ns",
+    ],
+)
+
+# The echo pods hold SIGTERM back with a native preStop sleep, as the workload
+# requirements ask of every mesh workload (docs/workload-requirements.md,
+# "Hitless rolling restarts"): sources learn the endpoint is DRAINING and close
+# their pools before the app exits, so a deleted echo pod does not refuse its
+# callers' retries. Native `sleep`, not `exec`: the image is distroless (no
+# `sleep` binary), and only a sleep action is read by the mesh's drain timing
+# (common/drain.PoolCloseDelay closes the pools 1 s before SIGTERM; an exec
+# hook keeps the 2 s floor). Positional: the container's pull policy, the hook,
+# its args; and the pod's grace period after its securityContext.
+PRESTOP = "\\n          imagePullPolicy: IfNotPresent\\n          lifecycle:\\n            preStop:\\n              sleep:\\n                seconds: %d\\n          args:\\n"
+
+GRACE = "\\n      securityContext: \\{fsGroup: 65532\\}\\n      terminationGracePeriodSeconds: %d\\n      containers:\\n"
+
+# The default: a 10 s sleep (what docs/workload-requirements.md measured as
+# zero-loss) inside the 30 s grace period, stated rather than defaulted.
+helm_template_match_test(
+    name = "udsecho_prestop_default_test",
+    chart = ":udsecho",
+    document_patterns = {
+        "Deployment/uds-echo": [
+            PRESTOP % 10,
+            GRACE % 30,
+        ],
+        "Deployment/uds-cr-echo": [
+            PRESTOP % 10,
+            GRACE % 30,
+        ],
+    },
+)
+
+# An operator override reaches both echo Deployments.
+helm_template_match_test(
+    name = "udsecho_prestop_override_test",
+    chart = ":udsecho",
+    document_patterns = {
+        "Deployment/uds-echo": [
+            PRESTOP % 20,
+            GRACE % 45,
+        ],
+        "Deployment/uds-cr-echo": [
+            PRESTOP % 20,
+            GRACE % 45,
+        ],
+    },
+    opts = [
+        "--set",
+        "echo.preStopSleepSeconds=20",
+        "--set",
+        "echo.terminationGracePeriodSeconds=45",
+    ],
+)
+
+# The off switch: 0 renders no hook at all (the pods get SIGTERM at once, as
+# before chart 2.0.7). The client never has one, so the whole render has none;
+# the grace period is still stated.
+helm_template_absent_test(
+    name = "udsecho_prestop_off_test",
+    absent = [
+        "lifecycle:",
+        "preStop:",
+    ],
+    chart = ":udsecho",
+    control = "terminationGracePeriodSeconds: 30",
+    opts = [
+        "--set",
+        "echo.preStopSleepSeconds=0",
+    ],
+)
+
+# A grace period that leaves the app no time after the sleep is refused: the
+# kubelet would kill it mid-drain (udsecho's own shutdown takes up to 5 s).
+helm_template_fail_test(
+    name = "udsecho_prestop_grace_too_short_test",
+    chart = ":udsecho",
+    expected_message = "echo.terminationGracePeriodSeconds (14) must be at least echo.preStopSleepSeconds (10) + 5",
+    opts = [
+        "--set",
+        "echo.terminationGracePeriodSeconds=14",
+    ],
+)
+
+# A negative sleep is refused rather than rendered as an invalid hook.
+helm_template_fail_test(
+    name = "udsecho_prestop_negative_test",
+    chart = ":udsecho",
+    expected_message = "echo.preStopSleepSeconds must be 0 or more, got -1",
+    opts = [
+        "--set",
+        "echo.preStopSleepSeconds=-1",
     ],
 )

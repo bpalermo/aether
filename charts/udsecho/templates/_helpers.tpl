@@ -1,4 +1,21 @@
 {{/*
+The echo pods' grace period, after checking the shutdown values: the preStop
+sleep must not be negative, and the grace period must hold the sleep plus
+udsecho's own graceful shutdown (shutdownGrace in e2e/udsecho/main.go, 5 s).
+*/}}
+{{- define "udsecho.echoGracePeriod" -}}
+{{- $sleep := int .Values.echo.preStopSleepSeconds -}}
+{{- $grace := int .Values.echo.terminationGracePeriodSeconds -}}
+{{- if lt $sleep 0 -}}
+{{- fail (printf "echo.preStopSleepSeconds must be 0 or more, got %d" $sleep) -}}
+{{- end -}}
+{{- if lt $grace (add $sleep 5) -}}
+{{- fail (printf "echo.terminationGracePeriodSeconds (%d) must be at least echo.preStopSleepSeconds (%d) + 5" $grace $sleep) -}}
+{{- end -}}
+{{- $grace -}}
+{{- end -}}
+
+{{/*
 Chart label value (name-version).
 */}}
 {{- define "udsecho.chart" -}}
