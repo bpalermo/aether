@@ -52,6 +52,7 @@ go_test(
         "quic_path_a_test.go",
         "quic_selection_test.go",
         "quic_twin_eds_test.go",
+        "retry_priority_live_test.go",
         "review1703r2_hm_query_test.go",
         "review1703r2_inplace_test.go",
     ],

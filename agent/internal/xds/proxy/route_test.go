@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	routev3 "github.com/envoyproxy/go-control-plane/envoy/config/route/v3"
+	previousprioritiesv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/retry/priority/previous_priorities/v3"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -281,7 +282,36 @@ func TestOutboundRetryPolicy(t *testing.T) {
 		assert.Equal(t, uint32(2), rp.GetNumRetries().GetValue(), name)
 		require.Len(t, rp.GetRetryHostPredicate(), 1, name)
 		assert.Equal(t, "envoy.retry_host_predicates.previous_hosts", rp.GetRetryHostPredicate()[0].GetName(), name)
+		requireRetryPriority(t, name, rp)
 	}
+}
+
+// requireRetryPriority fails unless a retry under rp leaves every priority
+// already attempted: previous_priorities with update_frequency 1. Without it
+// a source whose priority 0 is one dying endpoint sends every retry back to
+// that endpoint, previous_hosts having no other host there to pick.
+func requireRetryPriority(t *testing.T, where string, rp *routev3.RetryPolicy) {
+	t.Helper()
+	pr := rp.GetRetryPriority()
+	require.NotNilf(t, pr, "%s: no retry_priority: a retry stays at the priority that failed", where)
+	assert.Equalf(t, "envoy.retry_priorities.previous_priorities", pr.GetName(), where)
+	var cfg previousprioritiesv3.PreviousPrioritiesConfig
+	require.NotNilf(t, pr.GetTypedConfig(), "%s: previous_priorities needs its typed config (update_frequency 0 is rejected)", where)
+	require.NoErrorf(t, pr.GetTypedConfig().UnmarshalTo(&cfg), where)
+	assert.Equalf(t, int32(1), cfg.GetUpdateFrequency(),
+		"%s: the FIRST retry must already leave the priority that failed", where)
+}
+
+// TestEveryRetryPolicyLeavesAttemptedPriorities: both policies the generators
+// hand out, the mesh one and the cleartext edge one, carry the retry
+// priority, and each call returns its own copy.
+func TestEveryRetryPolicyLeavesAttemptedPriorities(t *testing.T) {
+	requireRetryPriority(t, "outboundRetryPolicy", outboundRetryPolicy())
+	requireRetryPriority(t, "nonMeshRetryPolicy", nonMeshRetryPolicy())
+
+	a, b := outboundRetryPolicy(), outboundRetryPolicy()
+	a.GetRetryPriority().Name = "changed"
+	assert.Equal(t, retryPriorityName, b.GetRetryPriority().GetName(), "two routes must not share one retry priority")
 }
 
 // TestEgressLivenessRoute: the outbound catch-all leads with a local-reply 200 on
