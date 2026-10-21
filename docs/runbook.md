@@ -5322,6 +5322,42 @@ kubectl -n "$NS" get pods -l app=uds-client \
   -o jsonpath='{range .items[*]}{.spec.containers[0].image}{"  "}{.status.containerStatuses[0].imageID}{"\n"}{end}'
 ```
 
+#### udsecho chart 2.0.7: the echo pods sleep before SIGTERM
+
+Until 2.0.7 the two echo Deployments (`uds-echo`, `uds-cr-echo`) had no preStop
+hook, and udsecho exits on SIGTERM at once. A deleted echo pod was gone before
+mesh sources had learned its endpoint was DRAINING, and a caller's retry could
+land on a refusing socket: in two soaks on the reference cluster the UDS-CSI
+churn step, which deletes an echo pod while the CSI node plugin is down, failed
+4 requests each time. That step exists to test the plugin's window, not this
+exit race.
+
+From 2.0.7 both echo containers carry `lifecycle.preStop.sleep.seconds: 10`
+(`echo.preStopSleepSeconds`), the value `docs/workload-requirements.md` asks of
+every mesh workload, and both pods state `terminationGracePeriodSeconds: 30`
+(`echo.terminationGracePeriodSeconds`, the Kubernetes default). The hook is
+the native sleep action, not an exec of `sleep`: the image is distroless, and
+the mesh's drain timing reads a sleep hook (pools close 1 s before SIGTERM,
+`common/drain.PoolCloseDelay`) but cannot read an exec one. A grace period
+below the sleep plus 5 s (udsecho's own graceful shutdown) fails the render.
+`echo.preStopSleepSeconds=0` renders no hook, as before.
+
+**The upgrade that crosses 2.0.7 rolls both echo Deployments once**, and from
+then on deleting an echo pod takes about 10 s longer. Before and after:
+
+```bash
+NS=aether-test
+# The hook and the grace period each echo pod runs with (empty before 2.0.7):
+kubectl -n "$NS" get pods -l 'app in (uds-echo,uds-cr-echo)' \
+  -o jsonpath='{range .items[*]}{.metadata.name}{"  sleep="}{.spec.containers[0].lifecycle.preStop.sleep.seconds}{"  grace="}{.spec.terminationGracePeriodSeconds}{"\n"}{end}'
+# The effect: delete one echo pod and count the client's failures across it.
+# Expect no FAIL line for the deleted workload (before 2.0.7 a deletion could
+# cost a few).
+kubectl -n "$NS" delete pod "$(kubectl -n "$NS" get pods -l app=uds-echo -o name | head -1 | cut -d/ -f2)" --wait=false
+sleep 40
+kubectl -n "$NS" logs deploy/uds-client --since=60s | grep -c ' FAIL '
+```
+
 ### Rendering the chart reproducibly (#1364)
 
 Two `helm template` renders of the `aether` chart with the same values are
