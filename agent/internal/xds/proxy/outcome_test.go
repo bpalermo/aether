@@ -366,6 +366,7 @@ func requireMeshRetryPolicy(t *testing.T, where string, rp *routev3.RetryPolicy)
 	assert.Equalf(t, uint32(2), rp.GetNumRetries().GetValue(), where)
 	require.Lenf(t, rp.GetRetryHostPredicate(), 1, where)
 	assert.Equalf(t, "envoy.retry_host_predicates.previous_hosts", rp.GetRetryHostPredicate()[0].GetName(), where)
+	requireRetryPriority(t, where, rp)
 }
 
 // TestOutboundRetryPolicyReadsOnlyTheOutcome guards the conditions that would
@@ -509,6 +510,7 @@ func TestEdgeRoutesByBackendKind(t *testing.T) {
 		assert.Emptyf(t, rp.GetRetriableHeaders(), where)
 		assert.Equalf(t, uint32(2), rp.GetNumRetries().GetValue(), where)
 		require.Lenf(t, rp.GetRetryHostPredicate(), 1, where)
+		requireRetryPriority(t, where, rp)
 	}
 
 	r := BuildEdgeRoute("/", "", nil, "", nil, mesh, &GammaHeaderMutation{RemoveResponse: []string{"x-internal"}, RemoveRequest: []string{"x-debug"}}, nil, nil, nil)

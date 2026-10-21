@@ -20,6 +20,7 @@ import (
 	corev3 "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
 	routev3 "github.com/envoyproxy/go-control-plane/envoy/config/route/v3"
 	previoushostsv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/retry/host/previous_hosts/v3"
+	previousprioritiesv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/retry/priority/previous_priorities/v3"
 	matcherv3 "github.com/envoyproxy/go-control-plane/envoy/type/matcher/v3"
 	typev3 "github.com/envoyproxy/go-control-plane/envoy/type/v3"
 	"google.golang.org/protobuf/proto"
@@ -110,11 +111,66 @@ func nonMeshRetryPolicy() *routev3.RetryPolicy {
 	return rp
 }
 
+// retryPriorityName is the retry priority every mesh retry policy carries.
+const retryPriorityName = "envoy.retry_priorities.previous_priorities"
+
+// retryPriorityUpdateFrequency is the previous_priorities update_frequency:
+// after how many attempts the priorities already attempted are taken out of
+// the priority load a retry selects from.
+//
+// 1: every retry leaves every priority attempted so far. Envoy (the pinned
+// release's previous_priorities.cc) returns the cluster's own priority load
+// while fewer than update_frequency hosts have been attempted and recomputes
+// it, without the attempted priorities, on every attempt count that is a
+// multiple of it. With 2 the FIRST retry would still use the original load:
+// it lands on the dying priority-0 endpoint again (previous_hosts cannot steer
+// it elsewhere when that endpoint is the priority's only host), and only the
+// second, last retry could leave. With 1 the first retry already does, and
+// the second still has somewhere to go if that one fails too. The price is
+// that a retry of a failure on a priority with OTHER healthy hosts also
+// leaves it, for another zone: a retry is the rare path, and it already
+// avoids the host that failed. 0 is not a value: Envoy rejects it.
+//
+// Once every priority with hosts has been attempted, Envoy falls back to the
+// cluster's own priority load, so on a cluster with one priority (no locality
+// labels, every endpoint in one zone, a cleartext edge backend) the policy
+// changes nothing, nor for a request pinned to one endpoint (the NO_FALLBACK
+// x-aether-pod / x-aether-ip subsets): the pinned subset has no other
+// priority to move to.
+const retryPriorityUpdateFrequency = 1
+
 // baseRetryPolicy is what the two policies share: how often, where and how
 // fast, but not on what.
+//
+// Where: on a different host (previous_hosts) and, first, at a different
+// priority (previous_priorities). EndpointPriority bands a service's
+// endpoints by locality (same zone 0, same region 1, another or no known
+// region 2), and Envoy keeps a request at the lowest priority with healthy
+// hosts.
+// previous_hosts alone only picks another host WITHIN that priority: when a
+// source's priority 0 is one endpoint and that pod is going away (its
+// application exits on SIGTERM before DRAINING reaches the source), every
+// retry is sent back to it, previous_hosts having nowhere else to steer, and
+// the caller gets the final 503 while a healthy endpoint sits one priority
+// up. previous_priorities moves the retry to the next priority with hosts.
+//
+// This is the retry policy of every route aether generates, mesh or not, and
+// a route rule cannot supply its own: a Gateway API HTTPRoute's retry stanza
+// is not projected. If it ever is, the priority should stay: the bands are
+// aether's own construction, which a route author cannot see, and a retry
+// that goes back to the one failing endpoint of its zone is not what any
+// author asked for.
 func baseRetryPolicy() *routev3.RetryPolicy {
 	return &routev3.RetryPolicy{
 		NumRetries: wrapperspb.UInt32(2),
+		RetryPriority: &routev3.RetryPolicy_RetryPriority{
+			Name: retryPriorityName,
+			ConfigType: &routev3.RetryPolicy_RetryPriority_TypedConfig{
+				TypedConfig: config.TypedConfig(&previousprioritiesv3.PreviousPrioritiesConfig{
+					UpdateFrequency: retryPriorityUpdateFrequency,
+				}),
+			},
+		},
 		RetryHostPredicate: []*routev3.RetryPolicy_RetryHostPredicate{{
 			Name: "envoy.retry_host_predicates.previous_hosts",
 			ConfigType: &routev3.RetryPolicy_RetryHostPredicate_TypedConfig{

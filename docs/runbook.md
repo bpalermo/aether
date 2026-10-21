@@ -8765,7 +8765,12 @@ response of a mesh inbound listener carries the response header `x-aether-outcom
 the request's. The grammar and the rule live in one place,
 `agent/internal/xds/proxy/outcome.go`. The caller's retry policy is
 `connect-failure,refused-stream,reset-before-request,retriable-headers` with one matcher
-on that header. There is no status-code condition any more.
+on that header. There is no status-code condition any more. A retry goes to another
+host (`previous_hosts`) and, first, to another priority (`previous_priorities`,
+`update_frequency: 1`): the endpoints are banded by locality (same zone 0, same region 1,
+elsewhere 2), so without it a source whose priority 0 is one dying endpoint retried onto
+that endpoint every time and returned the final 503. With one priority, or a request
+pinned to one endpoint, it changes nothing.
 
 | `x-aether-outcome` (destination) | Client sees, if nothing is retried | Caller |
 |---|---|---|
