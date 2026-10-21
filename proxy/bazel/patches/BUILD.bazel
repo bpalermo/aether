@@ -21,12 +21,6 @@ test_suite(
         "@envoy//test/server:hot_restarting_base_test",
         "@envoy//test/server:hot_restarting_child_test",
         "@envoy//test/server:hot_restarting_parent_test",
-        # envoy-48319-hotrestart-wait-for-parent-exit.patch (envoyproxy/envoy#48319): the
-        # child's inherited UDP listeners stay paused until the parent has exited, the
-        # terminate request is retried while the parent's socket is full, and the wait is
-        # capped (hot_restarting_child_test DrainsCompleteOnlyAfterParentHasExited,
-        # ResendsTerminateWhileParentSocketIsFull, DrainsCompleteAtTheCap*,
-        # DrainsCompleteAtOnceWhenWaitingForParentExitIsDisabled; target listed above).
         # envoy-aether1054-http3-drain-idle-connections.patch (aether#1054): idle
         # HTTP/3 connections drain themselves inside the drain window
         # (conn_manager_impl_test Http3IdleConnection*; the same target runs upstream's
