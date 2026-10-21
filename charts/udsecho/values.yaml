@@ -29,6 +29,26 @@ policyPath:
   enabled: true
   replicas: 2
 
+# Shutdown of both echo Deployments (uds-echo and uds-cr-echo; not the client).
+echo:
+  # Seconds the kubelet holds SIGTERM back after the pod's deletion is
+  # requested: a native `lifecycle.preStop.sleep` (Kubernetes >= 1.30; the
+  # image is distroless and has no `sleep` binary for an exec hook). Mesh
+  # sources mark the endpoint DRAINING at once and close their pools 1 s before
+  # SIGTERM (the mesh reads a sleep hook's length; it cannot read an exec
+  # hook's), so the app is never gone while callers still pick it. Without it
+  # udsecho exits on SIGTERM right away and a caller's retry can land on a
+  # refusing socket. 10 is what docs/workload-requirements.md ("Hitless rolling
+  # restarts") asks of every mesh workload and what was measured as zero-loss.
+  # 0 renders no hook (the behaviour before chart 2.0.7). Changing it rolls both
+  # echo Deployments.
+  preStopSleepSeconds: 10
+  # The pods' terminationGracePeriodSeconds: the sleep, then udsecho's own
+  # graceful shutdown (up to 5 s), must fit inside it, and a value below
+  # preStopSleepSeconds + 5 fails the render. 30 is the Kubernetes default,
+  # stated so the bound is in the pod spec rather than implied.
+  terminationGracePeriodSeconds: 30
+
 # Continuous light load on both services (failures-only logging with an OK
 # heartbeat, so `kubectl logs` doubles as the soak error ledger).
 client:

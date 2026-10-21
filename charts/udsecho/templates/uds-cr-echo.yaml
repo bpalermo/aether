@@ -37,10 +37,17 @@ spec:
           labelSelector:
             matchLabels: { {{- include "udsecho.selectorLabels" "uds-cr-echo" -}} }
       securityContext: {fsGroup: 65532}
+      terminationGracePeriodSeconds: {{ include "udsecho.echoGracePeriod" . }}
       containers:
         - name: app
           image: {{ .Values.image.ref }}
           imagePullPolicy: {{ .Values.image.pullPolicy }}
+          {{- with int .Values.echo.preStopSleepSeconds }}
+          lifecycle:
+            preStop:
+              sleep:
+                seconds: {{ . }}
+          {{- end }}
           args:
             - "--socket=/{{ .Values.socket }}"
             - "--text=served-by-uds-cr-echo"

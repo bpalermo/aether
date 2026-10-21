@@ -45,10 +45,21 @@ spec:
       # root:<fsGroup> mode 2770, which is how the distroless nonroot user can
       # create the socket in it (the plugin refuses a pod without one).
       securityContext: {fsGroup: 65532}
+      {{- /* SIGTERM waits for a native preStop sleep, so mesh sources have
+      drained the endpoint before the app exits (echo.* in values.yaml). */}}
+      terminationGracePeriodSeconds: {{ include "udsecho.echoGracePeriod" . }}
       containers:
         - name: app
           image: {{ .Values.image.ref }}
           imagePullPolicy: {{ .Values.image.pullPolicy }}
+          {{- /* Native sleep: the image is distroless, with no `sleep` binary for
+          an exec hook. 0 renders no hook. */}}
+          {{- with int .Values.echo.preStopSleepSeconds }}
+          lifecycle:
+            preStop:
+              sleep:
+                seconds: {{ . }}
+          {{- end }}
           args:
             - "--socket=/{{ .Values.socket }}"
             - "--text=served-by-uds-echo"
