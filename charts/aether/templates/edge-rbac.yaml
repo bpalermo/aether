@@ -57,9 +57,10 @@ rules:
   - apiGroups: [""]
     resources: ["services"]
     verbs: ["create", "update", "patch", "delete"]
-  {{- if .Values.edge.tls.enabled }}
-  # Read the kubernetes.io/tls Secrets a Gateway listener references (downstream
-  # certs, served to Envoy over SDS); watch for hot rotation.
+  {{- if and .Values.edge.tls.enabled (include "aether.edge.clusterWideSecrets" .) }}
+  # edge.tls.clusterWideSecrets (opt-in): read the kubernetes.io/tls Secrets a
+  # Gateway listener references in ANY namespace; watch for hot rotation. This
+  # reaches every Secret in the cluster; the default is the namespaced Roles below.
   - apiGroups: [""]
     resources: ["secrets"]
     verbs: ["get", "list", "watch"]
@@ -79,4 +80,40 @@ subjects:
   - kind: ServiceAccount
     name: {{ include "aether.edge.serviceAccountName" . }}
     namespace: {{ include "aether.edge.namespace" . }}
+{{- if and .Values.edge.tls.enabled (not (include "aether.edge.clusterWideSecrets" .)) }}
+{{- range splitList "," (include "aether.edge.secretNamespaces" $) }}
+# Read the kubernetes.io/tls Secrets a Gateway listener references (downstream
+# certs, served to Envoy over SDS) in this namespace only, and watch them for hot
+# rotation. The edge's Secret informer covers exactly these namespaces
+# (--secret-namespaces); a certificateRef elsewhere does not resolve.
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "aether.edge.fullname" $ }}-secrets
+  namespace: {{ . }}
+  labels:
+    {{- include "aether.edge.labels" $ | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "aether.edge.fullname" $ }}-secrets
+  namespace: {{ . }}
+  labels:
+    {{- include "aether.edge.labels" $ | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ include "aether.edge.fullname" $ }}-secrets
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "aether.edge.serviceAccountName" $ }}
+    namespace: {{ include "aether.edge.namespace" $ }}
+{{- end }}
+{{- end }}
 {{- end }}
