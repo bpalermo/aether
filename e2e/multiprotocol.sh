@@ -2502,7 +2502,14 @@ YAML
 }
 
 # u2_slice SUFFIX PORT — an EndpointSlice of $LATE_SLICED, written by hand,
-# that gives its port name "http" the number PORT.
+# that gives its port name "http" the number PORT. Only the port matters to the
+# leg; its one address must be one no pod holds. The suite runs on kind, where
+# 10.244.255.254 is outside the podSubnet (10.20.0.0/16). It is inside
+# 10.244.0.0/16 as a precaution: if the suite is ever pointed at talos-main as
+# the fleet-aether identity, the cluster's policy (homelab #295) denies that
+# identity EndpointSlice and Endpoints addresses outside 10.244.0.0/16. There,
+# 10.244.255.254, the last usable host of the /16, is an address no node's /24
+# is expected to hand out.
 u2_slice() {
 	kc apply -f - >/dev/null <<YAML || die "U2: EndpointSlice $LATE_SLICED-$1 apply failed"
 apiVersion: discovery.k8s.io/v1
@@ -2513,7 +2520,7 @@ metadata:
   labels: {kubernetes.io/service-name: $LATE_SLICED}
 addressType: IPv4
 ports: [{name: http, port: $2, protocol: TCP}]
-endpoints: [{addresses: ["10.250.0.9"]}]
+endpoints: [{addresses: ["10.244.255.254"]}]
 YAML
 }
 
