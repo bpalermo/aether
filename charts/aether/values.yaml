@@ -1138,6 +1138,19 @@ edge:
   # your own (cert-manager, kubectl, …). The edge->pod upstream hop stays mTLS.
   tls:
     enabled: false
+    # Namespaces whose kubernetes.io/tls Secrets the edge may read: a Role and
+    # RoleBinding in each (the namespaces must exist at install), and the edge
+    # watches Secrets only there. A listener certificateRef into any other
+    # namespace does not resolve (ResolvedRefs=False). Empty = the edge's own
+    # namespace (edge.namespace). edge.gateway.tlsSecretNamespace, when set with
+    # edge.gateway.create, is always added. Since chart 3.1.0.
+    secretNamespaces: []
+    # Opt-in: read Secrets in EVERY namespace through the edge's ClusterRole, the
+    # grant charts before 3.1.0 gave unconditionally. Anyone who can run a pod as
+    # the edge's ServiceAccount can then read every Secret in the cluster; prefer
+    # secretNamespaces. Needed when Gateways' namespaces are not known at install
+    # (e.g. the Gateway API conformance suite).
+    clusterWideSecrets: false
   # Envoy admin endpoint, bound to pod-local loopback (127.0.0.1) only — never
   # exposed via a Service. Off by default (it is an unauthenticated control surface
   # even on loopback); enable for diagnostics (config_dump/stats) and reach it with

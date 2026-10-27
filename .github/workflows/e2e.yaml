@@ -151,6 +151,9 @@ jobs:
       # conformance backends over cleartext. edge.tls.enabled=true wires the
       # Kubernetes Secret provider (the HTTPS-listener fixtures need cert
       # resolution or Gateways stay Programmed=False and setup times out).
+      # edge.tls.clusterWideSecrets=true: the suite's certificates live in
+      # namespaces it creates after the install, where the chart cannot render
+      # a namespaced Role.
       # edge.gateway.create=false: the suite brings its own Gateways.
       # cloud-provider-kind gives the edge's per-Gateway LB Services external
       # IPs -> Gateway.status.addresses.
@@ -166,6 +169,7 @@ jobs:
           helm-set: |
             edge.enabled=true
             edge.tls.enabled=true
+            edge.tls.clusterWideSecrets=true
             edge.gateway.create=false
           ready-description: Wait for edge to be Ready
           wait-for-ready: |

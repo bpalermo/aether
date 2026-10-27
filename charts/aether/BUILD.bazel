@@ -3434,9 +3434,187 @@ helm_template_match_test(
     ],
 )
 
-# Downstream TLS is what lets the edge read Secrets (the listeners' certificates).
+# Downstream TLS is what lets the edge read Secrets (the listeners'
+# certificates), and by default only in its own namespace: a Role and binding
+# there, the edge told to watch only that namespace, and still no Secret rule in
+# the ClusterRole (it ends with the Service write, as without TLS).
 helm_template_match_test(
     name = "aether_edge_rbac_tls_test",
+    chart = ":aether",
+    document_patterns = {
+        "ClusterRole/release-name-aether-edge": [
+            RULE % ("\"\"", "\"services\"", "\"create\", \"update\", \"patch\", \"delete\"") + "$",
+        ],
+        "Role/release-name-aether-edge-secrets": [
+            "\\nmetadata:\\n  name: release-name-aether-edge-secrets\\n  namespace: aether-ingress\\n",
+            RULE % ("\"\"", "\"secrets\"", GET_LIST_WATCH) + "$",
+        ],
+        "RoleBinding/release-name-aether-edge-secrets": [
+            "\\nmetadata:\\n  name: release-name-aether-edge-secrets\\n  namespace: aether-ingress\\n",
+            BINDING % ("Role", "release-name-aether-edge-secrets", "release-name-aether-edge", "aether-ingress"),
+        ],
+        "Deployment/release-name-aether-edge": [
+            "\\n            - \"--edge-tls\"\\n",
+            "\\n            - \"--secret-namespaces=aether-ingress\"\\n",
+        ],
+    },
+    opts = [
+        "--set",
+        "edge.enabled=true",
+        "--set",
+        "edge.tls.enabled=true",
+        "--set",
+        "edge.gateway.tlsSecretName=edge-cert",
+    ],
+)
+
+# edge.tls.secretNamespaces lists the namespaces instead: one Role and binding
+# in each, the binding's subject still the edge's ServiceAccount in the edge
+# namespace, and the same list passed to the edge. Two Roles share a name, so the
+# patterns are on the whole render.
+helm_template_match_test(
+    name = "aether_edge_rbac_tls_secret_namespaces_test",
+    chart = ":aether",
+    opts = [
+        "--set",
+        "edge.enabled=true",
+        "--set",
+        "edge.tls.enabled=true",
+        "--set",
+        "edge.gateway.tlsSecretName=edge-cert",
+        "--set",
+        "edge.tls.secretNamespaces={web,infra}",
+    ],
+    patterns = [
+        "\\nkind: Role\\nmetadata:\\n  name: release-name-aether-edge-secrets\\n  namespace: web\\n",
+        "\\nkind: Role\\nmetadata:\\n  name: release-name-aether-edge-secrets\\n  namespace: infra\\n",
+        "\\nkind: RoleBinding\\nmetadata:\\n  name: release-name-aether-edge-secrets\\n  namespace: web\\n",
+        "\\nkind: RoleBinding\\nmetadata:\\n  name: release-name-aether-edge-secrets\\n  namespace: infra\\n",
+        "\\n            - \"--secret-namespaces=web,infra\"\\n",
+    ],
+)
+
+# The chart-managed Gateway's certificate namespace is always readable: with
+# edge.gateway.tlsSecretNamespace set, the default list is the edge namespace
+# plus that one.
+helm_template_match_test(
+    name = "aether_edge_rbac_tls_gateway_secret_namespace_test",
+    chart = ":aether",
+    opts = [
+        "--set",
+        "edge.enabled=true",
+        "--set",
+        "edge.tls.enabled=true",
+        "--set",
+        "edge.gateway.tlsSecretName=edge-cert",
+        "--set",
+        "edge.gateway.tlsSecretNamespace=certs",
+    ],
+    patterns = [
+        "\\nkind: Role\\nmetadata:\\n  name: release-name-aether-edge-secrets\\n  namespace: aether-ingress\\n",
+        "\\nkind: Role\\nmetadata:\\n  name: release-name-aether-edge-secrets\\n  namespace: certs\\n",
+        "\\n            - \"--secret-namespaces=aether-ingress,certs\"\\n",
+    ],
+)
+
+# A quoted "false" (--set-string, or a string in a values file) is not false:
+# read for truthiness it would re-open the cluster-wide grant. Anything but a
+# boolean fails the render.
+helm_template_fail_test(
+    name = "aether_edge_tls_cluster_wide_secrets_string_test",
+    chart = ":aether",
+    expected_message = "edge.tls.clusterWideSecrets must be a boolean",
+    opts = [
+        "--set",
+        "edge.enabled=true",
+        "--set",
+        "edge.tls.enabled=true",
+        "--set",
+        "edge.gateway.tlsSecretName=edge-cert",
+        "--set-string",
+        "edge.tls.clusterWideSecrets=false",
+    ],
+)
+
+# An empty entry would render a Role with no namespace (helm puts it in the
+# release namespace) and an empty name in --secret-namespaces.
+helm_template_fail_test(
+    name = "aether_edge_tls_secret_namespaces_empty_test",
+    chart = ":aether",
+    expected_message = "edge.tls.secretNamespaces entries must be namespace names (DNS-1123 labels)",
+    opts = [
+        "--set",
+        "edge.enabled=true",
+        "--set",
+        "edge.tls.enabled=true",
+        "--set",
+        "edge.gateway.tlsSecretName=edge-cert",
+        "--set-string",
+        "edge.tls.secretNamespaces[0]=web",
+        "--set-string",
+        "edge.tls.secretNamespaces[1]=",
+    ],
+)
+
+# The list is joined with commas into --secret-namespaces and split again for
+# the Roles, so an entry with a comma ("web,") would smuggle in an empty
+# namespace, and "a,b" would slip past the duplicate check. Every entry must be
+# a namespace name: a DNS-1123 label.
+helm_template_fail_test(
+    name = "aether_edge_tls_secret_namespaces_comma_test",
+    chart = ":aether",
+    expected_message = "edge.tls.secretNamespaces entries must be namespace names (DNS-1123 labels), got \"web,\"",
+    opts = [
+        "--set",
+        "edge.enabled=true",
+        "--set",
+        "edge.tls.enabled=true",
+        "--set",
+        "edge.gateway.tlsSecretName=edge-cert",
+        "--set-string",
+        "edge.tls.secretNamespaces[0]=web\\,",
+    ],
+)
+
+# edge.gateway.tlsSecretNamespace joins the same list, under the same rule.
+helm_template_fail_test(
+    name = "aether_edge_tls_gateway_secret_namespace_invalid_test",
+    chart = ":aether",
+    expected_message = "edge.gateway.tlsSecretNamespace must be a namespace name (DNS-1123 label), got \"certs,web\"",
+    opts = [
+        "--set",
+        "edge.enabled=true",
+        "--set",
+        "edge.tls.enabled=true",
+        "--set",
+        "edge.gateway.tlsSecretName=edge-cert",
+        "--set-string",
+        "edge.gateway.tlsSecretNamespace=certs\\,web",
+    ],
+)
+
+# A namespace listed twice would render two Roles of the same name in it.
+helm_template_fail_test(
+    name = "aether_edge_tls_secret_namespaces_duplicate_test",
+    chart = ":aether",
+    expected_message = "edge.tls.secretNamespaces lists \"web\" more than once",
+    opts = [
+        "--set",
+        "edge.enabled=true",
+        "--set",
+        "edge.tls.enabled=true",
+        "--set",
+        "edge.gateway.tlsSecretName=edge-cert",
+        "--set",
+        "edge.tls.secretNamespaces={web,web}",
+    ],
+)
+
+# edge.tls.clusterWideSecrets is the opt-in to the grant every chart before
+# 3.1.0 gave: Secrets in the ClusterRole (its last rule), no Role, and no
+# --secret-namespaces, so the edge watches Secrets in every namespace.
+helm_template_match_test(
+    name = "aether_edge_rbac_tls_cluster_wide_test",
     chart = ":aether",
     document_patterns = {
         "ClusterRole/release-name-aether-edge": [
@@ -3450,6 +3628,43 @@ helm_template_match_test(
         "edge.tls.enabled=true",
         "--set",
         "edge.gateway.tlsSecretName=edge-cert",
+        "--set",
+        "edge.tls.clusterWideSecrets=true",
+    ],
+)
+
+helm_template_absent_test(
+    name = "aether_edge_rbac_tls_cluster_wide_no_role_test",
+    absent = [
+        "name: release-name-aether-edge-secrets",
+        "--secret-namespaces",
+    ],
+    chart = ":aether",
+    control = "--edge-tls",
+    opts = [
+        "--set",
+        "edge.enabled=true",
+        "--set",
+        "edge.tls.enabled=true",
+        "--set",
+        "edge.gateway.tlsSecretName=edge-cert",
+        "--set",
+        "edge.tls.clusterWideSecrets=true",
+    ],
+)
+
+# Without downstream TLS the edge reads no Secret anywhere.
+helm_template_absent_test(
+    name = "aether_edge_rbac_no_tls_no_secrets_test",
+    absent = [
+        "name: release-name-aether-edge-secrets",
+        "--secret-namespaces",
+    ],
+    chart = ":aether",
+    control = "name: release-name-aether-edge",
+    opts = [
+        "--set",
+        "edge.enabled=true",
     ],
 )
 

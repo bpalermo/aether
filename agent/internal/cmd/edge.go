@@ -17,9 +17,12 @@ import (
 	"aethermesh.dev/common/manager"
 	commonspire "aethermesh.dev/common/spire"
 	"github.com/spf13/cobra"
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
+	ctrlcache "sigs.k8s.io/controller-runtime/pkg/cache"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
 	gatewayv1beta1 "sigs.k8s.io/gateway-api/apis/v1beta1"
@@ -85,6 +88,7 @@ func init() {
 
 	edgeCmd.Flags().Uint32Var(&cfg.EdgeHTTPPort, "edge-http-port", cfg.EdgeHTTPPort, "Port the edge proxy's public-facing HTTP listener binds")
 	edgeCmd.Flags().StringVar(&cfg.RouteNamespace, "route-namespace", "", "Default namespace for Gateway TLS certificate Secrets (empty = the edge pod's own namespace). Gateway/route watching is cluster-wide regardless")
+	edgeCmd.Flags().StringSliceVar(&cfg.SecretNamespaces, "secret-namespaces", nil, "Namespaces whose TLS Secrets the edge reads and watches for Gateway listener certificates (with --edge-tls). Empty = every namespace, which needs a cluster-wide Secret grant; a certificateRef outside the list does not resolve (listener ResolvedRefs=False)")
 	edgeCmd.Flags().BoolVar(&cfg.EdgeTLS, "edge-tls", false, "Terminate downstream TLS: serve an HTTPS listener (certs per Gateway listener via SDS) + an HTTP->HTTPS redirect")
 	edgeCmd.Flags().Uint32Var(&cfg.EdgeHTTPSPort, "edge-https-port", cfg.EdgeHTTPSPort, "Port the edge TLS listener binds when --edge-tls is set")
 	edgeCmd.Flags().StringVar(&cfg.GatewayClassName, "gateway-class", cfg.GatewayClassName, "GatewayClass name whose Gateways this edge serves")
@@ -134,6 +138,8 @@ func runEdge(ctx context.Context) (retErr error) {
 	// would never see them and they would never reach Accepted/Programmed. Leaving
 	// CacheOptions nil makes the manager cache every watched kind across all
 	// namespaces; the ClusterRoles grant the matching cluster-wide list/watch.
+	// Secrets are the exception: with --secret-namespaces the Secret informer
+	// covers only those namespaces, matching the chart's namespaced Roles.
 	//
 	// routeNamespace is still resolved (the edge's own namespace) and used as the
 	// default namespace for the Secret provider's TLS cert lookups — Gateway TLS
@@ -142,7 +148,7 @@ func runEdge(ctx context.Context) (retErr error) {
 	if routeNamespace == "" {
 		routeNamespace = manager.CurrentNamespace()
 	}
-	cfg.CacheOptions = nil
+	cfg.CacheOptions = edgeCacheOptions(cfg.SecretNamespaces)
 
 	// The edge runs NO leader election. It is a 2-replica Deployment where each
 	// replica hosts its own xDS server + SnapshotCache feeding its co-located Envoy,
@@ -420,6 +426,24 @@ func wireGatewayAPIReconciler(m ctrl.Manager, snapshotCache *cache.SnapshotCache
 		return fmt.Errorf("failed to set up Gateway API reconciler: %w", err)
 	}
 	return nil
+}
+
+// edgeCacheOptions scopes the manager's Secret informer to secretNamespaces and
+// leaves every other kind cluster-wide. With no namespaces it returns nil: the
+// whole cache is cluster-wide, Secrets included.
+func edgeCacheOptions(secretNamespaces []string) *ctrlcache.Options {
+	if len(secretNamespaces) == 0 {
+		return nil
+	}
+	namespaces := make(map[string]ctrlcache.Config, len(secretNamespaces))
+	for _, ns := range secretNamespaces {
+		namespaces[ns] = ctrlcache.Config{}
+	}
+	return &ctrlcache.Options{
+		ByObject: map[client.Object]ctrlcache.ByObject{
+			&corev1.Secret{}: {Namespaces: namespaces},
+		},
+	}
 }
 
 // currentPodName returns the edge pod's name from the POD_NAME downward-API env

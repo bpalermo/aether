@@ -1069,6 +1069,58 @@ app.kubernetes.io/version: {{ . | quote }}
 {{- define "aether.edge.namespace" -}}
 {{- default "aether-ingress" .Values.edge.namespace -}}
 {{- end -}}
+{{/*
+The namespaces whose TLS Secrets the edge may read, comma-joined:
+edge.tls.secretNamespaces, or the edge's own namespace when that is empty, plus
+the namespace of the chart-managed Gateway's certificate
+(edge.gateway.tlsSecretNamespace) when the chart creates that Gateway. The list
+is comma-joined here and split again for the Roles, so every entry must be a
+namespace name (a DNS-1123 label: no comma, no space, never empty, where an
+empty one would put a Role in the release namespace); anything else, or an
+entry listed twice, fails the render.
+*/}}
+{{- define "aether.edge.secretNamespaces" -}}
+{{- $seen := dict -}}
+{{- range .Values.edge.tls.secretNamespaces -}}
+{{- if not (include "aether.isNamespaceName" .) -}}
+{{- fail (printf "edge.tls.secretNamespaces entries must be namespace names (DNS-1123 labels), got %q" (toString .)) -}}
+{{- end -}}
+{{- if hasKey $seen . -}}
+{{- fail (printf "edge.tls.secretNamespaces lists %q more than once" .) -}}
+{{- end -}}
+{{- $_ := set $seen . true -}}
+{{- end -}}
+{{- $ns := .Values.edge.tls.secretNamespaces | default (list (include "aether.edge.namespace" .)) -}}
+{{- with .Values.edge.gateway.tlsSecretNamespace -}}
+{{- if not (include "aether.isNamespaceName" .) -}}
+{{- fail (printf "edge.gateway.tlsSecretNamespace must be a namespace name (DNS-1123 label), got %q" (toString .)) -}}
+{{- end -}}
+{{- end -}}
+{{- if and .Values.edge.gateway.create .Values.edge.gateway.tlsSecretNamespace -}}
+{{- $ns = append $ns .Values.edge.gateway.tlsSecretNamespace -}}
+{{- end -}}
+{{- join "," (uniq $ns) -}}
+{{- end -}}
+{{/*
+"true" when the value is a namespace name, a DNS-1123 label (lowercase
+alphanumerics and '-', alphanumeric at both ends, at most 63 characters), else
+the empty string.
+*/}}
+{{- define "aether.isNamespaceName" -}}
+{{- if and (kindIs "string" .) (le (len .) 63) (regexMatch "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$" .) }}true{{ end -}}
+{{- end -}}
+{{/*
+edge.tls.clusterWideSecrets as "true" or the empty string. Only a real boolean
+is accepted: a quoted "false" read for truthiness would re-open the
+cluster-wide Secret grant, so anything else fails the render.
+*/}}
+{{- define "aether.edge.clusterWideSecrets" -}}
+{{- $v := .Values.edge.tls.clusterWideSecrets -}}
+{{- if not (kindIs "bool" $v) -}}
+{{- fail (printf "edge.tls.clusterWideSecrets must be a boolean, got %q" (toString $v)) -}}
+{{- end -}}
+{{- if $v }}true{{ end -}}
+{{- end -}}
 {{- define "aether.edge.serviceAccountName" -}}{{ include "aether.edge.fullname" . }}{{- end -}}
 {{- define "aether.edge.configMapName" -}}
 {{- printf "%s-config" (include "aether.edge.fullname" .) | trunc 63 | trimSuffix "-" -}}

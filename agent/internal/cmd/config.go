@@ -124,6 +124,12 @@ type AgentConfig struct {
 	// Gateway/route watching itself is cluster-wide regardless.
 	RouteNamespace string
 
+	// SecretNamespaces scopes the edge's Secret informer (edge subcommand only):
+	// the namespaces whose kubernetes.io/tls Secrets a Gateway listener may
+	// reference. Empty means every namespace, which needs a cluster-wide Secret
+	// grant; the chart passes its scoped list.
+	SecretNamespaces []string
+
 	// Gamma enables GAMMA east-west L7 routing on the node proxy: the agent watches
 	// HTTPRoutes parented to a Service and enriches the outbound routes (proposal
 	// 018, Phase 2). Default on since proposal 031 (kept as a kill switch); the
