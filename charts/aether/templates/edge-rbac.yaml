@@ -57,7 +57,7 @@ rules:
   - apiGroups: [""]
     resources: ["services"]
     verbs: ["create", "update", "patch", "delete"]
-  {{- if and .Values.edge.tls.enabled .Values.edge.tls.clusterWideSecrets }}
+  {{- if and .Values.edge.tls.enabled (include "aether.edge.clusterWideSecrets" .) }}
   # edge.tls.clusterWideSecrets (opt-in): read the kubernetes.io/tls Secrets a
   # Gateway listener references in ANY namespace; watch for hot rotation. This
   # reaches every Secret in the cluster; the default is the namespaced Roles below.
@@ -80,7 +80,7 @@ subjects:
   - kind: ServiceAccount
     name: {{ include "aether.edge.serviceAccountName" . }}
     namespace: {{ include "aether.edge.namespace" . }}
-{{- if and .Values.edge.tls.enabled (not .Values.edge.tls.clusterWideSecrets) }}
+{{- if and .Values.edge.tls.enabled (not (include "aether.edge.clusterWideSecrets" .)) }}
 {{- range splitList "," (include "aether.edge.secretNamespaces" $) }}
 # Read the kubernetes.io/tls Secrets a Gateway listener references (downstream
 # certs, served to Envoy over SDS) in this namespace only, and watch them for hot

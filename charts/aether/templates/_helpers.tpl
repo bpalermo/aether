@@ -1073,14 +1073,38 @@ app.kubernetes.io/version: {{ . | quote }}
 The namespaces whose TLS Secrets the edge may read, comma-joined:
 edge.tls.secretNamespaces, or the edge's own namespace when that is empty, plus
 the namespace of the chart-managed Gateway's certificate
-(edge.gateway.tlsSecretNamespace) when the chart creates that Gateway.
+(edge.gateway.tlsSecretNamespace) when the chart creates that Gateway. An empty
+entry (a Role with no namespace lands in the release namespace) or one listed
+twice fails the render.
 */}}
 {{- define "aether.edge.secretNamespaces" -}}
+{{- $seen := dict -}}
+{{- range .Values.edge.tls.secretNamespaces -}}
+{{- if or (not (kindIs "string" .)) (eq (trim .) "") -}}
+{{- fail (printf "edge.tls.secretNamespaces entries must be non-empty strings, got %q" (toString .)) -}}
+{{- end -}}
+{{- if hasKey $seen . -}}
+{{- fail (printf "edge.tls.secretNamespaces lists %q more than once" .) -}}
+{{- end -}}
+{{- $_ := set $seen . true -}}
+{{- end -}}
 {{- $ns := .Values.edge.tls.secretNamespaces | default (list (include "aether.edge.namespace" .)) -}}
 {{- if and .Values.edge.gateway.create .Values.edge.gateway.tlsSecretNamespace -}}
 {{- $ns = append $ns .Values.edge.gateway.tlsSecretNamespace -}}
 {{- end -}}
 {{- join "," (uniq $ns) -}}
+{{- end -}}
+{{/*
+edge.tls.clusterWideSecrets as "true" or the empty string. Only a real boolean
+is accepted: a quoted "false" read for truthiness would re-open the
+cluster-wide Secret grant, so anything else fails the render.
+*/}}
+{{- define "aether.edge.clusterWideSecrets" -}}
+{{- $v := .Values.edge.tls.clusterWideSecrets -}}
+{{- if not (kindIs "bool" $v) -}}
+{{- fail (printf "edge.tls.clusterWideSecrets must be a boolean, got %q" (toString $v)) -}}
+{{- end -}}
+{{- if $v }}true{{ end -}}
 {{- end -}}
 {{- define "aether.edge.serviceAccountName" -}}{{ include "aether.edge.fullname" . }}{{- end -}}
 {{- define "aether.edge.configMapName" -}}

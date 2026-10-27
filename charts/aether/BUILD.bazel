@@ -3517,6 +3517,62 @@ helm_template_match_test(
     ],
 )
 
+# A quoted "false" (--set-string, or a string in a values file) is not false:
+# read for truthiness it would re-open the cluster-wide grant. Anything but a
+# boolean fails the render.
+helm_template_fail_test(
+    name = "aether_edge_tls_cluster_wide_secrets_string_test",
+    chart = ":aether",
+    expected_message = "edge.tls.clusterWideSecrets must be a boolean",
+    opts = [
+        "--set",
+        "edge.enabled=true",
+        "--set",
+        "edge.tls.enabled=true",
+        "--set",
+        "edge.gateway.tlsSecretName=edge-cert",
+        "--set-string",
+        "edge.tls.clusterWideSecrets=false",
+    ],
+)
+
+# An empty entry would render a Role with no namespace (helm puts it in the
+# release namespace) and an empty name in --secret-namespaces.
+helm_template_fail_test(
+    name = "aether_edge_tls_secret_namespaces_empty_test",
+    chart = ":aether",
+    expected_message = "edge.tls.secretNamespaces entries must be non-empty strings",
+    opts = [
+        "--set",
+        "edge.enabled=true",
+        "--set",
+        "edge.tls.enabled=true",
+        "--set",
+        "edge.gateway.tlsSecretName=edge-cert",
+        "--set-string",
+        "edge.tls.secretNamespaces[0]=web",
+        "--set-string",
+        "edge.tls.secretNamespaces[1]=",
+    ],
+)
+
+# A namespace listed twice would render two Roles of the same name in it.
+helm_template_fail_test(
+    name = "aether_edge_tls_secret_namespaces_duplicate_test",
+    chart = ":aether",
+    expected_message = "edge.tls.secretNamespaces lists \"web\" more than once",
+    opts = [
+        "--set",
+        "edge.enabled=true",
+        "--set",
+        "edge.tls.enabled=true",
+        "--set",
+        "edge.gateway.tlsSecretName=edge-cert",
+        "--set",
+        "edge.tls.secretNamespaces={web,web}",
+    ],
+)
+
 # edge.tls.clusterWideSecrets is the opt-in to the grant every chart before
 # 3.1.0 gave: Secrets in the ClusterRole (its last rule), no Role, and no
 # --secret-namespaces, so the edge watches Secrets in every namespace.

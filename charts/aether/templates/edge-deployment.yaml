@@ -142,7 +142,7 @@ spec:
             - "--edge-service-name={{ include "aether.edge.fullname" . }}"
             {{- if .Values.edge.tls.enabled }}
             - "--edge-tls"
-            {{- if not .Values.edge.tls.clusterWideSecrets }}
+            {{- if not (include "aether.edge.clusterWideSecrets" .) }}
             # Watch Secrets only where the chart's Roles grant them (edge-rbac.yaml).
             - "--secret-namespaces={{ include "aether.edge.secretNamespaces" . }}"
             {{- end }}
