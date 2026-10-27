@@ -5141,6 +5141,42 @@ the cluster" and "anything else". Neither chain is access-logged.
 - Rolling or rolling back: per node, with the agent. A node not yet upgraded
   counts all of it under `cap_passthrough`.
 
+#### Chart 3.1.0: the edge reads TLS Secrets only in the namespaces it is given
+
+Until 3.1.0, `edge.tls.enabled=true` added `secrets` get/list/watch to the
+edge's ClusterRole: anyone who could run a pod as the edge's ServiceAccount
+could read every Secret in the cluster. The edge only needs the
+`kubernetes.io/tls` Secrets its Gateway listeners name in `certificateRefs`.
+
+- **Changed default.** With `edge.tls.enabled`, the chart renders a `Role` and
+  `RoleBinding` named `<release>-aether-edge-secrets` in each namespace of
+  `edge.tls.secretNamespaces` (default: the edge namespace, plus
+  `edge.gateway.tlsSecretNamespace` when the chart creates the Gateway), and
+  passes the same list to the edge as `--secret-namespaces`. The edge's Secret
+  informer then covers only those namespaces; every other kind stays
+  cluster-wide. The ClusterRole has no Secret rule.
+- **What breaks.** A Gateway listener whose `certificateRefs` point at a Secret
+  in a namespace outside the list stops resolving: the listener reports
+  `ResolvedRefs=False` with `certificateRef "<name>" did not resolve: ...` and
+  the edge logs `gateway listener TLS cert unresolved`. Before upgrading, list
+  the namespaces your Gateways' certificates live in:
+  `kubectl get gateways -A -o jsonpath='{range .items[*]}{range .spec.listeners[*]}{.tls.certificateRefs[*].namespace}{"\n"}{end}{end}'`
+  (an empty line is the Gateway's own namespace) and set
+  `edge.tls.secretNamespaces` to them. Each must exist when the chart is
+  installed.
+- **Opt-in to the old grant.** `edge.tls.clusterWideSecrets=true` restores the
+  ClusterRole rule and omits `--secret-namespaces`, for Gateways whose
+  namespaces are not known at install (the conformance workflow sets it: the
+  suite creates its namespaces after the install).
+- **Skew.** The edge runs the agent image of the same release, so a chart and
+  its edge image move together. An edge image older than 3.1.0 under a 3.1.0
+  chart fails at start on the unknown `--secret-namespaces` flag, and would not
+  sync its cluster-wide Secret informer under the namespaced Roles anyway; set
+  `edge.tls.clusterWideSecrets=true` if the edge image must be pinned older.
+  A 3.1.0 edge under an older chart (no flag) watches Secrets cluster-wide, as
+  before. Not measured on a cluster; the template tests and the cache-scoping
+  unit test cover the rendering and the informer scope.
+
 #### Prober chart 1.1.1: targets name a declared port (proposal 043)
 
 Deploy prober chart **1.1.1 before** `aether` chart 3.0.0. It works against

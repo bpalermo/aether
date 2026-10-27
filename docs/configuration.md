@@ -455,6 +455,8 @@ over mTLS and routes external traffic via the Gateway API. Disabled by default.
 | `edge.gateway.hostname` | `""` | Constrain the chart-managed Gateway's listeners (e.g. `"*.example.com"`). |
 | `edge.gateway.httpRoutes` | `[]` | Declaratively managed `HTTPRoute`s parented to the chart Gateway (the supported replacement for hand-applied manifests). |
 | `edge.tls.enabled` | `false` | Downstream TLS: HTTPS listener (certs per Gateway listener via SDS) + HTTP→HTTPS redirect. The edge→pod hop stays mTLS. |
+| `edge.tls.secretNamespaces` | `[]` | Namespaces whose `kubernetes.io/tls` Secrets the edge may read: a `Role` + `RoleBinding` in each (they must exist at install), and the edge watches Secrets only there (`--secret-namespaces`). A `certificateRef` elsewhere does not resolve. Empty = the edge namespace; `edge.gateway.tlsSecretNamespace` is always added. Since 3.1.0. |
+| `edge.tls.clusterWideSecrets` | `false` | Opt-in to the pre-3.1.0 grant: Secrets in every namespace through the edge's `ClusterRole` (anyone who can run a pod as the edge's ServiceAccount reads every Secret). For Gateways whose namespaces are not known at install, such as the conformance suite. |
 | `edge.geoip.enabled` | `false` | Emit `x-geo-*` request headers from a MaxMind DB (028). The `x-geo-*` namespace is always stripped from client requests. |
 | `edge.geoip.headers` | `[country]` | Which headers to emit: `country`, `city`. |
 | `edge.geoip.database.secretName` / `fileName` | `""` / `GeoLite2-City.mmdb` | The bring-your-own mmdb Secret + key. |

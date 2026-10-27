@@ -1069,6 +1069,19 @@ app.kubernetes.io/version: {{ . | quote }}
 {{- define "aether.edge.namespace" -}}
 {{- default "aether-ingress" .Values.edge.namespace -}}
 {{- end -}}
+{{/*
+The namespaces whose TLS Secrets the edge may read, comma-joined:
+edge.tls.secretNamespaces, or the edge's own namespace when that is empty, plus
+the namespace of the chart-managed Gateway's certificate
+(edge.gateway.tlsSecretNamespace) when the chart creates that Gateway.
+*/}}
+{{- define "aether.edge.secretNamespaces" -}}
+{{- $ns := .Values.edge.tls.secretNamespaces | default (list (include "aether.edge.namespace" .)) -}}
+{{- if and .Values.edge.gateway.create .Values.edge.gateway.tlsSecretNamespace -}}
+{{- $ns = append $ns .Values.edge.gateway.tlsSecretNamespace -}}
+{{- end -}}
+{{- join "," (uniq $ns) -}}
+{{- end -}}
 {{- define "aether.edge.serviceAccountName" -}}{{ include "aether.edge.fullname" . }}{{- end -}}
 {{- define "aether.edge.configMapName" -}}
 {{- printf "%s-config" (include "aether.edge.fullname" .) | trunc 63 | trimSuffix "-" -}}
