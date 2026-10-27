@@ -2503,12 +2503,13 @@ YAML
 
 # u2_slice SUFFIX PORT — an EndpointSlice of $LATE_SLICED, written by hand,
 # that gives its port name "http" the number PORT. Only the port matters to the
-# leg; its one address must be one no pod holds: the last of 10.244.0.0/16,
-# rather than one outside every pod range: talos-main refuses EndpointSlice and
-# Endpoints addresses outside its pod CIDR (10.244.0.0/16) from the aether
-# principals, so an address elsewhere fails the apply there. No node's pod
-# range reaches 10.244.255.0/24 (one /24 per node, allocated from the bottom),
-# and on this script's kind cluster (podSubnet 10.20.0.0/16) it is outside it.
+# leg; its one address must be one no pod holds. The suite runs on kind, where
+# 10.244.255.254 is outside the podSubnet (10.20.0.0/16). It is inside
+# 10.244.0.0/16 as a precaution: if the suite is ever pointed at talos-main as
+# the fleet-aether identity, the cluster's policy (homelab #295) denies that
+# identity EndpointSlice and Endpoints addresses outside 10.244.0.0/16. There,
+# 10.244.255.254, the last usable host of the /16, is an address no node's /24
+# is expected to hand out.
 u2_slice() {
 	kc apply -f - >/dev/null <<YAML || die "U2: EndpointSlice $LATE_SLICED-$1 apply failed"
 apiVersion: discovery.k8s.io/v1
