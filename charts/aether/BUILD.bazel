@@ -3541,7 +3541,7 @@ helm_template_fail_test(
 helm_template_fail_test(
     name = "aether_edge_tls_secret_namespaces_empty_test",
     chart = ":aether",
-    expected_message = "edge.tls.secretNamespaces entries must be non-empty strings",
+    expected_message = "edge.tls.secretNamespaces entries must be namespace names (DNS-1123 labels)",
     opts = [
         "--set",
         "edge.enabled=true",
@@ -3553,6 +3553,43 @@ helm_template_fail_test(
         "edge.tls.secretNamespaces[0]=web",
         "--set-string",
         "edge.tls.secretNamespaces[1]=",
+    ],
+)
+
+# The list is joined with commas into --secret-namespaces and split again for
+# the Roles, so an entry with a comma ("web,") would smuggle in an empty
+# namespace, and "a,b" would slip past the duplicate check. Every entry must be
+# a namespace name: a DNS-1123 label.
+helm_template_fail_test(
+    name = "aether_edge_tls_secret_namespaces_comma_test",
+    chart = ":aether",
+    expected_message = "edge.tls.secretNamespaces entries must be namespace names (DNS-1123 labels), got \"web,\"",
+    opts = [
+        "--set",
+        "edge.enabled=true",
+        "--set",
+        "edge.tls.enabled=true",
+        "--set",
+        "edge.gateway.tlsSecretName=edge-cert",
+        "--set-string",
+        "edge.tls.secretNamespaces[0]=web\\,",
+    ],
+)
+
+# edge.gateway.tlsSecretNamespace joins the same list, under the same rule.
+helm_template_fail_test(
+    name = "aether_edge_tls_gateway_secret_namespace_invalid_test",
+    chart = ":aether",
+    expected_message = "edge.gateway.tlsSecretNamespace must be a namespace name (DNS-1123 label), got \"certs,web\"",
+    opts = [
+        "--set",
+        "edge.enabled=true",
+        "--set",
+        "edge.tls.enabled=true",
+        "--set",
+        "edge.gateway.tlsSecretName=edge-cert",
+        "--set-string",
+        "edge.gateway.tlsSecretNamespace=certs\\,web",
     ],
 )
 

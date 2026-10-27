@@ -1073,15 +1073,17 @@ app.kubernetes.io/version: {{ . | quote }}
 The namespaces whose TLS Secrets the edge may read, comma-joined:
 edge.tls.secretNamespaces, or the edge's own namespace when that is empty, plus
 the namespace of the chart-managed Gateway's certificate
-(edge.gateway.tlsSecretNamespace) when the chart creates that Gateway. An empty
-entry (a Role with no namespace lands in the release namespace) or one listed
-twice fails the render.
+(edge.gateway.tlsSecretNamespace) when the chart creates that Gateway. The list
+is comma-joined here and split again for the Roles, so every entry must be a
+namespace name (a DNS-1123 label: no comma, no space, never empty, where an
+empty one would put a Role in the release namespace); anything else, or an
+entry listed twice, fails the render.
 */}}
 {{- define "aether.edge.secretNamespaces" -}}
 {{- $seen := dict -}}
 {{- range .Values.edge.tls.secretNamespaces -}}
-{{- if or (not (kindIs "string" .)) (eq (trim .) "") -}}
-{{- fail (printf "edge.tls.secretNamespaces entries must be non-empty strings, got %q" (toString .)) -}}
+{{- if not (include "aether.isNamespaceName" .) -}}
+{{- fail (printf "edge.tls.secretNamespaces entries must be namespace names (DNS-1123 labels), got %q" (toString .)) -}}
 {{- end -}}
 {{- if hasKey $seen . -}}
 {{- fail (printf "edge.tls.secretNamespaces lists %q more than once" .) -}}
@@ -1089,10 +1091,23 @@ twice fails the render.
 {{- $_ := set $seen . true -}}
 {{- end -}}
 {{- $ns := .Values.edge.tls.secretNamespaces | default (list (include "aether.edge.namespace" .)) -}}
+{{- with .Values.edge.gateway.tlsSecretNamespace -}}
+{{- if not (include "aether.isNamespaceName" .) -}}
+{{- fail (printf "edge.gateway.tlsSecretNamespace must be a namespace name (DNS-1123 label), got %q" (toString .)) -}}
+{{- end -}}
+{{- end -}}
 {{- if and .Values.edge.gateway.create .Values.edge.gateway.tlsSecretNamespace -}}
 {{- $ns = append $ns .Values.edge.gateway.tlsSecretNamespace -}}
 {{- end -}}
 {{- join "," (uniq $ns) -}}
+{{- end -}}
+{{/*
+"true" when the value is a namespace name, a DNS-1123 label (lowercase
+alphanumerics and '-', alphanumeric at both ends, at most 63 characters), else
+the empty string.
+*/}}
+{{- define "aether.isNamespaceName" -}}
+{{- if and (kindIs "string" .) (le (len .) 63) (regexMatch "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$" .) }}true{{ end -}}
 {{- end -}}
 {{/*
 edge.tls.clusterWideSecrets as "true" or the empty string. Only a real boolean
