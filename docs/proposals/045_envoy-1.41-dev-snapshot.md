@@ -363,6 +363,12 @@ no TLS 1.2 pin.
 - **Why that works:** a pass needs a response the inbound sends after it has
   accepted the connection. A rejection arrives as a reset and fails the check
   on TLS 1.2 and 1.3 alike.
+- **Any HTTP status passes** (`expected_statuses` 200-599). The inbound
+  connection manager is not exempt from the overload manager: at heap >= 0.95
+  it answers 503 before the health_check filter runs. A 503 still proves the
+  inbound accepted the node certificate. Requiring 200 would demote every
+  serving pod on an overloaded node at once, the flap the health gateway's
+  `bypass_overload_manager` exists to prevent.
 - **What stayed:** the probe's own transport socket, a fresh handshake per
   check and the 5 s cadence.
 - **The proof** is a live test against real Envoy,
