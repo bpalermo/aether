@@ -10776,9 +10776,20 @@ cluster's own SSL counters say which half (these are deliberately NOT excluded
 from the stats matcher, precisely for this).
 
 Since proposal 045 the probe is an HTTP/2 GET of `/-/-/live` that the inbound
-answers itself, not a connect-only TCP check, and any HTTP status passes. An
-overloaded inbound answers 503 before its health_check filter, and has still
-accepted the node certificate. An inbound that rejects the node identity shows
+answers itself, not a connect-only TCP check, and any HTTP status passes. The
+two overload stages of the chart affect the probe differently:
+- **`stop_accepting_requests`** (heap ≥ 0.95): the inbound answers 503 before
+  its health_check filter. It has still accepted the node certificate, so the
+  probe passes and the node's pods stay ready.
+- **`stop_accepting_connections`** (heap ≥ 0.98): the listeners stop
+  accepting. The probe's connection is never answered, its 1 s timeout fails
+  it, and every local pod is demoted.
+
+The second stage is not a regression: the connect-only probe before proposal
+045 needed the same accept and failed the same way. If `inboundready_*` drops
+for every pod of one node at once, check that node's proxy heap
+(`envoy_overload_envoy_overload_actions_stop_accepting_connections_active`)
+before anything else. An inbound that rejects the node identity shows
 up differently on the probe cluster under each TLS version (measured in
 `//agent/test/mtlspool` `TestInboundReadyProbe_RequiresTheInboundToAcceptTheNodeIdentity`,
 three checks each):

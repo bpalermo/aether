@@ -136,10 +136,10 @@ func TestInboundReadyProbeClusterHealthCheck(t *testing.T) {
 	assert.Equal(t, MeshLivePath, httpHC.GetPath(), "the path the inbound's own health_check filter answers locally")
 	assert.Equal(t, typev3.CodecClientType_HTTP2, httpHC.GetCodecClientType(),
 		"h2, the codec of the no-SNI chain the probe's ALPN selects")
-	// Any response passes: an overloaded inbound answers 503 before the
-	// health_check filter, and readiness must not follow overload (the flap the
-	// health gateway's bypass_overload_manager prevents). A rejection is a
-	// reset, which no status range admits.
+	// Any response passes: under stop_accepting_requests the inbound answers 503
+	// before the health_check filter, and readiness must not follow that stage
+	// (the flap the health gateway's bypass_overload_manager prevents). A
+	// rejection is a reset, which no status range admits.
 	require.Len(t, httpHC.GetExpectedStatuses(), 1)
 	assert.Equal(t, int64(200), httpHC.GetExpectedStatuses()[0].GetStart())
 	assert.Equal(t, int64(600), httpHC.GetExpectedStatuses()[0].GetEnd(), "exclusive end: every status through 599")

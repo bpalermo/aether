@@ -467,9 +467,9 @@ func NewAppHealthProbeCluster(name string, addr AppAddress, port uint16, healthP
 // every mTLS HCM chain and replies 200 locally, before authz, stats or the
 // router, so the application never takes part. A pass needs the inbound's own
 // response, which only exists after the inbound has accepted the connection.
-// ANY HTTP status passes: an overloaded inbound answers 503 before that filter
-// runs, and it has still accepted the node certificate (see the
-// ExpectedStatuses comment below for why readiness must not follow overload).
+// ANY HTTP status passes: an inbound under stop_accepting_requests answers 503
+// before that filter runs, and it has still accepted the node certificate (see
+// the ExpectedStatuses comment below for what that covers, and what it does not).
 // So a pass means, in one signal:
 //
 //	the inbound listener is listening (not warming, not absent)
@@ -606,6 +606,18 @@ func NewInboundReadyProbeCluster(name, netns, nodeSpiffeID, validationContextNam
 						// overloaded node is the data plane's job, not
 						// readiness'. The range end is exclusive, 600 is
 						// Envoy's ceiling.
+						//
+						// What this does NOT cover: the chart's second overload
+						// stage, stop_accepting_connections at heap >= 0.98
+						// (agent-proxy-configmap.yaml). There the listeners stop
+						// accepting, the probe's connection is never answered,
+						// the 1 s timeout fails it, and every local pod is
+						// still demoted. That is not a regression: the
+						// connect-only probe before this one needed the same
+						// accept and failed the same way. Covering it would
+						// take a probe path that bypasses the overload manager
+						// (the inbound listener cannot, it is the data plane)
+						// and is out of this change's scope.
 						ExpectedStatuses: []*typev3.Int64Range{{Start: 200, End: 600}},
 					},
 				},

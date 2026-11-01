@@ -131,10 +131,12 @@ func TestInboundReadyProbe_RequiresTheInboundToAcceptTheNodeIdentity(t *testing.
 		// harness no longer reproduces the hole and the cases above prove
 		// nothing.
 		{name: "tls13_rejected_connect_only_control", node: spiffeNode, tls: tlsv3.TlsParameters_TLSv1_3, connectOnly: true, wantHealthy: true},
-		// An inbound that answers 503 (an overloaded one) has still accepted the
-		// node identity: ready. Readiness must not follow overload, or every
-		// pod on an overloaded node is demoted at once. A rejected identity
-		// stays a reset, so it still fails against the same inbound.
+		// An inbound that answers 503 (under stop_accepting_requests) has still
+		// accepted the node identity: ready. Readiness must not follow that
+		// overload stage, or every pod on the node is demoted at once. A
+		// rejected identity stays a reset, so it still fails against the same
+		// inbound. (stop_accepting_connections, the stage after it, refuses the
+		// connection itself; no probe through the inbound can pass then.)
 		{name: "tls13_accepted_inbound_503", node: spiffeAgentNode, tls: tlsv3.TlsParameters_TLSv1_3, answers503: true, wantHealthy: true},
 		{name: "tls12_accepted_inbound_503", node: spiffeAgentNode, tls: tlsv3.TlsParameters_TLSv1_2, answers503: true, wantHealthy: true},
 		{name: "tls13_rejected_inbound_503", node: spiffeNode, tls: tlsv3.TlsParameters_TLSv1_3, answers503: true, wantHealthy: false},
