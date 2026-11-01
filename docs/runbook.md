@@ -10633,7 +10633,7 @@ independent facts about each local pod, on **two separate gateway paths**:
 | Gateway path | Probe cluster | What it proves | Transport |
 |---|---|---|---|
 | `/healthz/health_<namespace>_<pod>` | `health_<namespace>_<pod>` | the application answers (HTTP GET on the readiness path, or a raw TCP connect for a `protocol: tcp` pod) | cleartext, in the pod's netns |
-| `/healthz/inboundready_<namespace>_<pod>` | `inboundready_<namespace>_<pod>` | the pod's **mesh inbound listener** is listening, has loaded the pod's own SVID, it verifies as that pod, and it **accepted the node's client certificate**: an HTTP/2 GET of `/-/-/live`, answered by the inbound itself (never the application) | mTLS, node identity → `127.0.0.1:18008` in the pod's netns, SAN-pinned to the pod's SPIFFE ID |
+| `/healthz/inboundready_<namespace>_<pod>` | `inboundready_<namespace>_<pod>` | the pod's **mesh inbound listener** is listening, has loaded the pod's own SVID, it verifies as that pod, and it **accepted the node's client certificate**: an HTTP/2 GET of `/-/-/live`, answered by the inbound itself (never the application), any status passing | mTLS, node identity → `127.0.0.1:18008` in the pod's netns, SAN-pinned to the pod's SPIFFE ID |
 
 Each path reflects **its own cluster only**. `/healthz/health_<namespace>_<pod>` means
 exactly what it meant before #815. A `404` on either path means "not programmed"
@@ -10773,13 +10773,26 @@ max_over_time(envoy_cluster_membership_healthy{aether_cluster=~"health_.*"}[5m])
 
 If `inboundready_<namespace>_<pod>` alone is 0, the handshake is the problem, and the probe
 cluster's own SSL counters say which half (these are deliberately NOT excluded
-from the stats matcher, precisely for this). Since proposal 045 the probe is an
-HTTP/2 GET of `/-/-/live` that the inbound answers itself, not a connect-only
-TCP check. Under TLS 1.3 (the upstream default from the 1.41 proxy,
-envoyproxy/envoy#48570) the client's handshake completes before the server has
-accepted its certificate, so an inbound that rejects the node identity shows up
-as a reset of the probe request (`envoy_cluster_health_check_failure` rising
-with no probe-side `ssl_*` counter), not as a handshake error:
+from the stats matcher, precisely for this).
+
+Since proposal 045 the probe is an HTTP/2 GET of `/-/-/live` that the inbound
+answers itself, not a connect-only TCP check, and any HTTP status passes. An
+overloaded inbound answers 503 before its health_check filter, and has still
+accepted the node certificate. An inbound that rejects the node identity shows
+up differently on the probe cluster under each TLS version (measured in
+`//agent/test/mtlspool` `TestInboundReadyProbe_RequiresTheInboundToAcceptTheNodeIdentity`,
+three checks each):
+- **TLS 1.2:** `ssl_connection_error` rises and `ssl_handshake` does not; the
+  client's handshake fails.
+- **TLS 1.3** (the upstream default from the 1.41 proxy,
+  envoyproxy/envoy#48570): **both** `ssl_handshake` and `ssl_connection_error`
+  rise, one each per check. The client's handshake completes before the server
+  has accepted its certificate, and the server's alert is read afterwards, as a
+  connection error.
+
+Either way, `envoy_cluster_health_check_failure` rises and the probe-side
+`ssl_fail_verify_*` counters stay at 0: those are the probe rejecting the
+SERVER, not the server rejecting the probe:
 
 ```promql
 increase(envoy_cluster_ssl_fail_verify_san{aether_cluster=~"inboundready_.*"}[5m])   # wrong pod answered on :18008

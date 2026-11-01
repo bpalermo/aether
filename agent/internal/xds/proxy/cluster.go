@@ -467,6 +467,9 @@ func NewAppHealthProbeCluster(name string, addr AppAddress, port uint16, healthP
 // every mTLS HCM chain and replies 200 locally, before authz, stats or the
 // router, so the application never takes part. A pass needs the inbound's own
 // response, which only exists after the inbound has accepted the connection.
+// ANY HTTP status passes: an overloaded inbound answers 503 before that filter
+// runs, and it has still accepted the node certificate (see the
+// ExpectedStatuses comment below for why readiness must not follow overload).
 // So a pass means, in one signal:
 //
 //	the inbound listener is listening (not warming, not absent)
@@ -510,9 +513,12 @@ func NewAppHealthProbeCluster(name string, addr AppAddress, port uint16, healthP
 // CLIENT IDENTITY. nodeSpiffeID: the node's own SVID, the same secret the
 // service clusters' transport-socket matcher presents on its no-match path for
 // node-originated connections (active health checks carry no source-pod filter
-// state). The inbound DownstreamTlsContext requires a client certificate and
-// validates it against the trust-domain bundle with no SAN restriction, so the
-// node identity is accepted; nothing about inbound validation is loosened here.
+// state). The inbound DownstreamTlsContext requires a client certificate,
+// validates it against the trust-domain bundle, and pins its URI SAN to the
+// workload shape spiffe://<td>/ns/ (#843, WorkloadSANPrefix). The node identity
+// is the agent's own workload SVID, spiffe://<td>/ns/aether-system/sa/aether-agent,
+// so it satisfies that pin (TestInboundReadyProbeIsAcceptedByInboundValidation);
+// nothing about inbound validation is loosened here.
 //
 // podSpiffeID pins the SERVER side: the probe must not pass because SOMETHING
 // answered on that address, only because THIS pod did.
@@ -579,12 +585,28 @@ func NewInboundReadyProbeCluster(name, netns, nodeSpiffeID, validationContextNam
 				// keep the connection, so this pin is what forces the handshake.
 				ReuseConnection: wrapperspb.Bool(false),
 				// Answered by the inbound itself (see WHAT "HEALTHY" MEANS
-				// HERE): the liveness path, over the chain's h2 codec, expecting
-				// Envoy's default 200.
+				// HERE): the liveness path, over the chain's h2 codec.
 				HealthChecker: &corev3.HealthCheck_HttpHealthCheck_{
 					HttpHealthCheck: &corev3.HealthCheck_HttpHealthCheck{
 						Path:            MeshLivePath,
 						CodecClientType: typev3.CodecClientType_HTTP2,
+						// ANY HTTP response passes, not only 200. A response
+						// at all is the proof: the inbound sent it after
+						// accepting the node certificate, and a TLS 1.3
+						// rejection is a reset, never a response. Its status
+						// is not the question. In particular the inbound
+						// connection manager is not exempt from the overload
+						// manager: at heap >= 0.95 (stop_accepting_requests)
+						// it answers 503 before the health_check filter runs.
+						// Requiring 200 would then fail every local pod's
+						// probe, and liveness.go would demote every serving
+						// pod on the node: the registry flap the health
+						// gateway's bypass_overload_manager exists to prevent
+						// (see BuildHealthGatewayListener). Shedding away from an
+						// overloaded node is the data plane's job, not
+						// readiness'. The range end is exclusive, 600 is
+						// Envoy's ceiling.
+						ExpectedStatuses: []*typev3.Int64Range{{Start: 200, End: 600}},
 					},
 				},
 			},

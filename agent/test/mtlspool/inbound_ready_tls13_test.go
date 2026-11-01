@@ -30,6 +30,8 @@ package mtlspool
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"io"
 	"net"
 	"net/http"
@@ -48,8 +50,11 @@ import (
 	corev3 "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
 	endpointv3 "github.com/envoyproxy/go-control-plane/envoy/config/endpoint/v3"
 	listenerv3 "github.com/envoyproxy/go-control-plane/envoy/config/listener/v3"
+	healthcheckv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/http/health_check/v3"
+	hcmv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/network/http_connection_manager/v3"
 	tlsv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/transport_sockets/tls/v3"
 	secretservice "github.com/envoyproxy/go-control-plane/envoy/service/secret/v3"
+	typev3 "github.com/envoyproxy/go-control-plane/envoy/type/v3"
 	"github.com/envoyproxy/go-control-plane/pkg/cache/types"
 	cachev3 "github.com/envoyproxy/go-control-plane/pkg/cache/v3"
 	resourcev3 "github.com/envoyproxy/go-control-plane/pkg/resource/v3"
@@ -69,6 +74,7 @@ type readyCase struct {
 	node        string                          // the client SVID the probe presents
 	tls         tlsv3.TlsParameters_TlsProtocol // forced as both minimum and maximum
 	connectOnly bool                            // the pre-change probe shape (the control)
+	answers503  bool                            // dial the inbound whose liveness answer is a 503
 	wantHealthy bool
 }
 
@@ -87,14 +93,33 @@ func TestInboundReadyProbe_RequiresTheInboundToAcceptTheNodeIdentity(t *testing.
 		NetworkNamespace: "/var/run/netns/echo-0", ContainerId: "c-echo-0", Ips: []string{"10.0.0.7"},
 	}
 	inbound := productionInbound(t, pod, socketAddress("127.0.0.1", envoyPicksPort), true, false)
+	// The same inbound, answering the probe with a 503 instead of a 200: what
+	// an overloaded inbound does (stop_accepting_requests replies 503 before
+	// the health_check filter runs). Here the liveness filter itself is made to
+	// fail, by conditioning it on a cluster that does not exist; either way the
+	// 503 is the inbound's own response, sent after it accepted the client.
+	inbound503 := productionInbound(t, pod, socketAddress("127.0.0.1", envoyPicksPort), true, false)
+	inbound503.Name = inbound.GetName() + "_503"
+	eachHCM(t, inbound503, func(h *hcmv3.HttpConnectionManager) {
+		for _, f := range h.GetHttpFilters() {
+			if f.GetName() != "envoy.filters.http.health_check.live" {
+				continue
+			}
+			var hc healthcheckv3.HealthCheck
+			require.NoError(t, f.GetTypedConfig().UnmarshalTo(&hc))
+			hc.ClusterMinHealthyPercentages = map[string]*typev3.Percent{"no_such_cluster": {Value: 100}}
+			f.ConfigType = &hcmv3.HttpFilter_TypedConfig{TypedConfig: config.TypedConfig(&hc)}
+		}
+	})
 	dest := launchEnvoy(t, bin, "destination", &bootstrapv3.Bootstrap{
 		Node: &corev3.Node{Id: envoyNodeID, Cluster: "aether"},
 		StaticResources: &bootstrapv3.Bootstrap_StaticResources{
 			Clusters:  []*clusterv3.Cluster{sdsCluster(sdsAddr)},
-			Listeners: []*listenerv3.Listener{inbound},
+			Listeners: []*listenerv3.Listener{inbound, inbound503},
 		},
 	}, nil, "--concurrency", "1")
 	inboundAddr := dest.listenerAddr(t, inbound.GetName())
+	inbound503Addr := dest.listenerAddr(t, inbound503.GetName())
 
 	cases := []readyCase{
 		{name: "tls13_rejected", node: spiffeNode, tls: tlsv3.TlsParameters_TLSv1_3, wantHealthy: false},
@@ -106,11 +131,22 @@ func TestInboundReadyProbe_RequiresTheInboundToAcceptTheNodeIdentity(t *testing.
 		// harness no longer reproduces the hole and the cases above prove
 		// nothing.
 		{name: "tls13_rejected_connect_only_control", node: spiffeNode, tls: tlsv3.TlsParameters_TLSv1_3, connectOnly: true, wantHealthy: true},
+		// An inbound that answers 503 (an overloaded one) has still accepted the
+		// node identity: ready. Readiness must not follow overload, or every
+		// pod on an overloaded node is demoted at once. A rejected identity
+		// stays a reset, so it still fails against the same inbound.
+		{name: "tls13_accepted_inbound_503", node: spiffeAgentNode, tls: tlsv3.TlsParameters_TLSv1_3, answers503: true, wantHealthy: true},
+		{name: "tls12_accepted_inbound_503", node: spiffeAgentNode, tls: tlsv3.TlsParameters_TLSv1_2, answers503: true, wantHealthy: true},
+		{name: "tls13_rejected_inbound_503", node: spiffeNode, tls: tlsv3.TlsParameters_TLSv1_3, answers503: true, wantHealthy: false},
 	}
 
 	clusters := []*clusterv3.Cluster{sdsCluster(sdsAddr)}
 	for _, c := range cases {
-		clusters = append(clusters, readyProbeCluster(t, c, pod, inboundAddr))
+		addr := inboundAddr
+		if c.answers503 {
+			addr = inbound503Addr
+		}
+		clusters = append(clusters, readyProbeCluster(t, c, pod, addr))
 	}
 	probe := launchEnvoy(t, bin, "probe", &bootstrapv3.Bootstrap{
 		Node:            &corev3.Node{Id: envoyNodeID, Cluster: "aether"},
@@ -133,6 +169,10 @@ func TestInboundReadyProbe_RequiresTheInboundToAcceptTheNodeIdentity(t *testing.
 			success := adminCounter(t, probe.admin, prefix+"health_check.success")
 			failure := adminCounter(t, probe.admin, prefix+"health_check.failure")
 			t.Logf("%s: membership_healthy=%d success=%d failure=%d", c.name, healthy, success, failure)
+			// What the probe side records for each case, for the runbook's
+			// "how a rejection shows" (docs/runbook.md, the inbound-readiness
+			// section): the probe cluster's own ssl.* counters.
+			t.Logf("%s: probe-side ssl.* %v", c.name, adminStats(t, probe.admin, prefix+"ssl."))
 			if c.wantHealthy {
 				require.Equal(t, 1, healthy, "the probe must report the inbound ready")
 				require.Positive(t, success)
@@ -144,6 +184,14 @@ func TestInboundReadyProbe_RequiresTheInboundToAcceptTheNodeIdentity(t *testing.
 			require.GreaterOrEqual(t, failure, 2)
 		})
 	}
+
+	// The 503s are real: the destination's inbound connection managers answered
+	// 5xx (only the second inbound does).
+	// Health-check responses are not counted in the connection manager's
+	// downstream_rq_<code> stats, so the status is read by asking directly,
+	// as the node identity, over h2.
+	require.Equal(t, http.StatusOK, liveStatus(t, p, inboundAddr), "the first inbound answers the probe path with a 200")
+	require.Equal(t, http.StatusServiceUnavailable, liveStatus(t, p, inbound503Addr), "the second inbound answers the probe path with a 503")
 
 	// The rejection is real: the destination refused client certificates on
 	// the SAN pin, which is what the rejected cases were up against.
@@ -217,6 +265,38 @@ func startReadySDS(t *testing.T, p *pki) string {
 	go func() { _ = gs.Serve(ln) }()
 	t.Cleanup(gs.Stop)
 	return ln.Addr().String()
+}
+
+// liveStatus GETs the inbound's liveness path over mTLS h2 as the accepted
+// node identity and returns the status the inbound answered with.
+func liveStatus(t *testing.T, p *pki, addr string) int {
+	t.Helper()
+	certPath, keyPath := p.leaf(t, "live-client", spiffeAgentNode, false)
+	cert, err := tls.LoadX509KeyPair(certPath, keyPath)
+	require.NoError(t, err)
+	roots := x509.NewCertPool()
+	require.True(t, roots.AppendCertsFromPEM(p.caPEM))
+	client := &http.Client{
+		Timeout: 5 * time.Second,
+		Transport: &http.Transport{
+			ForceAttemptHTTP2: true,
+			TLSClientConfig: &tls.Config{
+				Certificates: []tls.Certificate{cert},
+				RootCAs:      roots,
+				NextProtos:   []string{"h2"},
+				MinVersion:   tls.VersionTLS12,
+			},
+		},
+	}
+	resp, err := client.Get("https://" + addr + proxy.MeshLivePath)
+	require.NoError(t, err)
+	defer resp.Body.Close()
+	_, _ = io.Copy(io.Discard, resp.Body)
+	// Offering ALPN h2 selects the inbound's no-SNI h2 chain, as the probe's
+	// does. The inbound's TLS context advertises no ALPN of its own, so Go
+	// falls back to HTTP/1.1 on that chain, which its AUTO codec accepts. The
+	// status comes from the same health_check filter either way.
+	return resp.StatusCode
 }
 
 // adminStats returns the admin /stats lines whose name contains filter.
