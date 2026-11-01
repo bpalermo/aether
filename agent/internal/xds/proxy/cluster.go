@@ -461,20 +461,41 @@ func NewAppHealthProbeCluster(name string, addr AppAddress, port uint16, healthP
 // and one pod promoted in <=0.5 s — i.e. the mesh advertised an endpoint whose
 // mesh port refused connections.
 //
-// WHAT "HEALTHY" MEANS HERE. The health check is TCP with an EMPTY send payload
-// (connect-only) over a TLS transport socket, which is a deliberate composition:
-// Envoy's TCP health-check session succeeds on the Connected event, and a
-// connection with a TLS transport socket does not raise Connected until the
-// handshake has completed (SslSocket::doHandshake raises it; RawBufferSocket
-// raises it on connect). So a pass means, in one signal:
+// WHAT "HEALTHY" MEANS HERE. The health check is an HTTP/2 GET of MeshLivePath
+// over a TLS transport socket, and the inbound answers it ITSELF: its
+// health_check filter (buildLivenessHealthCheckFilter) is the first filter of
+// every mTLS HCM chain and replies 200 locally, before authz, stats or the
+// router, so the application never takes part. A pass needs the inbound's own
+// response, which only exists after the inbound has accepted the connection.
+// ANY HTTP status passes: an inbound under stop_accepting_requests answers 503
+// before that filter runs, and it has still accepted the node certificate (see
+// the ExpectedStatuses comment below for what that covers, and what it does not).
+// So a pass means, in one signal:
 //
 //	the inbound listener is listening (not warming, not absent)
 //	AND it presented a certificate
 //	AND that certificate verifies against the mesh trust bundle
-//	AND its URI SAN is exactly THIS pod's SPIFFE ID.
+//	AND its URI SAN is exactly THIS pod's SPIFFE ID
+//	AND it ACCEPTED the probe's client certificate (the node SVID).
 //
-// No bytes are sent and no request is made, so nothing downstream of the
-// filter chain (route table, authz/RBAC, the app) participates.
+// The last line is why this is an HTTP check and not a connect-only TCP one
+// (which it was until proposal 045). A TCP health check passes on the Connected
+// event, raised when the CLIENT's handshake completes. Under TLS 1.2 that comes
+// after the server's Finished, so a server rejecting the client certificate
+// fails the handshake on the client too. Under TLS 1.3 the client completes its
+// handshake as soon as it has SENT its certificate; the server's rejection
+// arrives later, as an alert on an established connection. A connect-only check
+// therefore passed against an inbound that refused the node identity, and
+// envoyproxy/envoy#48570 (in the 1.41 snapshot) makes TLS 1.3 the upstream
+// default. Waiting for a response the inbound sends after the handshake closes
+// that: a rejection arrives as a reset and the check fails, on both versions
+// (//agent/test/mtlspool TestInboundReadyProbe_RequiresTheInboundToAcceptTheNodeIdentity).
+//
+// The request lands on the no-SNI h2 HCM chain (see CHAIN SELECTION), which
+// every mTLS inbound has, raw-TCP pods included. Health-check requests are
+// excluded from the access log (notHealthCheckFilter) and answered before the
+// destination stats filter; they do count in the node-wide http.inbound.*
+// connection-manager stats, one request per local pod every interval.
 //
 // ADDRESSING. 127.0.0.1:defaultInboundPort bound into the pod's network
 // namespace — the same netns hop the app clusters use. The inbound listener
@@ -492,9 +513,12 @@ func NewAppHealthProbeCluster(name string, addr AppAddress, port uint16, healthP
 // CLIENT IDENTITY. nodeSpiffeID: the node's own SVID, the same secret the
 // service clusters' transport-socket matcher presents on its no-match path for
 // node-originated connections (active health checks carry no source-pod filter
-// state). The inbound DownstreamTlsContext requires a client certificate and
-// validates it against the trust-domain bundle with no SAN restriction, so the
-// node identity is accepted; nothing about inbound validation is loosened here.
+// state). The inbound DownstreamTlsContext requires a client certificate,
+// validates it against the trust-domain bundle, and pins its URI SAN to the
+// workload shape spiffe://<td>/ns/ (#843, WorkloadSANPrefix). The node identity
+// is the agent's own workload SVID, spiffe://<td>/ns/aether-system/sa/aether-agent,
+// so it satisfies that pin (TestInboundReadyProbeIsAcceptedByInboundValidation);
+// nothing about inbound validation is loosened here.
 //
 // podSpiffeID pins the SERVER side: the probe must not pass because SOMETHING
 // answered on that address, only because THIS pod did.
@@ -556,11 +580,46 @@ func NewInboundReadyProbeCluster(name, netns, nodeSpiffeID, validationContextNam
 				NoTrafficHealthyInterval: durationpb.New(5 * time.Second),
 				// A fresh connection (and therefore a fresh handshake) per check
 				// is the whole point: a reused connection would stop re-proving
-				// the certificate. Connect-only checks close the connection
-				// themselves, so this only documents the intent.
+				// the certificate, and whether the inbound still accepts the node
+				// identity. Load-bearing for an HTTP check: Envoy's default is to
+				// keep the connection, so this pin is what forces the handshake.
 				ReuseConnection: wrapperspb.Bool(false),
-				HealthChecker: &corev3.HealthCheck_TcpHealthCheck_{
-					TcpHealthCheck: &corev3.HealthCheck_TcpHealthCheck{},
+				// Answered by the inbound itself (see WHAT "HEALTHY" MEANS
+				// HERE): the liveness path, over the chain's h2 codec.
+				HealthChecker: &corev3.HealthCheck_HttpHealthCheck_{
+					HttpHealthCheck: &corev3.HealthCheck_HttpHealthCheck{
+						Path:            MeshLivePath,
+						CodecClientType: typev3.CodecClientType_HTTP2,
+						// ANY HTTP response passes, not only 200. A response
+						// at all is the proof: the inbound sent it after
+						// accepting the node certificate, and a TLS 1.3
+						// rejection is a reset, never a response. Its status
+						// is not the question. In particular the inbound
+						// connection manager is not exempt from the overload
+						// manager: at heap >= 0.95 (stop_accepting_requests)
+						// it answers 503 before the health_check filter runs.
+						// Requiring 200 would then fail every local pod's
+						// probe, and liveness.go would demote every serving
+						// pod on the node: the registry flap the health
+						// gateway's bypass_overload_manager exists to prevent
+						// (see BuildHealthGatewayListener). Shedding away from an
+						// overloaded node is the data plane's job, not
+						// readiness'. The range end is exclusive, 600 is
+						// Envoy's ceiling.
+						//
+						// What this does NOT cover: the chart's second overload
+						// stage, stop_accepting_connections at heap >= 0.98
+						// (agent-proxy-configmap.yaml). There the listeners stop
+						// accepting, the probe's connection is never answered,
+						// the 1 s timeout fails it, and every local pod is
+						// still demoted. That is not a regression: the
+						// connect-only probe before this one needed the same
+						// accept and failed the same way. Covering it would
+						// take a probe path that bypasses the overload manager
+						// (the inbound listener cannot, it is the data plane)
+						// and is out of this change's scope.
+						ExpectedStatuses: []*typev3.Int64Range{{Start: 200, End: 600}},
+					},
 				},
 			},
 		},

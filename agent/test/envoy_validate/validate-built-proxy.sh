@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Run //agent/test/envoy_validate against an Envoy binary built OUTSIDE this
+# Run //agent/test/envoy_validate, and the live inbound-readiness probe test of
+# //agent/test/mtlspool, against an Envoy binary built OUTSIDE this
 # workspace — typically the //proxy workspace's freshly built //:envoy — instead
 # of the chart-pinned aether-proxy image the gate uses by default.
 #
@@ -68,3 +69,17 @@ bazel test \
 	--nocache_test_results \
 	"$@" \
 	//agent/test/envoy_validate/...
+
+# The inbound-readiness probe, live, against the same binary (proposal 045): a
+# connect-only probe passed under TLS 1.3 against an inbound that rejected the
+# node identity, and envoyproxy/envoy#48570 makes TLS 1.3 the upstream default.
+# The probe's verdict depends on the proxy's TLS behaviour, not only on its
+# config, so it runs against the proxy a proxy PR builds, not just the pinned one.
+bazel test \
+	"--override_repository=+pinned_proxy+pinned_envoy_linux_${arch}=${repo}" \
+	--test_output=all \
+	--test_arg=-test.v \
+	--nocache_test_results \
+	"--test_filter=^TestInboundReadyProbe_RequiresTheInboundToAcceptTheNodeIdentity$" \
+	"$@" \
+	//agent/test/mtlspool:mtlspool_test

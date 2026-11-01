@@ -186,11 +186,12 @@ func buildNodeBootstrap() (*bootstrapv3.Bootstrap, error) {
 	tunnel := proxy.BuildWaypointTunnelListener(proxy.DefaultEastWestTunnelPort,
 		[]*listenerv3.FilterChain{proxy.BuildWaypointTunnelChain("echo." + meshDomain)})
 
-	// The per-pod inbound-readiness probe (issue #815): a TCP (connect-only)
-	// active health check over an mTLS UpstreamTlsContext, SAN-pinned to the
-	// pod's own SPIFFE ID, dialing the pod's mesh inbound inside its netns.
-	// Validated here so stock-proxy acceptance of "TCP health check + TLS
-	// transport socket + combined validation context" is a build-time gate.
+	// The per-pod inbound-readiness probe (issue #815, proposal 045): an HTTP/2
+	// active health check of the inbound's own liveness path, any status
+	// passing, over an mTLS UpstreamTlsContext SAN-pinned to the pod's own
+	// SPIFFE ID, dialing the pod's mesh inbound inside its netns. Validated here
+	// so stock-proxy acceptance of "HTTP health check + TLS transport socket +
+	// combined validation context" is a build-time gate.
 	inboundReady := proxy.NewInboundReadyProbeCluster(
 		proxy.InboundReadyClusterName(pod),
 		pod.GetNetworkNamespace(),
