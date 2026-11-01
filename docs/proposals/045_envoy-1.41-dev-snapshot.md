@@ -674,9 +674,16 @@ Then:
      By then the child's version series already exist, so `increase()`
      counts only the child's own handshakes. The window lasts a few minutes.
 
-     The destination inbound's access log shows the expected source SPIFFE ID
-     in `downstream_peer_uri_san`, which exercises the per-source certificate
-     selector under each version.
+     The source identity comes from a different source than the TLS version,
+     because neither TLS source logs it at the destination: the raw-TCP floor
+     chain's `tcp_proxy` writes no access log, and health-check requests are
+     dropped from the inbound access log (`notHealthCheckFilter`). It comes
+     from the h2 target instead. After the parent exits, its requests ride
+     connections the child opened, with the child's TLS settings and its
+     per-source certificate selector. The destination inbound's HTTP access
+     log for those requests shows the expected source SPIFFE ID in
+     `downstream_peer_uri_san`, under each version. The TLS version of those
+     connections is read from the version sources above, not from this log.
 
    The upgrade and the rollback must meet the same bar as the baseline. A
    failure in either is a soak FAIL, and the rollback below applies. The
