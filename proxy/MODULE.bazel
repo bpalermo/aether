@@ -119,13 +119,17 @@ bazel_dep(name = "envoy_api", version = "1.41.0-dev.20261028.011e396.envoy")
 #   #45504 moved the QUIC listener's socket options into
 #   ActiveQuicListenerFactory::initializeWorkerRouting() (behind
 #   envoy.restart_features.defer_worker_routing_init, default true), which applies them to
-#   factory->getListenSocket(i) for every worker. Under `envoy --mode validate`,
+#   factory->getListenSocket(i) for every worker; with concurrency > 1 those options
+#   include the BPF reuseport option. Under `envoy --mode validate`,
 #   ValidationListenerComponentFactory::createListenSocket() returns nullptr by design, so
-#   any bootstrap with a QUIC listener segfaulted in validation (found by #1733's
-#   envoy_validate_test, both arches). That is also the proxy-supervisor's node-local check
-#   before every hot restart on a changed bootstrap, so without this patch no bootstrap
-#   change would ever be applied. The patch skips a null socket, as validation mode did
-#   before #45504; production sockets are never null. Its regression test is
+#   any bootstrap with a static QUIC listener segfaulted in validation (found by #1733's
+#   envoy_validate_test, both arches; raw-UDP listeners take a no-op
+#   initializeWorkerRouting() and pass). Production exposure, inferred: the
+#   proxy-supervisor runs the same `--mode validate` before every hot restart on a changed
+#   bootstrap. Today's chart bootstraps carry static clusters only (listeners come over
+#   LDS), so they do not crash; a future bootstrap with a static QUIC listener would fail
+#   that check, and so every hot restart. The patch skips a null socket, as validation mode
+#   did before #45504; serve-mode sockets are never null. Its regression test is
 #   //agent/test/envoy_validate:envoy_validate_test (root workspace), which the proxy
 #   workflow runs against the binary it builds.
 #   Drop each override when the pin moves past its merged PR.
