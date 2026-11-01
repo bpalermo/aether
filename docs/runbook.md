@@ -52,7 +52,7 @@ There is no `make build-controller`; build it directly with
 `bazel build //controller/cmd/controller/...`.
 
 > **The `aether-proxy` (custom Envoy) is NOT built here.** It lives in a separate
-> sibling Bazel workspace under `proxy/` (its own `.bazelversion` = 8.7.0) and
+> sibling Bazel workspace under `proxy/` (its own `.bazelversion` = 9.3.1) and
 > compiles Envoy from source (multi-hour; use a warm cache / CI). Build/load it
 > with `make load-proxy-image` only when you need a fresh proxy image. See
 > [`proxy/README.md`](../proxy/README.md) and proposal 010.

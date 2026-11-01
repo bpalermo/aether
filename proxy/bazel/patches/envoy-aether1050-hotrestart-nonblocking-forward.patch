@@ -1,5 +1,5 @@
 diff --git a/source/server/hot_restarting_base.cc b/source/server/hot_restarting_base.cc
-index 99d7352427..9873a0a17a 100644
+index 6139c85a55..728629e748 100644
 --- a/source/server/hot_restarting_base.cc
 +++ b/source/server/hot_restarting_base.cc
 @@ -67,11 +67,11 @@ void RpcStream::bindDomainSocket(uint64_t id, const std::string& role,
@@ -226,7 +226,7 @@ index 99d7352427..9873a0a17a 100644
    return true;
  }
  
-@@ -230,8 +351,16 @@ std::unique_ptr<HotRestartMessage> RpcStream::receiveHotRestartMessage(Blocking
+@@ -235,8 +356,16 @@ std::unique_ptr<HotRestartMessage> RpcStream::receiveHotRestartMessage(Blocking
      message.msg_controllen = CMSG_SPACE(sizeof(int));
  
      const Api::SysCallSizeResult recv_result = os_sys_calls.recvmsg(domain_socket_, &message, 0);
@@ -246,7 +246,7 @@ index 99d7352427..9873a0a17a 100644
      }
      RELEASE_ASSERT(recv_result.return_value_ != -1,
 diff --git a/source/server/hot_restarting_base.h b/source/server/hot_restarting_base.h
-index 21737a1209..22a085a557 100644
+index 93d8fe4e8d..36cdc69b3c 100644
 --- a/source/server/hot_restarting_base.h
 +++ b/source/server/hot_restarting_base.h
 @@ -7,8 +7,11 @@
@@ -331,7 +331,7 @@ index 21737a1209..22a085a557 100644
    void getPassedFdIfPresent(envoy::HotRestartMessage* out, msghdr* message);
    std::unique_ptr<envoy::HotRestartMessage> parseProtoAndResetState();
    void initRecvBufIfNewMessage();
-@@ -84,6 +134,12 @@ private:
+@@ -85,6 +135,12 @@ private:
    // expected_proto_length_. The protobuf partial data starts at byte 8.
    // Should be resized to 0 in between messages, to indicate readiness for a new message.
    std::vector<uint8_t> recv_buf_;
@@ -716,10 +716,10 @@ index 07da3bbeb2..4105e7be84 100644
  
  } // namespace Server
 diff --git a/test/server/BUILD b/test/server/BUILD
-index d10ea2f09d..d1a6da151d 100644
+index 17dea766e1..ba5d2b782a 100644
 --- a/test/server/BUILD
 +++ b/test/server/BUILD
-@@ -212,16 +212,22 @@ envoy_cc_test(
+@@ -214,16 +214,22 @@ envoy_cc_test(
      srcs = envoy_select_hot_restart(["hot_restarting_parent_test.cc"]),
      rbe_pool = "linux_x64_small",
      deps = [
@@ -742,7 +742,7 @@ index d10ea2f09d..d1a6da151d 100644
          "@envoy_api//envoy/config/metrics/v3:pkg_cc_proto",
      ],
  )
-@@ -235,6 +241,7 @@ envoy_cc_test(
+@@ -237,6 +243,7 @@ envoy_cc_test(
          "//source/server:hot_restarting_base",
          "//test/mocks/api:api_mocks",
          "//test/mocks/network:network_mocks",
@@ -813,7 +813,7 @@ index 7cacf2c4c8..d068e7559e 100644
  } // namespace Server
  } // namespace Envoy
 diff --git a/test/server/hot_restarting_base_test.cc b/test/server/hot_restarting_base_test.cc
-index dd115a59e0..43a5048035 100644
+index 206900fc37..dfa17b30e2 100644
 --- a/test/server/hot_restarting_base_test.cc
 +++ b/test/server/hot_restarting_base_test.cc
 @@ -2,6 +2,7 @@
@@ -923,9 +923,9 @@ index dd115a59e0..43a5048035 100644
 +  EXPECT_TRUE(base_.socketIsNonBlocking());
 +}
 +
- } // namespace
- } // namespace Server
- } // namespace Envoy
+ // A length prefix within sizeof(uint64_t) of UINT64_MAX would wrap the buffer size
+ // computation to a tiny value. The datagram must be dropped gracefully (no crash, no
+ // undersized allocation) — see #45872.
 diff --git a/test/server/hot_restarting_child_test.cc b/test/server/hot_restarting_child_test.cc
 index 517bdc0f7d..246876654d 100644
 --- a/test/server/hot_restarting_child_test.cc

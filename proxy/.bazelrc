@@ -24,20 +24,24 @@ common --noenable_workspace
 # bazel-registry kept a single rolling dev snapshot per module and DELETED the
 # previous version directory on every bump; it now keeps published versions
 # (its CI enforces their immutability), but HEAD still moves siblings ahead of
-# the envoy module, so the pin stays a full commit. a1264b53 (tag v0.0.3,
-# 2026-10-13) is the commit that added envoy@1.40.0.envoy and envoy_api at the
-# same release, with the full transitive .envoy-suffixed closure resolving. See
-# README.md "Envoy version bumps" for the recipe.
+# the envoy module, so the pin stays a full commit. 36d481b01b (2026-10-28) is the
+# commit that added envoy@1.41.0-dev.20261028.011e396.envoy and envoy_api at the
+# same snapshot, with the full transitive .envoy-suffixed closure resolving
+# (published modules are immutable, so a later commit would resolve the same
+# closure; the commit that added the version is the one pinned). See README.md
+# "Envoy version bumps" for the recipe.
 #
-# Why this bump (2026-10-15): 1.40.0.envoy is the v1.40.0 release (Envoy
-# 9e55809337), the first release pin after a run of main dev snapshots. It
-# contains envoyproxy/envoy#48206 (69ff216f86; a draining hot-restart parent
-# leaves time-wait connection IDs to quiche instead of forwarding them), so the
-# patch carried for it (aether#1054's second) is dropped. The previous pin (189f198,
-# 2026-10-10, aether#980) moved for envoyproxy/envoy#47743 and #47776, which
-# this release also contains.
+# Why this bump (2026-10-31, proposal 045): 1.41.0-dev.20261028.011e396.envoy is the
+# snapshot of Envoy main at 011e39616b, the only version newer than the 1.40.0
+# release the registry publishes (v1.40.1 and v1.40.2 are not published, and carry
+# no fix of ours). It contains envoyproxy/envoy#47868 (2eff6e8ccf) and #47893
+# (77b512527c), so the patches carried for them (aether1054c, aether1074) are
+# dropped. Its closure needs Bazel 9 (see .bazelversion): the 1.40.0 closure does
+# not load under Bazel 9 (emsdk 4.0.23.envoy, proxy-wasm-cpp-host's v8_transition.bzl,
+# a yanked c-ares), which is why the Bazel move rides with this bump. The previous
+# pin, 1.40.0.envoy at a1264b53 (2026-10-15), moved for envoyproxy/envoy#48206.
 common --registry=https://bcr.bazel.build/
-common --registry=https://raw.githubusercontent.com/envoyproxy/bazel-registry/a1264b53cec00abbc8399a20a3669fdffb94cc81
+common --registry=https://raw.githubusercontent.com/envoyproxy/bazel-registry/36d481b01b5d5bd40c9545852b01f0b46d370285
 
 #############################################################################
 # UPSTREAM: global
@@ -69,7 +73,8 @@ build --define envoy_mobile_listener=enabled
 build --experimental_repository_downloader_retries=2
 build --experimental_cc_static_library
 build --enable_platform_specific_config
-build --incompatible_merge_fixed_and_default_shell_env
+# (--incompatible_merge_fixed_and_default_shell_env left with Bazel 9, which removed
+# the flag and made its behaviour the default; envoyproxy/envoy#48608.)
 build --incompatible_config_setting_private_default_visibility
 build --incompatible_enforce_config_setting_visibility
 # We already have absl in the build; tell googletest to use it for backtrace.
@@ -77,6 +82,9 @@ build --define absl=1
 # A workaround for slow ICU download (kept from Envoy's .bazelrc).
 build --http_timeout_scaling=6.0
 build --test_summary=terse
+# External headers are system includes, as upstream sets with its Bazel 9 move
+# (envoyproxy/envoy#48527).
+build --features=system_include_paths --host_features=system_include_paths
 
 test --test_verbose_timeout_warnings
 test --experimental_ui_max_stdouterr_bytes=11712829 #default 1048576
@@ -111,6 +119,11 @@ common --@rules_python//python/config_settings:bootstrap_impl=script
 
 common --@rules_rust//rust/settings:skip_fission_for_rust=true
 build --@rules_rust//rust/settings:rustfmt.toml=@envoy//:rustfmt.toml
+# rustc links with -nodefaultlibs, so the cc toolchain's unwinder/rtlib link flags
+# (compiler-rt + libunwind since envoyproxy/envoy#48641) are inert for Rust: silence
+# its linker_messages lint, as upstream does.
+build --@rules_rust//rust/settings:extra_rustc_flag=-Alinker_messages
+build --@rules_rust//rust/settings:extra_exec_rustc_flag=-Alinker_messages
 
 #############################################################################
 # UPSTREAM: linux codegen (from Envoy's own .bazelrc `build:linux` block — NOT in
@@ -135,11 +148,17 @@ build:linux --features=per_object_debug_info
 # the `force_libcpp` define no longer exist and are gone from the `libc++` config
 # below. The rest of these configs is kept as it was: the flags are still valid,
 # and they are what this workspace's two RBE legs have been built with.
+#
+# The clang runtimes come from the envoy module's own llvm.toolchain since
+# envoyproxy/envoy#48641 (in the 011e396 snapshot): extra_link_flags link
+# compiler-rt and LLVM's libunwind statically (-rtlib=compiler-rt
+# -unwindlib=libunwind -static-libgcc) instead of libgcc. The two toolchains_llvm
+# settings this file used to pin off (config:compiler-rt=false,
+# config:libunwind=false) were dropped upstream in envoyproxy/envoy#47716; they are
+# gone here too (proposal 045), so the link line is upstream's.
 #############################################################################
 
 common:clang-common --linkopt=-fuse-ld=lld
-common:clang-common --@toolchains_llvm//toolchain/config:compiler-rt=false
-common:clang-common --@toolchains_llvm//toolchain/config:libunwind=false
 
 common:libc++ --action_env=CXXFLAGS=-stdlib=libc++
 common:libc++ --action_env=LDFLAGS="-stdlib=libc++ -fuse-ld=lld"

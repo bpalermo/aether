@@ -16,7 +16,8 @@ test_suite(
         # ServicesUdpForwardingWhileWaitingForParentStats is the deadlock interleaving;
         # SendMsgRetriesWhenInterruptedBySignal, BlockingReceiveReturnsNothingWhenInterruptedBySignal
         # (base test) and KeepsWaitingForParentReplyWhenInterruptedBySignal (child test) are the
-        # EINTR abort.
+        # EINTR abort. The base test also runs upstream's OversizedLengthPrefixDropped* cases
+        # (envoyproxy/envoy#47068), which share the receive loop this patch changes.
         "@envoy//test/server:hot_restart_impl_test",
         "@envoy//test/server:hot_restarting_base_test",
         "@envoy//test/server:hot_restarting_child_test",
@@ -29,20 +30,13 @@ test_suite(
         # Envoy's platform test headers, which this downstream module does not wire
         # up, so it runs in the Envoy workspace only.
         "@envoy//test/common/http:conn_manager_impl_test",
-        # envoy-aether1054c-paused-udp-listener-no-read.patch (aether#1054): a paused
-        # child UDP listener runs its read-ready hook on an injected read but never reads
-        # the parent's socket (udp_listener_impl_test InjectedReadWhilePausedDoesNotReadTheSocket).
-        "@envoy//test/common/network:udp_listener_impl_test",
         # envoy-aether1126-forwarded-udp-worker-index.patch (aether#1126): a datagram a
         # hot-restart parent forwards with a worker index the child does not have (concurrency
         # lowered across the restart) is delivered to index % workers instead of crashing the
         # child (udp_listener_impl_test DeliverMapsAWorkerIndexItDoesNotHaveOntoItsOwnWorkers,
-        # hot_restarting_child_test ForwardsPacketFromAParentWorkerTheChildDoesNotHave; both
-        # targets are listed above).
-        # envoy-aether1074-quic-persistent-info-lifetime.patch (aether#1074): HTTP/3 pools
-        # keep the persistent QUIC info alive after their cluster is removed. Its test
-        # (http3 conn_pool_test PoolKeepsPersistentQuicInfoAliveAfterItsCreatorReleasesIt)
-        # needs quiche's test tooling like the other QUIC tests, so it runs in the Envoy
-        # workspace only.
+        # hot_restarting_child_test ForwardsPacketFromAParentWorkerTheChildDoesNotHave, listed
+        # above). The same target also runs InjectedReadWhilePausedDoesNotReadTheSocket,
+        # upstream since envoyproxy/envoy#47868 (the dropped aether1054c patch).
+        "@envoy//test/common/network:udp_listener_impl_test",
     ],
 )

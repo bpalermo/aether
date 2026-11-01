@@ -256,7 +256,7 @@ website-serve:
 	@bazel run //website:mkdocs -- serve -f "$(CURDIR)/website/mkdocs.yml"
 
 # --- Custom proxy (separate Bazel workspace under proxy/; see proposal 010) ---
-# These run inside proxy/ so its own Bazel version (.bazelversion=8.7.0) and its
+# These run inside proxy/ so its own Bazel version (.bazelversion=9.3.1) and its
 # own module graph (proxy/MODULE.bazel, pinned to the envoy bazel-registry) are
 # used.
 # NOTE: building the proxy compiles Envoy from source (multi-hour); use a warm

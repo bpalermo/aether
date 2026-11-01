@@ -8,7 +8,7 @@ removal (envoy#42890 / envoy#47217).
 > This is a **separate Bazel module** from the root `aether` repo. The root
 > `//.bazelignore` lists `proxy`, so `bazel build //...` / Gazelle in the repo
 > root never descend here. It pins its **own** Bazel version
-> (`.bazelversion = 8.7.0`), its **own** module graph (`MODULE.bazel`), and its
+> (`.bazelversion = 9.3.1`), its **own** module graph (`MODULE.bazel`), and its
 > **own** registries (`.bazelrc`). The two workspaces share only the git repo.
 > See [`docs/proposals/010`](../docs/proposals/010_custom-proxy-workspace.md).
 
@@ -90,7 +90,7 @@ symbol upload is keyed by (#653).
 |---|---|
 | `MODULE.bazel` | module graph; **pins `envoy` / `envoy_api`** (see "Envoy version bumps") |
 | `.bazelrc` | build config; **pins the envoy bazel-registry commit**; clang/RBE/release configs |
-| `.bazelversion` | `8.7.0` (independent of the root repo) |
+| `.bazelversion` | `9.3.1` (independent of the root repo; Envoy's own since envoyproxy/envoy#48527, and the 1.41 snapshot's closure needs Bazel 9) |
 | `bazel/build_config/` | the compiled-in Envoy extension set, as a tiny local module (`envoy_build_config`) |
 | `bazel/platforms/BUILD.bazel` | BuildBuddy RBE exec platforms (amd64 / arm64), derived from Envoy's |
 | `bazel/get_workspace_status` | `--workspace_status_command` stamping script |
@@ -125,13 +125,11 @@ new pin, which of them the new Envoy already contains.
 | Patch (`bazel/patches/envoy-…`) | What it fixes | Upstream |
 |---|---|---|
 | `47740-quic-hostname-check-explicit-san` | The QUIC client defers its hostname check to explicit SAN matchers (aether#957); behind `envoy.reloadable_features.quic_hostname_check_deferred_to_explicit_san_match`. | envoyproxy/envoy#47740, open |
-| `aether1050-hotrestart-nonblocking-forward` | The hot-restart main-thread deadlock (aether#1050): parent UDP/QUIC forwarding to the child no longer blocks the parent's main thread, and the child keeps servicing forwarded packets while it waits, with a bound, for the parent's replies. Counts what it forwards in `server.hot_restart_udp_forwarding_{datagrams,retries,dropped}`. A signal interrupting a send or a wait on the hot-restart domain socket (EINTR, which the socket timeouts make non-restartable) is retried instead of aborting the child on a `RELEASE_ASSERT`. | envoyproxy/envoy#47834, open (the patch is that pull request's diff) |
+| `aether1050-hotrestart-nonblocking-forward` | The hot-restart main-thread deadlock (aether#1050): parent UDP/QUIC forwarding to the child no longer blocks the parent's main thread, and the child keeps servicing forwarded packets while it waits, with a bound, for the parent's replies. Counts what it forwards in `server.hot_restart_udp_forwarding_{datagrams,retries,dropped}`. A signal interrupting a send or a wait on the hot-restart domain socket (EINTR, which the socket timeouts make non-restartable) is retried instead of aborting the child on a `RELEASE_ASSERT`. | envoyproxy/envoy#47834, open (the patch is that pull request's diff against its merge base) |
 | `aether1054-http3-drain-idle-connections` | Idle HTTP/3 connections drain themselves inside the drain window (aether#1054), behind `envoy.reloadable_features.http3_drain_idle_connections`, beside upstream's own proactive drain (envoyproxy/envoy#47991), which arms nothing at the chart's 10s drain time. | not proposed |
-| `aether1054c-paused-udp-listener-no-read` | A paused hot-restart child UDP listener no longer reads the parent's socket when the QUIC listener injects a read to process forwarded handshakes (aether#1054). | envoyproxy/envoy#47868, merged on Envoy main after v1.40.0 (a later pin drops it) |
-| `aether1074-quic-persistent-info-lifetime` | HTTP/3 pools keep the per-cluster persistent QUIC info alive after a CDS removal, instead of their draining connections reading its freed clock (aether#1074). | envoyproxy/envoy#47893, open |
 | `aether1126-forwarded-udp-worker-index` | A hot-restart child with fewer workers than its parent no longer indexes past its worker table when the parent forwards a UDP/QUIC datagram tagged with one of its extra workers: the index is mapped onto `index % concurrency` (aether#1126). | not reported |
 
-No longer carried, because the pinned release contains them:
+No longer carried, because the pin contains them:
 envoyproxy/envoy#47743 (UDP hot-restart forwarding keyed by listener address +
 network namespace, aether#967) and envoyproxy/envoy#47776
 (`execInNetworkNamespace` restores the calling thread's netns via
@@ -142,7 +140,14 @@ both dropped at the `189f198` snapshot (aether#980); and envoyproxy/envoy#48206
 connections from its time-wait list instead of forwarding them to the child,
 aether#1054; behind the same
 `envoy.reloadable_features.quic_hot_restart_time_wait_before_forward`), dropped
-at the `1.40.0.envoy` release, which contains it as `69ff216f86`.
+at the `1.40.0.envoy` release, which contains it as `69ff216f86`; and, at the
+`1.41.0-dev.20261028.011e396.envoy` snapshot ([proposal 045](../docs/proposals/045_envoy-1.41-dev-snapshot.md)),
+envoyproxy/envoy#47868 (a paused hot-restart child UDP listener no longer reads
+the parent's socket on an injected read, aether#1054, the former
+`aether1054c-paused-udp-listener-no-read` patch; `2eff6e8ccf`) and
+envoyproxy/envoy#47893 (HTTP/3 pools keep the per-cluster persistent QUIC info
+alive after a CDS removal, aether#1074, the former
+`aether1074-quic-persistent-info-lifetime` patch; `77b512527c`).
 
 Dropped without an upstream merge: upstream Envoy PR 48319, which kept the
 hot-restart child's inherited UDP listeners paused until the parent had exited
@@ -325,8 +330,11 @@ Then, in one commit:
    arches.
 
 When a stable release publishes a `1.NN.0.envoy` module, move to it. The pin is
-`1.40.0.envoy` at registry tag `v0.0.3` (`a1264b53`, the commit that added it);
-it replaced the `1.40.0-dev.20261009.189f198.envoy` snapshot. A release pin needs
+the `1.41.0-dev.20261028.011e396.envoy` snapshot at registry commit `36d481b01b`
+(the commit that added it), [proposal 045](../docs/proposals/045_envoy-1.41-dev-snapshot.md);
+it replaced the `1.40.0.envoy` release (registry tag `v0.0.3`, `a1264b53`), because
+the snapshot contains two upstream fixes the release did not and the registry
+publishes no v1.40.x patch release. A release pin needs
 the matching `go-control-plane/envoy` bindings (`v1.NN.0`) on `main` first:
 `scripts/check-envoy-api-parity.sh` accepts bindings one minor behind only for a
 `-dev` pin.
@@ -345,8 +353,9 @@ is no separate SDK version to keep in sync.
 ## Status
 
 **Custom Envoy + `aether_stats` C++ extension building on CI** (proposals 010 /
-012), on bzlmod against the Envoy `1.40.0.envoy` release (`main` dev snapshots
-from #697 until the 1.40.0 release). The Envoy compile
+012), on bzlmod against the Envoy `1.41.0-dev.20261028.011e396.envoy` `main`
+snapshot under Bazel 9.3.1 (proposal 045; `main` dev snapshots from #697 until the
+1.40.0 release, then `1.40.0.envoy`). The Envoy compile
 runs on BuildBuddy RBE — amd64 driven from an x64 runner, arm64 driven from a
 native `ubuntu-24.04-arm` runner (`@clang_platform` and `@llvm_toolchain` derive
 their exec constraints from the *driver* host's arch, so an x64 driver cannot

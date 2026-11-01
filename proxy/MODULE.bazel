@@ -22,23 +22,29 @@ module(
 # Envoy
 ####################################################################################
 
-bazel_dep(name = "envoy", version = "1.40.0.envoy")
-bazel_dep(name = "envoy_api", version = "1.40.0.envoy")
+bazel_dep(name = "envoy", version = "1.41.0-dev.20261028.011e396.envoy")
+bazel_dep(name = "envoy_api", version = "1.41.0-dev.20261028.011e396.envoy")
 
 # Carried fixes, applied to the registry module at fetch time
 # (README "Customizing": a patch is the exception, not the mechanism).
-# No longer carried, because the pinned release contains them:
+# No longer carried, because the pin contains them:
 # envoyproxy/envoy#47743 (UDP hot-restart forwarding keyed by listener address +
 # network namespace, aether#967; a644fc670e) and envoyproxy/envoy#47776
 # (execInNetworkNamespace restores the calling thread's namespace, aether#1022;
-# 7d6ca3273c), both dropped at the 189f198 snapshot (aether#980); and
+# 7d6ca3273c), both dropped at the 189f198 snapshot (aether#980);
 # envoyproxy/envoy#48206 (a draining hot-restart parent leaves connection IDs in
 # its QUIC time-wait list to the time-wait manager instead of forwarding them to
 # the child, aether#1054; 69ff216f86, in v1.40.0, the same source change behind
 # the same runtime guard, envoy.reloadable_features.quic_hot_restart_time_wait_before_forward),
-# carried as aether#1054's second patch until this pin. The release also brings
-# envoyproxy/envoy#47492 (a hot-restart successor inherits its listen sockets
-# before entering the network namespace).
+# dropped at the 1.40.0 release; and, at the 011e396 snapshot (proposal 045),
+# envoyproxy/envoy#47868 (a paused hot-restart child UDP listener runs its read-ready
+# hook on an injected read activation but never reads the parent's socket, aether#1054's
+# third patch, aether1054c; 2eff6e8ccf) and envoyproxy/envoy#47893 (HTTP/3 pools and
+# connectivity grids hold the persistent QUIC info by shared pointer, so a CDS removal
+# no longer frees the clock their draining connections read, aether#1074; 77b512527c;
+# upstream's version also changes cluster_manager_impl.cc, which the carried patch did
+# not need). v1.40.0 also brought envoyproxy/envoy#47492 (a hot-restart successor
+# inherits its listen sockets before entering the network namespace).
 #   envoyproxy/envoy#47740 "quic: defer the upstream hostname check to explicit
 #   SAN matchers" (67af4c692c + 01c09223bd; still open upstream): the QUIC client no
 #   longer requires the server leaf's DNS SAN to match the SNI when an explicit
@@ -49,7 +55,9 @@ bazel_dep(name = "envoy_api", version = "1.40.0.envoy")
 #   SPIFFE validator BUILD visibility line; api/ doc comment (a separate module),
 #   tests and changelog dropped.
 #   aether#1050 (proposed upstream as envoyproxy/envoy#47834, still open; this is
-#   that pull request's diff at 2eae5ebf92, docs and changelog dropped): the hot-restart
+#   that pull request's diff, docs and changelog dropped, taken at 39dacbff0f against its
+#   merge base ab652e7164, which already contains envoyproxy/envoy#47068; the +/- lines
+#   are the ones carried since 2eae5ebf92, only the context moved): the hot-restart
 #   main-thread deadlock. The parent forwards undispatchable UDP/QUIC packets to
 #   the child from its main thread with a BLOCKING sendmsg(); the child's main
 #   thread waits for the parent's replies (stats merge every flush, listen socket
@@ -66,6 +74,10 @@ bazel_dep(name = "envoy_api", version = "1.40.0.envoy")
 #   (EINTR, which SO_SNDTIMEO/SO_RCVTIMEO make non-restartable, see signal(7)) is
 #   retried or treated as a timeout slice instead of hitting a RELEASE_ASSERT, which
 #   aborted the child when e.g. a forwarded SIGUSR1 landed in getParentStats().
+#   envoyproxy/envoy#47068 (in the pin) drops a datagram whose length prefix would
+#   overflow the receive buffer and continues the receive loop: in blocking mode the next
+#   recvmsg() now waits at most one SO_RCVTIMEO slice and returns nothing, which every
+#   blocking caller of this patch already treats as "keep waiting until the deadline".
 #   Carries its tests (test/server:hot_restarting_{base,child,parent}_test,
 #   hot_restart_impl_test), run by //bazel/patches:carried_patch_tests.
 #   aether#1054 (not yet proposed upstream; the maintainer's call), applied AFTER
@@ -86,34 +98,11 @@ bazel_dep(name = "envoy_api", version = "1.40.0.envoy")
 #   unpatched Envoy does; an 8 h soak of exactly that configuration (the 48319 guard
 #   off) showed 0 misses near handoffs and 0 QUIC stateless resets. Carries its tests
 #   (test/common/http:conn_manager_impl_test), run by //bazel/patches:carried_patch_tests;
-#   its quic_http_integration_test case only builds in the Envoy workspace.
-#   aether#1054, third patch (an upstream bug; envoyproxy/envoy#47868, merged on
-#   Envoy main after v1.40.0 as 2eff6e8ccf, so a later pin drops it), applied AFTER
-#   aether1054: a paused hot-restart child UDP listener (inherited socket,
-#   read events disabled until the parent is gone) still READ the shared socket
-#   whenever the QUIC listener injected a read activation to process handshakes
-#   buffered from forwarded packets (injected activations bypass the enabled-event
-#   mask); the packets it dequeued belonged to the parent's connections and the
-#   child's dispatcher stateless-reset each one (the drain-start resets left after
-#   #1064/#1066). UdpListenerImpl::handleReadCallback now runs onReadReady() and
-#   returns without reading while paused. Child-side: effective from the first roll.
-#   Carries its test (test/common/network:udp_listener_impl_test), run by
-#   //bazel/patches:carried_patch_tests.
-#   aether#1074 (an upstream bug; proposed as envoyproxy/envoy#47893, still open),
-#   applied AFTER aether1054c: the persistent QUIC info (connection helper + clock,
-#   alarm factory, QUIC config) was owned by the thread-local ClusterEntry while
-#   HTTP/3 pools held it by reference and their connections by raw pointer; a CDS
-#   removal destroys the entry after only DRAINING its pools, so a pool with live
-#   streams outlived the info and the next write/alarm read the freed clock (the
-#   SIGBUS in QuicConnection::CanWrite). PersistentQuicInfoPtr is now shared and each
-#   HTTP/3 pool and connectivity grid holds a reference. (Refreshed for v1.40.0, whose
-#   envoyproxy/envoy#48241 renamed the pool's sni() to effectiveSni() and re-indented the test fixture's
-#   allocateConnPool() call: context and indentation only, the change is the same.)
-#   Its test
-#   (test/common/http/http3:conn_pool_test) needs quiche's test tooling, so it runs in
-#   the Envoy workspace only, not in //bazel/patches:carried_patch_tests.
+#   its quic_http_integration_test case only builds in the Envoy workspace. (Refreshed for
+#   the 011e396 snapshot: the runtime guards and initializers next to its two one-line
+#   insertions changed upstream; context only, the change is the same.)
 #   aether#1126 (an upstream bug in the #47743 forwarding; to be reported upstream on
-#   the maintainer's word), applied AFTER aether1074: the hot-restart parent forwards
+#   the maintainer's word), applied AFTER aether1054: the hot-restart parent forwards
 #   each undispatched UDP/QUIC datagram tagged with ITS worker index and the child
 #   delivered it with UdpListenerWorkerRouterImpl::deliver(), which indexes its
 #   per-worker table unchecked (an ASSERT only). A child with fewer workers than its
@@ -133,11 +122,9 @@ single_version_override(
         "//bazel/patches:envoy-47740-quic-hostname-check-explicit-san.patch",
         "//bazel/patches:envoy-aether1050-hotrestart-nonblocking-forward.patch",
         "//bazel/patches:envoy-aether1054-http3-drain-idle-connections.patch",
-        "//bazel/patches:envoy-aether1054c-paused-udp-listener-no-read.patch",
-        "//bazel/patches:envoy-aether1074-quic-persistent-info-lifetime.patch",
         "//bazel/patches:envoy-aether1126-forwarded-udp-worker-index.patch",
     ],
-    version = "1.40.0.envoy",
+    version = "1.41.0-dev.20261028.011e396.envoy",
 )
 
 ####################################################################################
@@ -145,7 +132,7 @@ single_version_override(
 ####################################################################################
 
 bazel_dep(name = "platforms", version = "1.1.0")
-bazel_dep(name = "rules_cc", version = "0.2.25")
+bazel_dep(name = "rules_cc", version = "0.2.27")
 
 # pkg_tar (//:envoy_tar).
 bazel_dep(name = "rules_pkg", version = "1.3.0")
@@ -172,8 +159,8 @@ bazel_dep(name = "protobuf", version = "35.1.bcr.envoy")
 # wires them from .bazelrc, so nothing here names them.)
 ####################################################################################
 
-bazel_dep(name = "proxy-wasm-cpp-host", version = "0.0.0-260704-f2db56a.envoy")
-bazel_dep(name = "rules_python", version = "2.3.3")
+bazel_dep(name = "proxy-wasm-cpp-host", version = "0.0.0-260704-f2db56a.envoy.1")
+bazel_dep(name = "rules_python", version = "2.4.5")
 bazel_dep(name = "rules_rust", version = "0.74.0.envoy")
 bazel_dep(name = "toolchains_llvm", version = "1.9.1.envoy")
 
