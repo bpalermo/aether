@@ -479,20 +479,51 @@ Then:
      - on the source, the twin's `upstream_rq_total` rises with the load. A
        twin is a QUIC-only cluster (`<ns>/<svc>@<ns>/<sa>`), so its requests
        are HTTP/3 by construction;
-     - on the destination node, the pod's own QUIC listener
-       (`inbound_<ns>_<pod>_h3`, per-pod listener stats) holds
-       `downstream_cx_active` > 0.
+     - on the destination node, the pod's own QUIC listener holds
+       `downstream_cx_active` > 0. Its stat prefix is `inbound_<ns>_<pod>_h3`,
+       which the proxy's stats tags split, so in Prometheus it is
+       `envoy_listener_inbound_downstream_cx_active{aether_namespace="<ns>", aether_pod="<pod>_h3"}`.
 
      Then HTTP/3 connections stay established, with requests flowing
      throughout the roll;
-   - at least one load target routed over TCP (a service with no QUIC twin),
-     for the TCP mTLS hop.
+   - at least one load target routed over raw TCP, the TCP floor
+     (`tcp_<ns>/<svc>`), for the TCP mTLS hop. Its client opens a **new
+     connection per request**. The source's `tcp_proxy` opens one upstream
+     connection per downstream connection, so every request is a fresh mTLS
+     handshake with the source's own identity, at a steady rate, through
+     every window.
 
    **Measurements.** Envoy counters are per generation: a hot-restart child
    inherits only the parent's unflushed delta, so a raw value can fall during
    a healthy handoff. Every counter below is therefore read as a reset-aware
    increase or rate over the exported series (Prometheus `increase()` /
    `rate()`), never as a raw value.
+
+   **A series born inside the window.** `increase()` alone cannot see it.
+   - The proxy's OTel stats sink exports only counters that have been used,
+     with cumulative temporality.
+   - A failure counter therefore appears in Prometheus at the first scrape
+     after its first failure, already carrying it. That first sample is
+     `increase()`'s baseline, so the burst reads 0.
+   - Per-pod series make this the common case, not the corner. Every pod
+     starts its roll with no failure series at all, and a first-ever
+     `TLSv1.2` handshake would hide the same way.
+
+   The rule used here keeps cumulative temporality and counts a series born
+   in the window at its full value:
+   - a series that existed at the window's start contributes its
+     `increase()`;
+   - a series that did not contributes `max_over_time()`, its whole
+     cumulative count. It started from zero in its own process, apart from
+     the small unflushed delta a hot-restart child inherits.
+
+   In PromQL, for any counter `X`:
+
+   `(increase(X[w]) and X offset w) or (max_over_time(X[w]) unless X offset w)`
+
+   The alternative, delta temporality on the sink with `sum_over_time()`, was
+   set aside. It changes the export for every consumer of these series, not
+   only the soak.
 
    A QUIC twin's stats are keyed by its `alt_stat_name`, which
    `QUICAltStatName` (`agent/internal/xds/proxy/egress.go`) sets to
@@ -544,7 +575,12 @@ Then:
      cannot pass vacuously. `upstream_rq_5xx` in particular is created lazily
      and is absent on a node that has not seen one. The query shape:
 
-     `sum by (node) (increase({__name__=~"<the four exported counters>", aether_cluster=~"<ns>/<svc>@.*"}[<window>])) or on(node) (0 * group by (node) (<the twin's upstream_rq_total series>))`
+     `sum by (node) ((increase(F[w]) and F offset w) or (max_over_time(F[w]) unless F offset w)) or on(node) (0 * group by (node) (<the twin's upstream_rq_total series>))`
+
+     where `F` is `{__name__=~"<the four exported counters>", aether_cluster=~"<ns>/<svc>@.*"}`.
+     A failure series born inside the window, which is every failure series
+     of a pod that has just rolled, counts at its full value and does not
+     read as 0.
 
      A bare `or vector(0)` carries no labels. In a per-node sum it would
      neither restore a node whose failure series are all missing, nor
@@ -573,14 +609,24 @@ Then:
      returns no series and would pass "no TLSv1.2" vacuously, so the series is
      first required to exist and to have a non-zero rate.
 
-     `ssl.versions.*` counts handshakes, not requests. Pooled upstream
-     connections carry the load without new handshakes, so a non-zero rate
-     holds only right after a roll, while the new process opens its pools.
-     Each TLS window therefore starts **when that node's hot-restart parent
-     has exited**, so no handshake in it is the parent's, and ends a few
-     minutes later. Like every rate here, it is read per pod, here the child.
-     A window that sees no handshakes is inconclusive, not a pass. Then, per
-     source node:
+     `ssl.versions.*` counts handshakes, not requests. Pooled h2 upstream
+     connections carry load without new handshakes, and a child opens its
+     pools during the parent's drain, so an h2 target would see few or no
+     handshakes after the parent exits. The TLS checks therefore read two
+     sources that handshake on their own schedule:
+     - **the raw-TCP load target**, with one new connection per request, so
+       one source-identity handshake per request
+       (`aether_cluster="tcp_<ns>/<svc>"`);
+     - **the inbound-readiness probe clusters** (`inboundready_<ns>_<pod>`).
+       They open a fresh connection to every local pod every 5 s, so they
+       give a steady handshake rate per node under the node proxy's default
+       client TLS settings.
+
+     Each TLS window starts **when that node's hot-restart parent has
+     exited**, so no handshake in it is the parent's, and lasts a few
+     minutes. Both sources guarantee handshakes inside it. Like every rate
+     here, it is read per pod (the child) with the born-in-window rule above,
+     so a first-ever `TLSv1.2` series counts. Then, per source node:
      - a 1.41-dev source proxy's fresh upstream connections are `TLSv1.3`
        only: after the upgrade, and after the final forward roll;
      - a 1.40.0 source proxy's are `TLSv1.2` only: in the baseline, and
