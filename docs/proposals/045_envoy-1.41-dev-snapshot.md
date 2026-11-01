@@ -502,7 +502,7 @@ Then:
    **A series born inside the window.** `increase()` alone cannot see it.
    - The proxy's OTel stats sink exports only counters that have been used,
      with cumulative temporality.
-   - A failure counter therefore appears in Prometheus at the first scrape
+   - A failure counter therefore appears in Prometheus at the first export
      after its first failure, already carrying it. That first sample is
      `increase()`'s baseline, so the burst reads 0.
    - Per-pod series make this the common case, not the corner. Every pod
@@ -545,9 +545,13 @@ Then:
 
    The soak's pipeline therefore carries, on these series, both:
    - `node` (from `k8s.node.name`);
-   - the proxy pod, `k8s.pod.name` (or `k8s.pod.uid`), which the node proxy
-     already sets on its Envoy stats (`docs/observability/metric-labels.md`).
-     The parent and the surge child are different pods.
+   - the proxy pod, `k8s.pod.name` (or `k8s.pod.uid`). The node proxy sets
+     both as resource attributes on its Envoy stats
+     (`docs/observability/metric-labels.md`), but the reference cluster's
+     pipeline does not promote either to a label today (measured: the node
+     proxy's cluster series carry `node` and no pod label). Promoting one is
+     a precondition of the soak. The parent and the surge child are different
+     pods.
 
    Every rate and increase below is taken **per pod first**, so each
    generation's counter stays monotonic within its own series, **then summed
@@ -556,37 +560,53 @@ Then:
    `sum by (node) (increase(<counter>{…}[<window>]))`, where `increase()` runs
    on each pod's series before the sum.
 
+   **The queries.** The PromQL below uses the series names the node proxy
+   exports today. Counters carry `_total`, cluster stats are labelled
+   `aether_cluster`, listener stats `aether_namespace` / `aether_pod`, and
+   the node proxy's series have `job="aether-proxy"`. Every expression was
+   run against the reference cluster's Prometheus over a recent window,
+   grouped by the labels that exist there today. Each parsed and returned
+   one row per node.
+
+   A failure or version counter is read with the born-in-window rule, applied
+   **to one counter at a time**: `increase()` and `max_over_time()` drop
+   `__name__`, so one `{__name__=~…}` selector over several counters that
+   share every other label is rejected ("vector cannot contain metrics with
+   the same labelset"; measured). Per counter `C`, with the target's selector
+   `S` and the window `w`, the per-node term is:
+
+   `T(C) = sum by (node) ((increase(C{S}[w]) and C{S} offset w) or (max_over_time(C{S}[w]) unless C{S} offset w)) or on(node) (0 * group by (node) (A{S}))`
+
+   `A` is a series every node that carries the load has, the anchor. The
+   `or on(node)` gives such a node a zero row when `C` has no series there
+   yet; a bare `or vector(0)` carries no labels and cannot. The terms of
+   different counters are then added with `+`, which matches on `node`
+   alone.
+
    For each node's handoff window, in each roll:
-   - **Forward progress:** the destination inbound HTTP connection manager's
-     `downstream_rq_total` keeps a non-zero rate through the window, and so
-     does the source twin's `upstream_rq_total`.
-   - **Request failures:** on the source twin, the increase of
-     `upstream_rq_5xx` + `upstream_rq_rx_reset` + `upstream_rq_tx_reset` +
-     `upstream_cx_destroy_remote_with_active_rq`, plus the load generator's
-     own error count, is no greater than the baseline roll's worst handoff.
-     Envoy has no `upstream_rq_reset`. `upstream_rq_rx_reset_no_error` (a peer
-     ending a stream with NO_ERROR) is not a failure and is left out. It exists
-     at both pins (`envoy/upstream/upstream.h` at `v1.40.0` declares it beside
-     `upstream_rq_rx_reset`, and nothing in `v1.40.0..011e396` touches it), so
-     the 1.40.0 baseline and 1.41-dev are graded with the same split, and
-     neither counts a NO_ERROR reset as a failure.
-
-     The sum is one selector over all four counters, so it is per node and
-     cannot pass vacuously. `upstream_rq_5xx` in particular is created lazily
-     and is absent on a node that has not seen one. The query shape:
-
-     `sum by (node) ((increase(F[w]) and F offset w) or (max_over_time(F[w]) unless F offset w)) or on(node) (0 * group by (node) (<the twin's upstream_rq_total series>))`
-
-     where `F` is `{__name__=~"<the four exported counters>", aether_cluster=~"<ns>/<svc>@.*"}`.
-     A failure series born inside the window, which is every failure series
-     of a pod that has just rolled, counts at its full value and does not
-     read as 0.
-
-     A bare `or vector(0)` carries no labels. In a per-node sum it would
-     neither restore a node whose failure series are all missing, nor
-     anchor it, so that node would drop out of the result and pass
-     vacuously. The `or on(node)` term gives every node that carries the
-     load a zero row to fall back on.
+   - **Forward progress:** two counters keep a non-zero rate through the
+     window, and both are QUIC-specific:
+     - on the destination, the target pod's QUIC listener's
+       `sum by (node) (rate(envoy_listener_inbound_http_inbound_downstream_rq_completed_total{job="aether-proxy", aether_namespace="<ns>", aether_pod="<pod>_h3"}[1m]))`;
+     - on the source, the twin's
+       `sum by (node) (rate(envoy_cluster_upstream_rq_total{job="aether-proxy", aether_cluster=~"<ns>/<svc>@.*"}[1m]))`.
+   - **Request failures:** on the source twin (`S` =
+     `job="aether-proxy", aether_cluster=~"<ns>/<svc>@.*"`, anchor
+     `A` = `envoy_cluster_upstream_rq_total`), the sum
+     `T(envoy_cluster_upstream_rq_5xx_total) + T(envoy_cluster_upstream_rq_rx_reset_total) + T(envoy_cluster_upstream_rq_tx_reset_total) + T(envoy_cluster_upstream_cx_destroy_remote_with_active_rq_total)`,
+     plus the load generator's own error count, is no greater than the
+     baseline roll's worst handoff.
+     - Envoy has no `upstream_rq_reset`. Its reset counters are
+       `upstream_rq_rx_reset` and `upstream_rq_tx_reset`.
+     - `upstream_rq_rx_reset_no_error` (a peer ending a stream with NO_ERROR)
+       is not a failure and is left out. It exists at both pins:
+       `envoy/upstream/upstream.h` at `v1.40.0` declares it beside
+       `upstream_rq_rx_reset`, and nothing in `v1.40.0..011e396` touches it.
+       So the 1.40.0 baseline and 1.41-dev are graded with the same split.
+     - Counters are created lazily. Today `envoy_cluster_upstream_rq_rx_reset_total`
+       has no series at all, and its term is still a zero row per node.
+     - A failure series born inside the window (every failure series of a
+       pod that has just rolled) counts at its full value, not as 0.
    - **Prober:** misses in the window are no greater than the baseline roll's
      worst handoff, and the soak's per-target gate (proposal 042) holds.
    - **Connections, as diagnostics rather than the pass criterion:** the
@@ -595,19 +615,17 @@ Then:
      connection that survives the handoff leaves it flat, and a dropped one
      that reconnects makes it rise. A rise above the baseline's, together
      with the stateless-reset count, points at connections lost in the
-     handoff.
+     handoff. Its live count is
+     `envoy_listener_inbound_downstream_cx_active{job="aether-proxy", aether_namespace="<ns>", aether_pod="<pod>_h3"}`.
    - **Process:** the child reaches ready, the parent exits on its own, and
      the supervisor's restart counters show no stale-flag repair and no
      validation rejection.
    - **TLS version on the TCP path, by source-proxy version.** The stat key
      depends on the target. An HTTP service reached over h2 is keyed by its
-     `alt_stat_name`, `<ns>/<svc>`: `cluster.<ns>/<svc>.ssl.versions.TLSv1.3`,
-     in Prometheus `aether_cluster="<ns>/<svc>"`. A raw-TCP floor or per-port
-     cluster is keyed `tcp_<ns>/<svc>` or `tcp_<ns>/<svc>_<port>`
-     (`TCPStatKey` / `TCPPortStatKey` in `agent/internal/xds/proxy/egress.go`).
-     Nothing is keyed `cluster.<svc>`. A query on a key that does not exist
-     returns no series and would pass "no TLSv1.2" vacuously, so the series is
-     first required to exist and to have a non-zero rate.
+     `alt_stat_name`, `<ns>/<svc>`. A raw-TCP floor or per-port cluster is
+     keyed `tcp_<ns>/<svc>` or `tcp_<ns>/<svc>_<port>` (`TCPStatKey` /
+     `TCPPortStatKey` in `agent/internal/xds/proxy/egress.go`). Nothing is
+     keyed `cluster.<svc>`.
 
      `ssl.versions.*` counts handshakes, not requests. Pooled h2 upstream
      connections carry load without new handshakes, and a child opens its
@@ -615,23 +633,46 @@ Then:
      handshakes after the parent exits. The TLS checks therefore read two
      sources that handshake on their own schedule:
      - **the raw-TCP load target**, with one new connection per request, so
-       one source-identity handshake per request
-       (`aether_cluster="tcp_<ns>/<svc>"`);
+       one source-identity handshake per request;
      - **the inbound-readiness probe clusters** (`inboundready_<ns>_<pod>`).
        They open a fresh connection to every local pod every 5 s, so they
        give a steady handshake rate per node under the node proxy's default
        client TLS settings.
 
-     Each TLS window starts **when that node's hot-restart parent has
-     exited**, so no handshake in it is the parent's, and lasts a few
-     minutes. Both sources guarantee handshakes inside it. Like every rate
-     here, it is read per pod (the child) with the born-in-window rule above,
-     so a first-ever `TLSv1.2` series counts. Then, per source node:
-     - a 1.41-dev source proxy's fresh upstream connections are `TLSv1.3`
-       only: after the upgrade, and after the final forward roll;
-     - a 1.40.0 source proxy's are `TLSv1.2` only: in the baseline, and
-       after the rollback. 1.40.0 offers TLS 1.2 at most by default, so
-       expecting TLS 1.3 there would fail a healthy run.
+     With `S` = `job="aether-proxy", aether_cluster=~"inboundready_.*|tcp_<ns>/<svc>"`
+     and anchor `A` = `envoy_cluster_ssl_handshake_total` (the anchor also
+     makes a missing series read 0, never pass vacuously), per source node:
+     - a 1.41-dev source proxy: `T(envoy_cluster_ssl_versions_TLSv1_3_total) > 0`
+       and `T(envoy_cluster_ssl_versions_TLSv1_2_total) == 0`, after the
+       upgrade and after the final forward roll;
+     - a 1.40.0 source proxy: `T(envoy_cluster_ssl_versions_TLSv1_2_total) > 0`
+       and `T(envoy_cluster_ssl_versions_TLSv1_3_total) == 0`, in the
+       baseline and after the rollback. 1.40.0 offers TLS 1.2 at most by
+       default, so expecting TLS 1.3 there would fail a healthy run.
+
+     **When a TLS window starts.** Until its parent exits, the child keeps
+     merging the parent's latched stat deltas into its own counters on every
+     flush (the parent's admin shutdown resets its flush timer). A 1.40.0
+     parent's TLS 1.2 probe handshakes would therefore create
+     `ssl.versions.TLSv1.2` in the 1.41-dev child, the born-in-window rule
+     would count it at full value, and "TLS 1.3 only" would fail a healthy
+     upgrade. The rollback has the mirror problem.
+
+     So the window starts **one export interval after the parent exits**,
+     rounded up to two. That interval comes from the real pipeline:
+     - the node proxy's stats are not scraped. Its OTel sink pushes them over
+       OTLP on every stats flush, every 5 s (the chart leaves
+       `stats_flush_interval` at Envoy's default);
+     - each sample is stamped at its export. Measured: 60 samples per series
+       in 5 minutes, and no `up` series for `job="aether-proxy"`, which a
+       scrape would create;
+     - so the last merge of the parent's deltas lands in a sample stamped no
+       later than one flush after the parent exits, and ingestion delay does
+       not move that timestamp.
+
+     The window therefore starts 10 s (two flushes) after the parent exits.
+     By then the child's version series already exist, so `increase()`
+     counts only the child's own handshakes. The window lasts a few minutes.
 
      The destination inbound's access log shows the expected source SPIFFE ID
      in `downstream_peer_uri_san`, which exercises the per-source certificate
