@@ -1,5 +1,5 @@
 diff --git a/source/common/http/conn_manager_impl.cc b/source/common/http/conn_manager_impl.cc
-index 16c0e814a2..dd81d92083 100644
+index eb5b1c761c..a67ea240e4 100644
 --- a/source/common/http/conn_manager_impl.cc
 +++ b/source/common/http/conn_manager_impl.cc
 @@ -232,6 +232,8 @@ ConnectionManagerImpl::ConnectionManagerImpl(
@@ -9,9 +9,9 @@ index 16c0e814a2..dd81d92083 100644
 +      drain_idle_http3_connections_(Runtime::runtimeFeatureEnabled(
 +          "envoy.reloadable_features.http3_drain_idle_connections")),
        allow_upstream_half_close_(Runtime::runtimeFeatureEnabled(
-           "envoy.reloadable_features.allow_multiplexed_upstream_half_close")),
-       close_connection_on_zombie_stream_complete_(Runtime::runtimeFeatureEnabled(
-@@ -760,12 +762,69 @@ void ConnectionManagerImpl::onDrain(Network::ConnectionDrainEvent drain_event) {
+           "envoy.reloadable_features.allow_multiplexed_upstream_half_close")) {
+   ENVOY_LOG_ONCE_IF(
+@@ -796,12 +798,69 @@ void ConnectionManagerImpl::onDrain(Network::ConnectionDrainEvent drain_event) {
    // accepted after that part of the window has begun is not drained proactively.
    const std::chrono::milliseconds delay = Network::proactiveDrainDelay(
        server_context_, drain_event, config_->drainTimeout(), ProactiveDrainWindowStart);
@@ -86,7 +86,7 @@ index 16c0e814a2..dd81d92083 100644
  
  bool ConnectionManagerImpl::shouldDrainClose(Network::DrainDirection scope) {
 diff --git a/source/common/http/conn_manager_impl.h b/source/common/http/conn_manager_impl.h
-index e71be649e6..0ea9076891 100644
+index 25f3ab1985..2fc8565f06 100644
 --- a/source/common/http/conn_manager_impl.h
 +++ b/source/common/http/conn_manager_impl.h
 @@ -627,6 +627,13 @@ private:
@@ -103,7 +103,7 @@ index e71be649e6..0ea9076891 100644
    void startDrainSequence();
    // Called when the drain sequence the connection was notified of (see onDrain()) is about to end
    // and the connection has to be drained without waiting for a response to decide on.
-@@ -692,6 +699,9 @@ private:
+@@ -694,6 +701,9 @@ private:
    // Set once proactive_drain_timer_ has fired. From then on tunneling streams are reset as soon as
    // the connection is closing, see resetTunnelingStreams().
    bool proactive_drain_{false};
@@ -113,7 +113,7 @@ index e71be649e6..0ea9076891 100644
    // When set to true, add Connection:close response header to nudge downstream client to reconnect.
    bool soft_drain_http1_{false};
    Random::RandomGenerator& random_generator_;
-@@ -738,6 +748,9 @@ private:
+@@ -740,6 +750,9 @@ private:
    // Latched when the connection manager is created so it is not re-read on every response. See
    // shouldDrainClose().
    const bool use_connection_event_drain_ = false;
@@ -124,10 +124,10 @@ index e71be649e6..0ea9076891 100644
    // If independent half-close is enabled and the upstream protocol is either HTTP/2 or HTTP/3
    // protocols the stream is destroyed after both request and response are complete i.e. reach their
 diff --git a/source/common/runtime/runtime_features.cc b/source/common/runtime/runtime_features.cc
-index 3127a7225b..05b8a92678 100644
+index 8d9eb2d43b..9f688b4679 100644
 --- a/source/common/runtime/runtime_features.cc
 +++ b/source/common/runtime/runtime_features.cc
-@@ -86,6 +86,10 @@ RUNTIME_GUARD(envoy_reloadable_features_filter_chain_drain_uses_configured_strat
+@@ -96,6 +96,10 @@ RUNTIME_GUARD(envoy_reloadable_features_filter_chain_drain_uses_configured_strat
  // lost. See https://github.com/envoyproxy/envoy/issues/46841
  RUNTIME_GUARD(envoy_reloadable_features_filter_manager_forward_added_data_on_continue);
  RUNTIME_GUARD(envoy_reloadable_features_fix_http3_early_data_timing);
@@ -135,14 +135,14 @@ index 3127a7225b..05b8a92678 100644
 +// inside the drain window even if no response is encoded meanwhile. Requires
 +// use_connection_event_drain.
 +RUNTIME_GUARD(envoy_reloadable_features_http3_drain_idle_connections);
+ RUNTIME_GUARD(envoy_reloadable_features_geoip_sanitize_geo_headers);
  RUNTIME_GUARD(envoy_reloadable_features_grpc_side_stream_flow_control);
  RUNTIME_GUARD(envoy_reloadable_features_happy_eyeballs_sort_non_ip_addresses);
- RUNTIME_GUARD(envoy_reloadable_features_header_mutation_url_encode_query_params);
 diff --git a/test/common/http/conn_manager_impl_test_3.cc b/test/common/http/conn_manager_impl_test_3.cc
-index 3aaffa3983..9281c16d3f 100644
+index de21ed8ba3..0b224232da 100644
 --- a/test/common/http/conn_manager_impl_test_3.cc
 +++ b/test/common/http/conn_manager_impl_test_3.cc
-@@ -3621,6 +3621,11 @@ TEST_F(HttpConnectionManagerImplTest, TestRefreshRouteCluster) {
+@@ -3629,6 +3629,11 @@ TEST_F(HttpConnectionManagerImplTest, TestRefreshRouteCluster) {
  // A connection that never received any data has no codec. When the drain sequence it was notified
  // of is about to end it is closed directly, as there is no peer to drain gracefully.
  TEST_F(HttpConnectionManagerImplTest, ProactiveDrainNoCodec) {
@@ -154,7 +154,7 @@ index 3aaffa3983..9281c16d3f 100644
    // Not used in the test.
    delete codec_;
    ON_CALL(factory_context_.server_factory_context_.options_, drainTime())
-@@ -3643,6 +3648,11 @@ TEST_F(HttpConnectionManagerImplTest, ProactiveDrainNoCodec) {
+@@ -3651,6 +3656,11 @@ TEST_F(HttpConnectionManagerImplTest, ProactiveDrainNoCodec) {
  // A connection that is idle when the drain sequence is about to end sends no response to make the
  // drain-close decision on. It runs the drain sequence on its own and is closed once that completes.
  TEST_F(HttpConnectionManagerImplTest, ProactiveDrainIdleConnection) {
@@ -166,7 +166,7 @@ index 3aaffa3983..9281c16d3f 100644
    ON_CALL(factory_context_.server_factory_context_.options_, drainTime())
        .WillByDefault(Return(std::chrono::seconds(600)));
    setup();
-@@ -3693,6 +3703,11 @@ TEST_F(HttpConnectionManagerImplTest, ProactiveDrainIdleConnection) {
+@@ -3701,6 +3711,11 @@ TEST_F(HttpConnectionManagerImplTest, ProactiveDrainIdleConnection) {
  // An ordinary request that is still in flight when the connection is proactively drained is left
  // to complete: only the drain sequence runs, and the connection closes with the response.
  TEST_F(HttpConnectionManagerImplTest, ProactiveDrainLeavesActiveRequest) {
@@ -178,7 +178,7 @@ index 3aaffa3983..9281c16d3f 100644
    ON_CALL(factory_context_.server_factory_context_.options_, drainTime())
        .WillByDefault(Return(std::chrono::seconds(600)));
    setup();
-@@ -3745,6 +3760,11 @@ TEST_F(HttpConnectionManagerImplTest, ProactiveDrainLeavesActiveRequest) {
+@@ -3753,6 +3768,11 @@ TEST_F(HttpConnectionManagerImplTest, ProactiveDrainLeavesActiveRequest) {
  // connection is already closing, as it cannot be reused, so the stream is reset as soon as the
  // connection is proactively drained instead of being left until the listener is torn down.
  TEST_F(HttpConnectionManagerImplTest, ProactiveDrainResetsUpgradedStream) {
@@ -190,7 +190,7 @@ index 3aaffa3983..9281c16d3f 100644
    ON_CALL(factory_context_.server_factory_context_.options_, drainTime())
        .WillByDefault(Return(std::chrono::seconds(600)));
    setup(SetupOpts().setTracing(false));
-@@ -3803,6 +3823,11 @@ TEST_F(HttpConnectionManagerImplTest, ProactiveDrainResetsUpgradedStream) {
+@@ -3811,6 +3831,11 @@ TEST_F(HttpConnectionManagerImplTest, ProactiveDrainResetsUpgradedStream) {
  // On HTTP/2 the connection of an upgraded stream is first drained gracefully, and the stream is
  // reset once the drain sequence completes.
  TEST_F(HttpConnectionManagerImplTest, ProactiveDrainResetsUpgradedStreamAfterDrainTimeoutHttp2) {
@@ -202,7 +202,7 @@ index 3aaffa3983..9281c16d3f 100644
    codec_->protocol_ = Protocol::Http2;
    ON_CALL(factory_context_.server_factory_context_.options_, drainTime())
        .WillByDefault(Return(std::chrono::seconds(600)));
-@@ -3870,6 +3895,11 @@ TEST_F(HttpConnectionManagerImplTest, ProactiveDrainResetsUpgradedStreamAfterDra
+@@ -3878,6 +3903,11 @@ TEST_F(HttpConnectionManagerImplTest, ProactiveDrainResetsUpgradedStreamAfterDra
  // upgraded stream when that drain sequence completes: the stream is only reset when the end of the
  // drain window is near, i.e. when the connection is drained proactively as well.
  TEST_F(HttpConnectionManagerImplTest, ResponseDrainKeepsUpgradedStreamHttp2) {
@@ -214,7 +214,7 @@ index 3aaffa3983..9281c16d3f 100644
    codec_->protocol_ = Protocol::Http2;
    ON_CALL(factory_context_.server_factory_context_.options_, drainTime())
        .WillByDefault(Return(std::chrono::seconds(600)));
-@@ -3957,6 +3987,11 @@ TEST_F(HttpConnectionManagerImplTest, NoProactiveDrainOnLegacyDrainPath) {
+@@ -3965,6 +3995,11 @@ TEST_F(HttpConnectionManagerImplTest, NoProactiveDrainOnLegacyDrainPath) {
  // while the listener was draining. It is not drained proactively, as that could close it before its
  // first request has been read; its first response drains it instead.
  TEST_F(HttpConnectionManagerImplTest, NoProactiveDrainForConnectionAcceptedLate) {
@@ -226,7 +226,7 @@ index 3aaffa3983..9281c16d3f 100644
    // Not used in the test.
    delete codec_;
    ON_CALL(factory_context_.server_factory_context_.options_, drainTime())
-@@ -3972,3 +4007,200 @@ TEST_F(HttpConnectionManagerImplTest, NoProactiveDrainForConnectionAcceptedLate)
+@@ -3980,3 +4015,200 @@ TEST_F(HttpConnectionManagerImplTest, NoProactiveDrainForConnectionAcceptedLate)
  
  } // namespace Http
  } // namespace Envoy
@@ -428,10 +428,10 @@ index 3aaffa3983..9281c16d3f 100644
 +} // namespace Http
 +} // namespace Envoy
 diff --git a/test/integration/quic_http_integration_test.cc b/test/integration/quic_http_integration_test.cc
-index 3089ba3544..60e831da9a 100644
+index ad83c15054..423484885b 100644
 --- a/test/integration/quic_http_integration_test.cc
 +++ b/test/integration/quic_http_integration_test.cc
-@@ -561,6 +561,28 @@ TEST_P(QuicHttpIntegrationTest, AdminDrainDrainsListeners) {
+@@ -612,6 +612,28 @@ TEST_P(QuicHttpIntegrationTest, AdminDrainDrainsListeners) {
    testAdminDrain(Http::CodecType::HTTP1);
  }
  

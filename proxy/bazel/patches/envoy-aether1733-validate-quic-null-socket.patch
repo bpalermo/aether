@@ -1,0 +1,17 @@
+diff --git a/source/common/quic/active_quic_listener.cc b/source/common/quic/active_quic_listener.cc
+index bb6a554dc5..56a2118119 100644
+--- a/source/common/quic/active_quic_listener.cc
++++ b/source/common/quic/active_quic_listener.cc
+@@ -416,6 +416,12 @@ absl::Status ActiveQuicListenerFactory::initializeWorkerRouting(
+   for (const auto& factory : socket_factories) {
+     for (uint32_t i = 0; i < concurrency_; i++) {
+       auto socket = factory->getListenSocket(i);
++      if (socket == nullptr) {
++        // `--mode validate`: the validation listener component factory creates no sockets
++        // (ValidationListenerComponentFactory::createListenSocket() returns nullptr), so there is
++        // nothing to apply the options to, as before defer_worker_routing_init.
++        continue;
++      }
+       if (!Network::Socket::applyOptions(options_, *socket,
+                                          envoy::config::core::v3::SocketOption::STATE_BOUND)) {
+         return absl::InvalidArgumentError(

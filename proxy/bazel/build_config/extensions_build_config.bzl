@@ -30,11 +30,18 @@ load(
 )
 
 # Substrings matched against the extension NAME (not the target label). At the
-# pinned 1.40.0 release (its extensions_build_config.bzl is unchanged from the
-# 1.40.0-dev.20261009.189f198 snapshot): 349 upstream extensions
-# - 34 dropped = 315 compiled in. (At 20260926.726d7ac it was 345 - 32 = 313; at
-# 20260904.13144fb, 338 - 29 = 309; at v1.39.0, 330 - 27 = 303, against the 317
-# the stale verbatim copy carried.)
+# pinned 1.41.0-dev.20261028.011e396 snapshot: 354 upstream extensions - 35
+# dropped = 319 compiled in. New since v1.40.0 (349 - 34 = 315):
+# envoy.tls.certificate_selectors.dynamic_modules (dropped, by "dynamic_module"),
+# and four that compile in: envoy.filters.http.priority_load_shed,
+# envoy.load_balancing_policies.host_allowlist, envoy.matching.matchers.uri_template
+# and envoy.ai_protocol_manager.external_buffer.in_memory. aether configures none
+# of the four, and none reaches the wasm, dynamic-module or Rust machinery
+# (no such dep under their packages at 011e396), so they stay: this list drops
+# what cannot build or drags that machinery in, not everything aether leaves
+# unused. (At 20260926.726d7ac it was 345 - 32 = 313; at 20260904.13144fb,
+# 338 - 29 = 309; at v1.39.0, 330 - 27 = 303, against the 317 the stale verbatim
+# copy carried.)
 _DROPPED = [
     # wasm: aether emits no wasm filter/runtime/access-logger/stat-sink anywhere
     # (no `wasm` in charts/, agent/, common/ or api/). .bazelrc also sets
