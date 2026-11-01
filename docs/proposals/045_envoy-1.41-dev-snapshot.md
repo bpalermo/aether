@@ -363,6 +363,12 @@ no TLS 1.2 pin.
 - **Why that works:** a pass needs a response the inbound sends after it has
   accepted the connection. A rejection arrives as a reset and fails the check
   on TLS 1.2 and 1.3 alike.
+- **Any HTTP status passes** (`expected_statuses` 200-599). The inbound
+  connection manager is not exempt from the overload manager: at heap >= 0.95
+  it answers 503 before the health_check filter runs. A 503 still proves the
+  inbound accepted the node certificate. Requiring 200 would demote every
+  serving pod on an overloaded node at once, the flap the health gateway's
+  `bypass_overload_manager` exists to prevent.
 - **What stayed:** the probe's own transport socket, a fresh handshake per
   check and the 5 s cadence.
 - **The proof** is a live test against real Envoy,
@@ -491,7 +497,13 @@ Then:
      connection per request**. The source's `tcp_proxy` opens one upstream
      connection per downstream connection, so every request is a fresh mTLS
      handshake with the source's own identity, at a steady rate, through
-     every window.
+     every window;
+   - at least one **HTTP target with no QUIC twin**, reached over h2
+     (`aether_cluster="<ns>/<svc>"`), with application (non-probe) requests
+     from a source on every node under each source-proxy version. It is the
+     source of the identity check below: the destination's HTTP access log
+     records its requests, and records neither the raw-TCP floor's nor the
+     probes'.
 
    **Measurements.** Envoy counters are per generation: a hot-restart child
    inherits only the parent's unflushed delta, so a raw value can fall during
@@ -575,7 +587,13 @@ Then:
    the same labelset"; measured). Per counter `C`, with the target's selector
    `S` and the window `w`, the per-node term is:
 
-   `T(C) = sum by (node) ((increase(C{S}[w]) and C{S} offset w) or (max_over_time(C{S}[w]) unless C{S} offset w)) or on(node) (0 * group by (node) (A{S}))`
+   `T(C) = (sum by (node) ((increase(C{S}[w]) and C{S} offset w) or (max_over_time(C{S}[w]) unless C{S} offset w)) or on(node) (0 * group by (node) (A{S})))`
+
+   The outer parentheses are part of `T(C)`, and every use below pastes it
+   with them. Its last operator is `or`, which binds more loosely than `+` and
+   the comparisons. So, unparenthesised, `T(a) + T(b)` would add `T(b)` to
+   only the anchor of `T(a)`, and `T(…) == 0` would compare only the anchor
+   and return the non-zero count unchanged.
 
    `A` is a series every node that carries the load has, the anchor. The
    `or on(node)` gives such a node a zero row when `C` has no series there
@@ -639,9 +657,21 @@ Then:
        give a steady handshake rate per node under the node proxy's default
        client TLS settings.
 
-     With `S` = `job="aether-proxy", aether_cluster=~"inboundready_.*|tcp_<ns>/<svc>"`
-     and anchor `A` = `envoy_cluster_ssl_handshake_total` (the anchor also
-     makes a missing series read 0, never pass vacuously), per source node:
+     The two sources are judged **separately**, each on its own source
+     nodes. Combined, the probes alone would keep supplying the expected
+     version, and the gate would pass with no application-path handshake at
+     all: no TCP load, or a port-qualified TCP cluster the selector missed.
+     Each source has its own selector, with anchor
+     `A` = `envoy_cluster_ssl_handshake_total` (the anchor makes a missing
+     series read 0, never pass vacuously):
+     - the raw-TCP target:
+       `S` = `job="aether-proxy", aether_cluster=~"tcp_<ns>/<svc>(_[0-9]+)?"`,
+       on the nodes of its sources;
+     - the probes:
+       `S` = `job="aether-proxy", aether_cluster=~"inboundready_.*"`, on every
+       node.
+
+     For each source on each of its nodes:
      - a 1.41-dev source proxy: `T(envoy_cluster_ssl_versions_TLSv1_3_total) > 0`
        and `T(envoy_cluster_ssl_versions_TLSv1_2_total) == 0`, after the
        upgrade and after the final forward roll;
@@ -649,6 +679,10 @@ Then:
        and `T(envoy_cluster_ssl_versions_TLSv1_3_total) == 0`, in the
        baseline and after the rollback. 1.40.0 offers TLS 1.2 at most by
        default, so expecting TLS 1.3 there would fail a healthy run.
+
+     The `> 0` on the expected version is what proves the source handshook
+     in the window. A source that did not is a FAIL of the check, not a
+     pass.
 
      **When a TLS window starts.** Until its parent exits, the child keeps
      merging the parent's latched stat deltas into its own counters on every
@@ -678,12 +712,17 @@ Then:
      because neither TLS source logs it at the destination: the raw-TCP floor
      chain's `tcp_proxy` writes no access log, and health-check requests are
      dropped from the inbound access log (`notHealthCheckFilter`). It comes
-     from the h2 target instead. After the parent exits, its requests ride
-     connections the child opened, with the child's TLS settings and its
-     per-source certificate selector. The destination inbound's HTTP access
-     log for those requests shows the expected source SPIFFE ID in
-     `downstream_peer_uri_san`, under each version. The TLS version of those
-     connections is read from the version sources above, not from this log.
+     from the h2 target (no QUIC twin) instead. After the parent exits, its
+     requests ride connections the child opened, with the child's TLS
+     settings and its per-source certificate selector. In the destination
+     inbound's HTTP access log, for each source node and each window:
+     - there is **at least one** line for that target from that source node.
+       No line is a FAIL, never a pass;
+     - **every** line's `downstream_peer_uri_san` equals the source
+       workload's SPIFFE ID, `spiffe://<td>/ns/<source-ns>/sa/<source-sa>`.
+
+     The TLS version of those connections is read from the version sources
+     above, not from this log.
 
    The upgrade and the rollback must meet the same bar as the baseline. A
    failure in either is a soak FAIL, and the rollback below applies. The
