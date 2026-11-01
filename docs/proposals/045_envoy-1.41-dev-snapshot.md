@@ -10,7 +10,8 @@ until the 8 h soak in *Validation* has passed. The facts below were read from
 **Related:** proposal [010](010_custom-proxy-workspace.md) (the proxy
 workspace), `proxy/README.md` § *Envoy version bumps* (the recipe this follows),
 aether#1050, #1054, #1074, #1126 (the carried patches), aether#980 (the
-previous snapshot pin).
+previous snapshot pin), #1733 (the implementation, and aether1733's name),
+proposal [042](042_sortie-soak-driver.md) (the soak).
 
 ## The decision
 
@@ -18,11 +19,14 @@ previous snapshot pin).
 > `a1264b53`) to `1.41.0-dev.20261028.011e396.envoy` (registry `36d481b01b`),
 > and its workspace moves from Bazel 8.7.0 to 9.3.1 in the same change. Two
 > carried patches drop (aether1054c, aether1074). Four stay: 47740 and aether1126
-> as they are, aether1050 and aether1054 with their context refreshed.**
+> as they are, aether1050 and aether1054 with their context refreshed. One is
+> added: aether1733, for a crash the snapshot brings into `envoy --mode
+> validate` (see *A new carried patch*).**
 
 No upstream pull request or issue is opened or commented on for this. The
-owner has put all upstream Envoy activity on hold, so aether1126 stays
-unreported and envoyproxy/envoy#47740 and #47834 are left alone.
+owner has put all upstream Envoy activity on hold, so aether1126 and the
+aether1733 bug stay unreported, and envoyproxy/envoy#47740 and #47834 are left
+alone.
 
 ## Why this version
 
@@ -45,6 +49,29 @@ release, and `1.41.0-dev.20261028.011e396.envoy`. Measured:
 
 The snapshot is 276 commits past `v1.40.0`.
 
+### Running a dev snapshot in production
+
+A `main` snapshot has no release branch. No upstream backport will ever target
+`1.41.0-dev.20261028.011e396`, so while the proxy is on it, a fix reaches it in
+one of three ways:
+
+1. **A later snapshot.** The registry cuts them now and then, never on a
+   schedule. Moving to one is another bump of this size: closure, `.bazelrc`
+   re-diff, patch check, soak.
+2. **The `1.41.0` release.** Envoy releases quarterly; 1.40.0 was tagged on
+   2026-10-13, so 1.41.0 is expected around January 2027. **The pin moves to
+   `1.41.0.envoy` as soon as the registry publishes it.**
+   `modules/envoy/metadata.json` is checked on every dependency sweep, as
+   `proxy/README.md` § *Envoy version bumps* already prescribes.
+3. **A carried patch.** For a security fix that cannot wait for 1 or 2, the
+   upstream commit, public once the advisory is out, is carried in
+   `proxy/bazel/patches/` like any other. It is dropped at the next pin that
+   contains it.
+
+Staying on `1.40.0.envoy` would not be safer on this count. The registry has
+not published `1.40.1` or `1.40.2` either, so a security patch release on the
+1.40 branch would have reached the proxy only through 3 as well.
+
 ## The carried patches
 
 Each patch was checked by applying the series in order with `git apply` to a
@@ -58,6 +85,7 @@ worktree of the upstream commit (measured):
 | `aether1054c-paused-udp-listener-no-read` | envoyproxy/envoy#47868, merged `2eff6e8ccf` | reverse-applies (already present) | **drop** |
 | `aether1074-quic-persistent-info-lifetime` | envoyproxy/envoy#47893, merged `77b512527c` | no longer applies; upstream merged the same fix, plus a `cluster_manager_impl.cc` hunk the carried patch did not need | **drop** |
 | `aether1126-forwarded-udp-worker-index` | not reported | applies unchanged | keep |
+| `aether1733-validate-quic-null-socket` | not reported (a bug in envoyproxy/envoy#45504) | new | **add** (below) |
 
 The `proxy/MODULE.bazel` comment that still called #47893 "open" was stale:
 it merged on 2026-10-20. The rewritten comment says so.
@@ -114,6 +142,31 @@ still exists at `011e396`. Upstream changed no drain logic in
 touch it are filter buffering, span tags, idle counters and a guard removal.
 The `+`/`-` lines are identical to the carried patch's.
 
+### A new carried patch: aether1733
+
+The first `proxy` workflow run of the implementation pull request (run
+41308410926, both arches) failed `//agent/test/envoy_validate`. `envoy --mode
+validate` of every bootstrap with a QUIC listener died with SIGSEGV in
+`Quic::ActiveQuicListenerFactory::initializeWorkerRouting()`, called from
+`ListenerManagerImpl::addOrUpdateListenerInternal()` under
+`ValidationInstance::initialize()`.
+
+- **Cause** (read at `011e396`): envoyproxy/envoy#45504 moved the QUIC
+  listener's socket options into `initializeWorkerRouting()`. That path sits
+  behind `envoy.restart_features.defer_worker_routing_init`, on by default. It
+  applies the options to `factory->getListenSocket(i)` for every worker.
+  Validation mode creates no sockets:
+  `ValidationListenerComponentFactory::createListenSocket()` returns `nullptr`
+  by design, so `*socket` dereferences null. Upstream `main` still has it.
+- **Why it blocks the release:** the proxy-supervisor's check before every hot
+  restart on a changed bootstrap is `envoy --mode validate`. With this binary,
+  every such change would be rejected.
+- **The fix:** the patch skips a null socket, which only validation mode
+  produces, as validation did before #45504.
+- **The regression test** is `//agent/test/envoy_validate:envoy_validate_test`,
+  which the `proxy` workflow runs against the binary it builds. It was red
+  without the patch on both arches.
+
 ## Why the Bazel 9 move rides with the bump
 
 The owner asked for the Bazel move to land alone on 1.40.0 first, if that were
@@ -150,7 +203,9 @@ version.
   selects those versions, and `--check_direct_dependencies` warns when the root
   names an older one. `protobuf`, `rules_rust`, `toolchains_llvm` and
   `abseil-cpp` are unchanged. Transitively, `quiche` moves from
-  `261006-9e60ac2` to `261019-67bce2e` (envoyproxy/envoy#48288).
+  `261006-9e60ac2` to `261019-67bce2e`, in two upstream bumps:
+  envoyproxy/envoy#48288 (to `132bfd9`) and #48484 (to `67bce2e`, the
+  revision that ships).
 - **`.bazelrc`:**
   - The registry line moves to `36d481b01b`.
   - `--incompatible_merge_fixed_and_default_shell_env` goes: removed in Bazel 9,
@@ -169,7 +224,8 @@ version.
   the last `--build-id` (the aether#651/#653 invariant the `proxy` workflow
   asserts). The image stays on `distroless/cc`. The `symtab_test` and
   `build_id_test` gates are unchanged and run in the workflow.
-- **Carried patches:** two files deleted, two refreshed. The comments in
+- **Carried patches:** two files deleted, two refreshed, one added
+  (aether1733). The comments in
   `//bazel/patches:carried_patch_tests` say what each remaining target covers.
   `udp_listener_impl_test` stays: it carries aether1126's case, and now runs
   #47868's upstream case too.
@@ -192,31 +248,78 @@ was exercised against aether's configuration before the soak.
 |---|---|---|---|
 | envoyproxy/envoy#45504, "QUIC eBPF hot restart part 0" | QUIC listener setup: the connection-ID generator factory and UDP socket options move to `initializeWorkerRouting()`, and the listener's init target registers after it. Behind `envoy.restart_features.defer_worker_routing_init`, default **on**. Touches no hot-restart IPC file. | No behaviour change intended. The path is the one aether1050 and aether1126 sit next to (QUIC listeners on a hot-restart child, CID → worker routing). | soak: proxy rolls under QUIC load, stateless resets, misses near handoffs |
 | envoyproxy/envoy#47068 | the hot-restart receive loop | composes with aether1050 (see above) | `carried_patch_tests`; soak rolls |
-| envoyproxy/envoy#48570, upstream TLS default max 1.3 | every TCP mesh hop: aether sets only `tls_minimum_protocol_version` (TLSv1_2), so mesh upstreams now offer and negotiate TLS 1.3. QUIC was 1.3 already. Behind `envoy.reloadable_features.default_client_tls_max_version_is_1_3`. | A wire-visible change. Resumption stays off (`max_session_keys: 0`). The per-source certificate selector is exercised under 1.3 for the first time. | soak: TCP tiers of the prober; the guard is the rollback lever (see *Rollback*) |
+| envoyproxy/envoy#48570, upstream TLS default max 1.3 | every TCP mesh hop: aether sets only `tls_minimum_protocol_version` (TLSv1_2), so mesh upstreams now offer and negotiate TLS 1.3. QUIC was 1.3 already. Behind `envoy.reloadable_features.default_client_tls_max_version_is_1_3`. | A wire-visible change. Resumption stays off (`max_session_keys: 0`). The per-source certificate selector is exercised under 1.3 for the first time. Per the release note, a client certificate the server rejects becomes a reset *after* connect: `connect-failure` retries and `tcp_proxy` `max_connect_attempts` no longer move it to another endpoint, connect-only TCP health checks pass (the readiness probe, below), and outlier detection counts it as a success. The default key exchange becomes post-quantum, so ClientHellos get larger. | the readiness-probe mitigation below (before release); the TCP-routed soak check in *Validation*; the guard is the rollback lever (see *Rollback*) |
 | envoyproxy/envoy#47067, `wait_for_warm_on_init` for all cluster types | CDS warming: one CDS pause handle per warming cluster instead of one global handle | aether sets no `wait_for_warm_on_init` (default true): each warming cluster still holds CDS back. ACK timing per cluster may shift. | soak: agent ACK/NACK metrics, the `503 NC` count at twin admission |
 | envoyproxy/envoy#48024, ODCDS remembers "missing" | QUIC twins over ODCDS | behind `envoy.reloadable_features.odcds_missing_cluster_cache`, **default off** at `011e396`: no change unless turned on | nothing to watch; re-check when upstream flips it |
 | envoyproxy/envoy#48214, `prefer_gro` honoured | the inbound QUIC listener | aether sets `prefer_gro: true` (`agent/internal/xds/proxy/ingress.go`), so GRO stays on; the fix only stops Envoy turning GRO on where `prefer_gro` is false | soak: QUIC per-request CPU (the #1021 gate) |
 | envoyproxy/envoy#48403 (listener addresses updated in place), #48413 and #47455 (use-after-free fixes in connection-handler and accepted-socket teardown) | listener updates, drains | fixes; no aether configuration change needed | soak |
-| envoyproxy/envoy#48288, QUICHE `132bfd9` | every HTTP/3 hop | dependency bump | soak |
+| envoyproxy/envoy#48288 and #48484, QUICHE `9e60ac2` → `132bfd9` → `67bce2e` (ships `0.0.0-261019-67bce2e.envoy`) | every HTTP/3 hop | dependency bumps | soak |
+| Hot restart **across** the two versions | every node's upgrade roll is a 1.40.0 parent → 1.41-dev child handoff, and a rollback is the reverse | compatible, by the evidence below | the cross-version roll in *Validation* |
 
-Runtime flags aether sets: `hot_restart_propagate_stat_tags` still exists at
-`011e396`, and the only other one is 47740's own guard. None of the guards
-upstream removed in this range is one aether sets.
+**Hot restart across 1.40.0 and 1.41-dev.** A surge roll starts the new proxy
+pod's Envoy as a hot-restart child of the old pod's: same host network
+namespace, same `/dev/shm`, same base id. So every node's upgrade is a 1.40.0 →
+1.41-dev handoff, and a revert is the reverse handoff on every node. The soak
+alone would not show it, since it rolls 1.41 to 1.41. The evidence that the
+two versions interoperate (read):
+
+- **The segment and its version:** `HOT_RESTART_VERSION` is 11 at both
+  `v1.40.0` and `011e396`. That is also the value the supervisor's
+  stale-flag repair is tied to (`envoyHotRestartVersion` in
+  `agent/internal/proxy/hotrestart/sharedmemory.go`).
+- **The IPC sources:** `git diff v1.40.0 011e396` changes nothing in
+  `source/server/hot_restart.proto`, `hot_restart_impl.{h,cc}`, or
+  `hot_restarting_{child,parent}.cc`.
+- **The receive loop:** the only change in `hot_restarting_base.{h,cc}` is
+  #47068. It drops a length prefix that no legitimate peer sends, so a 1.40.0
+  peer, which lacks it, sends and receives the same messages.
+- **aether's IPC patches:** aether1050 and aether1126 carry identical
+  `+`/`-` lines in both builds. aether1733 touches validation only.
+
+What this does not cover is behaviour: #45504's deferred option setup on a
+child that inherits a 1.40.0 parent's QUIC sockets. Hence the validation step.
+
+Runtime guards aether relies on, all at their defaults:
+`hot_restart_propagate_stat_tags` (the chart's stats configuration assumes it
+is on; the chart sets no runtime) still exists at `011e396`, and 47740's own
+guard comes with the patch. None of the guards upstream removed in this range
+is one aether relies on.
+
+**TLS 1.3 and the inbound readiness probe.** The upstream release note for
+#48570 says that under TLS 1.3 a server's rejection of the client certificate
+reaches the client only after the client considers the connection
+established. `NewInboundReadyProbeCluster` (`agent/internal/xds/proxy/cluster.go`)
+gates an endpoint's promotion on a connect-only TCP health check over TLS, which
+passes on the Connected event. Under TLS 1.2 that event implied the pod's
+inbound had also accepted the probe's client certificate (the node SVID).
+Under TLS 1.3 it no longer does, so an endpoint could be promoted while its
+inbound rejects the node identity. The probe's documented contract
+(listening, presents a certificate that verifies, URI SAN is this pod's) still
+holds. The implicit client-acceptance half does not. The mitigation, a
+**pre-release step** and a separate agent pull request (one concern per pull
+request): the probe's own transport socket (`InboundReadyProbeTransportSocket`)
+pins `tls_maximum_protocol_version: TLSv1_2`. It carries no application
+traffic, so this keeps the TLS 1.2 semantics for exactly the probe and nothing
+else, and both proxy versions accept the field. A test asserts the probe's
+context pins it. The prober's traffic does not exercise a certificate
+rejection, so it cannot stand in for this.
 
 ## Validation
 
 Before merge:
 
-1. Local, measured on this change:
+1. **Local**, measured on the implementation:
    - `bazel mod graph --depth=1` resolves with no warning.
    - `bazel mod show_repo --base_module=envoy @envoy_build_config` is our
      `local_repository`.
    - `bazel build --nobuild //...` analyses all 30 targets, which fetches
-     `@envoy` with the four patches applied.
+     `@envoy` with every carried patch applied.
    - `scripts/check-envoy-pin.sh` and `--online` pass.
-   - The repository gates pass: `make test-unit`, `make lint`,
-     `make format-check`, `make gazelle`, `make tidy`.
-2. The `proxy` workflow on the implementation pull request, both arches on
+   - `make gazelle`, `make tidy`, `make format-check` and lint as CI runs it
+     pass.
+   - `make test-unit` cannot run cleanly in the agent sandbox, which forbids
+     Unix sockets. The `ci` workflow runs it; the change touches no Go code.
+2. **The `proxy` workflow** on the implementation pull request, both arches on
    RBE:
    - the build;
    - `//...`, which runs `//bazel/patches:carried_patch_tests` (aether1050's
@@ -225,31 +328,99 @@ Before merge:
    - `image_test`, `symtab_test` and `build_id_test`;
    - the `--build-id=sha1` link-line check;
    - `envoy_validate` of the agent's generated configuration against the
-     binary this pull request builds.
-3. The tests that build only in the Envoy workspace: aether1054's
-   `quic_http_integration_test` case, and aether1050's suite under Envoy's own
-   test setup. They run from an Envoy checkout at `011e396` with the four
-   patches applied. The implementation pull request says whether they were
-   run, and with what result.
+     binary this pull request builds. This is also aether1733's regression
+     test.
+3. **The tests that build only in the Envoy workspace:** aether1054's
+   `quic_http_integration_test` case, and the http3 `conn_pool_test` that came
+   with #47893. They run from an Envoy checkout at `011e396` with the patches
+   applied, on BuildBuddy RBE. The implementation pull request says whether
+   they were run, and with what result.
 
-Before release: **an 8 h soak** (the aether-soak-runner procedure: sortie
-load, rollout churn, the external prober) on the build of the merged pull
-request. `AGENTS.md` does not require one for an Envoy bump. Every
-hot-restart and QUIC change before this one was soaked, and this one carries
-#45504, the TLS 1.3 default and a new toolchain runtime. The soak is started
-by the owner, not by this change.
+Before release, in this order:
+
+4. **The readiness-probe mitigation** (*Risk*, TLS 1.3) is merged and in the
+   agent image the release ships with.
+5. **A cross-version hot-restart roll** under the external prober, on one node
+   of the reference cluster. Roll that node's proxy from the current 1.40.0
+   image to the candidate, then back to the 1.40.0 image. For each handoff,
+   measure:
+   - the prober's misses within the handoff window;
+   - the child reaching ready;
+   - the parent exiting on its own;
+   - the supervisor's restart counters showing no stale-flag repair and no
+     validation rejection.
+
+   Both directions must be as clean as a same-version roll. This is the only
+   step that exercises a 1.40.0 parent with a 1.41-dev child, which is what
+   every node does on upgrade, and the reverse, which every node does on
+   rollback.
+6. **An 8 h soak** on the candidate image: the external soak harness
+   (proposal [042](042_sortie-soak-driver.md): sortie load, rollout churn,
+   the external prober). `AGENTS.md` does not require one for an Envoy bump.
+   Every hot-restart and QUIC change before this one was soaked, and this one
+   carries #45504, the TLS 1.3 default and a new toolchain runtime. The prober
+   alone does not cover a TCP mTLS mesh hop: its liveness check is a local
+   reply, and eligible service routes take the QUIC twins. So the soak also
+   needs:
+   - at least one load target routed over TCP (a service with no QUIC twin);
+   - on that path, `cluster.<svc>.ssl.versions.TLSv1.3` increasing on the
+     source proxy, and no `TLSv1.2`;
+   - the destination inbound's access log showing the expected source SPIFFE
+     ID in its `downstream_peer_uri_san` field, which exercises the per-source
+     certificate selector under TLS 1.3.
+
+   The owner starts the soak, not this change.
+
+### Holding the release until the soak passes
+
+Merging the implementation is not a soaked release, and nothing in the
+workflows waits for one. On a push to `main` touching `proxy/**`,
+`proxy-release.yml`:
+
+- builds and pushes the image by digest;
+- opens the `chore/proxy-image-bump-<sha>` chart pin pull request;
+- in its *auto* mode, arms `gh pr merge --auto --squash` on that pull request,
+  so the pin merges as soon as its checks pass.
+
+The hold is therefore on that pin pull request, and it is the owner's:
+
+- right after the implementation merges, disable auto-merge on the pin pull
+  request and label it `blocked`;
+- run steps 5 and 6 with the published candidate image, set by digest on the
+  reference cluster (a `helm upgrade --set` of the proxy image, as for any
+  test build);
+- merge the pin, or close it, only on the soak's verdict.
+
+Until the pin merges, no published chart references the new proxy. The
+candidate image is soaked exactly as it would ship, because the pin pull
+request carries that same digest.
 
 ## Rollback
 
 Revert the implementation pull request. That restores `1.40.0.envoy`, Bazel
 8.7.0 and the six patches. `proxy-release.yml` then builds the previous proxy
-again, and the chart pin follows. To keep the bump and back out only a
-behaviour, use the runtime guards: `default_client_tls_max_version_is_1_3`
-(TLS 1.3) and `defer_worker_routing_init` (#45504) can be set false without
-rebuilding Envoy. The proxy bootstrap (`charts/aether/templates/agent-proxy-configmap.yaml`)
-has no `layered_runtime` today, so doing that takes a chart change that adds a
-static layer. The admin endpoint's `/runtime_modify` works too, but it is lost
-at the next hot restart.
+again, and the chart pin follows. Every node's proxy then hot-restarts from
+1.41-dev back to 1.40.0, the direction step 5 measures.
+
+To keep the bump and back out only a behaviour, two runtime guards can be set
+to false without rebuilding Envoy:
+
+- `default_client_tls_max_version_is_1_3` (TLS 1.3). Envoy reads it only when
+  it builds an upstream TLS context configuration.
+- `defer_worker_routing_init` (#45504), a restart feature. Envoy reads it only
+  when it builds a listener.
+
+Neither changes what already exists, and the proxy bootstrap
+(`charts/aether/templates/agent-proxy-configmap.yaml`) has no
+`layered_runtime` today. The lever that works is therefore a chart change
+that adds a static runtime layer with the guard set to false, followed by a
+proxy roll. That is a hot restart into a process that builds every TLS
+context and listener with the override from the start. The admin endpoint's
+`/runtime_modify` is not a rollback:
+
+- it needs an admin layer the bootstrap does not have;
+- it affects only clusters and listeners built afterwards;
+- its effect is lost at the next hot restart.
 
 ## Not verified
 
