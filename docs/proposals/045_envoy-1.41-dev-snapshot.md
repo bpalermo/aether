@@ -682,7 +682,16 @@ Then:
 
      The `> 0` on the expected version is what proves the source handshook
      in the window. A source that did not is a FAIL of the check, not a
-     pass.
+     pass. As a filter, though, `> 0` drops a failing node's row, with or
+     without the anchor, so an absent row cannot be read as a pass. The
+     checks are written so that a failure is a row:
+     - `> bool 0` and `== bool 0` instead of `> 0` and `== 0`. Every node
+       with an anchor series then returns a row, 1 for pass and 0 for fail
+       (measured: `T(…) > bool 0` over the probes returns one 0/1 row per
+       node);
+     - and the expected node set comes from the load placement, not from the
+       result. Every node that runs a source of that target must have a row.
+       A node with no row at all, not even an anchor series, is a FAIL.
 
      **When a TLS window starts.** Until its parent exits, the child keeps
      merging the parent's latched stat deltas into its own counters on every
@@ -720,6 +729,41 @@ Then:
        No line is a FAIL, never a pass;
      - **every** line's `downstream_peer_uri_san` equals the source
        workload's SPIFFE ID, `spiffe://<td>/ns/<source-ns>/sa/<source-sa>`.
+
+     **Precondition: access logs on, every success logged.** Inbound access
+     logs are off unless the `MeshConfig` turns them on, and successes are
+     sampled. On default config the check above would find no lines and fail
+     every window. The reference cluster's `MeshConfig` `aether-system/default`
+     therefore carries, for the whole soak:
+
+         spec:
+           proxy:
+             accessLogsEnabled: true
+             accessLogSuccessSampleRate: 100
+
+     `accessLogsEnabled` defaults to false, and `accessLogSuccessSampleRate`
+     defaults to 100 when unset. It is set explicitly, so the soak does not
+     depend on that default. 100 also makes every destination line have its
+     source-side partner for the join below. Today that `MeshConfig` has
+     `accessLogsEnabled: true` and no sample rate, so it runs at the default
+     of 100.
+
+     **Which source node a destination line came from.** The destination
+     line does not carry the source's node. Its `downstream_remote_address`
+     is a pod-network address on the source's side (live: `10.244.3.1`,
+     `10.244.1.0`), and mapping it to a node would depend on how the CNI
+     assigns addresses. The check joins on `x_request_id` instead:
+     - the source proxy logs the same request with `reporter="source"`,
+       its own `node_name`, and `source_spiffe_id`;
+     - the destination line has `reporter="destination"` and the same
+       `x_request_id`;
+     - the source line's `node_name` is the source node.
+
+     Checked against live data: a destination line for `echo` with
+     `x_request_id` `bec7c857-…` joins to exactly one source line, from the prober pod on
+     its node, whose `source_spiffe_id` equals the
+     destination's `downstream_peer_uri_san`. A destination line with no
+     source partner in the window is a FAIL, not a skip.
 
      The TLS version of those connections is read from the version sources
      above, not from this log.
