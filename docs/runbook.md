@@ -10782,14 +10782,27 @@ two overload stages of the chart affect the probe differently:
   its health_check filter. It has still accepted the node certificate, so the
   probe passes and the node's pods stay ready.
 - **`stop_accepting_connections`** (heap ≥ 0.98): the listeners stop
-  accepting. The probe's connection is never answered, its 1 s timeout fails
-  it, and every local pod is demoted.
+  accepting. The probe's connection is never answered and its 1 s timeout
+  fails it. The pods are demoted only if the stage holds:
+  - the probe cluster marks the host unhealthy after two failed checks,
+    5 s apart;
+  - the agent then demotes after three consecutive failing liveness ticks,
+    5 s apart (`livenessDemoteStreak`, `agent/internal/cni/server/liveness.go`).
+
+  That is about 20 s of sustained heap ≥ 0.98. Even then it demotes only pods
+  whose inbound probe has already passed in this Envoy epoch. A pod whose
+  probe never passed in the epoch stays as it was ("can't tell").
 
 The second stage is not a regression: the connect-only probe before proposal
 045 needed the same accept and failed the same way. If `inboundready_*` drops
-for every pod of one node at once, check that node's proxy heap
-(`envoy_overload_envoy_overload_actions_stop_accepting_connections_active`)
-before anything else. An inbound that rejects the node identity shows
+for every pod of one node at once, check that node's proxy heap first. Read two
+series, because a 5 s sample can miss a short excursion:
+- the action gauge, 0 or 1:
+  `max_over_time(envoy_overload_envoy_overload_actions_stop_accepting_connections_active{job="aether-proxy", node="<node>"}[10m])`;
+- the heap pressure behind it, in percent, so the stage is 98:
+  `max_over_time(envoy_overload_envoy_resource_monitors_fixed_heap_pressure{job="aether-proxy", node="<node>"}[10m])`.
+
+An inbound that rejects the node identity shows
 up differently on the probe cluster under each TLS version (measured in
 `//agent/test/mtlspool` `TestInboundReadyProbe_RequiresTheInboundToAcceptTheNodeIdentity`,
 three checks each):
