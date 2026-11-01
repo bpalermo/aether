@@ -704,10 +704,10 @@ proxy:
   # scripts/proxy-pin-lib.sh) accepts that reference and no other.
   image:
     repository: quay.io/aethermesh/proxy
-    tag: dde1d29ec1c7b1cbbb8cf25304807b6cabb55420
+    tag: eeb52bcbf139be3a09c89055a93dcc0d048b8e6e
     # Digest-pinned (option A): content-addressed, tamper-proof. The aether.image
-    # helper prefers digest over tag. Multi-arch index for dde1d29ec1c7b1cbbb8cf25304807b6cabb55420.
-    digest: "sha256:12e299b9a5bfd9640d3ba8de81e734cec44c5058c7f5b50264265450ea89b6d3"
+    # helper prefers digest over tag. Multi-arch index for eeb52bcbf139be3a09c89055a93dcc0d048b8e6e.
+    digest: "sha256:c814fa89c262972ff65defcdf8ec4db918a45bc83afd1e74331c6d13cd7344d6"
     pullPolicy: Always
   # The Envoy hot-restart supervisor (#772): its own binary and its own image
   # since it stopped being an `agent` subcommand. The initContainer runs it to
