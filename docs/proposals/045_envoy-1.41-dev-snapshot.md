@@ -304,7 +304,7 @@ was exercised against aether's configuration before the soak.
 |---|---|---|---|
 | envoyproxy/envoy#45504, "QUIC eBPF hot restart part 0" | QUIC listener setup: the connection-ID generator factory and UDP socket options move to `initializeWorkerRouting()`, and the listener's init target registers after it. Behind `envoy.restart_features.defer_worker_routing_init`, default **on**. Touches no hot-restart IPC file. | One defect already found: with concurrency > 1, `envoy --mode validate` segfaults on any bootstrap with a static QUIC listener (*A new carried patch: aether1733*), fixed by aether1733. Otherwise no behaviour change is intended, but the path is the one aether1050 and aether1126 sit next to (QUIC listeners on a hot-restart child, CID → worker routing). | `//agent/test/envoy_validate:envoy_validate_test` in the `proxy` workflow (the validate crash); the soak (step 5), including its upgrade and rollback rolls: proxy rolls under QUIC load, stateless resets, misses near handoffs |
 | envoyproxy/envoy#47068 | the hot-restart receive loop | composes with aether1050 (see above) | `carried_patch_tests`; soak rolls |
-| envoyproxy/envoy#48570, upstream TLS default max 1.3 | every TCP mesh hop: aether sets only `tls_minimum_protocol_version` (TLSv1_2), so mesh upstreams now offer and negotiate TLS 1.3. QUIC was 1.3 already. Behind `envoy.reloadable_features.default_client_tls_max_version_is_1_3`. | A wire-visible change. Resumption stays off (`max_session_keys: 0`). The per-source certificate selector is exercised under 1.3 for the first time. Per the release note, a client certificate the server rejects becomes a reset *after* connect: `connect-failure` retries and `tcp_proxy` `max_connect_attempts` no longer move it to another endpoint, connect-only TCP health checks pass (the readiness probe, below), and outlier detection counts it as a success. The default key exchange becomes post-quantum, so ClientHellos get larger. | the readiness-probe mitigation below (before release); the TCP-routed soak check in *Validation*; the guard is the rollback lever (see *Rollback*) |
+| envoyproxy/envoy#48570, upstream TLS default max 1.3 | every TCP mesh hop: aether sets only `tls_minimum_protocol_version` (TLSv1_2), so mesh upstreams now offer and negotiate TLS 1.3. QUIC was 1.3 already. Behind `envoy.reloadable_features.default_client_tls_max_version_is_1_3`. | A wire-visible change. Resumption stays off (`max_session_keys: 0`). The per-source certificate selector is exercised under 1.3 for the first time. Per the release note, a client certificate the server rejects becomes a reset *after* connect: `connect-failure` retries and `tcp_proxy` `max_connect_attempts` no longer move it to another endpoint, connect-only TCP health checks pass (the readiness probe, below), and outlier detection counts it as a success. The default key exchange becomes post-quantum, so ClientHellos get larger. | the TLS-1.3-compatible readiness probe below (#1735, merged before #1733); the TCP-routed soak check in *Validation*; the guard is the rollback lever (see *Rollback*) |
 | envoyproxy/envoy#47067, `wait_for_warm_on_init` for all cluster types | CDS warming: one CDS pause handle per warming cluster instead of one global handle | aether sets no `wait_for_warm_on_init` (default true): each warming cluster still holds CDS back. ACK timing per cluster may shift. | soak: agent ACK/NACK metrics, the `503 NC` count at twin admission |
 | envoyproxy/envoy#48024, ODCDS remembers "missing" | QUIC twins over ODCDS | behind `envoy.reloadable_features.odcds_missing_cluster_cache`, **default off** at `011e396`: no change unless turned on | nothing to watch; re-check when upstream flips it |
 | envoyproxy/envoy#48214, `prefer_gro` honoured | the inbound QUIC listener | aether sets `prefer_gro: true` (`agent/internal/xds/proxy/ingress.go`), so GRO stays on; the fix only stops Envoy turning GRO on where `prefer_gro` is false | soak: QUIC per-request CPU (the #1021 gate) |
@@ -351,14 +351,29 @@ inbound had also accepted the probe's client certificate (the node SVID).
 Under TLS 1.3 it no longer does, so an endpoint could be promoted while its
 inbound rejects the node identity. The probe's documented contract
 (listening, presents a certificate that verifies, URI SAN is this pod's) still
-holds. The implicit client-acceptance half does not. The mitigation, a
-**step before the deploy** (step 4) and a separate agent pull request (one concern per pull
-request): the probe's own transport socket (`InboundReadyProbeTransportSocket`)
-pins `tls_maximum_protocol_version: TLSv1_2`. It carries no application
-traffic, so this keeps the TLS 1.2 semantics for exactly the probe and nothing
-else, and both proxy versions accept the field. A test asserts the probe's
-context pins it. The prober's traffic does not exercise a certificate
-rejection, so it cannot stand in for this.
+holds. The implicit client-acceptance half does not.
+
+The fix, a requirement the owner set on 2026-11-01, is a TLS-1.3-compatible
+probe in its own agent pull request, #1735, merged **before** #1733. There is
+no TLS 1.2 pin.
+- **What changed:** the probe is an HTTP/2 GET of `/-/-/live` that the
+  inbound answers itself. Its liveness `health_check` filter is the first HTTP
+  filter of the no-SNI h2 chain the probe's ALPN selects, with no pass-through
+  and no cluster condition, so the application never takes part.
+- **Why that works:** a pass needs a response the inbound sends after it has
+  accepted the connection. A rejection arrives as a reset and fails the check
+  on TLS 1.2 and 1.3 alike.
+- **What stayed:** the probe's own transport socket, a fresh handshake per
+  check and the 5 s cadence.
+- **The proof** is a live test against real Envoy,
+  `TestInboundReadyProbe_RequiresTheInboundToAcceptTheNodeIdentity`. Under TLS
+  1.3, with an inbound that rejects the node SVID, it was red on the
+  connect-only probe and is green on the new one. `validate-built-proxy.sh`
+  also runs it against the proxy a proxy pull request builds, so #1733's CI
+  exercises it on the 1.41 snapshot.
+
+The prober's traffic does not exercise a certificate rejection, so it cannot
+stand in for this.
 
 ## Validation
 
@@ -409,8 +424,18 @@ of #1733, `proxy-release.yml` runs as for every proxy change:
 The soak then validates the deployed full bump on the reference cluster.
 Before the deploy:
 
-4. **The readiness-probe mitigation** (*Risk*, TLS 1.3) is in the agent image
-   the bump is deployed with.
+4. **The TLS-1.3-compatible readiness probe** (*Risk*, TLS 1.3; #1735). The
+   order is strict:
+   1. #1735 merges;
+   2. its agent image is deployed on the reference cluster, and the agent
+      rollout completes: **every node's agent runs the #1735 image**;
+   3. only then does #1733 merge.
+
+   "#1735 merged first" alone is not enough. Once #1733 is on `main`, a single
+   `helm upgrade` from `main` would roll the agent and the proxy together, so
+   some node's proxy could speak TLS 1.3 by default while its agent still
+   programs the connect-only probe. With this order, every node's probe is
+   the new one before any node's proxy runs 1.41-dev.
 
 Then:
 
@@ -442,13 +467,31 @@ Then:
    prove that inherited QUIC listeners carried traffic through a handoff: its
    liveness check is a local reply, and other probes may reach another node
    or use TCP. The soak's load therefore includes:
-   - a QUIC load target with a destination pod on **every** node and, for
-     each, a source on another node, so every node's inherited inbound QUIC
-     listener carries traffic through its own handoff;
-   - HTTP/3 connections established before each roll, with requests flowing
-     throughout;
-   - at least one load target routed over TCP (a service with no QUIC twin),
-     for the TCP mTLS hop.
+   - for every node, a QUIC load target of its own: a service with a single
+     endpoint, pinned to that node, and a source on another node. A twin
+     load-balances over all of a service's endpoints and keeps its connections
+     pooled, so one service with a pod on every node would not guarantee each
+     node's listener any traffic; a single-endpoint service per node does;
+   - before each roll, a check that each target's requests reach its pod over
+     HTTP/3. The inbound HCM request counters cannot show it: the h2 and QUIC
+     chains share the `inbound` stat prefix. Two signals that are
+     QUIC-specific show it instead:
+     - on the source, the twin's `upstream_rq_total` rises with the load. A
+       twin is a QUIC-only cluster (`<ns>/<svc>@<ns>/<sa>`), so its requests
+       are HTTP/3 by construction;
+     - on the destination node, the pod's own QUIC listener holds
+       `downstream_cx_active` > 0. Its stat prefix is `inbound_<ns>_<pod>_h3`,
+       which the proxy's stats tags split, so in Prometheus it is
+       `envoy_listener_inbound_downstream_cx_active{aether_namespace="<ns>", aether_pod="<pod>_h3"}`.
+
+     Then HTTP/3 connections stay established, with requests flowing
+     throughout the roll;
+   - at least one load target routed over raw TCP, the TCP floor
+     (`tcp_<ns>/<svc>`), for the TCP mTLS hop. Its client opens a **new
+     connection per request**. The source's `tcp_proxy` opens one upstream
+     connection per downstream connection, so every request is a fresh mTLS
+     handshake with the source's own identity, at a steady rate, through
+     every window.
 
    **Measurements.** Envoy counters are per generation: a hot-restart child
    inherits only the parent's unflushed delta, so a raw value can fall during
@@ -456,20 +499,114 @@ Then:
    increase or rate over the exported series (Prometheus `increase()` /
    `rate()`), never as a raw value.
 
+   **A series born inside the window.** `increase()` alone cannot see it.
+   - The proxy's OTel stats sink exports only counters that have been used,
+     with cumulative temporality.
+   - A failure counter therefore appears in Prometheus at the first export
+     after its first failure, already carrying it. That first sample is
+     `increase()`'s baseline, so the burst reads 0.
+   - Per-pod series make this the common case, not the corner. Every pod
+     starts its roll with no failure series at all, and a first-ever
+     `TLSv1.2` handshake would hide the same way.
+
+   The rule used here keeps cumulative temporality and counts a series born
+   in the window at its full value:
+   - a series that existed at the window's start contributes its
+     `increase()`;
+   - a series that did not contributes `max_over_time()`, its whole
+     cumulative count. It started from zero in its own process, apart from
+     the small unflushed delta a hot-restart child inherits.
+
+   In PromQL, for any counter `X`:
+
+   `(increase(X[w]) and X offset w) or (max_over_time(X[w]) unless X offset w)`
+
+   The alternative, delta temporality on the sink with `sum_over_time()`, was
+   set aside. It changes the export for every consumer of these series, not
+   only the soak.
+
    A QUIC twin's stats are keyed by its `alt_stat_name`, which
    `QUICAltStatName` (`agent/internal/xds/proxy/egress.go`) sets to
    `<ns>/<svc>@<ns>/<sa>`. So the twin's series is
    `cluster.<ns>/<svc>@<ns>/<sa>.*`, in Prometheus
    `aether_cluster=~"<ns>/<svc>@.*"`. Nothing is keyed `quic:…`.
 
+   **Per node, not per service.** The documented metrics pipeline can leave the
+   per-service cluster series collapsed across nodes
+   (`docs/observability/metric-labels.md`, the `node` label on the node proxy's
+   per-cluster stats). Collapsed, another node's source proxy could keep a
+   twin's rate up during a failed handoff, and interleaved per-generation
+   counters can look like resets. A `node` label alone is not enough either.
+   During a handoff the hot-restart parent and the surge child run on the same
+   node and export the same label set, so with `node` only, their two counters
+   interleave in one series. `increase()` and `rate()` then read the switches
+   between them as resets inside the window, and the TLS checks mix the
+   parent's version with the child's.
+
+   The soak's pipeline therefore carries, on these series, both:
+   - `node` (from `k8s.node.name`);
+   - the proxy pod, `k8s.pod.name` (or `k8s.pod.uid`). The node proxy sets
+     both as resource attributes on its Envoy stats
+     (`docs/observability/metric-labels.md`), but the reference cluster's
+     pipeline does not promote either to a label today (measured: the node
+     proxy's cluster series carry `node` and no pod label). Promoting one is
+     a precondition of the soak. The parent and the surge child are different
+     pods.
+
+   Every rate and increase below is taken **per pod first**, so each
+   generation's counter stays monotonic within its own series, **then summed
+   by `node`**: the source proxy's node for twin and TCP cluster stats, and
+   the destination's node for inbound stats. For example:
+   `sum by (node) (increase(<counter>{…}[<window>]))`, where `increase()` runs
+   on each pod's series before the sum.
+
+   **The queries.** The PromQL below uses the series names the node proxy
+   exports today. Counters carry `_total`, cluster stats are labelled
+   `aether_cluster`, listener stats `aether_namespace` / `aether_pod`, and
+   the node proxy's series have `job="aether-proxy"`. Every expression was
+   run against the reference cluster's Prometheus over a recent window,
+   grouped by the labels that exist there today. Each parsed and returned
+   one row per node.
+
+   A failure or version counter is read with the born-in-window rule, applied
+   **to one counter at a time**: `increase()` and `max_over_time()` drop
+   `__name__`, so one `{__name__=~…}` selector over several counters that
+   share every other label is rejected ("vector cannot contain metrics with
+   the same labelset"; measured). Per counter `C`, with the target's selector
+   `S` and the window `w`, the per-node term is:
+
+   `T(C) = sum by (node) ((increase(C{S}[w]) and C{S} offset w) or (max_over_time(C{S}[w]) unless C{S} offset w)) or on(node) (0 * group by (node) (A{S}))`
+
+   `A` is a series every node that carries the load has, the anchor. The
+   `or on(node)` gives such a node a zero row when `C` has no series there
+   yet; a bare `or vector(0)` carries no labels and cannot. The terms of
+   different counters are then added with `+`, which matches on `node`
+   alone.
+
    For each node's handoff window, in each roll:
-   - **Forward progress:** the destination inbound HTTP connection manager's
-     `downstream_rq_total` keeps a non-zero rate through the window, and so
-     does the source twin's `upstream_rq_total`.
-   - **Request failures:** on the source twin, the increase of
-     `upstream_rq_5xx` + `upstream_rq_reset` +
-     `upstream_cx_destroy_remote_with_active_rq`, plus the load generator's
-     own error count, is no greater than the baseline roll's worst handoff.
+   - **Forward progress:** two counters keep a non-zero rate through the
+     window, and both are QUIC-specific:
+     - on the destination, the target pod's QUIC listener's
+       `sum by (node) (rate(envoy_listener_inbound_http_inbound_downstream_rq_completed_total{job="aether-proxy", aether_namespace="<ns>", aether_pod="<pod>_h3"}[1m]))`;
+     - on the source, the twin's
+       `sum by (node) (rate(envoy_cluster_upstream_rq_total{job="aether-proxy", aether_cluster=~"<ns>/<svc>@.*"}[1m]))`.
+   - **Request failures:** on the source twin (`S` =
+     `job="aether-proxy", aether_cluster=~"<ns>/<svc>@.*"`, anchor
+     `A` = `envoy_cluster_upstream_rq_total`), the sum
+     `T(envoy_cluster_upstream_rq_5xx_total) + T(envoy_cluster_upstream_rq_rx_reset_total) + T(envoy_cluster_upstream_rq_tx_reset_total) + T(envoy_cluster_upstream_cx_destroy_remote_with_active_rq_total)`,
+     plus the load generator's own error count, is no greater than the
+     baseline roll's worst handoff.
+     - Envoy has no `upstream_rq_reset`. Its reset counters are
+       `upstream_rq_rx_reset` and `upstream_rq_tx_reset`.
+     - `upstream_rq_rx_reset_no_error` (a peer ending a stream with NO_ERROR)
+       is not a failure and is left out. It exists at both pins:
+       `envoy/upstream/upstream.h` at `v1.40.0` declares it beside
+       `upstream_rq_rx_reset`, and nothing in `v1.40.0..011e396` touches it.
+       So the 1.40.0 baseline and 1.41-dev are graded with the same split.
+     - Counters are created lazily. Today `envoy_cluster_upstream_rq_rx_reset_total`
+       has no series at all, and its term is still a zero row per node.
+     - A failure series born inside the window (every failure series of a
+       pod that has just rolled) counts at its full value, not as 0.
    - **Prober:** misses in the window are no greater than the baseline roll's
      worst handoff, and the soak's per-target gate (proposal 042) holds.
    - **Connections, as diagnostics rather than the pass criterion:** the
@@ -478,15 +615,75 @@ Then:
      connection that survives the handoff leaves it flat, and a dropped one
      that reconnects makes it rise. A rise above the baseline's, together
      with the stateless-reset count, points at connections lost in the
-     handoff.
+     handoff. Its live count is
+     `envoy_listener_inbound_downstream_cx_active{job="aether-proxy", aether_namespace="<ns>", aether_pod="<pod>_h3"}`.
    - **Process:** the child reaches ready, the parent exits on its own, and
      the supervisor's restart counters show no stale-flag repair and no
      validation rejection.
-   - **TLS 1.3 on the TCP path:** `cluster.<svc>.ssl.versions.TLSv1.3`
-     increases on the source proxy, with no `TLSv1.2`. The destination
-     inbound's access log shows the expected source SPIFFE ID in
-     `downstream_peer_uri_san`, which exercises the per-source certificate
-     selector under TLS 1.3.
+   - **TLS version on the TCP path, by source-proxy version.** The stat key
+     depends on the target. An HTTP service reached over h2 is keyed by its
+     `alt_stat_name`, `<ns>/<svc>`. A raw-TCP floor or per-port cluster is
+     keyed `tcp_<ns>/<svc>` or `tcp_<ns>/<svc>_<port>` (`TCPStatKey` /
+     `TCPPortStatKey` in `agent/internal/xds/proxy/egress.go`). Nothing is
+     keyed `cluster.<svc>`.
+
+     `ssl.versions.*` counts handshakes, not requests. Pooled h2 upstream
+     connections carry load without new handshakes, and a child opens its
+     pools during the parent's drain, so an h2 target would see few or no
+     handshakes after the parent exits. The TLS checks therefore read two
+     sources that handshake on their own schedule:
+     - **the raw-TCP load target**, with one new connection per request, so
+       one source-identity handshake per request;
+     - **the inbound-readiness probe clusters** (`inboundready_<ns>_<pod>`).
+       They open a fresh connection to every local pod every 5 s, so they
+       give a steady handshake rate per node under the node proxy's default
+       client TLS settings.
+
+     With `S` = `job="aether-proxy", aether_cluster=~"inboundready_.*|tcp_<ns>/<svc>"`
+     and anchor `A` = `envoy_cluster_ssl_handshake_total` (the anchor also
+     makes a missing series read 0, never pass vacuously), per source node:
+     - a 1.41-dev source proxy: `T(envoy_cluster_ssl_versions_TLSv1_3_total) > 0`
+       and `T(envoy_cluster_ssl_versions_TLSv1_2_total) == 0`, after the
+       upgrade and after the final forward roll;
+     - a 1.40.0 source proxy: `T(envoy_cluster_ssl_versions_TLSv1_2_total) > 0`
+       and `T(envoy_cluster_ssl_versions_TLSv1_3_total) == 0`, in the
+       baseline and after the rollback. 1.40.0 offers TLS 1.2 at most by
+       default, so expecting TLS 1.3 there would fail a healthy run.
+
+     **When a TLS window starts.** Until its parent exits, the child keeps
+     merging the parent's latched stat deltas into its own counters on every
+     flush (the parent's admin shutdown resets its flush timer). A 1.40.0
+     parent's TLS 1.2 probe handshakes would therefore create
+     `ssl.versions.TLSv1.2` in the 1.41-dev child, the born-in-window rule
+     would count it at full value, and "TLS 1.3 only" would fail a healthy
+     upgrade. The rollback has the mirror problem.
+
+     So the window starts **one export interval after the parent exits**,
+     rounded up to two. That interval comes from the real pipeline:
+     - the node proxy's stats are not scraped. Its OTel sink pushes them over
+       OTLP on every stats flush, every 5 s (the chart leaves
+       `stats_flush_interval` at Envoy's default);
+     - each sample is stamped at its export. Measured: 60 samples per series
+       in 5 minutes, and no `up` series for `job="aether-proxy"`, which a
+       scrape would create;
+     - so the last merge of the parent's deltas lands in a sample stamped no
+       later than one flush after the parent exits, and ingestion delay does
+       not move that timestamp.
+
+     The window therefore starts 10 s (two flushes) after the parent exits.
+     By then the child's version series already exist, so `increase()`
+     counts only the child's own handshakes. The window lasts a few minutes.
+
+     The source identity comes from a different source than the TLS version,
+     because neither TLS source logs it at the destination: the raw-TCP floor
+     chain's `tcp_proxy` writes no access log, and health-check requests are
+     dropped from the inbound access log (`notHealthCheckFilter`). It comes
+     from the h2 target instead. After the parent exits, its requests ride
+     connections the child opened, with the child's TLS settings and its
+     per-source certificate selector. The destination inbound's HTTP access
+     log for those requests shows the expected source SPIFFE ID in
+     `downstream_peer_uri_san`, under each version. The TLS version of those
+     connections is read from the version sources above, not from this log.
 
    The upgrade and the rollback must meet the same bar as the baseline. A
    failure in either is a soak FAIL, and the rollback below applies. The
