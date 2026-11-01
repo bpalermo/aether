@@ -146,26 +146,78 @@ The `+`/`-` lines are identical to the carried patch's.
 
 The first `proxy` workflow run of the implementation pull request (run
 41308410926, both arches) failed `//agent/test/envoy_validate`. `envoy --mode
-validate` of every bootstrap with a QUIC listener died with SIGSEGV in
+validate` of every bootstrap with a static QUIC listener died with SIGSEGV in
 `Quic::ActiveQuicListenerFactory::initializeWorkerRouting()`, called from
 `ListenerManagerImpl::addOrUpdateListenerInternal()` under
-`ValidationInstance::initialize()`.
+`ValidationInstance::initialize()`. Three tests went down with it:
+`TestEnvoyValidate/{node,edge}_bootstrap.json` and
+`TestNodeProxyADSReconnectBackoffIsBounded`, which validates the node
+bootstrap. The `FilterStateMatcherValidationError.Key` rejection in the same
+log is a different matter: it is the deliberate negative case in
+`capture_onehcm_test.go`, which passed.
 
-- **Cause** (read at `011e396`): envoyproxy/envoy#45504 moved the QUIC
-  listener's socket options into `initializeWorkerRouting()`. That path sits
-  behind `envoy.restart_features.defer_worker_routing_init`, on by default. It
-  applies the options to `factory->getListenSocket(i)` for every worker.
-  Validation mode creates no sockets:
-  `ValidationListenerComponentFactory::createListenSocket()` returns `nullptr`
-  by design, so `*socket` dereferences null. Upstream `main` still has it.
-- **Why it blocks the release:** the proxy-supervisor's check before every hot
-  restart on a changed bootstrap is `envoy --mode validate`. With this binary,
-  every such change would be rejected.
+- **Cause** (read at `011e396`, not reproduced locally): envoyproxy/envoy#45504
+  moved the QUIC listener's socket options into `initializeWorkerRouting()`.
+  That path sits behind `envoy.restart_features.defer_worker_routing_init`, on
+  by default.
+  - It applies the options to `factory->getListenSocket(i)` for every worker.
+    With concurrency > 1 (validate mode defaults to the host's core count),
+    those options include the BPF reuseport option.
+  - Validation mode creates no sockets:
+    `ValidationListenerComponentFactory::createListenSocket()` returns
+    `nullptr` by design, so `setOption()` runs on a null socket.
+  - Raw-UDP listeners take `ActiveRawUdpListenerConfig::initializeWorkerRouting()`,
+    a no-op, which is why the UDP capture bootstrap passes.
+  - Upstream `main` still has the bug as of 2026-10-30.
+- **Production exposure** (inferred): the proxy-supervisor's check before
+  every hot restart on a changed bootstrap is `envoy --mode validate`, at the
+  chart's concurrency. Today's chart bootstraps carry static clusters only;
+  listeners come over LDS, which validation does not fetch. So nothing crashes
+  in production today. A future bootstrap with a static QUIC listener would
+  fail that check, and with it every hot restart.
 - **The fix:** the patch skips a null socket, which only validation mode
-  produces, as validation did before #45504.
+  produces, as validation did before #45504. The alternatives were set aside.
+  Turning the guard off through a runtime layer would also disable #45504 in
+  production. Validating with `--concurrency 1` would hide the crash, since
+  production validates at the chart's concurrency.
 - **The regression test** is `//agent/test/envoy_validate:envoy_validate_test`,
   which the `proxy` workflow runs against the binary it builds. It was red
-  without the patch on both arches.
+  without the patch on both arches (run 41308410926, head `8ce601a3`). It must
+  be green with it before merge. An Envoy-workspace unit test is not carried:
+  none was built or run here.
+
+**Upstream report, prepared and not posted.** The owner posts upstream. The
+text below is for an issue on envoyproxy/envoy, or for the description of a
+pull request carrying the same one-line guard:
+
+> **`envoy --mode validate` segfaults on a bootstrap with a static QUIC
+> listener since #45504**
+>
+> With `envoy.restart_features.defer_worker_routing_init` at its default
+> (true) and `--concurrency` > 1, `envoy --mode validate` of a bootstrap that
+> declares a QUIC listener in `static_resources` crashes with SIGSEGV
+> ("suspect faulting address 0") in
+> `Quic::ActiveQuicListenerFactory::initializeWorkerRouting()`, called from
+> `ListenerManagerImpl::initializeWorkerRoutingForUdpListener()`,
+> `addOrUpdateListenerInternal()` and `ValidationInstance::initialize()`.
+>
+> `initializeWorkerRouting()` applies `options_` (which, with concurrency > 1,
+> holds the BPF reuseport option) to `factory->getListenSocket(i)` for each
+> worker. Under validation, `ValidationListenerComponentFactory::createListenSocket()`
+> returns `nullptr` by design, so `Network::Socket::applyOptions()` operates
+> on a null socket. Before #45504 the options were applied through
+> `socketOptions()` at socket creation, which validation never reaches.
+> Raw-UDP listeners are unaffected (`ActiveRawUdpListenerConfig::initializeWorkerRouting()`
+> is a no-op).
+>
+> Reproduce: a bootstrap with one static listener whose
+> `udp_listener_config.quic_options` is set and a QUIC downstream transport
+> socket, run as `envoy --mode validate --concurrency 2 -c <file>`. Seen at
+> `011e39616b` and in `main` as of 2026-10-30.
+>
+> Suggested fix: skip a null socket in that loop. Only validation mode
+> produces one. A validation-server test with a static QUIC listener at
+> concurrency 2 covers it.
 
 ## Why the Bazel 9 move rides with the bump
 
