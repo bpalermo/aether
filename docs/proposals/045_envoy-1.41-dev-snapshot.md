@@ -2,7 +2,9 @@
 
 **Status:** Proposed. The owner decided on 2026-10-31 to make the bump. The
 implementation is the pull request stacked on this one. Nothing is released
-until the 8 h soak in *Validation* has passed. The facts below were read from
+until the 8 h soak in *Validation* has passed, under the hold described in
+*Holding the release until the soak passes*, which is set up before the
+implementation merges. The facts below were read from
 `main` at `9b256ed5f4`, from Envoy at `011e39616b`, and from
 `envoyproxy/bazel-registry` at `36d481b01b`.
 **Author:** Bruno Palermo
@@ -298,7 +300,7 @@ was exercised against aether's configuration before the soak.
 
 | Change | What it touches in aether | Expected effect | Watched by |
 |---|---|---|---|
-| envoyproxy/envoy#45504, "QUIC eBPF hot restart part 0" | QUIC listener setup: the connection-ID generator factory and UDP socket options move to `initializeWorkerRouting()`, and the listener's init target registers after it. Behind `envoy.restart_features.defer_worker_routing_init`, default **on**. Touches no hot-restart IPC file. | No behaviour change intended. The path is the one aether1050 and aether1126 sit next to (QUIC listeners on a hot-restart child, CID → worker routing). | soak: proxy rolls under QUIC load, stateless resets, misses near handoffs |
+| envoyproxy/envoy#45504, "QUIC eBPF hot restart part 0" | QUIC listener setup: the connection-ID generator factory and UDP socket options move to `initializeWorkerRouting()`, and the listener's init target registers after it. Behind `envoy.restart_features.defer_worker_routing_init`, default **on**. Touches no hot-restart IPC file. | One defect already found: with concurrency > 1, `envoy --mode validate` segfaults on any bootstrap with a static QUIC listener (*A new carried patch: aether1733*), fixed by aether1733. Otherwise no behaviour change is intended, but the path is the one aether1050 and aether1126 sit next to (QUIC listeners on a hot-restart child, CID → worker routing). | `//agent/test/envoy_validate:envoy_validate_test` in the `proxy` workflow (the validate crash); the cross-version roll (step 5) and the soak: proxy rolls under QUIC load, stateless resets, misses near handoffs |
 | envoyproxy/envoy#47068 | the hot-restart receive loop | composes with aether1050 (see above) | `carried_patch_tests`; soak rolls |
 | envoyproxy/envoy#48570, upstream TLS default max 1.3 | every TCP mesh hop: aether sets only `tls_minimum_protocol_version` (TLSv1_2), so mesh upstreams now offer and negotiate TLS 1.3. QUIC was 1.3 already. Behind `envoy.reloadable_features.default_client_tls_max_version_is_1_3`. | A wire-visible change. Resumption stays off (`max_session_keys: 0`). The per-source certificate selector is exercised under 1.3 for the first time. Per the release note, a client certificate the server rejects becomes a reset *after* connect: `connect-failure` retries and `tcp_proxy` `max_connect_attempts` no longer move it to another endpoint, connect-only TCP health checks pass (the readiness probe, below), and outlier detection counts it as a success. The default key exchange becomes post-quantum, so ClientHellos get larger. | the readiness-probe mitigation below (before release); the TCP-routed soak check in *Validation*; the guard is the rollback lever (see *Rollback*) |
 | envoyproxy/envoy#47067, `wait_for_warm_on_init` for all cluster types | CDS warming: one CDS pause handle per warming cluster instead of one global handle | aether sets no `wait_for_warm_on_init` (default true): each warming cluster still holds CDS back. ACK timing per cluster may shift. | soak: agent ACK/NACK metrics, the `503 NC` count at twin admission |
@@ -369,8 +371,9 @@ Before merge:
    - `scripts/check-envoy-pin.sh` and `--online` pass.
    - `make gazelle`, `make tidy`, `make format-check` and lint as CI runs it
      pass.
-   - `make test-unit` cannot run cleanly in the agent sandbox, which forbids
-     Unix sockets. The `ci` workflow runs it; the change touches no Go code.
+   - `make test-unit` cannot run cleanly in a sandbox without Unix sockets,
+     which is where these checks ran. The `ci` workflow runs it; the change
+     touches no Go code.
 2. **The `proxy` workflow** on the implementation pull request, both arches on
    RBE:
    - the build;
@@ -392,13 +395,37 @@ Before release, in this order:
 
 4. **The readiness-probe mitigation** (*Risk*, TLS 1.3) is merged and in the
    agent image the release ships with.
-5. **A cross-version hot-restart roll** under the external prober, on one node
-   of the reference cluster. Roll that node's proxy from the current 1.40.0
-   image to the candidate, then back to the 1.40.0 image. For each handoff,
-   measure:
+5. **A cross-version hot-restart roll, upgrade then rollback**, on the
+   reference cluster. It cannot be scoped to one node. The chart has no
+   node-scoped canary for the proxy:
+   - a `helm upgrade --set` of the proxy image changes the shared DaemonSet
+     template, so its RollingUpdate (maxSurge 1, maxUnavailable 0) rolls
+     every eligible node, and the edge Deployment too when it is enabled;
+   - Kubernetes DaemonSets have no partition;
+   - `OnDelete` would remove the old pod before the new one starts, which is
+     not a hot-restart handoff at all.
+
+   So the step is a cluster-wide roll on the reference cluster, which is
+   exactly what the release does on every cluster. Roll the proxy from the
+   current 1.40.0 image to the candidate, then back to the 1.40.0 image,
+   then forward again for step 6. The reference cluster is not production;
+   its owner accepts the three rolls as part of the validation.
+
+   Inherited QUIC listeners have to carry traffic through each handoff, and
+   the prober alone does not prove that: its liveness check is a local reply,
+   and other probes may reach another node or use TCP. Before each roll:
+   - start a QUIC load target with a source pod pinned to each of at least two
+     nodes, and its destination on a third;
+   - establish HTTP/3 connections and keep requests flowing through the roll.
+
+   For each node's handoff, in both directions, measure:
+   - on the source proxy, the twin cluster's (`quic:<svc>@<source-sa>`)
+     `upstream_rq_total` keeps increasing across the handoff window, with no
+     `upstream_cx_connect_fail` step;
+   - on the destination node, the inbound QUIC listener's `downstream_cx_total`
+     keeps increasing, and the stateless-reset count does not step;
    - the prober's misses within the handoff window;
-   - the child reaching ready;
-   - the parent exiting on its own;
+   - the child reaching ready, and the parent exiting on its own;
    - the supervisor's restart counters showing no stale-flag repair and no
      validation rejection.
 
@@ -426,26 +453,56 @@ Before release, in this order:
 ### Holding the release until the soak passes
 
 Merging the implementation is not a soaked release, and nothing in the
-workflows waits for one. On a push to `main` touching `proxy/**`,
+workflows waits for one. On a push to `main` that touches `proxy/**` (not
+`*.md`), `bazel/registry/**` or `.github/workflows/proxy-release.yml`,
 `proxy-release.yml`:
 
 - builds and pushes the image by digest;
-- opens the `chore/proxy-image-bump-<sha>` chart pin pull request;
-- in its *auto* mode, arms `gh pr merge --auto --squash` on that pull request,
-  so the pin merges as soon as its checks pass.
+- opens a `chore/proxy-image-bump-<sha>` chart pin pull request;
+- in its *auto* mode, arms `gh pr merge --auto --squash` on it, so the pin
+  merges as soon as its checks pass;
+- closes every older open `chore/proxy-image-bump-*` pull request as
+  superseded.
 
-The hold is therefore on that pin pull request, and it is the owner's:
+Disabling auto-merge by hand after the pin opens races the workflow. Any
+later proxy release would also replace a held pin with a fresh, auto-merging
+one carrying a different, unsoaked image. So the hold is set up **before**
+#1733 merges, and lasts until the soak's verdict. It has three layers:
 
-- right after the implementation merges, disable auto-merge on the pin pull
-  request and label it `blocked`;
-- run steps 5 and 6 with the published candidate image, set by digest on the
-  reference cluster (a `helm upgrade --set` of the proxy image, as for any
-  test build);
-- merge the pin, or close it, only on the soak's verdict.
+1. **Manual release mode for the hold.** The owner removes `RELEASE_PAT`
+   from the `release` environment before #1733 merges, and restores it after
+   the verdict. Without the token, `proxy-release.yml` runs in its *manual*
+   mode (#703). It still builds, signs and pushes the image and pushes the pin
+   branch with `GITHUB_TOKEN`, but it opens no pull request, arms no
+   auto-merge and closes nothing. The pin pull request is opened by hand,
+   from the run summary's one-liner, after the verdict. This layer is
+   enforceable: no workflow can merge a pin it cannot open.
+2. **A merge freeze on the release paths**: `proxy/**` (not `*.md`),
+   `bazel/registry/**` and `.github/workflows/proxy-release.yml`, from
+   #1733's merge to the soak's verdict. The lead does not merge such a pull
+   request during the hold. Each one would publish another image, and the
+   pin would no longer carry the image that was soaked.
+3. **The fallback**, if a pin pull request opens with auto-merge armed
+   anyway (layer 1 skipped, or the token restored early): disable auto-merge
+   on it and on any pin that supersedes it, and label them `blocked`. A
+   superseding pin carries a different image digest from the one soaked.
+   Either the soak is redone on that image, or the change behind it is
+   reverted out of the release.
 
-Until the pin merges, no published chart references the new proxy. The
-candidate image is soaked exactly as it would ship, because the pin pull
-request carries that same digest.
+Nothing else in the repository merges on its own:
+- Dependabot opens no pull requests (`.github/dependabot.yml` sets
+  `open-pull-requests-limit: 0`), and there is no Renovate configuration.
+- The only other workflow that touches pin pull requests is `main.yaml`. It
+  brings a `BEHIND` pin's branch up to date (`gh pr update-branch`) and never
+  arms auto-merge, so a held pin stays held.
+- `proxy-release.yml` has no `workflow_dispatch` trigger. Re-running one of
+  its past runs from the Actions page would open and supersede a pin like a
+  new release, so it is covered by the freeze too.
+
+During the hold, steps 5 and 6 run against the candidate image by digest on
+the reference cluster (a `helm upgrade --set` of the proxy image, as for any
+test build). Until a pin merges, no published chart references the new proxy,
+and the pin opened after the verdict carries the digest that was soaked.
 
 ## Rollback
 
