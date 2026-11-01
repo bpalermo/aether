@@ -424,11 +424,18 @@ of #1733, `proxy-release.yml` runs as for every proxy change:
 The soak then validates the deployed full bump on the reference cluster.
 Before the deploy:
 
-4. **The TLS-1.3-compatible readiness probe** (*Risk*, TLS 1.3; #1735) is
-   merged before #1733 merges, and its agent is rolled out on the reference
-   cluster before the proxy is upgraded. The rollout is complete when every
-   node's agent runs that image, so every node's probe is the new one before
-   any node's proxy speaks TLS 1.3 by default.
+4. **The TLS-1.3-compatible readiness probe** (*Risk*, TLS 1.3; #1735). The
+   order is strict:
+   1. #1735 merges;
+   2. its agent image is deployed on the reference cluster, and the agent
+      rollout completes: **every node's agent runs the #1735 image**;
+   3. only then does #1733 merge.
+
+   "#1735 merged first" alone is not enough. Once #1733 is on `main`, a single
+   `helm upgrade` from `main` would roll the agent and the proxy together, so
+   some node's proxy could speak TLS 1.3 by default while its agent still
+   programs the connect-only probe. With this order, every node's probe is
+   the new one before any node's proxy runs 1.41-dev.
 
 Then:
 
@@ -489,10 +496,25 @@ Then:
    (`docs/observability/metric-labels.md`, the `node` label on the node proxy's
    per-cluster stats). Collapsed, another node's source proxy could keep a
    twin's rate up during a failed handoff, and interleaved per-generation
-   counters can look like resets. The soak's pipeline therefore carries the
-   `node` label (from `k8s.node.name`) on these series. Every rate and increase
-   below is taken per node: the source proxy's node for twin and TCP cluster
-   stats, and the destination's node for inbound stats.
+   counters can look like resets. A `node` label alone is not enough either.
+   During a handoff the hot-restart parent and the surge child run on the same
+   node and export the same label set, so with `node` only, their two counters
+   interleave in one series. `increase()` and `rate()` then read the switches
+   between them as resets inside the window, and the TLS checks mix the
+   parent's version with the child's.
+
+   The soak's pipeline therefore carries, on these series, both:
+   - `node` (from `k8s.node.name`);
+   - the proxy pod, `k8s.pod.name` (or `k8s.pod.uid`), which the node proxy
+     already sets on its Envoy stats (`docs/observability/metric-labels.md`).
+     The parent and the surge child are different pods.
+
+   Every rate and increase below is taken **per pod first**, so each
+   generation's counter stays monotonic within its own series, **then summed
+   by `node`**: the source proxy's node for twin and TCP cluster stats, and
+   the destination's node for inbound stats. For example:
+   `sum by (node) (increase(<counter>{…}[<window>]))`, where `increase()` runs
+   on each pod's series before the sum.
 
    For each node's handoff window, in each roll:
    - **Forward progress:** the destination inbound HTTP connection manager's
@@ -503,9 +525,23 @@ Then:
      `upstream_cx_destroy_remote_with_active_rq`, plus the load generator's
      own error count, is no greater than the baseline roll's worst handoff.
      Envoy has no `upstream_rq_reset`. `upstream_rq_rx_reset_no_error` (a peer
-     ending a stream with NO_ERROR) is not a failure and is left out. Each term
-     is summed with `or vector(0)`, so a series that does not exist yet cannot
-     empty the whole sum.
+     ending a stream with NO_ERROR) is not a failure and is left out. It exists
+     at both pins (`envoy/upstream/upstream.h` at `v1.40.0` declares it beside
+     `upstream_rq_rx_reset`, and nothing in `v1.40.0..011e396` touches it), so
+     the 1.40.0 baseline and 1.41-dev are graded with the same split, and
+     neither counts a NO_ERROR reset as a failure.
+
+     The sum is one selector over all four counters, so it is per node and
+     cannot pass vacuously. `upstream_rq_5xx` in particular is created lazily
+     and is absent on a node that has not seen one. The query shape:
+
+     `sum by (node) (increase({__name__=~"<the four exported counters>", aether_cluster=~"<ns>/<svc>@.*"}[<window>])) or on(node) (0 * group by (node) (<the twin's upstream_rq_total series>))`
+
+     A bare `or vector(0)` carries no labels. In a per-node sum it would
+     neither restore a node whose failure series are all missing, nor
+     anchor it, so that node would drop out of the result and pass
+     vacuously. The `or on(node)` term gives every node that carries the
+     load a zero row to fall back on.
    - **Prober:** misses in the window are no greater than the baseline roll's
      worst handoff, and the soak's per-target gate (proposal 042) holds.
    - **Connections, as diagnostics rather than the pass criterion:** the
@@ -526,8 +562,16 @@ Then:
      (`TCPStatKey` / `TCPPortStatKey` in `agent/internal/xds/proxy/egress.go`).
      Nothing is keyed `cluster.<svc>`. A query on a key that does not exist
      returns no series and would pass "no TLSv1.2" vacuously, so the series is
-     first required to exist and to have a non-zero rate. Then, per source
-     node:
+     first required to exist and to have a non-zero rate.
+
+     `ssl.versions.*` counts handshakes, not requests. Pooled upstream
+     connections carry the load without new handshakes, so a non-zero rate
+     holds only right after a roll, while the new process opens its pools.
+     Each TLS window therefore starts **when that node's hot-restart parent
+     has exited**, so no handshake in it is the parent's, and ends a few
+     minutes later. Like every rate here, it is read per pod, here the child.
+     A window that sees no handshakes is inconclusive, not a pass. Then, per
+     source node:
      - a 1.41-dev source proxy's fresh upstream connections are `TLSv1.3`
        only: after the upgrade, and after the final forward roll;
      - a 1.40.0 source proxy's are `TLSv1.2` only: in the baseline, and
