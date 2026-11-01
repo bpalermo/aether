@@ -473,9 +473,18 @@ Then:
      pooled, so one service with a pod on every node would not guarantee each
      node's listener any traffic; a single-endpoint service per node does;
    - before each roll, a check that each target's requests reach its pod over
-     HTTP/3: the destination inbound QUIC listener's request counter on that
-     node rises with the load. Then HTTP/3 connections stay established, with
-     requests flowing throughout the roll;
+     HTTP/3. The inbound HCM request counters cannot show it: the h2 and QUIC
+     chains share the `inbound` stat prefix. Two signals that are
+     QUIC-specific show it instead:
+     - on the source, the twin's `upstream_rq_total` rises with the load. A
+       twin is a QUIC-only cluster (`<ns>/<svc>@<ns>/<sa>`), so its requests
+       are HTTP/3 by construction;
+     - on the destination node, the pod's own QUIC listener
+       (`inbound_<ns>_<pod>_h3`, per-pod listener stats) holds
+       `downstream_cx_active` > 0.
+
+     Then HTTP/3 connections stay established, with requests flowing
+     throughout the roll;
    - at least one load target routed over TCP (a service with no QUIC twin),
      for the TCP mTLS hop.
 
