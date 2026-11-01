@@ -114,6 +114,20 @@ bazel_dep(name = "envoy_api", version = "1.41.0-dev.20261028.011e396.envoy")
 #   (udp_listener_impl_test DeliverMapsAWorkerIndexItDoesNotHaveOntoItsOwnWorkers,
 #   hot_restarting_child_test ForwardsPacketFromAParentWorkerTheChildDoesNotHave), run by
 #   //bazel/patches:carried_patch_tests.
+#   aether1733 (an upstream bug in envoyproxy/envoy#45504, in the 011e396 snapshot; not
+#   reported upstream while upstream activity is on hold), applied AFTER aether1126:
+#   #45504 moved the QUIC listener's socket options into
+#   ActiveQuicListenerFactory::initializeWorkerRouting() (behind
+#   envoy.restart_features.defer_worker_routing_init, default true), which applies them to
+#   factory->getListenSocket(i) for every worker. Under `envoy --mode validate`,
+#   ValidationListenerComponentFactory::createListenSocket() returns nullptr by design, so
+#   any bootstrap with a QUIC listener segfaulted in validation (found by #1733's
+#   envoy_validate_test, both arches). That is also the proxy-supervisor's node-local check
+#   before every hot restart on a changed bootstrap, so without this patch no bootstrap
+#   change would ever be applied. The patch skips a null socket, as validation mode did
+#   before #45504; production sockets are never null. Its regression test is
+#   //agent/test/envoy_validate:envoy_validate_test (root workspace), which the proxy
+#   workflow runs against the binary it builds.
 #   Drop each override when the pin moves past its merged PR.
 single_version_override(
     module_name = "envoy",
@@ -123,6 +137,7 @@ single_version_override(
         "//bazel/patches:envoy-aether1050-hotrestart-nonblocking-forward.patch",
         "//bazel/patches:envoy-aether1054-http3-drain-idle-connections.patch",
         "//bazel/patches:envoy-aether1126-forwarded-udp-worker-index.patch",
+        "//bazel/patches:envoy-aether1733-validate-quic-null-socket.patch",
     ],
     version = "1.41.0-dev.20261028.011e396.envoy",
 )

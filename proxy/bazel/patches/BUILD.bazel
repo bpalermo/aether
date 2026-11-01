@@ -38,5 +38,10 @@ test_suite(
         # above). The same target also runs InjectedReadWhilePausedDoesNotReadTheSocket,
         # upstream since envoyproxy/envoy#47868 (the dropped aether1054c patch).
         "@envoy//test/common/network:udp_listener_impl_test",
+        # envoy-aether1733-validate-quic-null-socket.patch (#1733): `envoy --mode validate` of a
+        # bootstrap with a QUIC listener no longer dereferences the null sockets validation mode
+        # creates. No @envoy test here: the regression test is the root workspace's
+        # //agent/test/envoy_validate:envoy_validate_test, which the proxy workflow runs against
+        # the binary it builds (red without the patch on both arches).
     ],
 )
