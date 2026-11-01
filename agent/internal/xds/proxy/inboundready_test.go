@@ -7,8 +7,10 @@ import (
 	"testing"
 
 	clusterv3 "github.com/envoyproxy/go-control-plane/envoy/config/cluster/v3"
-	corev3 "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
+	healthcheckv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/http/health_check/v3"
+	http_connection_managerv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/network/http_connection_manager/v3"
 	tlsv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/transport_sockets/tls/v3"
+	typev3 "github.com/envoyproxy/go-control-plane/envoy/type/v3"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/protobuf/proto"
@@ -114,22 +116,33 @@ func TestInboundReadyProbeHasItsOwnTLSSessionState(t *testing.T) {
 		"the probe cluster must use InboundReadyProbeTransportSocket verbatim")
 }
 
-// TestInboundReadyProbeClusterHealthCheck: TCP with an EMPTY send payload.
-// Envoy's TCP health-check session succeeds on the Connected event, and a
-// connection with a TLS transport socket does not raise Connected until the
-// handshake completes — so connect-only + TLS is exactly "the listener is
-// listening, has a certificate, and it verifies as this pod". Any send/receive
-// payload here would turn it into an application-level probe and change that
-// meaning.
+// TestInboundReadyProbeClusterHealthCheck: an HTTP/2 GET of MeshLivePath that
+// the inbound answers itself. NOT a connect-only TCP check: under TLS 1.3 the
+// client's handshake completes before the server has accepted its certificate,
+// so a TCP check passes against an inbound that rejects the node identity
+// (proposal 045; //agent/test/mtlspool
+// TestInboundReadyProbe_RequiresTheInboundToAcceptTheNodeIdentity shows it
+// live). A response the inbound sends after the handshake only exists if it
+// accepted the connection. Not a TCP send/receive either: its reply would come
+// from the application, and readiness would depend on the app.
 func TestInboundReadyProbeClusterHealthCheck(t *testing.T) {
 	c := testInboundReadyCluster(t)
 	require.Len(t, c.GetHealthChecks(), 1)
 	hc := c.GetHealthChecks()[0]
 
-	tcp, ok := hc.GetHealthChecker().(*corev3.HealthCheck_TcpHealthCheck_)
-	require.True(t, ok, "must be a TCP health check, not HTTP")
-	assert.Nil(t, tcp.TcpHealthCheck.GetSend(), "connect-only: a send payload would probe the application, not the handshake")
-	assert.Empty(t, tcp.TcpHealthCheck.GetReceive())
+	assert.Nil(t, hc.GetTcpHealthCheck(), "a connect-only TCP check passes under TLS 1.3 against an inbound that rejects the probe")
+	httpHC := hc.GetHttpHealthCheck()
+	require.NotNil(t, httpHC, "must be an HTTP health check the inbound answers itself")
+	assert.Equal(t, MeshLivePath, httpHC.GetPath(), "the path the inbound's own health_check filter answers locally")
+	assert.Equal(t, typev3.CodecClientType_HTTP2, httpHC.GetCodecClientType(),
+		"h2, the codec of the no-SNI chain the probe's ALPN selects")
+	// Any response passes: under stop_accepting_requests the inbound answers 503
+	// before the health_check filter, and readiness must not follow that stage
+	// (the flap the health gateway's bypass_overload_manager prevents). A
+	// rejection is a reset, which no status range admits.
+	require.Len(t, httpHC.GetExpectedStatuses(), 1)
+	assert.Equal(t, int64(200), httpHC.GetExpectedStatuses()[0].GetStart())
+	assert.Equal(t, int64(600), httpHC.GetExpectedStatuses()[0].GetEnd(), "exclusive end: every status through 599")
 
 	assert.Equal(t, float64(5), hc.GetInterval().AsDuration().Seconds())
 	assert.Equal(t, float64(1), hc.GetTimeout().AsDuration().Seconds())
@@ -206,6 +219,44 @@ func TestInboundReadyChainAlwaysExists(t *testing.T) {
 		}
 	}
 	assert.Equal(t, 1, h2Chains, "exactly one no-SNI h2 chain, which the probe's ALPN selects")
+}
+
+// TestInboundReadyProbePathIsAnsweredByTheInboundItself reads the probe and the
+// chain it lands on against each other: on the no-SNI h2 chain, the FIRST HTTP
+// filter is a non-pass-through health_check filter on exactly the probe's path,
+// with no cluster condition. So the probe's 200 comes from the inbound, before
+// authz, the stats filter, the extension filters or the router, and the
+// application never takes part. A probe whose reply came from the app would
+// make readiness depend on the app; a probe on a path no filter answers would
+// be routed to it.
+func TestInboundReadyProbePathIsAnsweredByTheInboundItself(t *testing.T) {
+	pod := sourceTestPod()
+	probePath := testInboundReadyCluster(t).GetHealthChecks()[0].GetHttpHealthCheck().GetPath()
+	chains := buildInboundFilterChains(pod, testSourceIdentity, "spiffe://"+testTrustDomain, testTrustDomain, false, nil, nil)
+
+	var checked bool
+	for _, fc := range chains {
+		m := fc.GetFilterChainMatch()
+		if m == nil || len(m.GetServerNames()) != 0 || !slices.Equal(m.GetApplicationProtocols(), []string{"h2"}) {
+			continue
+		}
+		require.Len(t, fc.GetFilters(), 1, "the HCM is the chain's only network filter: nothing runs before it")
+		var hcm http_connection_managerv3.HttpConnectionManager
+		require.NoError(t, fc.GetFilters()[0].GetTypedConfig().UnmarshalTo(&hcm))
+		require.NotEmpty(t, hcm.GetHttpFilters())
+		first := hcm.GetHttpFilters()[0]
+		assert.Equal(t, livenessHealthCheckFilterName, first.GetName())
+		var hc healthcheckv3.HealthCheck
+		require.NoError(t, first.GetTypedConfig().UnmarshalTo(&hc))
+		assert.False(t, hc.GetPassThroughMode().GetValue(), "answered locally, never passed to the app")
+		require.Len(t, hc.GetHeaders(), 1)
+		assert.Equal(t, ":path", hc.GetHeaders()[0].GetName())
+		assert.Equal(t, probePath, hc.GetHeaders()[0].GetStringMatch().GetExact())
+		assert.Empty(t, hc.GetClusterMinHealthyPercentages(),
+			"no cluster condition: the probe's pass must not depend on the application's health")
+		checked = true
+	}
+	require.True(t, checked, "the no-SNI h2 chain must exist")
 }
 
 // TestHealthGatewayProbesHaveSeparatePaths: each probe cluster gets its OWN
