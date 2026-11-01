@@ -461,20 +461,38 @@ func NewAppHealthProbeCluster(name string, addr AppAddress, port uint16, healthP
 // and one pod promoted in <=0.5 s — i.e. the mesh advertised an endpoint whose
 // mesh port refused connections.
 //
-// WHAT "HEALTHY" MEANS HERE. The health check is TCP with an EMPTY send payload
-// (connect-only) over a TLS transport socket, which is a deliberate composition:
-// Envoy's TCP health-check session succeeds on the Connected event, and a
-// connection with a TLS transport socket does not raise Connected until the
-// handshake has completed (SslSocket::doHandshake raises it; RawBufferSocket
-// raises it on connect). So a pass means, in one signal:
+// WHAT "HEALTHY" MEANS HERE. The health check is an HTTP/2 GET of MeshLivePath
+// over a TLS transport socket, and the inbound answers it ITSELF: its
+// health_check filter (buildLivenessHealthCheckFilter) is the first filter of
+// every mTLS HCM chain and replies 200 locally, before authz, stats or the
+// router, so the application never takes part. A pass needs the inbound's own
+// response, which only exists after the inbound has accepted the connection.
+// So a pass means, in one signal:
 //
 //	the inbound listener is listening (not warming, not absent)
 //	AND it presented a certificate
 //	AND that certificate verifies against the mesh trust bundle
-//	AND its URI SAN is exactly THIS pod's SPIFFE ID.
+//	AND its URI SAN is exactly THIS pod's SPIFFE ID
+//	AND it ACCEPTED the probe's client certificate (the node SVID).
 //
-// No bytes are sent and no request is made, so nothing downstream of the
-// filter chain (route table, authz/RBAC, the app) participates.
+// The last line is why this is an HTTP check and not a connect-only TCP one
+// (which it was until proposal 045). A TCP health check passes on the Connected
+// event, raised when the CLIENT's handshake completes. Under TLS 1.2 that comes
+// after the server's Finished, so a server rejecting the client certificate
+// fails the handshake on the client too. Under TLS 1.3 the client completes its
+// handshake as soon as it has SENT its certificate; the server's rejection
+// arrives later, as an alert on an established connection. A connect-only check
+// therefore passed against an inbound that refused the node identity, and
+// envoyproxy/envoy#48570 (in the 1.41 snapshot) makes TLS 1.3 the upstream
+// default. Waiting for a response the inbound sends after the handshake closes
+// that: a rejection arrives as a reset and the check fails, on both versions
+// (//agent/test/mtlspool TestInboundReadyProbe_RequiresTheInboundToAcceptTheNodeIdentity).
+//
+// The request lands on the no-SNI h2 HCM chain (see CHAIN SELECTION), which
+// every mTLS inbound has, raw-TCP pods included. Health-check requests are
+// excluded from the access log (notHealthCheckFilter) and answered before the
+// destination stats filter; they do count in the node-wide http.inbound.*
+// connection-manager stats, one request per local pod every interval.
 //
 // ADDRESSING. 127.0.0.1:defaultInboundPort bound into the pod's network
 // namespace — the same netns hop the app clusters use. The inbound listener
@@ -556,11 +574,18 @@ func NewInboundReadyProbeCluster(name, netns, nodeSpiffeID, validationContextNam
 				NoTrafficHealthyInterval: durationpb.New(5 * time.Second),
 				// A fresh connection (and therefore a fresh handshake) per check
 				// is the whole point: a reused connection would stop re-proving
-				// the certificate. Connect-only checks close the connection
-				// themselves, so this only documents the intent.
+				// the certificate, and whether the inbound still accepts the node
+				// identity. Load-bearing for an HTTP check: Envoy's default is to
+				// keep the connection, so this pin is what forces the handshake.
 				ReuseConnection: wrapperspb.Bool(false),
-				HealthChecker: &corev3.HealthCheck_TcpHealthCheck_{
-					TcpHealthCheck: &corev3.HealthCheck_TcpHealthCheck{},
+				// Answered by the inbound itself (see WHAT "HEALTHY" MEANS
+				// HERE): the liveness path, over the chain's h2 codec, expecting
+				// Envoy's default 200.
+				HealthChecker: &corev3.HealthCheck_HttpHealthCheck_{
+					HttpHealthCheck: &corev3.HealthCheck_HttpHealthCheck{
+						Path:            MeshLivePath,
+						CodecClientType: typev3.CodecClientType_HTTP2,
+					},
 				},
 			},
 		},

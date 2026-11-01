@@ -25,6 +25,7 @@ go_test(
         "cds_partial_reject_test.go",
         "cds_reconnect_test.go",
         "harness_test.go",
+        "inbound_ready_tls13_test.go",
         "iprange_live_test.go",
         "lds_reconnect_test.go",
         "onehcm_filterstate_route_test.go",
