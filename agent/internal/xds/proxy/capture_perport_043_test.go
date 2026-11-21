@@ -37,7 +37,7 @@ func perPortPod() *cniv1.CNIPod {
 
 func perPortListener(t *testing.T, svcs []CaptureTCPService, withPassthrough bool) *listenerv3.Listener {
 	t.Helper()
-	l, err := GenerateCaptureListener(perPortPod(), perPortSource, meshconst.ProxyCapturePort, "aether.internal", false, svcs, withPassthrough, nil)
+	l, err := GenerateCaptureListener(perPortPod(), perPortSource, meshconst.ProxyCapturePort, "aether.internal", false, svcs, withPassthrough, nil, DefaultConnectionDrainTimeout)
 	require.NoError(t, err)
 	requireMatcherNamesChains(t, l)
 	return l

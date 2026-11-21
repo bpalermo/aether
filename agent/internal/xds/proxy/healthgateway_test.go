@@ -31,7 +31,7 @@ func decodeGatewayHealthCheck(t *testing.T, f *http_connection_managerv3.HttpFil
 
 func gatewayHCM(t *testing.T, probes []HealthGatewayProbe) *http_connection_managerv3.HttpConnectionManager {
 	t.Helper()
-	l := BuildHealthGatewayListener("/run/aether/health.sock", probes)
+	l := BuildHealthGatewayListener("/run/aether/health.sock", probes, DefaultConnectionDrainTimeout)
 	require.Len(t, l.GetFilterChains(), 1)
 	require.Len(t, l.GetFilterChains()[0].GetFilters(), 1)
 	hcm := &http_connection_managerv3.HttpConnectionManager{}
@@ -40,7 +40,7 @@ func gatewayHCM(t *testing.T, probes []HealthGatewayProbe) *http_connection_mana
 }
 
 func TestBuildHealthGatewayListener(t *testing.T) {
-	l := BuildHealthGatewayListener("/run/aether/health.sock", appProbes("health_b", "health_a"))
+	l := BuildHealthGatewayListener("/run/aether/health.sock", appProbes("health_b", "health_a"), DefaultConnectionDrainTimeout)
 
 	assert.Equal(t, HealthGatewayListenerName, l.GetName())
 	assert.Equal(t, "/run/aether/health.sock", l.GetAddress().GetPipe().GetPath(), "gateway must listen on the UDS, not a port")
@@ -71,8 +71,8 @@ func TestBuildHealthGatewayListener(t *testing.T) {
 // iteration order must produce byte-identical listeners, or every snapshot
 // rebuild would push a spurious LDS update.
 func TestBuildHealthGatewayListener_Deterministic(t *testing.T) {
-	a := BuildHealthGatewayListener("/run/aether/health.sock", appProbes("health_x", "health_y", "health_z"))
-	b := BuildHealthGatewayListener("/run/aether/health.sock", appProbes("health_z", "health_x", "health_y"))
+	a := BuildHealthGatewayListener("/run/aether/health.sock", appProbes("health_x", "health_y", "health_z"), DefaultConnectionDrainTimeout)
+	b := BuildHealthGatewayListener("/run/aether/health.sock", appProbes("health_z", "health_x", "health_y"), DefaultConnectionDrainTimeout)
 	assert.True(t, proto.Equal(a, b), "gateway listener must be order-independent")
 }
 
@@ -89,6 +89,6 @@ func TestBuildHealthGatewayListener_Empty(t *testing.T) {
 // overload actions: liveness must report app truth, not proxy state, or an
 // overloaded proxy would flap every local pod's registry health cluster-wide.
 func TestHealthGatewayBypassesOverloadManager(t *testing.T) {
-	l := BuildHealthGatewayListener("/run/aether/health.sock", appProbes("health_a"))
+	l := BuildHealthGatewayListener("/run/aether/health.sock", appProbes("health_a"), DefaultConnectionDrainTimeout)
 	assert.True(t, l.GetBypassOverloadManager(), "health gateway must bypass overload manager actions")
 }

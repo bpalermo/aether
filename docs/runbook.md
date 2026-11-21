@@ -8208,7 +8208,23 @@ GOAWAY is a coin flip per response, so a busy connection can dodge it for the wh
 and an idle connection gets no GOAWAY at all while the h3 pool's 30 s idle timeout
 outlasts the 15 s parent-shutdown window.
 
-**The fix** is two chart values:
+**The fix** is three chart values:
+
+- `proxy.hotRestart.connectionDrainTimeout: 2s` (the agent's
+  `--proxy-connection-drain-timeout`) is the `drain_timeout` of every node-proxy HTTP
+  connection manager. Upstream Envoy (upstream Envoy PR 47991, in the pin since
+  proposal 045) drains every connection, idle ones included, at a random point of
+  `[drainTime*2/3, drainTime - drain_timeout]` of a drain, and arms nothing when that
+  window is empty: with `drainTime: 10s` and Envoy's 5s default it was `[6.67s, 5s]`, so
+  until this value existed an idle connection got no GOAWAY, and the carried
+  `aether1054-http3-drain-idle-connections` patch drained idle HTTP/3 connections
+  instead. With 2s the window is `[6.67s, 8s]` for every protocol and the patch is no
+  longer carried. The listener's `downstream_cx_drain_close` counts each such drain, so
+  it rises on the inbound QUIC listener at every proxy roll. The chart refuses
+  `drainTime <= 3 x connectionDrainTimeout`. Side effects: idle h1/h2 connections get
+  their GOAWAY at 6.67-8s too, tunnels (CONNECT, WebSocket) are reset there instead of at
+  the parent's exit, and every drain sequence (hot restart, LDS listener removal, the
+  pod-termination drain) gives a connection 2s between GOAWAY and close instead of 5s.
 
 - `proxy.hotRestart.drainStrategy` (default **`gradual`**; `immediate` is an opt-in)
   passes Envoy `--drain-strategy`. `immediate` puts a GOAWAY on every response from the

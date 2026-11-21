@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io/fs"
 	"os"
+	"time"
 
 	agentconstants "aethermesh.dev/agent/constants"
 	"aethermesh.dev/agent/internal/xds/proxy"
@@ -18,6 +19,24 @@ import (
 	http_connection_managerv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/network/http_connection_manager/v3"
 	"github.com/envoyproxy/go-control-plane/pkg/cache/types"
 )
+
+// SetConnectionDrainTimeout sets the drain_timeout every node-proxy HCM carries
+// (--proxy-connection-drain-timeout; see proxy.DefaultConnectionDrainTimeout
+// for why it must leave upstream Envoy's proactive drain window non-empty).
+// d <= 0 means proxy.DefaultConnectionDrainTimeout. Boot-time, before the
+// manager starts.
+func (c *SnapshotCache) SetConnectionDrainTimeout(d time.Duration) {
+	c.connDrainTimeout.Store(int64(d))
+}
+
+// connectionDrainTimeout is the drain_timeout the node-proxy HCMs are built
+// with: the configured value, or proxy.DefaultConnectionDrainTimeout.
+func (c *SnapshotCache) connectionDrainTimeout() time.Duration {
+	if d := time.Duration(c.connDrainTimeout.Load()); d > 0 {
+		return d
+	}
+	return proxy.DefaultConnectionDrainTimeout
+}
 
 // netnsExists reports whether a pod's network-namespace path is still present.
 // Overridable in tests (which use synthetic netns paths). A pod whose netns is
@@ -368,7 +387,7 @@ func (c *SnapshotCache) AddPod(ctx context.Context, cniPod *cniv1.CNIPod, trustD
 	// capture listener (see extensionHTTPFilters).
 	extensionFilters := c.podExtensionHTTPFilters(cniPod, c.extensionHTTPFilters())
 
-	inbound, outbound, appClusters, healthCluster, err := proxy.GenerateListenersFromRegistryPod(cniPod, trustDomain, c.meshDomain, c.emitStatsPod, !c.spireEnabled, extensionFilters, c.inboundFilterForPod(cniPod), c.udsSocketPathForPod(ctx, cniPod))
+	inbound, outbound, appClusters, healthCluster, err := proxy.GenerateListenersFromRegistryPod(cniPod, trustDomain, c.meshDomain, c.emitStatsPod, !c.spireEnabled, extensionFilters, c.inboundFilterForPod(cniPod), c.udsSocketPathForPod(ctx, cniPod), c.connectionDrainTimeout())
 	if err != nil {
 		return err
 	}
@@ -578,7 +597,7 @@ func (c *SnapshotCache) meshListeners() []types.Resource {
 	// c.listeners is keyed by netns, so the per-pod listeners come out in a
 	// random order. (probeClusters is sorted inside BuildHealthGatewayListener.)
 	sortResourcesByName(resources)
-	resources = append(resources, proxy.BuildHealthGatewayListener(agentconstants.DefaultProxyHealthSocketPath, probes))
+	resources = append(resources, proxy.BuildHealthGatewayListener(agentconstants.DefaultProxyHealthSocketPath, probes, c.connectionDrainTimeout()))
 	// East/west waypoint (proposal 019): one host-netns tunnel listener that
 	// SNI-forwards cross-cluster mTLS to the services this node hosts. nil unless
 	// --east-west-waypoint is set and the node hosts mesh pods.
@@ -724,7 +743,7 @@ func (c *SnapshotCache) LoadListenersFromStorage(ctx context.Context, store stor
 		c.log.DebugContext(ctx, "generating listeners for pod", "pod", pod.GetName(), "namespace", pod.GetNamespace(), "netns", netns)
 
 		extensionFilters := c.podExtensionHTTPFilters(pod, shared)
-		inbound, outbound, appClusters, healthCluster, listenerErr := proxy.GenerateListenersFromRegistryPod(pod, trustDomain, c.meshDomain, c.emitStatsPod, !c.spireEnabled, extensionFilters, c.inboundFilterForPod(pod), c.udsSocketPathForPod(ctx, pod))
+		inbound, outbound, appClusters, healthCluster, listenerErr := proxy.GenerateListenersFromRegistryPod(pod, trustDomain, c.meshDomain, c.emitStatsPod, !c.spireEnabled, extensionFilters, c.inboundFilterForPod(pod), c.udsSocketPathForPod(ctx, pod), c.connectionDrainTimeout())
 		if listenerErr != nil {
 			c.log.ErrorContext(ctx, "failed to generate listeners for pod", "error", listenerErr, "pod", pod.GetName(), "namespace", pod.GetNamespace())
 			errs = append(errs, listenerErr)
@@ -813,7 +832,7 @@ func (c *SnapshotCache) generateListenerSnapshot(ctx context.Context) error {
 // non-nil types.Resource would defeat appendListener's guard and reach LDS as
 // an empty listener, which Envoy NACKs whole ("address is necessary").
 func (c *SnapshotCache) generateInboundQUICListener(cniPod *cniv1.CNIPod, trustDomain string, extensionFilters []*http_connection_managerv3.HttpFilter) (types.Resource, error) {
-	l, err := proxy.NewInboundQUICListener(cniPod, trustDomain, c.meshDomain, c.emitStatsPod, !c.spireEnabled, proxy.WithoutSourceMetadata(extensionFilters), c.inboundFilterForPod(cniPod))
+	l, err := proxy.NewInboundQUICListener(cniPod, trustDomain, c.meshDomain, c.emitStatsPod, !c.spireEnabled, proxy.WithoutSourceMetadata(extensionFilters), c.inboundFilterForPod(cniPod), c.connectionDrainTimeout())
 	if err != nil {
 		return nil, err
 	}

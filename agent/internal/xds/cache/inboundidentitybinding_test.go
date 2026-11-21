@@ -108,7 +108,7 @@ func TestInboundIdentityBindingForeignIdentityWarns(t *testing.T) {
 
 	rec.reset()
 	foreignPod := bindingPod("svc-5-1", "svc-5")
-	foreign, err := proxy.NewInboundListener(foreignPod, bindingTrustDomain, false, false, nil, nil)
+	foreign, err := proxy.NewInboundListener(foreignPod, bindingTrustDomain, false, false, nil, nil, proxy.DefaultConnectionDrainTimeout)
 	require.NoError(t, err)
 
 	c.listenerMu.Lock()
@@ -198,7 +198,7 @@ func TestInboundIdentityBindingSummaryAboveThreshold(t *testing.T) {
 			ServiceAccount:   "echo",
 			NetworkNamespace: "/var/run/netns/cni-bulk-" + string(rune('a'+i%26)) + string(rune('a'+i/26)),
 		}
-		l, err := proxy.NewInboundListener(pod, bindingTrustDomain, false, false, nil, nil)
+		l, err := proxy.NewInboundListener(pod, bindingTrustDomain, false, false, nil, nil, proxy.DefaultConnectionDrainTimeout)
 		require.NoError(t, err)
 		c.listeners[pod.GetNetworkNamespace()] = listenerEntry{inbound: l, cniPod: pod}
 	}

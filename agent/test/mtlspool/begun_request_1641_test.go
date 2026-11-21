@@ -336,7 +336,7 @@ func eachHCM(t *testing.T, l *listenerv3.Listener, edit func(*hcmv3.HttpConnecti
 // destination proxy whose agent has not been upgraded.
 func productionInbound(t *testing.T, pod *cniv1.CNIPod, addr *corev3.Address, mtls, previousRelease bool) *listenerv3.Listener {
 	t.Helper()
-	l, err := proxy.NewInboundListener(pod, trustDomain, false, !mtls, nil, nil)
+	l, err := proxy.NewInboundListener(pod, trustDomain, false, !mtls, nil, nil, proxy.DefaultConnectionDrainTimeout)
 	require.NoError(t, err)
 	l.Address = addr
 	if mtls {
@@ -373,7 +373,7 @@ func productionInbound(t *testing.T, pod *cniv1.CNIPod, addr *corev3.Address, mt
 func productionOutbound(t *testing.T, name string, routes *routev3.RouteConfiguration) *listenerv3.Listener {
 	t.Helper()
 	pod := &cniv1.CNIPod{Name: name, Namespace: "demo", ServiceAccount: "source-a", NetworkNamespace: "/var/run/netns/" + name}
-	l, err := proxy.GenerateOutboundHTTPListener(pod, spiffeSourceA, begunMeshDomain, false, nil)
+	l, err := proxy.GenerateOutboundHTTPListener(pod, spiffeSourceA, begunMeshDomain, false, nil, proxy.DefaultConnectionDrainTimeout)
 	require.NoError(t, err)
 	l.Name = name
 	l.Address = socketAddress("127.0.0.1", envoyPicksPort)

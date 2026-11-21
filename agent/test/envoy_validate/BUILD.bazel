@@ -93,6 +93,7 @@ go_test(
         "capture_onehcm_test.go",
         "capture_pathless_budget_test.go",
         "capture_transparent_test.go",
+        "drain_timeout_test.go",
         "identity_test.go",
         "idle_timeout_test.go",
         "l4_observability_test.go",

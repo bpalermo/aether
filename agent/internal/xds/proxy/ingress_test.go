@@ -27,7 +27,7 @@ func TestNewInboundListener(t *testing.T) {
 		Ips:              []string{"10.0.0.1"},
 	}
 
-	l, err := NewInboundListener(pod, "example.org", false, false, nil, nil)
+	l, err := NewInboundListener(pod, "example.org", false, false, nil, nil, DefaultConnectionDrainTimeout)
 	require.NoError(t, err)
 	assert.Equal(t, InboundListenerName(pod), l.GetName())
 
@@ -97,7 +97,7 @@ func TestNewInboundListener_IgnoresSpiffeIDAnnotation(t *testing.T) {
 		},
 	}
 
-	l, err := NewInboundListener(pod, "example.org", false, false, nil, nil)
+	l, err := NewInboundListener(pod, "example.org", false, false, nil, nil, DefaultConnectionDrainTimeout)
 	require.NoError(t, err)
 
 	require.NotEmpty(t, l.GetFilterChains())
@@ -130,7 +130,7 @@ func TestNewInboundListenerCleartext(t *testing.T) {
 		Ips:              []string{"10.0.0.1"},
 	}
 
-	l, err := NewInboundListener(pod, "example.org", false, true, nil, nil)
+	l, err := NewInboundListener(pod, "example.org", false, true, nil, nil, DefaultConnectionDrainTimeout)
 	require.NoError(t, err)
 
 	// No tls_inspector: there is no TLS to inspect in cleartext mode.
@@ -155,10 +155,10 @@ func TestNewInboundListenerCleartext(t *testing.T) {
 }
 
 func TestNewInboundListener_Errors(t *testing.T) {
-	_, err := NewInboundListener(nil, "example.org", false, false, nil, nil)
+	_, err := NewInboundListener(nil, "example.org", false, false, nil, nil, DefaultConnectionDrainTimeout)
 	require.Error(t, err)
 
-	_, err = NewInboundListener(&cniv1.CNIPod{Name: "no-netns"}, "example.org", false, false, nil, nil)
+	_, err = NewInboundListener(&cniv1.CNIPod{Name: "no-netns"}, "example.org", false, false, nil, nil, DefaultConnectionDrainTimeout)
 	require.Error(t, err)
 }
 
@@ -201,7 +201,7 @@ func TestInboundFilterChains_MultiPort(t *testing.T) {
 		Ips:              []string{"10.0.0.1"},
 		Annotations:      map[string]string{aetherannotations.AnnotationEndpointPorts: "8080,9090"},
 	}
-	l, err := NewInboundListener(pod, "example.org", false, false, nil, nil)
+	l, err := NewInboundListener(pod, "example.org", false, false, nil, nil, DefaultConnectionDrainTimeout)
 	require.NoError(t, err)
 
 	bySNI := map[string]*listenerv3.FilterChain{}
@@ -245,7 +245,7 @@ func TestInboundChainStatsFilter(t *testing.T) {
 		NetworkNamespace: "/var/run/netns/cni-a",
 		Ips:              []string{"10.0.0.1"},
 	}
-	l, err := NewInboundListener(pod, "aether.internal", false, false, nil, nil)
+	l, err := NewInboundListener(pod, "aether.internal", false, false, nil, nil, DefaultConnectionDrainTimeout)
 	require.NoError(t, err)
 	require.NotEmpty(t, l.GetFilterChains())
 
@@ -282,7 +282,7 @@ func TestInboundTCPFloorFilterChain(t *testing.T) {
 		NetworkNamespace: "/var/run/netns/cni-tcp",
 		Ips:              []string{"10.0.0.5"},
 	}
-	l, err := NewInboundListener(pod, "aether.internal", false, false, nil, nil)
+	l, err := NewInboundListener(pod, "aether.internal", false, false, nil, nil, DefaultConnectionDrainTimeout)
 	require.NoError(t, err)
 
 	// Find the TCP floor chain: the default chain (no match), named in_tcp_<namespace>_<pod>.
@@ -331,7 +331,7 @@ func TestNewInboundListener_EveryMTLSChainPinsTheClientSAN(t *testing.T) {
 		Annotations: map[string]string{aetherannotations.AnnotationEndpointPorts: "8080,9090"},
 	}
 
-	l, err := NewInboundListener(pod, "aether.internal", false, false, nil, nil)
+	l, err := NewInboundListener(pod, "aether.internal", false, false, nil, nil, DefaultConnectionDrainTimeout)
 	require.NoError(t, err)
 	require.NotEmpty(t, l.GetFilterChains())
 
@@ -374,12 +374,12 @@ func TestNewInboundListener_NoTrustDomainRefuses(t *testing.T) {
 		Ips:              []string{"10.0.0.1"},
 	}
 
-	_, err := NewInboundListener(pod, "", false, false, nil, nil)
+	_, err := NewInboundListener(pod, "", false, false, nil, nil, DefaultConnectionDrainTimeout)
 	require.ErrorIs(t, err, ErrNoTrustDomain, "an mTLS inbound listener with no trust domain must be refused, not downgraded")
 
 	// Cleartext (SPIRE off) needs no identity and is unaffected: no transport
 	// socket at all, so there is nothing to pin.
-	l, err := NewInboundListener(pod, "", false, true, nil, nil)
+	l, err := NewInboundListener(pod, "", false, true, nil, nil, DefaultConnectionDrainTimeout)
 	require.NoError(t, err, "the cleartext path must stay byte-identical")
 	require.Len(t, l.GetFilterChains(), 1)
 	assert.Nil(t, l.GetFilterChains()[0].GetTransportSocket())

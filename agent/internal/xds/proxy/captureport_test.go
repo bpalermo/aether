@@ -91,7 +91,7 @@ func TestGenerateCaptureListener_HTTPPrimaryGetsNoPortlessChain(t *testing.T) {
 	}}
 
 	l, err := GenerateCaptureListener(pod, "spiffe://aether.internal/ns/default/sa/test",
-		15001, "aether.internal", false, svcs, true, nil)
+		15001, "aether.internal", false, svcs, true, nil, DefaultConnectionDrainTimeout)
 	require.NoError(t, err)
 
 	// Raw bytes to the VIP reach the service on its raw-TCP port, and on no
@@ -118,7 +118,7 @@ func TestGenerateCaptureListener_TCPPrimaryKeepsPortlessChain(t *testing.T) {
 	}}
 
 	l, err := GenerateCaptureListener(pod, "spiffe://aether.internal/ns/default/sa/test",
-		15001, "aether.internal", false, svcs, true, nil)
+		15001, "aether.internal", false, svcs, true, nil, DefaultConnectionDrainTimeout)
 	require.NoError(t, err)
 
 	assert.Equal(t, []uint32{9000, 18082}, rawReach(t, l, "10.96.1.40", 1234, 31000),
@@ -145,7 +145,7 @@ func TestAnyPortShimIsCountedSeparately(t *testing.T) {
 	}}
 
 	l, err := GenerateCaptureListener(pod, "spiffe://aether.internal/ns/default/sa/test",
-		15001, "aether.internal", false, svcs, true, nil)
+		15001, "aether.internal", false, svcs, true, nil, DefaultConnectionDrainTimeout)
 	require.NoError(t, err)
 
 	prefixes := map[string]uint32{} // stat prefix -> the port whose raw bytes reach it

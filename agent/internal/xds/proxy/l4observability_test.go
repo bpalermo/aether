@@ -71,7 +71,7 @@ func l4CaptureFixture(t *testing.T, withPassthrough bool) *listenerv3.Listener {
 					{Service: "aether-test/tls-a", Cluster: tlsA, Weight: 1},
 				}}},
 			},
-		}, withPassthrough, nil, WithServiceRanges([]netip.Prefix{netip.MustParsePrefix("10.96.0.0/12")}))
+		}, withPassthrough, nil, DefaultConnectionDrainTimeout, WithServiceRanges([]netip.Prefix{netip.MustParsePrefix("10.96.0.0/12")}))
 	require.NoError(t, err)
 	return l
 }

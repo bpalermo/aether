@@ -7,6 +7,11 @@ mode, with no hold and no stage before the soak (see *Release and soak*). The
 facts below were read from
 `main` at `9b256ed5f4`, from Envoy at `011e39616b`, and from
 `envoyproxy/bazel-registry` at `36d481b01b`.
+**Status note (2026-11-21):** aether1054 is no longer carried. The agent sets a
+2s HCM `drain_timeout` (`--proxy-connection-drain-timeout`), which makes the
+proactive idle-connection drain of upstream Envoy PR 47991 arm under the 10s
+drain time; aether1126 has since been proposed upstream as upstream Envoy PR
+49523. The text below is unchanged.
 **Author:** Bruno Palermo
 **Date:** 2026-10-31
 **Related:** proposal [010](010_custom-proxy-workspace.md) (the proxy

@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"fmt"
+	"time"
 
 	cniv1 "aethermesh.dev/api/aether/cni/v1"
 	registryv1 "aethermesh.dev/api/aether/registry/v1"
@@ -54,16 +55,16 @@ func OutboundListenerName(cniPod *cniv1.CNIPod) string {
 // Empty — the default — is TCP delivery. Nothing else changes: the inbound
 // listener stays netns-bound TCP on :18008 and registry/EDS endpoints stay
 // pod_ip:18008, so a UDS pod is indistinguishable from a TCP pod to clients.
-func GenerateListenersFromRegistryPod(cniPod *cniv1.CNIPod, trustDomain string, meshDomain string, emitStatsPod bool, cleartext bool, extensionFilters []*http_connection_managerv3.HttpFilter, inboundFilter *ExtensionFilter, udsSocketPath string) (inbound *listenerv3.Listener, outbound *listenerv3.Listener, appClusters []*clusterv3.Cluster, healthCluster *clusterv3.Cluster, err error) {
+func GenerateListenersFromRegistryPod(cniPod *cniv1.CNIPod, trustDomain string, meshDomain string, emitStatsPod bool, cleartext bool, extensionFilters []*http_connection_managerv3.HttpFilter, inboundFilter *ExtensionFilter, udsSocketPath string, drainTimeout time.Duration) (inbound *listenerv3.Listener, outbound *listenerv3.Listener, appClusters []*clusterv3.Cluster, healthCluster *clusterv3.Cluster, err error) {
 	// Inbound never carries the egress source-metadata entry: the caller identity
 	// on the inbound path is the verified XFCC, and stamping the destination pod
 	// into aether.source would mislead authz policies.
-	inbound, err = NewInboundListener(cniPod, trustDomain, emitStatsPod, cleartext, WithoutSourceMetadata(extensionFilters), inboundFilter)
+	inbound, err = NewInboundListener(cniPod, trustDomain, emitStatsPod, cleartext, WithoutSourceMetadata(extensionFilters), inboundFilter, drainTimeout)
 	if err != nil {
 		return nil, nil, nil, nil, err
 	}
 
-	outbound, err = GenerateOutboundHTTPListener(cniPod, SourceIdentityForPod(cniPod, trustDomain), meshDomain, emitStatsPod, extensionFilters)
+	outbound, err = GenerateOutboundHTTPListener(cniPod, SourceIdentityForPod(cniPod, trustDomain), meshDomain, emitStatsPod, extensionFilters, drainTimeout)
 	if err != nil {
 		return nil, nil, nil, nil, err
 	}
@@ -132,7 +133,7 @@ func NewAppDeliveryClusters(cniPod *cniv1.CNIPod, udsSocketPath string) (appClus
 // sourceSpiffeID is the pod's own SPIFFE ID (SourceIdentityForPod), stamped into
 // filter state next to the netns for the cluster transport-socket matcher; "" is
 // accepted and reproduces the pre-#815 shape exactly.
-func GenerateOutboundHTTPListener(cniPod *cniv1.CNIPod, sourceSpiffeID, meshDomain string, emitStatsPod bool, extensionFilters []*http_connection_managerv3.HttpFilter) (*listenerv3.Listener, error) {
+func GenerateOutboundHTTPListener(cniPod *cniv1.CNIPod, sourceSpiffeID, meshDomain string, emitStatsPod bool, extensionFilters []*http_connection_managerv3.HttpFilter, drainTimeout time.Duration) (*listenerv3.Listener, error) {
 	if cniPod == nil {
 		return nil, fmt.Errorf("pod is required")
 	}
@@ -161,7 +162,7 @@ func GenerateOutboundHTTPListener(cniPod *cniv1.CNIPod, sourceSpiffeID, meshDoma
 		StatPrefix:       "out_http_" + PodStatKey(cniPod),
 		TrafficDirection: corev3.TrafficDirection_OUTBOUND,
 		FilterChains: []*listenerv3.FilterChain{
-			buildDefaultOutboundHTTPFilterChain(cniPod, sourceSpiffeID, meshDomain, emitStatsPod, extensionFilters),
+			buildDefaultOutboundHTTPFilterChain(cniPod, sourceSpiffeID, meshDomain, emitStatsPod, extensionFilters, drainTimeout),
 		},
 	}, nil
 }

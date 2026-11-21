@@ -2096,6 +2096,75 @@ helm_template_fail_test(
     ],
 )
 
+# The node-proxy HCMs' drain_timeout reaches the agent (default 2s): with the
+# 10s drain time, upstream Envoy's proactive idle-connection drain window is
+# [6.67s, 8s] instead of empty...
+helm_template_test(
+    name = "aether_agent_connection_drain_timeout_test",
+    chart = ":aether",
+    opts = [
+        "--set",
+        "controller.webhook.spire=true",
+    ],
+    template_patterns = {
+        "aether/templates/agent-daemonset.yaml": [
+            "- \"--proxy-connection-drain-timeout=2s\"",
+        ],
+    },
+)
+
+# ...an override that keeps the window open is passed through...
+helm_template_test(
+    name = "aether_agent_connection_drain_timeout_override_test",
+    chart = ":aether",
+    opts = [
+        "--set",
+        "proxy.hotRestart.connectionDrainTimeout=3s",
+        "--set",
+        "controller.webhook.spire=true",
+    ],
+    template_patterns = {
+        "aether/templates/agent-daemonset.yaml": [
+            "- \"--proxy-connection-drain-timeout=3s\"",
+        ],
+    },
+)
+
+# ...and the chart refuses drainTime <= 3 x connectionDrainTimeout, where the
+# window is empty and Envoy arms no proactive drain (Envoy's own 5s default
+# under the 10s drain time is exactly that)...
+helm_template_fail_test(
+    name = "aether_agent_connection_drain_timeout_empty_window_test",
+    chart = ":aether",
+    expected_message = "proxy.hotRestart.drainTime (10s) must be more than 3 x proxy.hotRestart.connectionDrainTimeout (5s)",
+    opts = [
+        "--set",
+        "proxy.hotRestart.connectionDrainTimeout=5s",
+    ],
+)
+
+# ...also when the drain time is the one that moves (6s == 3 x 2s fails)...
+helm_template_fail_test(
+    name = "aether_agent_connection_drain_timeout_short_drain_test",
+    chart = ":aether",
+    expected_message = "proxy.hotRestart.drainTime (6s) must be more than 3 x proxy.hotRestart.connectionDrainTimeout (2s)",
+    opts = [
+        "--set",
+        "proxy.hotRestart.drainTime=6s",
+    ],
+)
+
+# ...and a zero timeout (Envoy's default, unset) is refused outright.
+helm_template_fail_test(
+    name = "aether_agent_connection_drain_timeout_zero_test",
+    chart = ":aether",
+    expected_message = "proxy.hotRestart.connectionDrainTimeout must be > 0",
+    opts = [
+        "--set",
+        "proxy.hotRestart.connectionDrainTimeout=0s",
+    ],
+)
+
 # The same check holds when the parent-shutdown time is the one that moves.
 helm_template_fail_test(
     name = "aether_agent_quic_idle_timeout_short_parent_test",
@@ -2698,7 +2767,7 @@ helm_template_test(
             "proxy.terminationGracePeriodSeconds=%s" % grace,
             "--set",
             "controller.webhook.spire=true",
-        ],
+        ] + extra,
         template_patterns = {
             "aether/templates/agent-proxy-daemonset.yaml": [
                 "\\n      terminationGracePeriodSeconds: %s\\n" % grace,
@@ -2707,14 +2776,40 @@ helm_template_test(
             ],
         },
     )
-    for name, drain, grace in [
-        ("boundary", "10s", 26),
-        ("drain_30s_boundary", "30s", 46),
-        ("drain_5s_boundary", "5s", 21),
-        ("drain_components_boundary", "1m30s", 106),
-        ("drain_fraction_boundary", "1.5s", 17),
-        ("drain_millis_boundary", "500ms", 16),
-        ("drain_zero_boundary", "0", 16),
+    # A drain time shorter than 6s also needs a connectionDrainTimeout under a
+    # third of it (the proactive-drain window guard, aether.proxy.connectionDrainTimeout).
+    for name, drain, grace, extra in [
+        ("boundary", "10s", 26, []),
+        ("drain_30s_boundary", "30s", 46, []),
+        (
+            "drain_5s_boundary",
+            "5s",
+            21,
+            [
+                "--set",
+                "proxy.hotRestart.connectionDrainTimeout=1s",
+            ],
+        ),
+        ("drain_components_boundary", "1m30s", 106, []),
+        (
+            "drain_fraction_boundary",
+            "1.5s",
+            17,
+            [
+                "--set",
+                "proxy.hotRestart.connectionDrainTimeout=400ms",
+            ],
+        ),
+        (
+            "drain_millis_boundary",
+            "500ms",
+            16,
+            [
+                "--set",
+                "proxy.hotRestart.connectionDrainTimeout=100ms",
+            ],
+        ),
+        ("drain_zero_boundary", "0", 16, []),
     ]
 ]
 

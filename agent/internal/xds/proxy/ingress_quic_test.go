@@ -53,7 +53,7 @@ func hcmOf(t *testing.T, fc *listenerv3.FilterChain) *http_connection_managerv3.
 // offers only h3, and explicitly disables resumption and 0-RTT.
 func TestNewInboundQUICListener(t *testing.T) {
 	pod := quicTestPod()
-	l, err := NewInboundQUICListener(pod, "example.org", "mesh.local", false, false, nil, nil)
+	l, err := NewInboundQUICListener(pod, "example.org", "mesh.local", false, false, nil, nil, DefaultConnectionDrainTimeout)
 	require.NoError(t, err)
 	require.NotNil(t, l)
 
@@ -115,9 +115,9 @@ func TestNewInboundQUICListener(t *testing.T) {
 // could pick the weaker transport.
 func TestInboundQUICSharesTheTCPInboundTLSContext(t *testing.T) {
 	pod := quicTestPod()
-	tcp, err := NewInboundListener(pod, "example.org", false, false, nil, nil)
+	tcp, err := NewInboundListener(pod, "example.org", false, false, nil, nil, DefaultConnectionDrainTimeout)
 	require.NoError(t, err)
-	quic, err := NewInboundQUICListener(pod, "example.org", "mesh.local", false, false, nil, nil)
+	quic, err := NewInboundQUICListener(pod, "example.org", "mesh.local", false, false, nil, nil, DefaultConnectionDrainTimeout)
 	require.NoError(t, err)
 
 	var tcpCtx *tlsv3.DownstreamTlsContext
@@ -143,16 +143,16 @@ func TestInboundQUICSharesTheTCPInboundTLSContext(t *testing.T) {
 // same identity refusal as the TCP inbound when there is no trust domain.
 func TestNewInboundQUICListener_Nil(t *testing.T) {
 	pod := quicTestPod()
-	l, err := NewInboundQUICListener(pod, "example.org", "mesh.local", false, true, nil, nil)
+	l, err := NewInboundQUICListener(pod, "example.org", "mesh.local", false, true, nil, nil, DefaultConnectionDrainTimeout)
 	require.NoError(t, err)
 	assert.Nil(t, l, "cleartext (SPIRE off) has no SVID to present; QUIC mandates TLS")
 
-	_, err = NewInboundQUICListener(pod, "", "mesh.local", false, false, nil, nil)
+	_, err = NewInboundQUICListener(pod, "", "mesh.local", false, false, nil, nil, DefaultConnectionDrainTimeout)
 	require.ErrorIs(t, err, ErrNoTrustDomain)
 
-	_, err = NewInboundQUICListener(pod, "example.org", "", false, false, nil, nil)
+	_, err = NewInboundQUICListener(pod, "example.org", "", false, false, nil, nil, DefaultConnectionDrainTimeout)
 	require.Error(t, err, "no mesh domain, no authority for the server_names chains")
 
-	_, err = NewInboundQUICListener(&cniv1.CNIPod{Name: "no-netns"}, "example.org", "mesh.local", false, false, nil, nil)
+	_, err = NewInboundQUICListener(&cniv1.CNIPod{Name: "no-netns"}, "example.org", "mesh.local", false, false, nil, nil, DefaultConnectionDrainTimeout)
 	require.Error(t, err)
 }
