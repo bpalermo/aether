@@ -18,6 +18,10 @@ import (
 // diagLogTailLines bounds each container's log in a setup-failure dump.
 const diagLogTailLines = int64(200)
 
+// diagCallTimeout bounds each API call of a dump on its own, so one stalled
+// kubelet log endpoint cannot use up the time of the calls after it.
+const diagCallTimeout = 10 * time.Second
+
 // dumpDiagnostics writes the state of the aether-system namespace to stderr:
 // every pod with its init and main container states, the namespace's events,
 // and the tail of each container's log (and of its previous instance when it
@@ -25,8 +29,7 @@ const diagLogTailLines = int64(200)
 // action fails, so DestroyCluster removes the cluster before any CI step after
 // the test can look at it: this dump is the only record of why setup failed.
 func dumpDiagnostics(cfg *envconf.Config, reason error) {
-	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
-	defer cancel()
+	ctx := context.Background()
 	w := os.Stderr
 
 	fmt.Fprintf(w, "=== e2e setup diagnostics (%v) ===\n", reason)
@@ -36,7 +39,9 @@ func dumpDiagnostics(cfg *envconf.Config, reason error) {
 		return
 	}
 
-	pods, err := cs.CoreV1().Pods(namespace).List(ctx, metav1.ListOptions{})
+	listCtx, cancelList := context.WithTimeout(ctx, diagCallTimeout)
+	pods, err := cs.CoreV1().Pods(namespace).List(listCtx, metav1.ListOptions{})
+	cancelList()
 	if err != nil {
 		fmt.Fprintf(w, "diagnostics: list pods: %v\n", err)
 	} else {
@@ -45,7 +50,9 @@ func dumpDiagnostics(cfg *envconf.Config, reason error) {
 		}
 	}
 
-	events, err := cs.CoreV1().Events(namespace).List(ctx, metav1.ListOptions{})
+	eventsCtx, cancelEvents := context.WithTimeout(ctx, diagCallTimeout)
+	events, err := cs.CoreV1().Events(namespace).List(eventsCtx, metav1.ListOptions{})
+	cancelEvents()
 	if err != nil {
 		fmt.Fprintf(w, "diagnostics: list events: %v\n", err)
 		return
@@ -80,6 +87,8 @@ func dumpPod(ctx context.Context, w io.Writer, cs kubernetes.Interface, pod *cor
 }
 
 func dumpLog(ctx context.Context, w io.Writer, cs kubernetes.Interface, pod, container string, previous bool) {
+	ctx, cancel := context.WithTimeout(ctx, diagCallTimeout)
+	defer cancel()
 	tail := diagLogTailLines
 	rc, err := cs.CoreV1().Pods(namespace).GetLogs(pod, &corev1.PodLogOptions{
 		Container: container,
