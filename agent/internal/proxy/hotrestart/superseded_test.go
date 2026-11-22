@@ -107,6 +107,33 @@ func handleExit(ctx context.Context, s *Supervisor, exit childExit) <-chan handl
 	return out
 }
 
+// handleShutdownInBackground runs handleShutdown as the signal handler does
+// and delivers its result. While it waits for a successor it writes into the
+// state directory, so a test that fails before it returns would leave it
+// writing while t.TempDir removes that directory ("directory not empty"). The
+// cleanup ends the wait the way a successor does, by ending the Envoy, and
+// joins it.
+func handleShutdownInBackground(t *testing.T, s *Supervisor) <-chan error {
+	t.Helper()
+	done := make(chan error, 1)
+	finished := make(chan struct{})
+	go func() {
+		defer close(finished)
+		done <- s.handleShutdown(cancelledCtx())
+	}()
+	t.Cleanup(func() {
+		for e := 0; e < 8; e++ {
+			s.signalEpoch(e, syscall.SIGKILL)
+		}
+		select {
+		case <-finished:
+		case <-time.After(20 * time.Second):
+			t.Error("handleShutdown did not return after the test")
+		}
+	})
+	return done
+}
+
 func writeRawSuccessorWanted(t *testing.T, stateDir string, epoch int, age time.Duration) {
 	t.Helper()
 	data := fmt.Sprintf("%d %d\n", epoch, time.Now().Add(-age).UnixMilli())
@@ -172,8 +199,7 @@ func TestSupersededSupervisorTakesTheNodeBackFromATerminatingSuccessor(t *testin
 
 	// The surge pod is deleted: its supervisor gets the SIGTERM, with its
 	// Envoy LIVE at its own epoch.
-	shutdown := make(chan error, 1)
-	go func() { shutdown <- successor.handleShutdown(cancelledCtx()) }()
+	shutdown := handleShutdownInBackground(t, successor)
 
 	select {
 	case got := <-handled:
@@ -225,15 +251,22 @@ func TestTerminatingSupervisorAsksForASuccessorWhileItsEnvoyIsLive(t *testing.T)
 		s.cfg.TerminationGrace = 60 * time.Second
 		wanted := filepath.Join(s.cfg.StateDir, successorWantedFile)
 
-		done := make(chan error, 1)
-		go func() { done <- s.handleShutdown(cancelledCtx()) }()
+		done := handleShutdownInBackground(t, s)
 
 		require.Eventually(t, func() bool {
 			epoch, heartbeat, ok := s.readState()
 			return ok && epoch == 0 && time.Since(heartbeat) < 2*time.Second
 		}, 5*time.Second, 50*time.Millisecond, "the waiting supervisor did not keep the node epoch heartbeat fresh")
+		// Waited for on its own: each tick writes the heartbeat first and the
+		// request after it, so a fresh heartbeat does not mean the request is
+		// there yet. Once written it is only replaced (atomically) until the
+		// wait ends, so the read below sees a whole request.
+		require.Eventually(t, func() bool {
+			_, err := os.Stat(wanted)
+			return err == nil
+		}, 5*time.Second, 50*time.Millisecond, "the waiting supervisor did not ask for a successor")
 		b, err := os.ReadFile(wanted)
-		require.NoError(t, err, "the waiting supervisor did not ask for a successor")
+		require.NoError(t, err, "the request was withdrawn while the supervisor was still waiting")
 		var epoch int
 		var millis int64
 		_, err = fmt.Sscanf(string(b), "%d %d\n", &epoch, &millis)
@@ -262,8 +295,7 @@ func TestTerminatingSupervisorAsksForASuccessorWhileItsEnvoyIsLive(t *testing.T)
 		s := newShutdownSupervisor(t, f)
 		s.cfg.TerminationGrace = 60 * time.Second
 
-		done := make(chan error, 1)
-		go func() { done <- s.handleShutdown(cancelledCtx()) }()
+		done := handleShutdownInBackground(t, s)
 
 		time.Sleep(2500 * time.Millisecond)
 		assert.NoFileExists(t, filepath.Join(s.cfg.StateDir, successorWantedFile),
@@ -967,8 +999,7 @@ func TestTerminatingSupervisorStopsAskingBeforeItDrains(t *testing.T) {
 	require.Equal(t, 12*time.Second, s.successorWaitBudget())
 	wanted := filepath.Join(s.cfg.StateDir, successorWantedFile)
 
-	done := make(chan error, 1)
-	go func() { done <- s.handleShutdown(cancelledCtx()) }()
+	done := handleShutdownInBackground(t, s)
 
 	require.Eventually(t, func() bool { _, err := os.Stat(wanted); return err == nil },
 		2500*time.Millisecond, 20*time.Millisecond, "the request was never written")
