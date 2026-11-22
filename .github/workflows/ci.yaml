@@ -889,9 +889,11 @@ jobs:
       - name: Setup Bazel
         if: steps.walks.outputs.run == 'true'
         uses: ./.github/actions/setup-bazel
+      # --config=ci only, as in `race`: the warm-up is a `bazel build --nobuild`,
+      # and .bazelrc defines `race` for `test` alone.
       - name: Warm the Bazel repository cache (fetch + analysis, retried)
         if: steps.walks.outputs.run == 'true'
-        run: scripts/ci-bazel-warmup.sh --config=ci --config=race "$WALK_TEST"
+        run: scripts/ci-bazel-warmup.sh --config=ci "$WALK_TEST"
       # The same refusal as `race`: a query that returns nothing must not pass
       # the gate on an empty set.
       - name: The walk target is a go_test

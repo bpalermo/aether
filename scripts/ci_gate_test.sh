@@ -384,6 +384,11 @@ if grep -qE '^[[:space:]]+bazel test --config=ci --config=race \\$' <<<"$walks_j
 else
 	fail "ci.yaml: race-walks does not run \"\$WALK_TEST\" with bazel test --config=ci --config=race, once"
 fi
+# The warm-up is a `bazel build --nobuild`, and .bazelrc defines `race` for
+# `test` only: `build --config=race` fails with "Config value 'race' is not
+# defined in any .rc file".
+expect "ci.yaml: no warm-up passes --config=race (it is a test-only config)" \
+	"$(grep -F 'ci-bazel-warmup.sh' "$WORKFLOW" | grep -cF -- '--config=race')" 0
 
 # --- 7. proxy.yml: the decision (#1489) ---------------------------------------------------
 # The `proxy` job is the other required check with `if: always()`. Its legs
