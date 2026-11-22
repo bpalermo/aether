@@ -81,7 +81,7 @@ ci)
 	SWITCH=control_plane
 	SCOPE="the control plane"
 	CONDITIONAL="diff chart-version-bump deps-audit shell format"
-	LEGS="test race netns integration e2e"
+	LEGS="test race race-walks netns integration e2e"
 	OUTPUTS="has_any has_unit has_integration has_e2e"
 	;;
 proxy)
@@ -146,6 +146,7 @@ def flag: if . == "true" then true elif . == "false" then false else null end;
     | ({
         test: $has.has_any,
         race: ($has.has_unit or $has.has_integration),
+        "race-walks": ($has.has_unit or $has.has_integration),
         netns: $has.has_unit,
         integration: $has.has_integration,
         e2e: $has.has_e2e

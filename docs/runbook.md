@@ -186,13 +186,17 @@ runs concurrently stays invisible no matter how often you run it.
 **What CI's `race` job runs how often.** Impacted tests run once under the
 detector, and the tests of the concurrency-heavy packages (the list is in
 `.github/workflows/ci.yaml`) run three times. One target of such a package is
-the exception and runs **once**: `//agent/internal/xds/cache:cache_walk_test`,
-the fifteen seeded random walks of proposal 043. They are single-goroutine and
-deterministic for a seed, so a second and a third run repeat the first step
-for step; they are nine tenths of that package's test time, and at three runs
-they had brought the job to 54 of its 60 minutes. Three runs was the figure
-until then, and is still the figure for everything else in the package
-(`cache_test`, the interleaving tests among them). The split is one macro call
+the exception: `//agent/internal/xds/cache:cache_walk_test`, the seeded random
+walks of proposal 043, is not run by `race` at all but **once**, by its own
+job `race-walks`, in parallel with `race` and only when the target is impacted.
+The walks are single-goroutine and deterministic for a seed, so a second and a
+third run repeat the first step for step; they are nine tenths of that
+package's test time. At three runs they had brought `race` to 54 of its 60
+minutes, and even run once inside `race` (about 1470 s under the detector) they
+left the three-run step too little of the hour on a pull request that touches
+the package. Everything else in the package (`cache_test`, the interleaving
+tests among them) still runs three times in `race`. Both jobs report into the
+`ci` gate, so a failed or cancelled `race-walks` fails `ci`. The split is one macro call
 in the package's BUILD file (`cache_go_test`, `defs.bzl`): a new walk is added
 to the list there, and a `--test_filter` that names a walk goes to
 `cache_walk_test`.
