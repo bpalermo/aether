@@ -36,11 +36,9 @@ def cache_go_test(name, **kwargs):
     three times over (it is one of the concurrency-heavy ones, and the one race
     the detector ever caught showed in two runs of three). Repeating a seeded
     single-goroutine walk three times finds nothing the first run did not, and
-    it had brought the race job to 54 of its 60 minutes. The walk target is
-    therefore run once, under the race detector, in a job of its own that runs
-    in parallel with the race job (.github/workflows/ci.yaml, "race-walks";
-    "race" leaves it out), with every walk in a shard of its own. No round and
-    no seed is cut.
+    it had brought the required race job to 54 of its 60 minutes: the walk
+    target is run once there (.github/workflows/ci.yaml, "race"), with every
+    walk in a shard of its own. No round and no seed is cut.
 
     A --test_filter that names a walk must be given to the walk target: the
     other one skips it whatever the filter says.
