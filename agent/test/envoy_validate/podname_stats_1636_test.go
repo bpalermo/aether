@@ -98,9 +98,9 @@ type podStatNames struct {
 
 func statNamesOf(t *testing.T, pod *cniv1.CNIPod) podStatNames {
 	t.Helper()
-	inbound, outbound, _, health, err := proxy.GenerateListenersFromRegistryPod(pod, "aether.internal", "mesh.internal", false, false, nil, nil, "")
+	inbound, outbound, _, health, err := proxy.GenerateListenersFromRegistryPod(pod, "aether.internal", "mesh.internal", false, false, nil, nil, "", proxy.DefaultConnectionDrainTimeout)
 	require.NoError(t, err)
-	quic, err := proxy.NewInboundQUICListener(pod, "aether.internal", "mesh.internal", false, false, nil, nil)
+	quic, err := proxy.NewInboundQUICListener(pod, "aether.internal", "mesh.internal", false, false, nil, nil, proxy.DefaultConnectionDrainTimeout)
 	require.NoError(t, err)
 	ready := proxy.NewInboundReadyProbeCluster(proxy.InboundReadyClusterName(pod), pod.GetNetworkNamespace(),
 		"spiffe://aether.internal/node", "ROOTCA", proxy.SpiffeIDFromPod(pod, "aether.internal"))
@@ -233,7 +233,7 @@ func TestHealthGatewayAnswersForADottedPod(t *testing.T) {
 		}}},
 		StaticResources: &bootstrapv3.Bootstrap_StaticResources{
 			Clusters:  clusters,
-			Listeners: []*listenerv3.Listener{proxy.BuildHealthGatewayListener(gatewaySocket, probes)},
+			Listeners: []*listenerv3.Listener{proxy.BuildHealthGatewayListener(gatewaySocket, probes, proxy.DefaultConnectionDrainTimeout)},
 		},
 	}
 	bootstrapJSON, err := protojson.Marshal(bootstrap)
@@ -376,7 +376,7 @@ func TestHealthGatewayAcrossTheStatNameChange(t *testing.T) {
 			SocketAddress: &corev3.SocketAddress{Address: "127.0.0.1", PortSpecifier: &corev3.SocketAddress_PortValue{PortValue: 0}},
 		}}},
 		StaticResources: &bootstrapv3.Bootstrap_StaticResources{
-			Listeners: []*listenerv3.Listener{proxy.BuildHealthGatewayListener(gatewaySocket, probes)},
+			Listeners: []*listenerv3.Listener{proxy.BuildHealthGatewayListener(gatewaySocket, probes, proxy.DefaultConnectionDrainTimeout)},
 		},
 		DynamicResources: &bootstrapv3.Bootstrap_DynamicResources{
 			CdsConfig: &corev3.ConfigSource{

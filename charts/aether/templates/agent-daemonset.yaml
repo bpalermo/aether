@@ -168,6 +168,10 @@ spec:
             # hot-restart parent; the helper fails the render unless it is 5s
             # shorter than proxy.hotRestart.parentShutdownTime.
             - "--east-west-quic-idle-timeout={{ include "aether.agent.eastWestQuicIdleTimeout" . }}"
+            # The node-proxy HCMs' drain_timeout: Envoy's proactive drain of
+            # idle connections arms only when proxy.hotRestart.drainTime is
+            # more than 3 times this; the helper fails the render otherwise.
+            - "--proxy-connection-drain-timeout={{ include "aether.proxy.connectionDrainTimeout" . }}"
             {{- if .Values.agent.meshDns }}
             # Gates the agent's PERSIST path only (issue #578): the agent writes the
             # mesh record snapshot but no longer serves DNS — the standalone

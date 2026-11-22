@@ -44,7 +44,7 @@ func srServices() []CaptureTCPService {
 
 func srListener(t *testing.T, svcs []CaptureTCPService, withPassthrough bool, opts ...CaptureListenerOption) *listenerv3.Listener {
 	t.Helper()
-	l, err := GenerateCaptureListener(perPortPod(), perPortSource, meshconst.ProxyCapturePort, "aether.internal", false, svcs, withPassthrough, nil, opts...)
+	l, err := GenerateCaptureListener(perPortPod(), perPortSource, meshconst.ProxyCapturePort, "aether.internal", false, svcs, withPassthrough, nil, DefaultConnectionDrainTimeout, opts...)
 	require.NoError(t, err)
 	requireMatcherNamesChains(t, l)
 	return l

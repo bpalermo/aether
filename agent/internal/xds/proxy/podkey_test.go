@@ -114,9 +114,9 @@ func TestPerPodResourceNamesCarryTheNamespace(t *testing.T) {
 func TestSameNamedPodsShareNoGeneratedName(t *testing.T) {
 	a, b := sameNamePodA(), sameNamePodB()
 
-	inA, outA, appA, healthA, err := GenerateListenersFromRegistryPod(a, sameNameTrustDomain, sameNameMeshDomain, false, false, nil, nil, "")
+	inA, outA, appA, healthA, err := GenerateListenersFromRegistryPod(a, sameNameTrustDomain, sameNameMeshDomain, false, false, nil, nil, "", DefaultConnectionDrainTimeout)
 	require.NoError(t, err)
-	inB, outB, appB, healthB, err := GenerateListenersFromRegistryPod(b, sameNameTrustDomain, sameNameMeshDomain, false, false, nil, nil, "")
+	inB, outB, appB, healthB, err := GenerateListenersFromRegistryPod(b, sameNameTrustDomain, sameNameMeshDomain, false, false, nil, nil, "", DefaultConnectionDrainTimeout)
 	require.NoError(t, err)
 
 	for _, pair := range [][2]*listenerv3.Listener{{inA, inB}, {outA, outB}} {
@@ -174,9 +174,9 @@ func TestSameNamedPodsOtherListenersShareNoName(t *testing.T) {
 	assert.Equal(t, a.GetNetworkNamespace(), udpA.GetAddress().GetSocketAddress().GetNetworkNamespaceFilepath())
 	assert.Equal(t, b.GetNetworkNamespace(), udpB.GetAddress().GetSocketAddress().GetNetworkNamespaceFilepath())
 
-	capA, err := GenerateCaptureListener(a, SpiffeIDFromPod(a, sameNameTrustDomain), 15001, sameNameTrustDomain, false, nil, false, nil)
+	capA, err := GenerateCaptureListener(a, SpiffeIDFromPod(a, sameNameTrustDomain), 15001, sameNameTrustDomain, false, nil, false, nil, DefaultConnectionDrainTimeout)
 	require.NoError(t, err)
-	capB, err := GenerateCaptureListener(b, SpiffeIDFromPod(b, sameNameTrustDomain), 15001, sameNameTrustDomain, false, nil, false, nil)
+	capB, err := GenerateCaptureListener(b, SpiffeIDFromPod(b, sameNameTrustDomain), 15001, sameNameTrustDomain, false, nil, false, nil, DefaultConnectionDrainTimeout)
 	require.NoError(t, err)
 	assert.Equal(t, "capture_ns-a_web-0", capA.GetName())
 	assert.Equal(t, "capture_ns-a_web-0", capA.GetStatPrefix())

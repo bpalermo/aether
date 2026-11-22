@@ -188,9 +188,9 @@ func inboundAccessLogs(t *testing.T) (tcp, quic []*accesslogv3.AccessLog) {
 		Name: "echo-0", Namespace: "demo", ServiceAccount: "echo",
 		NetworkNamespace: "/var/run/netns/echo-0", ContainerId: "abc123", Ips: []string{"10.0.0.7"},
 	}
-	tl, err := proxy.NewInboundListener(pod, trustDomain, false, false, nil, nil)
+	tl, err := proxy.NewInboundListener(pod, trustDomain, false, false, nil, nil, proxy.DefaultConnectionDrainTimeout)
 	require.NoError(t, err)
-	ql, err := proxy.NewInboundQUICListener(pod, trustDomain, "mesh.internal", false, false, nil, nil)
+	ql, err := proxy.NewInboundQUICListener(pod, trustDomain, "mesh.internal", false, false, nil, nil, proxy.DefaultConnectionDrainTimeout)
 	require.NoError(t, err)
 	return productionAccessLog(t, tl), productionAccessLog(t, ql)
 }

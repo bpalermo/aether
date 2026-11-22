@@ -47,6 +47,7 @@ go_test(
         "perport_tlsroute_test.go",
         "podname_namespace_1584_test.go",
         "pool_identity_test.go",
+        "proactive_drain_live_test.go",
         "quic_cost_test.go",
         "quic_dormant_test.go",
         "quic_odcds_test.go",

@@ -76,6 +76,7 @@ go_test(
     srcs = [
         "chart_flags_test.go",
         "config_test.go",
+        "drain_timeout_test.go",
         "edge_cache_test.go",
         "edge_identity_test.go",
         "healthsock_test.go",
@@ -101,6 +102,7 @@ go_test(
         "//agent/internal/node",
         "//agent/internal/ownership",
         "//agent/internal/xds/config",
+        "//agent/internal/xds/proxy",
         "//common/buildinfo",
         "//common/spire",
         "//common/spire/spiretest",

@@ -45,6 +45,11 @@ bazel_dep(name = "envoy_api", version = "1.41.0-dev.20261028.011e396.envoy")
 # upstream's version also changes cluster_manager_impl.cc, which the carried patch did
 # not need). v1.40.0 also brought envoyproxy/envoy#47492 (a hot-restart successor
 # inherits its listen sockets before entering the network namespace).
+# aether1054 (idle HTTP/3 connections drain themselves inside the drain window,
+# aether#1054) is no longer carried either: upstream Envoy PR 47991 (in the pin) drains
+# idle connections of every protocol in [drain_time*2/3, drain_time - drain_timeout],
+# which the agent opens with a 2s HCM drain_timeout (--proxy-connection-drain-timeout,
+# chart proxy.hotRestart.connectionDrainTimeout) under the 10s drain time.
 #   envoyproxy/envoy#47740 "quic: defer the upstream hostname check to explicit
 #   SAN matchers" (67af4c692c + 01c09223bd; still open upstream): the QUIC client no
 #   longer requires the server leaf's DNS SAN to match the SNI when an explicit
@@ -80,29 +85,8 @@ bazel_dep(name = "envoy_api", version = "1.41.0-dev.20261028.011e396.envoy")
 #   blocking caller of this patch already treats as "keep waiting until the deadline".
 #   Carries its tests (test/server:hot_restarting_{base,child,parent}_test,
 #   hot_restart_impl_test), run by //bazel/patches:carried_patch_tests.
-#   aether#1054 (not yet proposed upstream; the maintainer's call), applied AFTER
-#   aether1050: an HTTP/3 connection notified of a drain starts its own
-#   drain sequence (GOAWAY, then close) inside the drain window even when idle,
-#   behind envoy.reloadable_features.http3_drain_idle_connections (default true).
-#   Since envoyproxy/envoy#47991 (in the pinned release) the connection manager also
-#   drains idle connections of every protocol on its own, but only in the last
-#   third of the drain time and not at all when the drain time leaves no room
-#   after the drain timeout -- the chart's 10s drain time with the default 5s
-#   drain timeout arms nothing -- so this is still needed and is armed beside it
-#   (ConnectionManagerImpl::armIdleHttp3DrainTimer); whichever fires first starts
-#   the drain sequence. Its former first half (the child keeping its inherited UDP
-#   listeners paused until the parent has exited) is no longer carried in any form:
-#   it moved to upstream Envoy PR 48319, which was carried for a short while and then
-#   dropped when upstream closed it after an A/B soak showed no measurable benefit.
-#   The child completes its drains (unpausing those listeners) at Terminate, as
-#   unpatched Envoy does; an 8 h soak of exactly that configuration (the 48319 guard
-#   off) showed 0 misses near handoffs and 0 QUIC stateless resets. Carries its tests
-#   (test/common/http:conn_manager_impl_test), run by //bazel/patches:carried_patch_tests;
-#   its quic_http_integration_test case only builds in the Envoy workspace. (Refreshed for
-#   the 011e396 snapshot: the runtime guards and initializers next to its two one-line
-#   insertions changed upstream; context only, the change is the same.)
-#   aether#1126 (an upstream bug in the #47743 forwarding; to be reported upstream on
-#   the maintainer's word), applied AFTER aether1054: the hot-restart parent forwards
+#   aether#1126 (an upstream bug in the #47743 forwarding; proposed upstream as upstream
+#   Envoy PR 49523, open), applied AFTER aether1050: the hot-restart parent forwards
 #   each undispatched UDP/QUIC datagram tagged with ITS worker index and the child
 #   delivered it with UdpListenerWorkerRouterImpl::deliver(), which indexes its
 #   per-worker table unchecked (an ASSERT only). A child with fewer workers than its
@@ -139,7 +123,6 @@ single_version_override(
     patches = [
         "//bazel/patches:envoy-47740-quic-hostname-check-explicit-san.patch",
         "//bazel/patches:envoy-aether1050-hotrestart-nonblocking-forward.patch",
-        "//bazel/patches:envoy-aether1054-http3-drain-idle-connections.patch",
         "//bazel/patches:envoy-aether1126-forwarded-udp-worker-index.patch",
         "//bazel/patches:envoy-aether1733-validate-quic-null-socket.patch",
     ],
