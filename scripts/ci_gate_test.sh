@@ -81,6 +81,7 @@ FULL='{
   "format":             {"result": "success", "outputs": {}},
   "test":               {"result": "success", "outputs": {}},
   "race":               {"result": "success", "outputs": {}},
+  "race-walks":         {"result": "success", "outputs": {}},
   "netns":              {"result": "success", "outputs": {}},
   "integration":        {"result": "success", "outputs": {}},
   "e2e":                {"result": "success", "outputs": {}}
@@ -90,7 +91,7 @@ DEFS='
 def skip($jobs): reduce ($jobs | split(" "))[] as $j (.; .[$j] = {result: "skipped", outputs: {}});
 def has($a; $u; $i; $e): .diff.outputs = {has_any: $a, has_unit: $u, has_integration: $i, has_e2e: $e};
 '
-LEGS='test race netns integration e2e'
+LEGS='test race race-walks netns integration e2e'
 CP_JOBS='diff chart-version-bump deps-audit shell format'
 
 RC=0
@@ -132,7 +133,7 @@ red() {
 
 # --- 1. runs that pass ------------------------------------------------------------
 green "everything impacted, everything green" '.' \
-	'decision: impacted; had to run: test race netns integration e2e'
+	'decision: impacted; had to run: test race race-walks netns integration e2e'
 green "proxy-only change: control_plane=false, everything else skipped" \
 	".changes.outputs.control_plane = \"false\" | skip(\"$CP_JOBS $LEGS\")" \
 	'decision: the control plane is untouched (changes wrote control_plane=false)'
@@ -141,15 +142,15 @@ green "nothing impacted: diff wrote false four times, the legs are skipped" \
 	'decision: nothing impacted (diff wrote false to has_any, has_unit, has_integration and has_e2e)'
 green "only unit tests impacted" \
 	'has("true"; "true"; "false"; "false") | skip("integration e2e")' \
-	'decision: impacted; had to run: test race netns'
+	'decision: impacted; had to run: test race race-walks netns'
 green "only an integration test impacted" \
 	'has("true"; "false"; "true"; "false") | skip("netns e2e")' \
-	'decision: impacted; had to run: test race integration'
+	'decision: impacted; had to run: test race race-walks integration'
 green "only the e2e target impacted" \
-	'has("true"; "false"; "false"; "true") | skip("race netns integration")' \
+	'has("true"; "false"; "false"; "true") | skip("race race-walks netns integration")' \
 	'decision: impacted; had to run: test e2e'
 green "a library with no test impacted: only the build leg" \
-	'has("true"; "false"; "false"; "false") | skip("race netns integration e2e")' \
+	'has("true"; "false"; "false"; "false") | skip("race race-walks netns integration e2e")' \
 	'decision: impacted; had to run: test'
 
 # --- 2. an output that was never set (#1460) ---------------------------------------
@@ -187,18 +188,22 @@ for leg in $LEGS; do
 done
 red "race skipped with only an integration test impacted" \
 	'has("true"; "false"; "true"; "false") | skip("race netns e2e")' 'job race was skipped, and diff says it had to run'
+red "race-walks skipped with only an integration test impacted" \
+	'has("true"; "false"; "true"; "false") | skip("race-walks netns e2e")' 'job race-walks was skipped, and diff says it had to run'
+red "race-walks ran though no unit or integration test is impacted" \
+	'has("true"; "false"; "false"; "true") | skip("race netns integration")' 'job race-walks ran, and diff says it had nothing to run'
 red "has_any=false and has_unit=true: the outputs contradict each other" \
 	"has(\"false\"; \"true\"; \"false\"; \"false\") | skip(\"$LEGS\")" 'a test cannot be impacted when no target is'
 
 # --- 4. failed and cancelled ---------------------------------------------------------
-for job in changes diff shell actionlint test race netns integration e2e; do
+for job in changes diff shell actionlint test race race-walks netns integration e2e; do
 	for result in failure cancelled; do
 		red "$job ended as $result" ".[\"$job\"].result = \"$result\"" "job $job ended as $result"
 	done
 done
 # The shape of a real red run: `test` failed, so the legs that need it skipped.
 red "test failed and the legs that need it skipped" \
-	'.test.result = "failure" | skip("race integration e2e")' 'job test ended as failure'
+	'.test.result = "failure" | skip("race race-walks integration e2e")' 'job test ended as failure'
 red "diff was cancelled before it set an output; the legs skipped" \
 	".diff = {result: \"cancelled\", outputs: {}} | skip(\"$LEGS\")" 'job diff ended as cancelled'
 red "diff failed before it set an output; the legs skipped" \
@@ -285,6 +290,7 @@ for j in changes envoy-api-parity proxy-pin actionlint; do condition "$j" ""; do
 for j in diff chart-version-bump deps-audit shell format; do condition "$j" "$CP"; done
 condition test "$CP && needs.diff.outputs.has_any == 'true'"
 condition race "$CP && (needs.diff.outputs.has_unit == 'true' || needs.diff.outputs.has_integration == 'true')"
+condition race-walks "$CP && (needs.diff.outputs.has_unit == 'true' || needs.diff.outputs.has_integration == 'true')"
 condition netns "$CP && needs.diff.outputs.has_unit == 'true'"
 condition integration "$CP && needs.diff.outputs.has_integration == 'true'"
 condition e2e "$CP && needs.diff.outputs.has_e2e == 'true'"
@@ -353,7 +359,31 @@ for j in $workflow_jobs; do
 		fail "ci.yaml: job $j reads an impacted list and does not use ./.github/actions/impacted-lists (with has-any, has-unit, has-integration) in an earlier step"
 	fi
 done
-expect "ci.yaml: the jobs that read the impacted lists" "$(sorted <<<"$readers")" "integration netns race test"
+expect "ci.yaml: the jobs that read the impacted lists" "$(sorted <<<"$readers")" "integration netns race race-walks test"
+
+# The seeded cache walks run in `race-walks`, once, and never in `race`: both
+# jobs name the same label, `race` drops it from its lists and checks that it
+# still names a go_test, and `race-walks` runs it with the race config and no
+# --runs_per_test.
+walk_of() { job "$1" | sed -n 's/^      WALK_TEST: //p'; }
+race_job="$(job race)"
+walks_job="$(job race-walks)"
+expect "ci.yaml: race and race-walks name the same walk target" \
+	"$(walk_of race) $(walk_of race-walks)" \
+	"//agent/internal/xds/cache:cache_walk_test //agent/internal/xds/cache:cache_walk_test"
+if grep -qF '[ "$label" = "$WALK_TEST" ] && continue' <<<"$race_job" &&
+	grep -qF 'grep -qxF "$WALK_TEST" "$RUNNER_TEMP/go_tests.txt"' <<<"$race_job"; then
+	pass "ci.yaml: race leaves the walk target out and checks that it is still a go_test"
+else
+	fail "ci.yaml: race does not skip \$WALK_TEST in its split, or does not check it against its go_test query"
+fi
+if grep -qE '^[[:space:]]+bazel test --config=ci --config=race \\$' <<<"$walks_job" &&
+	grep -qE '^[[:space:]]+"\$WALK_TEST"$' <<<"$walks_job" &&
+	! grep -qF -- '--runs_per_test' <<<"$walks_job"; then
+	pass "ci.yaml: race-walks runs the walk target once under --config=ci --config=race"
+else
+	fail "ci.yaml: race-walks does not run \"\$WALK_TEST\" with bazel test --config=ci --config=race, once"
+fi
 
 # --- 7. proxy.yml: the decision (#1489) ---------------------------------------------------
 # The `proxy` job is the other required check with `if: always()`. Its legs

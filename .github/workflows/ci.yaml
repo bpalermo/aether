@@ -712,6 +712,12 @@ jobs:
   # Depends on `test` so a PR that is already red does not burn a second runner,
   # and so this runs in parallel with `integration`/`e2e` rather than extending
   # the critical path.
+  #
+  # One target is not run here: //agent/internal/xds/cache:cache_walk_test, the
+  # seeded random walks of proposal 043, runs in `race-walks` below, in parallel.
+  # Under the detector it alone took ~1470 s (agent/internal/xds/cache/defs.bzl),
+  # which left the three-run step too little of this job's 60 minutes on a pull
+  # request that touches that package.
   race:
     needs: [changes, diff, test]
     if: needs.changes.outputs.control_plane == 'true' && (needs.diff.outputs.has_unit == 'true' || needs.diff.outputs.has_integration == 'true')
@@ -722,6 +728,9 @@ jobs:
     # (actionlint `expression`, as in proxy.yml).
     env:
       BRANCH_NAME: ${{ github.head_ref }}
+      # Run by `race-walks`, never here. Both jobs name it; //scripts:ci_gate_test
+      # fails when they disagree.
+      WALK_TEST: //agent/internal/xds/cache:cache_walk_test
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -782,6 +791,13 @@ jobs:
             echo "::error::go_test query returned nothing — refusing to pass the race gate on an empty set"
             exit 1
           fi
+          # `race-walks` decides from the impacted lists alone, with no query of
+          # its own when the walks are not impacted: a renamed walk target would
+          # skip there forever. It is checked here, where the query is.
+          if ! grep -qxF "$WALK_TEST" "$RUNNER_TEMP/go_tests.txt"; then
+            echo "::error::$WALK_TEST is not a go_test of this checkout — rename it in the race and race-walks jobs of ci.yaml"
+            exit 1
+          fi
           # `|| true`: an empty leg makes grep exit 1, which pipefail would turn
           # into a job failure. An empty combined list is handled by has_* below.
           # Both files are there: the download step above fails on a missing
@@ -789,18 +805,12 @@ jobs:
           { cat "$IMPACTED/impacted_unit.txt" "$IMPACTED/impacted_integration.txt" |
             grep -v '^[[:space:]]*$' | sort -u |
             grep -Fxf "$RUNNER_TEMP/go_tests.txt" >"$RUNNER_TEMP/race_all.txt"; } || true
-          # A target of a hot package that is run once all the same: seeded,
-          # single-goroutine random walks, which a second and a third run
-          # repeat step for step. They are nine tenths of the cache package's
-          # test time (agent/internal/xds/cache/defs.bzl), and run three times
-          # they had brought this job to 54 of its 60 minutes.
-          cat >"$RUNNER_TEMP/once_labels.txt" <<'EOF'
-          //agent/internal/xds/cache:cache_walk_test
-          EOF
           while IFS= read -r label; do
+            # The seeded walks run once, in `race-walks`, and not in this job.
+            [ "$label" = "$WALK_TEST" ] && continue
             pkg="${label%%:*}"
             pkg="${pkg#//}"
-            if grep -qxF "$pkg" "$RUNNER_TEMP/hot_packages.txt" && ! grep -qxF "$label" "$RUNNER_TEMP/once_labels.txt"; then
+            if grep -qxF "$pkg" "$RUNNER_TEMP/hot_packages.txt"; then
               printf '%s\n' "$label" >>"$RUNNER_TEMP/race_hot.txt"
             else
               printf '%s\n' "$label" >>"$RUNNER_TEMP/race_normal.txt"
@@ -827,6 +837,81 @@ jobs:
             --build_metadata=REPO_URL=https://github.com/${{ github.repository }} \
             --build_metadata=BRANCH_NAME="$BRANCH_NAME" \
             --target_pattern_file=${{ runner.temp }}/race_hot.txt
+
+  # The seeded random walks of proposal 043 under the race detector, once, in
+  # parallel with `race` (which leaves them out). They are single-goroutine and
+  # deterministic for a seed, so a second run repeats the first step for step;
+  # they are nine tenths of agent/internal/xds/cache's test time, ~1470 s under
+  # the detector over 16 shards (agent/internal/xds/cache/defs.bzl). In `race`
+  # they pushed the three-run step past that job's 60 minutes.
+  #
+  # Same condition as `race`, so the `ci` gate holds it to the same rule. When
+  # the walk target is not impacted, the job succeeds without setting up Bazel:
+  # the impacted lists decide, and `race` checks that the label still names a
+  # go_test.
+  race-walks:
+    needs: [changes, diff, test]
+    if: needs.changes.outputs.control_plane == 'true' && (needs.diff.outputs.has_unit == 'true' || needs.diff.outputs.has_integration == 'true')
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    # The PR's branch name is attacker-controlled text: it reaches the build
+    # metadata through the environment, never interpolated into a script
+    # (actionlint `expression`, as in proxy.yml).
+    env:
+      BRANCH_NAME: ${{ github.head_ref }}
+      # The same label `race` leaves out; //scripts:ci_gate_test holds them equal.
+      WALK_TEST: //agent/internal/xds/cache:cache_walk_test
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Download impacted target lists (checked against this checkout)
+        uses: ./.github/actions/impacted-lists
+        with:
+          has-any: ${{ needs.diff.outputs.has_any }}
+          has-unit: ${{ needs.diff.outputs.has_unit }}
+          has-integration: ${{ needs.diff.outputs.has_integration }}
+      - name: Is the walk target impacted
+        id: walks
+        env:
+          IMPACTED: ${{ runner.temp }}/impacted
+        run: |
+          set -euo pipefail
+          # Both files are there: the download step above fails on a missing
+          # list (#1460). `|| true`: no match is the answer "no", not an error.
+          hits="$(cat "$IMPACTED/impacted_unit.txt" "$IMPACTED/impacted_integration.txt" | grep -cxF "$WALK_TEST" || true)"
+          if [ "$hits" -gt 0 ]; then
+            echo "run=true" >>"$GITHUB_OUTPUT"
+            echo ">> race-walks: $WALK_TEST is impacted"
+          else
+            echo "run=false" >>"$GITHUB_OUTPUT"
+            echo ">> race-walks: $WALK_TEST is not impacted; nothing to run"
+          fi
+      - name: Setup Bazel
+        if: steps.walks.outputs.run == 'true'
+        uses: ./.github/actions/setup-bazel
+      - name: Warm the Bazel repository cache (fetch + analysis, retried)
+        if: steps.walks.outputs.run == 'true'
+        run: scripts/ci-bazel-warmup.sh --config=ci --config=race "$WALK_TEST"
+      # The same refusal as `race`: a query that returns nothing must not pass
+      # the gate on an empty set.
+      - name: The walk target is a go_test
+        if: steps.walks.outputs.run == 'true'
+        run: |
+          set -euo pipefail
+          got="$(bazel query "kind(go_test, $WALK_TEST)" --noshow_progress 2>/dev/null || true)"
+          if [ "$got" != "$WALK_TEST" ]; then
+            echo "::error::go_test query for $WALK_TEST returned '${got}' — refusing to pass the race gate on an empty set"
+            exit 1
+          fi
+      - name: Race tests (seeded walks, once)
+        if: steps.walks.outputs.run == 'true'
+        run: |
+          bazel test --config=ci --config=race \
+            --remote_header=x-buildbuddy-api-key=${{ secrets.BUILDBUDDY_ORG_API_KEY }} \
+            --build_metadata=COMMIT_SHA=${{ github.event.pull_request.head.sha }} \
+            --build_metadata=REPO_URL=https://github.com/${{ github.repository }} \
+            --build_metadata=BRANCH_NAME="$BRANCH_NAME" \
+            "$WALK_TEST"
 
   # Proposal 038: the CNI's transparent-capture divert against a REAL kernel.
   # cni/internal/plugin:capture_netns_test creates network namespaces, programs
@@ -996,7 +1081,7 @@ jobs:
   # to `needs` below and to the script.
   ci:
     if: always()
-    needs: [changes, diff, chart-version-bump, deps-audit, envoy-api-parity, proxy-pin, actionlint, shell, format, test, race, netns, integration, e2e]
+    needs: [changes, diff, chart-version-bump, deps-audit, envoy-api-parity, proxy-pin, actionlint, shell, format, test, race, race-walks, netns, integration, e2e]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
