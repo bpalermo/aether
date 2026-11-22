@@ -118,7 +118,7 @@ func TestExternalHarnessContract_AnyPortStat(t *testing.T) {
 		for _, withPassthrough := range []bool{true, false} {
 			l, err := GenerateCaptureListener(&cniv1.CNIPod{Name: "p1", NetworkNamespace: "/var/run/netns/p1"},
 				"spiffe://aether.internal/ns/default/sa/test", 15001, "aether.internal", false,
-				svcs, withPassthrough, nil)
+				svcs, withPassthrough, nil, DefaultConnectionDrainTimeout)
 			if err != nil {
 				t.Fatalf("GenerateCaptureListener(%s): %v", name, err)
 			}

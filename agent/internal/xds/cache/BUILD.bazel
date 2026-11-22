@@ -120,6 +120,7 @@ cache_go_test(
         "dependencies_memo_test.go",
         "dependencies_test.go",
         "determinism_test.go",
+        "drain_timeout_test.go",
         "edge_test.go",
         "entryport_test.go",
         "identitybinding_test.go",

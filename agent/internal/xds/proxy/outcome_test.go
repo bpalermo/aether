@@ -60,11 +60,11 @@ func inboundHCMs(t *testing.T, l *listenerv3.Listener) map[string]*http_connecti
 // (aether#1641).
 func TestInboundStampsTheOutcomeOnEveryResponse(t *testing.T) {
 	pod := quicTestPod() // HTTP ports 8080 and 8081, raw TCP 9000
-	mtls, err := NewInboundListener(pod, "example.org", false, false, nil, nil)
+	mtls, err := NewInboundListener(pod, "example.org", false, false, nil, nil, DefaultConnectionDrainTimeout)
 	require.NoError(t, err)
-	cleartext, err := NewInboundListener(pod, "example.org", false, true, nil, nil)
+	cleartext, err := NewInboundListener(pod, "example.org", false, true, nil, nil, DefaultConnectionDrainTimeout)
 	require.NoError(t, err)
-	quic, err := NewInboundQUICListener(pod, "example.org", "mesh.local", false, false, nil, nil)
+	quic, err := NewInboundQUICListener(pod, "example.org", "mesh.local", false, false, nil, nil, DefaultConnectionDrainTimeout)
 	require.NoError(t, err)
 
 	for name, tc := range map[string]struct {

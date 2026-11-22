@@ -313,9 +313,10 @@ agent:
   # the workloads' ClusterSPIFFEID) -- see docs/configuration.md, "SPIRE", and
   # docs/runbook.md, "East-west QUIC".
   # Idle timeout of every east-west QUIC twin's upstream connection pool
-  # (#1054); h1/h2 pools keep 30s. An idle source h3 connection receives no
-  # GOAWAY when the destination proxy hot-restarts, so it must close on its
-  # own before the destination's parent exits: once the parent is gone, the
+  # (#1054); h1/h2 pools keep 30s. An idle source h3 connection receives its
+  # GOAWAY only from the destination's proactive drain, at 6.67-8s of a 10s
+  # drain (proxy.hotRestart.connectionDrainTimeout), so it should also close on
+  # its own before the destination's parent exits: once the parent is gone, the
   # connection's next packet reaches the child and draws a stateless reset
   # (the source's request fails `503 UC ... Received_stateless_reset`). The
   # chart REFUSES to render unless this + 5s < proxy.hotRestart.parentShutdownTime
@@ -704,10 +705,10 @@ proxy:
   # scripts/proxy-pin-lib.sh) accepts that reference and no other.
   image:
     repository: quay.io/aethermesh/proxy
-    tag: eeb52bcbf139be3a09c89055a93dcc0d048b8e6e
+    tag: 34ad2faca5c26430a420e89af422977ac8d4ba9c
     # Digest-pinned (option A): content-addressed, tamper-proof. The aether.image
-    # helper prefers digest over tag. Multi-arch index for eeb52bcbf139be3a09c89055a93dcc0d048b8e6e.
-    digest: "sha256:c814fa89c262972ff65defcdf8ec4db918a45bc83afd1e74331c6d13cd7344d6"
+    # helper prefers digest over tag. Multi-arch index for 34ad2faca5c26430a420e89af422977ac8d4ba9c.
+    digest: "sha256:f5b4b4eccf998647637760127e85bfe64c019b8759fdf14c748d64b41d889274"
     pullPolicy: Always
   # The Envoy hot-restart supervisor (#772): its own binary and its own image
   # since it stopped being an `agent` subcommand. The initContainer runs it to
@@ -758,6 +759,28 @@ proxy:
   hotRestart:
     baseId: 0
     drainTime: 10s
+    # drain_timeout of every node-proxy HTTP connection manager (inbound TCP and
+    # HTTP/3, capture, outbound, the health gateway), passed to the AGENT as
+    # --proxy-connection-drain-timeout; the edge keeps Envoy's 5s default. It is
+    # the grace a drain sequence gives a connection between its first GOAWAY and
+    # its close, on every drain: the hot-restart parent, LDS listener removal,
+    # the pod-termination drain.
+    #
+    # It also decides whether Envoy drains IDLE connections. When a listener
+    # drains, Envoy arms each connection's drain at a random point of
+    # [drainTime*2/3, drainTime - connectionDrainTimeout] (upstream Envoy PR
+    # 47991) and arms NOTHING when that window is empty. With drainTime 10s and
+    # Envoy's 5s default the window is [6.67s, 5s], empty: an idle source h3
+    # connection got no GOAWAY, outlived the hot-restart parent and died on a
+    # stateless reset (#1054). 2s opens [6.67s, 8s]; the drain sequence ends by
+    # 10s, before the parent exits at parentShutdownTime. The chart REFUSES to
+    # render unless drainTime > 3 x connectionDrainTimeout, so Envoy's 5s
+    # default is refused under a 10s drainTime (it is exactly the configuration
+    # that drains no idle connection); the largest value it accepts there is
+    # 3333ms. drainTime is checked as Envoy receives it, in whole seconds
+    # (6.5s is --drain-time-s 6). A longer grace needs a longer drainTime (and
+    # parentShutdownTime).
+    connectionDrainTimeout: 2s
     # Also the supervisor's admin re-verify budget: the epoch-identity probe
     # re-confirms on a fresh connection every parentShutdownTime/3 (floor 2s), so a
     # cross-pod takeover is diagnosed while the draining parent still lives
@@ -780,8 +803,10 @@ proxy:
     # be open when the parent exits at parentShutdownTime; its next packet then
     # reaches the child, which answers with a QUIC stateless reset the source
     # accepts, and the in-flight request fails (source `503 UC ...
-    # Received_stateless_reset`). An IDLE connection gets no GOAWAY under
-    # either strategy — agent.eastWestQuicIdleTimeout closes those first.
+    # Received_stateless_reset`). An IDLE connection sends no response to
+    # carry that GOAWAY under either strategy: upstream Envoy's proactive drain
+    # sends it one at 6.67-8s of the drain (connectionDrainTimeout above makes
+    # that arm), and agent.eastWestQuicIdleTimeout closes idle h3 twins too.
     #
     # Cost: reconnections bunch at the start of the drain instead of spreading
     # over drainTime (a burst of TLS/QUIC handshakes against the child), and it
@@ -791,10 +816,11 @@ proxy:
     # Default is gradual. On the reference cluster immediate made the #1054 resets WORSE
     # (4/8/0 per roll vs 1–3 per run under gradual): every parent connection
     # closes at drain start, and those closes are what the source then sees
-    # reset. The carried patches (#1064: the child unpauses its UDP listeners
-    # only after the parent exits; #1066: the draining parent answers its own
-    # time-wait connections) fixed the exit window under gradual. Keep
-    # immediate as an explicit opt-in only.
+    # reset. Under gradual the exit window is covered by the draining parent
+    # answering its own time-wait connections (upstream since Envoy 1.40) and
+    # by the proactive drain of idle connections (connectionDrainTimeout); the
+    # carried aether1054 patch that drained idle HTTP/3 connections before is
+    # no longer carried. Keep immediate as an explicit opt-in only.
     drainStrategy: gradual
     # Pass Envoy --skip-hot-restart-parent-stats (#1050). This was the
     # workaround for a hot-restart deadlock: the child asked the draining parent

@@ -148,7 +148,7 @@ func CaptureListenerName(cniPod *cniv1.CNIPod) string {
 //
 // opts: WithServiceRanges adds the Service-range branch (proposal 044, Phase
 // 0) to a redirect-all listener.
-func GenerateCaptureListener(cniPod *cniv1.CNIPod, sourceSpiffeID string, capturePort uint32, meshDomain string, emitStatsPod bool, tcpServices []CaptureTCPService, withPassthrough bool, extensionFilters []*http_connection_managerv3.HttpFilter, opts ...CaptureListenerOption) (*listenerv3.Listener, error) {
+func GenerateCaptureListener(cniPod *cniv1.CNIPod, sourceSpiffeID string, capturePort uint32, meshDomain string, emitStatsPod bool, tcpServices []CaptureTCPService, withPassthrough bool, extensionFilters []*http_connection_managerv3.HttpFilter, drainTimeout time.Duration, opts ...CaptureListenerOption) (*listenerv3.Listener, error) {
 	var o captureListenerOptions
 	for _, opt := range opts {
 		opt(&o)
@@ -192,7 +192,7 @@ func GenerateCaptureListener(cniPod *cniv1.CNIPod, sourceSpiffeID string, captur
 	// below and is NOT logged: it is every non-mesh egress connection, the
 	// volume the log must not carry.
 	attachL4AccessLog(chains, cniPod.GetName(), cniPod.GetNamespace())
-	chains = append(chains, buildCaptureHTTPFilterChain(cniPod, sourceSpiffeID, meshDomain, emitStatsPod, extensionFilters))
+	chains = append(chains, buildCaptureHTTPFilterChain(cniPod, sourceSpiffeID, meshDomain, emitStatsPod, extensionFilters, drainTimeout))
 	// The Service-range share of the passthrough (proposal 044, Phase 0):
 	// appended after attachL4AccessLog for the same reason as the default
 	// chain, which it is a copy of. It is non-mesh egress, the volume the L4
@@ -422,11 +422,11 @@ func buildCaptureTCPFloorFilterChain(svc CaptureTCPService, sourceSpiffeID strin
 //     application protocol and leaves through the passthrough too. Without
 //     that condition an HTTP chain swallowed such streams and answered a fake
 //     "HTTP/1.1 400 Bad Request" (#460).
-func buildCaptureHTTPFilterChain(cniPod *cniv1.CNIPod, sourceSpiffeID, meshDomain string, emitStatsPod bool, extensionFilters []*http_connection_managerv3.HttpFilter) *listenerv3.FilterChain {
+func buildCaptureHTTPFilterChain(cniPod *cniv1.CNIPod, sourceSpiffeID, meshDomain string, emitStatsPod bool, extensionFilters []*http_connection_managerv3.HttpFilter, drainTimeout time.Duration) *listenerv3.FilterChain {
 	// The stat prefix the two chains this one replaced already shared: the
 	// HTTP stats of a pod's captured traffic are one family whatever port was
 	// dialled.
-	hcm := buildHTTPConnectionManager("capture_http", ReporterSource, cniPod.GetName(), cniPod.GetNamespace(), nil, appFacingIdleTimeout)
+	hcm := buildHTTPConnectionManager("capture_http", ReporterSource, cniPod.GetName(), cniPod.GetNamespace(), nil, appFacingIdleTimeout, nodeDrainTimeout(drainTimeout))
 
 	prefix := []*http_connection_managerv3.HttpFilter{
 		readinessHttpFilter(),

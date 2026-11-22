@@ -111,13 +111,13 @@ func TestSourceIdentityStampedOnEveryMeshOriginatingChain(t *testing.T) {
 	tlsRules := []L4ServiceRoute{{SNIHostnames: []string{"a.example.com"}, Backends: rules[0].Backends}}
 
 	t.Run("per-pod outbound HTTP chain", func(t *testing.T) {
-		requireBothSourceKeys(t, buildDefaultOutboundHTTPFilterChain(pod, id, testTrustDomain, false, nil), "outbound chain")
+		requireBothSourceKeys(t, buildDefaultOutboundHTTPFilterChain(pod, id, testTrustDomain, false, nil, DefaultConnectionDrainTimeout), "outbound chain")
 	})
 
 	t.Run("capture HCM chain", func(t *testing.T) {
 		// One chain for every port, the proxy port included (it had its
 		// own until chart 3.0.2).
-		requireBothSourceKeys(t, buildCaptureHTTPFilterChain(pod, id, testTrustDomain, false, nil), "capture HCM chain")
+		requireBothSourceKeys(t, buildCaptureHTTPFilterChain(pod, id, testTrustDomain, false, nil, DefaultConnectionDrainTimeout), "capture HCM chain")
 	})
 
 	t.Run("capture TCP floor chain", func(t *testing.T) {
@@ -138,7 +138,7 @@ func TestSourceIdentityStampedOnEveryMeshOriginatingChain(t *testing.T) {
 		svcWithRoutes := svc
 		svcWithRoutes.TCPRouteRules = rules
 		svcWithRoutes.TLSRouteRules = tlsRules
-		l, err := GenerateCaptureListener(pod, id, 18081, testTrustDomain, false, []CaptureTCPService{svcWithRoutes}, true, nil)
+		l, err := GenerateCaptureListener(pod, id, 18081, testTrustDomain, false, []CaptureTCPService{svcWithRoutes}, true, nil, DefaultConnectionDrainTimeout)
 		require.NoError(t, err)
 		named := 0
 		for _, fc := range l.GetFilterChains() {
@@ -203,7 +203,7 @@ func TestSourceIdentityAbsentWithoutTrustDomain(t *testing.T) {
 	assert.Empty(t, SourceIdentityForPod(sourceTestPod(), ""))
 	assert.Empty(t, SourceIdentityForPod(nil, testTrustDomain))
 
-	got := filterStateValues(t, buildDefaultOutboundHTTPFilterChain(sourceTestPod(), "", testTrustDomain, false, nil))
+	got := filterStateValues(t, buildDefaultOutboundHTTPFilterChain(sourceTestPod(), "", testTrustDomain, false, nil, DefaultConnectionDrainTimeout))
 	require.Len(t, got, 1, "no trust domain: only the netns key")
 	assert.Equal(t, networkNamespaceFilterStateKey, got[0][0])
 }
@@ -213,7 +213,7 @@ func TestSourceIdentityAbsentWithoutTrustDomain(t *testing.T) {
 // same chain twice must produce the same order, always netns then identity.
 func TestSourceFilterStatesOrderIsFixed(t *testing.T) {
 	for range 8 {
-		got := filterStateValues(t, buildDefaultOutboundHTTPFilterChain(sourceTestPod(), testSourceIdentity, testTrustDomain, false, nil))
+		got := filterStateValues(t, buildDefaultOutboundHTTPFilterChain(sourceTestPod(), testSourceIdentity, testTrustDomain, false, nil, DefaultConnectionDrainTimeout))
 		require.Len(t, got, 2)
 		require.Equal(t, networkNamespaceFilterStateKey, got[0][0])
 		require.Equal(t, SourceIdentityCertMapperFilterStateKey, got[1][0])
@@ -256,7 +256,7 @@ func TestClusterSelectsCertificateFromTheStampedKey(t *testing.T) {
 	// comparison — which is the point: it is the one place the two ends meet,
 	// and a divergence here is otherwise invisible until traffic arrives with
 	// the wrong identity.
-	stamped := filterStateValues(t, buildDefaultOutboundHTTPFilterChain(sourceTestPod(), testSourceIdentity, testTrustDomain, false, nil))
+	stamped := filterStateValues(t, buildDefaultOutboundHTTPFilterChain(sourceTestPod(), testSourceIdentity, testTrustDomain, false, nil, DefaultConnectionDrainTimeout))
 	keys := make([]string, 0, len(stamped))
 	for _, kv := range stamped {
 		keys = append(keys, kv[0])

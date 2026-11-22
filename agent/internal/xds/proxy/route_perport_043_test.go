@@ -324,7 +324,7 @@ func TestInboundChains_RawTCPDeclaredPortWithAnHTTPSecondary(t *testing.T) {
 			aetherannotations.AnnotationEndpointPorts:    "9000,8080=h1",
 		},
 	}
-	chains := buildInboundFilterChains(pod, "c", "v", "example.org", false, nil, nil)
+	chains := buildInboundFilterChains(pod, "c", "v", "example.org", false, nil, nil, DefaultConnectionDrainTimeout)
 
 	last := func(name string) string {
 		c := chainByName(chains, name)
@@ -374,7 +374,7 @@ func TestInboundChains_RawTCPDeclaredPortWithAnHTTPSecondary(t *testing.T) {
 	// Negative control: the same pod with 9000 declared HTTP has an HCM chain
 	// for it and no tcp_proxy one.
 	pod.Annotations[aetherannotations.AnnotationEndpointProtocol] = aetherannotations.ProtocolHTTP
-	httpChains := buildInboundFilterChains(pod, "c", "v", "example.org", false, nil, nil)
+	httpChains := buildInboundFilterChains(pod, "c", "v", "example.org", false, nil, nil, DefaultConnectionDrainTimeout)
 	assert.Nil(t, chainByName(httpChains, "in_tcp_aether-test_app-0_9000"))
 	assert.NotNil(t, chainByName(httpChains, "in_aether-test_app-0_9000"))
 }

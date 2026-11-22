@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"slices"
+	"time"
 
 	corev3 "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
 	listenerv3 "github.com/envoyproxy/go-control-plane/envoy/config/listener/v3"
@@ -10,6 +11,7 @@ import (
 	http_connection_managerv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/network/http_connection_manager/v3"
 	matcherv3 "github.com/envoyproxy/go-control-plane/envoy/type/matcher/v3"
 	typev3 "github.com/envoyproxy/go-control-plane/envoy/type/v3"
+	"google.golang.org/protobuf/types/known/durationpb"
 	"google.golang.org/protobuf/types/known/wrapperspb"
 )
 
@@ -87,7 +89,7 @@ func (p HealthGatewayProbe) clusters() []string {
 //
 // Filters are emitted in sorted cluster order so the listener config is
 // deterministic and pod-set-equal snapshots do not produce spurious LDS updates.
-func BuildHealthGatewayListener(socketPath string, probes []HealthGatewayProbe) *listenerv3.Listener {
+func BuildHealthGatewayListener(socketPath string, probes []HealthGatewayProbe, drainTimeout time.Duration) *listenerv3.Listener {
 	names := make([]string, 0, 2*len(probes))
 	for _, probe := range probes {
 		names = append(names, probe.clusters()...)
@@ -105,6 +107,8 @@ func BuildHealthGatewayListener(socketPath string, probes []HealthGatewayProbe) 
 		StatPrefix:  HealthGatewayListenerName,
 		CodecType:   http_connection_managerv3.HttpConnectionManager_AUTO,
 		HttpFilters: filters,
+		// A node-proxy HCM like the others: see DefaultConnectionDrainTimeout.
+		DrainTimeout: durationpb.New(nodeDrainTimeout(drainTimeout)),
 		RouteSpecifier: &http_connection_managerv3.HttpConnectionManager_RouteConfig{
 			RouteConfig: &routev3.RouteConfiguration{
 				Name: HealthGatewayListenerName,

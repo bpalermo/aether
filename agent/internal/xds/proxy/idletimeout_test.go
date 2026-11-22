@@ -72,7 +72,7 @@ func TestIdleTimeoutValues(t *testing.T) {
 // has no idle timeout of its own.
 func TestBuildHTTPConnectionManagerUsesTheCallersIdleTimeout(t *testing.T) {
 	for _, d := range []time.Duration{peerFacingIdleTimeout, appFacingIdleTimeout, 42 * time.Second} {
-		hcm := buildHTTPConnectionManager("test", ReporterSource, "pod", "ns", nil, d)
+		hcm := buildHTTPConnectionManager("test", ReporterSource, "pod", "ns", nil, d, DefaultConnectionDrainTimeout)
 		idle := hcm.GetCommonHttpProtocolOptions().GetIdleTimeout()
 		require.NotNil(t, idle, "downstream idle timeout must be set")
 		assert.Equal(t, d, idle.AsDuration())
@@ -86,17 +86,17 @@ func TestMeshInboundKeepsThePeerFacingIdleTimeout(t *testing.T) {
 	pod := quicTestPod() // two HTTP ports: a default chain and one SNI chain
 
 	t.Run("mtls", func(t *testing.T) {
-		inbound, _, _, _, err := GenerateListenersFromRegistryPod(pod, "example.org", "mesh.local", false, false, nil, nil, "")
+		inbound, _, _, _, err := GenerateListenersFromRegistryPod(pod, "example.org", "mesh.local", false, false, nil, nil, "", DefaultConnectionDrainTimeout)
 		require.NoError(t, err)
 		requireEveryHCMIdle(t, inbound, 2, peerFacingIdleTimeout)
 	})
 	t.Run("cleartext", func(t *testing.T) {
-		inbound, _, _, _, err := GenerateListenersFromRegistryPod(pod, "example.org", "mesh.local", false, true, nil, nil, "")
+		inbound, _, _, _, err := GenerateListenersFromRegistryPod(pod, "example.org", "mesh.local", false, true, nil, nil, "", DefaultConnectionDrainTimeout)
 		require.NoError(t, err)
 		requireEveryHCMIdle(t, inbound, 1, peerFacingIdleTimeout)
 	})
 	t.Run("quic", func(t *testing.T) {
-		l, err := NewInboundQUICListener(pod, "example.org", "mesh.local", false, false, nil, nil)
+		l, err := NewInboundQUICListener(pod, "example.org", "mesh.local", false, false, nil, nil, DefaultConnectionDrainTimeout)
 		require.NoError(t, err)
 		require.NotNil(t, l)
 		requireEveryHCMIdle(t, l, 2, peerFacingIdleTimeout)
@@ -110,14 +110,14 @@ func TestAppFacingListenersGetTheAppFacingIdleTimeout(t *testing.T) {
 	pod := &cniv1.CNIPod{Name: "p1", Namespace: "default", NetworkNamespace: "/var/run/netns/p1"}
 
 	t.Run("outbound", func(t *testing.T) {
-		_, outbound, _, _, err := GenerateListenersFromRegistryPod(pod, "example.org", "mesh.local", false, false, nil, nil, "")
+		_, outbound, _, _, err := GenerateListenersFromRegistryPod(pod, "example.org", "mesh.local", false, false, nil, nil, "", DefaultConnectionDrainTimeout)
 		require.NoError(t, err)
 		requireEveryHCMIdle(t, outbound, 1, appFacingIdleTimeout)
 	})
 	for name, withPassthrough := range map[string]bool{"capture scoped": false, "capture redirect-all": true} {
 		t.Run(name, func(t *testing.T) {
 			l, err := GenerateCaptureListener(pod, "spiffe://example.org/ns/default/sa/test", 18001, "mesh.local", false,
-				[]CaptureTCPService{{ClusterName: "redis.mesh.local", ClusterIP: "10.96.1.10", LegacyTCPPort: 9000}}, withPassthrough, nil)
+				[]CaptureTCPService{{ClusterName: "redis.mesh.local", ClusterIP: "10.96.1.10", LegacyTCPPort: 9000}}, withPassthrough, nil, DefaultConnectionDrainTimeout)
 			require.NoError(t, err)
 			requireEveryHCMIdle(t, l, 1, appFacingIdleTimeout)
 		})

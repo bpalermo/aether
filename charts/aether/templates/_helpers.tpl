@@ -1012,6 +1012,36 @@ DaemonSet's value.
 {{- trim (toString .Values.agent.eastWestQuicIdleTimeout) -}}
 {{- end -}}
 
+{{/*
+proxy.hotRestart.connectionDrainTimeout, validated against the proxy's drain
+time. It is the drain_timeout of every node-proxy HTTP connection manager,
+which the AGENT programs (--proxy-connection-drain-timeout). When a listener
+drains, upstream Envoy (upstream Envoy PR 47991) arms a proactive drain of
+each connection, idle ones included, at a random point of
+[drainTime*2/3, drainTime - connectionDrainTimeout], and arms nothing when that
+window is empty. drainTime > 3 x connectionDrainTimeout is the condition for a
+non-empty window. Checked here because the agent never sees the proxy
+DaemonSet's drain time. Both values are read as the Go duration flags that
+receive them read them, and drainTime is then floored to whole seconds: the
+supervisor passes it to Envoy as --drain-time-s int(DrainTime.Seconds())
+(Supervisor.serveArgs), so 6.5s is 6s to Envoy. An effective drain time of 0
+(drainTime 0, or under 1s: no drain period at all, which the supervisor
+accepts) has no window to arm in and is not checked.
+*/}}
+{{- define "aether.proxy.connectionDrainTimeout" -}}
+{{- $cdt := include "aether.goDurationNanos" (dict "name" "proxy.hotRestart.connectionDrainTimeout" "value" .Values.proxy.hotRestart.connectionDrainTimeout "flag" "the agent's --proxy-connection-drain-timeout") | int64 -}}
+{{- $dt := include "aether.goDurationNanos" (dict "name" "proxy.hotRestart.drainTime" "value" .Values.proxy.hotRestart.drainTime "flag" "the supervisor's --drain-time") | int64 -}}
+{{- if le $cdt 0 -}}
+{{- fail (printf "proxy.hotRestart.connectionDrainTimeout must be > 0, got %q" (toString .Values.proxy.hotRestart.connectionDrainTimeout)) -}}
+{{- end -}}
+{{- $dts := div $dt 1000000000 -}}
+{{- $eff := mul $dts 1000000000 -}}
+{{- if and (gt $eff 0) (le $eff (mul $cdt 3)) -}}
+{{- fail (printf "proxy.hotRestart.drainTime (%s) must be more than 3 x proxy.hotRestart.connectionDrainTimeout (%s): Envoy receives the drain time in whole seconds (--drain-time-s %d), and its proactive idle-connection drain window [drainTime*2/3, drainTime - connectionDrainTimeout] would be empty, so idle connections would get no GOAWAY before the hot-restart parent exits" (toString .Values.proxy.hotRestart.drainTime) (toString .Values.proxy.hotRestart.connectionDrainTimeout) $dts) -}}
+{{- end -}}
+{{- trim (toString .Values.proxy.hotRestart.connectionDrainTimeout) -}}
+{{- end -}}
+
 {{- define "aether.proxy.podLabels" -}}
 {{ include "aether.proxy.selectorLabels" . }}
 app.kubernetes.io/part-of: aether

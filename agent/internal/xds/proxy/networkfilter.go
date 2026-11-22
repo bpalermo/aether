@@ -255,7 +255,47 @@ const (
 	// scaling this very timer down to 2s (reduce_timeouts,
 	// HTTP_DOWNSTREAM_CONNECTION_IDLE) and disabling keep-alive.
 	appFacingIdleTimeout = time.Hour
+
+	// edgeDrainTimeout leaves every EDGE HCM's drain_timeout at Envoy's 5s
+	// default. The reasoning behind DefaultConnectionDrainTimeout does not
+	// apply there: the edge Envoy runs without --drain-time-s, so its drain
+	// time is Envoy's 600s default and upstream's proactive drain window
+	// (400s..595s) is already non-empty.
+	edgeDrainTimeout time.Duration = 0
 )
+
+// DefaultConnectionDrainTimeout is the drain_timeout of every NODE-proxy HCM
+// (inbound TCP and HTTP/3, capture, outbound, the health gateway): the
+// default of the agent's --proxy-connection-drain-timeout, which the chart
+// renders from proxy.hotRestart.connectionDrainTimeout.
+//
+// It exists to make upstream Envoy's proactive idle-connection drain arm
+// (upstream Envoy PR 47991, in the pin). When a listener drains,
+// ConnectionManagerImpl::onDrain() arms a timer at a random point of
+// [drain_time*2/3, drain_time - drain_timeout] (Network::proactiveDrainDelay,
+// source/common/network/drain_close_util.cc). Its expiry starts the drain
+// sequence (GOAWAY, then close) on the connection whatever its protocol and
+// whether or not it is idle, and counts downstream_cx_drain_close. An empty
+// window (start >= end) arms nothing. The node proxy drains for
+// --drain-time-s 10 (proxy.hotRestart.drainTime): with Envoy's 5s default
+// drain_timeout the window is [6.67s, 5s], empty, so an idle connection got no
+// GOAWAY before the hot-restart parent exited, and a source's idle HTTP/3
+// connection died on a stateless reset (aether#1054; the carried aether1054
+// patch covered HTTP/3 only and is no longer carried). With 2s the window is
+// [6.67s, 8s], and the drain sequence the timer starts ends by 10s, inside the
+// 15s parent shutdown time. The chart refuses a drain time that is not more
+// than three times this value.
+const DefaultConnectionDrainTimeout = 2 * time.Second
+
+// nodeDrainTimeout is the drain_timeout a node-proxy HCM carries: d, or
+// DefaultConnectionDrainTimeout when d is not positive, so a node HCM never
+// falls back to Envoy's default (which leaves upstream's window empty).
+func nodeDrainTimeout(d time.Duration) time.Duration {
+	if d <= 0 {
+		return DefaultConnectionDrainTimeout
+	}
+	return d
+}
 
 // buildHTTPConnectionManager creates an HTTP connection manager for processing HTTP traffic.
 // It includes a router HTTP filter and uses the provided route configuration.
@@ -267,8 +307,14 @@ const (
 // purpose: the right value depends on who the downstream is, so every caller
 // says which (peerFacingIdleTimeout, appFacingIdleTimeout, or the edge's own
 // edgeDefaultIdleTimeout).
-func buildHTTPConnectionManager(name, reporter, podName, podNamespace string, routeConfig *routev3.RouteConfiguration, idleTimeout time.Duration) *http_connection_managerv3.HttpConnectionManager {
-	return &http_connection_managerv3.HttpConnectionManager{
+//
+// drainTimeout is the HCM drain_timeout: the grace between a drain sequence's
+// first GOAWAY and the connection's close, and the tail of upstream Envoy's
+// proactive idle-connection drain window (see DefaultConnectionDrainTimeout).
+// Zero leaves the field unset (Envoy's 5s default): only the edge passes zero
+// (edgeDrainTimeout); every node-proxy HCM passes nodeDrainTimeout(...).
+func buildHTTPConnectionManager(name, reporter, podName, podNamespace string, routeConfig *routev3.RouteConfiguration, idleTimeout, drainTimeout time.Duration) *http_connection_managerv3.HttpConnectionManager {
+	hcm := &http_connection_managerv3.HttpConnectionManager{
 		StatPrefix: name,
 		CodecType:  http_connection_managerv3.HttpConnectionManager_AUTO,
 		CommonHttpProtocolOptions: &corev3.HttpProtocolOptions{
@@ -283,6 +329,10 @@ func buildHTTPConnectionManager(name, reporter, podName, podNamespace string, ro
 			RouteConfig: routeConfig,
 		},
 	}
+	if drainTimeout > 0 {
+		hcm.DrainTimeout = durationpb.New(drainTimeout)
+	}
+	return hcm
 }
 
 // buildHTTPConnectionManagerFilter creates a network filter wrapping an HTTP connection manager.

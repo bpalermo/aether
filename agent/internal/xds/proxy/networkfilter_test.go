@@ -46,7 +46,7 @@ func TestBuildHTTPConnectionManager(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			hcm := buildHTTPConnectionManager(tt.statPrefix, ReporterSource, "pod", "ns", tt.routeConfig, peerFacingIdleTimeout)
+			hcm := buildHTTPConnectionManager(tt.statPrefix, ReporterSource, "pod", "ns", tt.routeConfig, peerFacingIdleTimeout, DefaultConnectionDrainTimeout)
 
 			require.NotNil(t, hcm)
 			assert.Equal(t, tt.statPrefix, hcm.GetStatPrefix())
@@ -58,7 +58,7 @@ func TestBuildHTTPConnectionManager(t *testing.T) {
 }
 
 func TestBuildHTTPConnectionManagerFilter(t *testing.T) {
-	hcm := buildHTTPConnectionManager("test", ReporterSource, "pod", "ns", nil, peerFacingIdleTimeout)
+	hcm := buildHTTPConnectionManager("test", ReporterSource, "pod", "ns", nil, peerFacingIdleTimeout, DefaultConnectionDrainTimeout)
 	filter := buildHTTPConnectionManagerFilter(hcm)
 
 	require.NotNil(t, filter)
@@ -84,7 +84,7 @@ func TestBuildSetFilterState(t *testing.T) {
 // leaked upstream connections pin thousands of inbound connections). Which
 // listener gets which value is in idletimeout_test.go (aether#1350).
 func TestHCMDownstreamIdleTimeout(t *testing.T) {
-	hcm := buildHTTPConnectionManager("test", ReporterSource, "pod", "ns", nil, peerFacingIdleTimeout)
+	hcm := buildHTTPConnectionManager("test", ReporterSource, "pod", "ns", nil, peerFacingIdleTimeout, DefaultConnectionDrainTimeout)
 	idle := hcm.GetCommonHttpProtocolOptions().GetIdleTimeout()
 	require.NotNil(t, idle, "downstream idle timeout must be set")
 	assert.Equal(t, peerFacingIdleTimeout, idle.AsDuration())

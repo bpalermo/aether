@@ -358,7 +358,7 @@ ep_rc_diff() {
 }
 
 # ep_patch_report <tree> <patch>... — applies the carried patches IN ORDER to a
-# scratch tree (they stack: 1054 sits on 1050, 1054c on 1054, ...) and prints
+# scratch tree (they stack: 1126 sits on 1050, 1733 on 1126, ...) and prints
 # per patch: `applies` (still needed, applied for the next one), `UPSTREAM`
 # (reverse-applies cleanly: already in this Envoy, drop it) or `CONFLICT` (needs
 # a refresh; not applied, so a later patch stacked on it may conflict too).

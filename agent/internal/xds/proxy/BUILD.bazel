@@ -119,6 +119,7 @@ go_test(
         "captureport_test.go",
         "cluster_test.go",
         "clusterfamily_test.go",
+        "drain_timeout_test.go",
         "droppedbackend_test.go",
         "eastwest_port_test.go",
         "edge_test.go",
@@ -265,6 +266,7 @@ go_test(
         "capturemerge_test.go",
         "capturemerge_pathless_test.go",
         "capture_servicerange_044_test.go",
+        "drain_timeout_test.go",
     ],
     deps = [
         "//agent/internal/xds/config",

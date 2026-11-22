@@ -39,7 +39,7 @@ func chainByName(chains []*listenerv3.FilterChain, name string) *listenerv3.Filt
 // chain — leaving the pod on its previous listener, or unreachable if new.
 func TestInboundChains_TCPPortReplacesHCM(t *testing.T) {
 	pod := podWithPorts("8080,9000=tcp,9090=h2")
-	chains := buildInboundFilterChains(pod, "spiffe-cert", "spiffe-validation", "example.org", false, nil, nil)
+	chains := buildInboundFilterChains(pod, "spiffe-cert", "spiffe-validation", "example.org", false, nil, nil, DefaultConnectionDrainTimeout)
 
 	tcpChain := chainByName(chains, "in_tcp_aether-test_app-0_9000")
 	require.NotNil(t, tcpChain, "a =tcp port must get a tcp_proxy chain")
@@ -90,7 +90,7 @@ func TestInboundChains_PrimaryTCPPortKeepsTheFloor(t *testing.T) {
 	pod := podWithPorts("8080")
 	pod.Annotations[aetherannotations.AnnotationEndpointProtocol] = "tcp"
 
-	chains := buildInboundFilterChains(pod, "c", "v", "example.org", false, nil, nil)
+	chains := buildInboundFilterChains(pod, "c", "v", "example.org", false, nil, nil, DefaultConnectionDrainTimeout)
 
 	require.NotNil(t, chainByName(chains, "in_tcp_aether-test_app-0"), "the default floor chain must still be there")
 	own := chainByName(chains, "in_tcp_aether-test_app-0_8080")
@@ -109,7 +109,7 @@ func TestInboundChains_PrimaryTCPPortKeepsTheFloor(t *testing.T) {
 // than the builder guessing a protocol.
 func TestInboundChains_MalformedAnnotationKeepsHTTP(t *testing.T) {
 	pod := podWithPorts("8080,9000=quic")
-	chains := buildInboundFilterChains(pod, "c", "v", "example.org", false, nil, nil)
+	chains := buildInboundFilterChains(pod, "c", "v", "example.org", false, nil, nil, DefaultConnectionDrainTimeout)
 
 	assert.Nil(t, chainByName(chains, "in_tcp_aether-test_app-0_9000"),
 		"an unparseable annotation must not produce a TCP chain")

@@ -197,6 +197,12 @@ type AgentConfig struct {
 	// idle + 5s < proxy.hotRestart.parentShutdownTime, which the agent does
 	// not know (the proxy is another DaemonSet). h1/h2 keep 30s.
 	EastWestQUICIdleTimeout time.Duration
+	// ProxyConnectionDrainTimeout is the drain_timeout of every node-proxy
+	// HCM (proxy.DefaultConnectionDrainTimeout). Must be > 0; the chart also
+	// enforces proxy.hotRestart.drainTime > 3 x this, so upstream Envoy's
+	// proactive drain window is non-empty -- the proxy's drain time is another
+	// DaemonSet's flag, which the agent does not see.
+	ProxyConnectionDrainTimeout time.Duration
 
 	// MeshDNS enables the per-pod mesh-DNS listener (proposal 018, mesh-global FQDN):
 	// the agent answers <svc>.<meshDomain> from the generated mesh Services' ClusterIPs.
@@ -267,6 +273,20 @@ func NewAgentConfig() *AgentConfig {
 func validateEastWestQUICIdleTimeout(d time.Duration) error {
 	if d <= 0 {
 		return fmt.Errorf("--east-west-quic-idle-timeout must be > 0, got %s", d)
+	}
+	return nil
+}
+
+// validateProxyConnectionDrainTimeout rejects a non-positive
+// --proxy-connection-drain-timeout. Zero would leave the node HCMs at Envoy's
+// 5s default drain_timeout, which with the chart's 10s drain time leaves
+// upstream Envoy's proactive idle-connection drain window empty
+// (proxy.DefaultConnectionDrainTimeout). The upper bound (drain time > 3 x
+// this) is enforced by the chart, the only place that sees both DaemonSets'
+// values.
+func validateProxyConnectionDrainTimeout(d time.Duration) error {
+	if d <= 0 {
+		return fmt.Errorf("--proxy-connection-drain-timeout must be > 0, got %s", d)
 	}
 	return nil
 }

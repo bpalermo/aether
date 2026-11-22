@@ -392,6 +392,11 @@ type SnapshotCache struct {
 	// rather than under depMu: it is read while building every snapshot's
 	// fan-out and written once at boot.
 	quicIdleTimeout atomic.Int64
+	// connDrainTimeout is the drain_timeout of every node-proxy HCM, as a
+	// time.Duration (--proxy-connection-drain-timeout); <= 0 means
+	// proxy.DefaultConnectionDrainTimeout. Atomic for the same reason as
+	// quicIdleTimeout: read on every listener build, written once at boot.
+	connDrainTimeout atomic.Int64
 	// localPodsSynced is set once LoadListenersFromStorage has merged the
 	// node's pod records: only then is "no local pod of this ServiceAccount"
 	// evidence that a persisted QUIC pair's source left. Guarded by depMu.

@@ -42,7 +42,7 @@ func TestChartStatsConfigOnNamespacedPodNames(t *testing.T) {
 	bin := envoyBinary(t)
 
 	pod := &cniv1.CNIPod{Name: "web-0", Namespace: "team-a", ServiceAccount: "web", NetworkNamespace: "/var/run/netns/cni-aaaa"}
-	inbound, outbound, _, health, err := proxy.GenerateListenersFromRegistryPod(pod, "aether.internal", "mesh.internal", false, false, nil, nil, "")
+	inbound, outbound, _, health, err := proxy.GenerateListenersFromRegistryPod(pod, "aether.internal", "mesh.internal", false, false, nil, nil, "", proxy.DefaultConnectionDrainTimeout)
 	require.NoError(t, err)
 	listenerPrefixes := []string{inbound.GetStatPrefix(), outbound.GetStatPrefix(), proxy.InboundQUICListenerName(pod)}
 	require.Equal(t, []string{"inbound_team-a_web-0", "out_http_team-a_web-0", "inbound_team-a_web-0_h3"}, listenerPrefixes)

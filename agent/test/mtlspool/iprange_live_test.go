@@ -256,7 +256,7 @@ func TestIPRangeMatcher_AgentCaptureMatcherLive(t *testing.T) {
 	pod := &cniv1.CNIPod{Name: "client-0", Namespace: "demo", NetworkNamespace: "/proc/self/ns/net"}
 	tcpCluster := proxy.TCPClusterName("demo/tcponly", "aether.internal")
 	gen, err := proxy.GenerateCaptureListener(pod, "spiffe://aether.internal/ns/demo/sa/client", meshconst.ProxyCapturePort, "aether.internal", false,
-		[]proxy.CaptureTCPService{{ClusterName: tcpCluster, ClusterIP: tcpVIP, LegacyTCPPort: port}}, true, nil,
+		[]proxy.CaptureTCPService{{ClusterName: tcpCluster, ClusterIP: tcpVIP, LegacyTCPPort: port}}, true, nil, proxy.DefaultConnectionDrainTimeout,
 		proxy.WithServiceRanges([]netip.Prefix{netip.MustParsePrefix("127.96.0.0/12"), netip.MustParsePrefix(setIP + "/32")}))
 	require.NoError(t, err)
 	tcpOwn := fmt.Sprintf("cap_tcp_%s_%d", tcpCluster, port)

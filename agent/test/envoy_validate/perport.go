@@ -278,6 +278,7 @@ func buildCapturePerPortBootstrap() (*bootstrapv3.Bootstrap, error) {
 		inputs,
 		true, // withPassthrough (redirect-all, the shipped default)
 		nil,  // extensionFilters
+		proxy.DefaultConnectionDrainTimeout,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("GenerateCaptureListener: %w", err)

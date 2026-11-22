@@ -208,7 +208,7 @@ func TestInboundReadyProbeIsAcceptedByInboundValidation(t *testing.T) {
 // every mTLS pod, including single-port ones.
 func TestInboundReadyChainAlwaysExists(t *testing.T) {
 	pod := sourceTestPod()
-	chains := buildInboundFilterChains(pod, testSourceIdentity, "spiffe://"+testTrustDomain, testTrustDomain, false, nil, nil)
+	chains := buildInboundFilterChains(pod, testSourceIdentity, "spiffe://"+testTrustDomain, testTrustDomain, false, nil, nil, DefaultConnectionDrainTimeout)
 
 	var h2Chains int
 	for _, fc := range chains {
@@ -232,7 +232,7 @@ func TestInboundReadyChainAlwaysExists(t *testing.T) {
 func TestInboundReadyProbePathIsAnsweredByTheInboundItself(t *testing.T) {
 	pod := sourceTestPod()
 	probePath := testInboundReadyCluster(t).GetHealthChecks()[0].GetHttpHealthCheck().GetPath()
-	chains := buildInboundFilterChains(pod, testSourceIdentity, "spiffe://"+testTrustDomain, testTrustDomain, false, nil, nil)
+	chains := buildInboundFilterChains(pod, testSourceIdentity, "spiffe://"+testTrustDomain, testTrustDomain, false, nil, nil, DefaultConnectionDrainTimeout)
 
 	var checked bool
 	for _, fc := range chains {

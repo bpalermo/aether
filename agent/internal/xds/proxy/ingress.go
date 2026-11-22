@@ -3,6 +3,7 @@ package proxy
 import (
 	"fmt"
 	"strconv"
+	"time"
 
 	cniv1 "aethermesh.dev/api/aether/cni/v1"
 	registryv1 "aethermesh.dev/api/aether/registry/v1"
@@ -67,7 +68,7 @@ func InboundListenerName(cniPod *cniv1.CNIPod) string {
 // h2c and HTTP/1 are both detected, no ALPN/SNI demux, no XFCC since there is no
 // verified peer). This is for SPIRE-off testing/conformance (the suite asserts
 // routing correctness, not mTLS); the production posture keeps per-pod mTLS.
-func NewInboundListener(cniPod *cniv1.CNIPod, trustDomain string, emitStatsPod bool, cleartext bool, extensionFilters []*http_connection_managerv3.HttpFilter, inboundFilter *ExtensionFilter) (*listenerv3.Listener, error) {
+func NewInboundListener(cniPod *cniv1.CNIPod, trustDomain string, emitStatsPod bool, cleartext bool, extensionFilters []*http_connection_managerv3.HttpFilter, inboundFilter *ExtensionFilter, drainTimeout time.Duration) (*listenerv3.Listener, error) {
 	if cniPod == nil {
 		return nil, fmt.Errorf("pod is required")
 	}
@@ -98,10 +99,10 @@ func NewInboundListener(cniPod *cniv1.CNIPod, trustDomain string, emitStatsPod b
 	if cleartext {
 		// No tls_inspector listener filter: there is no TLS to inspect, and a single
 		// default HCM chain serves every request.
-		chains = []*listenerv3.FilterChain{buildInboundCleartextFilterChain(cniPod, emitStatsPod, extensionFilters, inboundFilter)}
+		chains = []*listenerv3.FilterChain{buildInboundCleartextFilterChain(cniPod, emitStatsPod, extensionFilters, inboundFilter, drainTimeout)}
 	} else {
 		listenerFilters = buildInboundListenerFilters()
-		chains = buildInboundFilterChains(cniPod, tlsCertificateSecretName, validationContextName, trustDomain, emitStatsPod, extensionFilters, inboundFilter)
+		chains = buildInboundFilterChains(cniPod, tlsCertificateSecretName, validationContextName, trustDomain, emitStatsPod, extensionFilters, inboundFilter, drainTimeout)
 	}
 
 	return &listenerv3.Listener{
@@ -140,11 +141,11 @@ func NewInboundListener(cniPod *cniv1.CNIPod, trustDomain string, emitStatsPod b
 // this mode. HTTP carried that way gets the outcome header (OutcomeHeader) on
 // every response with no HTTP-aware caller to remove it, so the client
 // application sees it. The mTLS listener has a tcp_proxy chain for the floor.
-func buildInboundCleartextFilterChain(cniPod *cniv1.CNIPod, emitStatsPod bool, extensionFilters []*http_connection_managerv3.HttpFilter, inboundFilter *ExtensionFilter) *listenerv3.FilterChain {
+func buildInboundCleartextFilterChain(cniPod *cniv1.CNIPod, emitStatsPod bool, extensionFilters []*http_connection_managerv3.HttpFilter, inboundFilter *ExtensionFilter, drainTimeout time.Duration) *listenerv3.FilterChain {
 	defaultPort := AppPortFromPod(cniPod)
 	rc := buildInboundRouteConfiguration(AppClusterName(cniPod, defaultPort))
 	applyInboundFilter(rc, inboundFilter)
-	hcm := buildHTTPConnectionManager("inbound", ReporterDestination, cniPod.GetName(), cniPod.GetNamespace(), rc, peerFacingIdleTimeout)
+	hcm := buildHTTPConnectionManager("inbound", ReporterDestination, cniPod.GetName(), cniPod.GetNamespace(), rc, peerFacingIdleTimeout, nodeDrainTimeout(drainTimeout))
 	// The local replies no route stamps (an overloaded proxy's 503) get their
 	// outcome header here (aether#1641; see OutcomeHeader).
 	hcm.LocalReplyConfig = inboundOutcomeLocalReply()
@@ -175,7 +176,7 @@ func buildInboundCleartextFilterChain(cniPod *cniv1.CNIPod, emitStatsPod bool, e
 //     Demux is the standard "h2" ALPN for HTTP vs no-ALPN for TCP — no bespoke token.
 //
 // SNI is port routing only — identity stays the terminated mTLS SVID.
-func buildInboundFilterChains(cniPod *cniv1.CNIPod, tlsCertificateSecretName, validationContextName, trustDomain string, emitStatsPod bool, extensionFilters []*http_connection_managerv3.HttpFilter, inboundFilter *ExtensionFilter) []*listenerv3.FilterChain {
+func buildInboundFilterChains(cniPod *cniv1.CNIPod, tlsCertificateSecretName, validationContextName, trustDomain string, emitStatsPod bool, extensionFilters []*http_connection_managerv3.HttpFilter, inboundFilter *ExtensionFilter, drainTimeout time.Duration) []*listenerv3.FilterChain {
 	defaultPort := AppPortFromPod(cniPod)
 	ports := AppPortsFromPod(cniPod)
 
@@ -187,7 +188,7 @@ func buildInboundFilterChains(cniPod *cniv1.CNIPod, tlsCertificateSecretName, va
 
 	// No-SNI HCM chain: matches application_protocols ["h2"] (the mesh HTTP/2
 	// transport) on the primary port. Per-port SNI chains follow.
-	chains = append(chains, buildInboundFilterChain(cniPod, "", defaultPort, tlsCertificateSecretName, validationContextName, trustDomain, emitStatsPod, extensionFilters, inboundFilter))
+	chains = append(chains, buildInboundFilterChain(cniPod, "", defaultPort, tlsCertificateSecretName, validationContextName, trustDomain, emitStatsPod, extensionFilters, inboundFilter, drainTimeout))
 	// One chain per served port, SNI-matched on the port number -- an HCM chain
 	// for an HTTP port, a tcp_proxy chain for a raw-TCP one (proposal 037).
 	//
@@ -201,7 +202,7 @@ func buildInboundFilterChains(cniPod *cniv1.CNIPod, tlsCertificateSecretName, va
 			chains = append(chains, buildInboundTCPPortFilterChain(cniPod, port, tlsCertificateSecretName, validationContextName, trustDomain))
 			continue
 		}
-		chains = append(chains, buildInboundFilterChain(cniPod, strconv.Itoa(int(port)), port, tlsCertificateSecretName, validationContextName, trustDomain, emitStatsPod, extensionFilters, inboundFilter))
+		chains = append(chains, buildInboundFilterChain(cniPod, strconv.Itoa(int(port)), port, tlsCertificateSecretName, validationContextName, trustDomain, emitStatsPod, extensionFilters, inboundFilter, drainTimeout))
 	}
 	return chains
 }
@@ -263,8 +264,8 @@ func buildInboundTCPFloorFilterChain(cniPod *cniv1.CNIPod, defaultPort uint16, t
 // sni is non-empty the chain is SNI-matched (server_names); the empty-sni chain
 // is the default (no match criteria). chainPort selects both the app cluster
 // and the chain name suffix.
-func buildInboundFilterChain(cniPod *cniv1.CNIPod, sni string, chainPort uint16, tlsCertificateSecretName, validationContextName, trustDomain string, emitStatsPod bool, extensionFilters []*http_connection_managerv3.HttpFilter, inboundFilter *ExtensionFilter) *listenerv3.FilterChain {
-	hcm := buildInboundHCM(cniPod, chainPort, emitStatsPod, extensionFilters, inboundFilter)
+func buildInboundFilterChain(cniPod *cniv1.CNIPod, sni string, chainPort uint16, tlsCertificateSecretName, validationContextName, trustDomain string, emitStatsPod bool, extensionFilters []*http_connection_managerv3.HttpFilter, inboundFilter *ExtensionFilter, drainTimeout time.Duration) *listenerv3.FilterChain {
+	hcm := buildInboundHCM(cniPod, chainPort, emitStatsPod, extensionFilters, inboundFilter, drainTimeout)
 
 	name := fmt.Sprintf("in_%s", PodResourceKey(cniPod))
 	// The no-SNI HCM chain matches application_protocols:["h2"] (the mesh's HTTP/2
@@ -291,10 +292,10 @@ func buildInboundFilterChain(cniPod *cniv1.CNIPod, sni string, chainPort uint16,
 // from the verified peer. Shared by the TCP inbound chain (h2 codec, AUTO) and
 // the QUIC inbound chain (HTTP/3 codec) so the two transports carry the SAME
 // filter set and the same XFCC contract; only the codec differs.
-func buildInboundHCM(cniPod *cniv1.CNIPod, chainPort uint16, emitStatsPod bool, extensionFilters []*http_connection_managerv3.HttpFilter, inboundFilter *ExtensionFilter) *http_connection_managerv3.HttpConnectionManager {
+func buildInboundHCM(cniPod *cniv1.CNIPod, chainPort uint16, emitStatsPod bool, extensionFilters []*http_connection_managerv3.HttpFilter, inboundFilter *ExtensionFilter, drainTimeout time.Duration) *http_connection_managerv3.HttpConnectionManager {
 	rc := buildInboundRouteConfiguration(AppClusterName(cniPod, chainPort))
 	applyInboundFilter(rc, inboundFilter)
-	hcm := buildHTTPConnectionManager("inbound", ReporterDestination, cniPod.GetName(), cniPod.GetNamespace(), rc, peerFacingIdleTimeout)
+	hcm := buildHTTPConnectionManager("inbound", ReporterDestination, cniPod.GetName(), cniPod.GetNamespace(), rc, peerFacingIdleTimeout, nodeDrainTimeout(drainTimeout))
 	// The local replies no route stamps (an overloaded proxy's 503) get their
 	// outcome header here (aether#1641; see OutcomeHeader).
 	hcm.LocalReplyConfig = inboundOutcomeLocalReply()
@@ -365,7 +366,7 @@ func InboundQUICListenerName(cniPod *cniv1.CNIPod) string {
 // no SVID to present, and the TCP inbound's cleartext chain keeps the mesh hop
 // routable on its own. Returns ErrNoTrustDomain in the same case the TCP
 // inbound does, for the same reason.
-func NewInboundQUICListener(cniPod *cniv1.CNIPod, trustDomain, meshDomain string, emitStatsPod bool, cleartext bool, extensionFilters []*http_connection_managerv3.HttpFilter, inboundFilter *ExtensionFilter) (*listenerv3.Listener, error) {
+func NewInboundQUICListener(cniPod *cniv1.CNIPod, trustDomain, meshDomain string, emitStatsPod bool, cleartext bool, extensionFilters []*http_connection_managerv3.HttpFilter, inboundFilter *ExtensionFilter, drainTimeout time.Duration) (*listenerv3.Listener, error) {
 	if cniPod == nil {
 		return nil, fmt.Errorf("pod is required")
 	}
@@ -390,7 +391,7 @@ func NewInboundQUICListener(cniPod *cniv1.CNIPod, trustDomain, meshDomain string
 	authority := ServiceClusterName(serviceref.New(cniPod.GetNamespace(), cniPod.GetServiceAccount()).Key(), meshDomain)
 
 	var chains []*listenerv3.FilterChain
-	chains = append(chains, buildInboundQUICFilterChain(cniPod, "", defaultPort, tlsCertificateSecretName, validationContextName, trustDomain, emitStatsPod, extensionFilters, inboundFilter))
+	chains = append(chains, buildInboundQUICFilterChain(cniPod, "", defaultPort, tlsCertificateSecretName, validationContextName, trustDomain, emitStatsPod, extensionFilters, inboundFilter, drainTimeout))
 	for _, port := range AppPortsFromPod(cniPod) {
 		if port == defaultPort {
 			continue
@@ -398,7 +399,7 @@ func NewInboundQUICListener(cniPod *cniv1.CNIPod, trustDomain, meshDomain string
 		if _, isTCP := tcpPorts[port]; isTCP {
 			continue
 		}
-		chains = append(chains, buildInboundQUICFilterChain(cniPod, QUICServerName(strconv.Itoa(int(port)), authority), port, tlsCertificateSecretName, validationContextName, trustDomain, emitStatsPod, extensionFilters, inboundFilter))
+		chains = append(chains, buildInboundQUICFilterChain(cniPod, QUICServerName(strconv.Itoa(int(port)), authority), port, tlsCertificateSecretName, validationContextName, trustDomain, emitStatsPod, extensionFilters, inboundFilter, drainTimeout))
 	}
 
 	return &listenerv3.Listener{
@@ -468,8 +469,8 @@ func InboundQUICUDPListenerConfig() *listenerv3.UdpListenerConfig {
 // inbound: the same HCM (buildInboundHCM) with the HTTP3 codec, behind the QUIC
 // transport socket. sni == "" is the default chain (the primary port); a
 // non-empty sni is a server_names chain on that port number.
-func buildInboundQUICFilterChain(cniPod *cniv1.CNIPod, sni string, chainPort uint16, tlsCertificateSecretName, validationContextName, trustDomain string, emitStatsPod bool, extensionFilters []*http_connection_managerv3.HttpFilter, inboundFilter *ExtensionFilter) *listenerv3.FilterChain {
-	hcm := buildInboundHCM(cniPod, chainPort, emitStatsPod, extensionFilters, inboundFilter)
+func buildInboundQUICFilterChain(cniPod *cniv1.CNIPod, sni string, chainPort uint16, tlsCertificateSecretName, validationContextName, trustDomain string, emitStatsPod bool, extensionFilters []*http_connection_managerv3.HttpFilter, inboundFilter *ExtensionFilter, drainTimeout time.Duration) *listenerv3.FilterChain {
+	hcm := buildInboundHCM(cniPod, chainPort, emitStatsPod, extensionFilters, inboundFilter, drainTimeout)
 	hcm.CodecType = http_connection_managerv3.HttpConnectionManager_HTTP3
 	hcm.Http3ProtocolOptions = &corev3.Http3ProtocolOptions{}
 

@@ -34,7 +34,7 @@ func TestBuildDefaultOutboundHTTPFilterChain(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			fc := buildDefaultOutboundHTTPFilterChain(&cniv1.CNIPod{Name: tt.podName, Namespace: "team-a"}, "spiffe://aether.internal/ns/default/sa/test", "aether.internal", false, nil)
+			fc := buildDefaultOutboundHTTPFilterChain(&cniv1.CNIPod{Name: tt.podName, Namespace: "team-a"}, "spiffe://aether.internal/ns/default/sa/test", "aether.internal", false, nil, DefaultConnectionDrainTimeout)
 
 			require.NotNil(t, fc)
 			assert.Equal(t, tt.expectedChainName, fc.GetName())
@@ -53,7 +53,7 @@ func TestBuildDefaultOutboundHTTPFilterChain(t *testing.T) {
 // non-pass-through health_check readiness filter ahead of the router, matched
 // on the shared readiness path probed by the CNI plugin from inside the netns.
 func TestOutboundChainReadinessFilter(t *testing.T) {
-	fc := buildDefaultOutboundHTTPFilterChain(&cniv1.CNIPod{Name: "my-pod"}, "spiffe://aether.internal/ns/default/sa/test", "aether.internal", false, nil)
+	fc := buildDefaultOutboundHTTPFilterChain(&cniv1.CNIPod{Name: "my-pod"}, "spiffe://aether.internal/ns/default/sa/test", "aether.internal", false, nil, DefaultConnectionDrainTimeout)
 	require.Len(t, fc.GetFilters(), 3)
 
 	hcm := &http_connection_managerv3.HttpConnectionManager{}
@@ -86,7 +86,7 @@ func TestOutboundChainStatsFilter(t *testing.T) {
 	pod := &cniv1.CNIPod{Name: "my-pod", ServiceAccount: "checkout"}
 
 	hcm := &http_connection_managerv3.HttpConnectionManager{}
-	fc := buildDefaultOutboundHTTPFilterChain(pod, "spiffe://aether.internal/ns/default/sa/test", "aether.internal", false, nil)
+	fc := buildDefaultOutboundHTTPFilterChain(pod, "spiffe://aether.internal/ns/default/sa/test", "aether.internal", false, nil, DefaultConnectionDrainTimeout)
 	require.NoError(t, fc.GetFilters()[2].GetTypedConfig().UnmarshalTo(hcm))
 
 	filters := hcm.GetHttpFilters()
@@ -121,7 +121,7 @@ func TestOutboundChainStatsFilter(t *testing.T) {
 // fresh Envoy epoch can activate the egress listener while the agent feeding it
 // is still inside its initial-snapshot budget.
 func TestOutboundChainRDSInitialFetchTimeout(t *testing.T) {
-	fc := buildDefaultOutboundHTTPFilterChain(&cniv1.CNIPod{Name: "my-pod"}, "spiffe://aether.internal/ns/default/sa/test", "aether.internal", false, nil)
+	fc := buildDefaultOutboundHTTPFilterChain(&cniv1.CNIPod{Name: "my-pod"}, "spiffe://aether.internal/ns/default/sa/test", "aether.internal", false, nil, DefaultConnectionDrainTimeout)
 	require.Len(t, fc.GetFilters(), 3)
 
 	hcm := &http_connection_managerv3.HttpConnectionManager{}
@@ -170,7 +170,7 @@ func TestOutboundChainRDSIdenticalAcrossPods(t *testing.T) {
 
 	var want []byte
 	for _, pod := range pods {
-		fc := buildDefaultOutboundHTTPFilterChain(pod, "spiffe://aether.internal/ns/"+pod.GetNamespace()+"/sa/"+pod.GetServiceAccount(), "aether.internal", true, nil)
+		fc := buildDefaultOutboundHTTPFilterChain(pod, "spiffe://aether.internal/ns/"+pod.GetNamespace()+"/sa/"+pod.GetServiceAccount(), "aether.internal", true, nil, DefaultConnectionDrainTimeout)
 		require.Len(t, fc.GetFilters(), 4)
 
 		hcm := &http_connection_managerv3.HttpConnectionManager{}

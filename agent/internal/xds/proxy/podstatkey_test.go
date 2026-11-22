@@ -41,11 +41,11 @@ func dottedPod() *cniv1.CNIPod {
 // perPodResources builds everything the generators derive from one pod.
 func perPodResources(t *testing.T, pod *cniv1.CNIPod) (listeners []*listenerv3.Listener, clusters []*clusterv3.Cluster) {
 	t.Helper()
-	inbound, outbound, apps, health, err := GenerateListenersFromRegistryPod(pod, sameNameTrustDomain, sameNameMeshDomain, false, false, nil, nil, "")
+	inbound, outbound, apps, health, err := GenerateListenersFromRegistryPod(pod, sameNameTrustDomain, sameNameMeshDomain, false, false, nil, nil, "", DefaultConnectionDrainTimeout)
 	require.NoError(t, err)
-	quic, err := NewInboundQUICListener(pod, sameNameTrustDomain, sameNameMeshDomain, false, false, nil, nil)
+	quic, err := NewInboundQUICListener(pod, sameNameTrustDomain, sameNameMeshDomain, false, false, nil, nil, DefaultConnectionDrainTimeout)
 	require.NoError(t, err)
-	capture, err := GenerateCaptureListener(pod, SpiffeIDFromPod(pod, sameNameTrustDomain), 15001, sameNameMeshDomain, false, nil, false, nil)
+	capture, err := GenerateCaptureListener(pod, SpiffeIDFromPod(pod, sameNameTrustDomain), 15001, sameNameMeshDomain, false, nil, false, nil, DefaultConnectionDrainTimeout)
 	require.NoError(t, err)
 	udp, err := GenerateUDPCaptureListener(pod, 18082,
 		map[string][]L4Backend{"ns-a/dns": {{Service: "ns-a/dns", Cluster: "udp:dns.ns-a.mesh.internal", Weight: 1}}},
@@ -188,7 +188,7 @@ func TestPerPodStatNamesCarryNoPodDot(t *testing.T) {
 	// what the agent's liveness loop requests does not change.
 	gateway := BuildHealthGatewayListener("/run/aether/health.sock", []HealthGatewayProbe{
 		NewHealthGatewayProbe(HealthProbeClusterName(pod), InboundReadyClusterName(pod)),
-	})
+	}, DefaultConnectionDrainTimeout)
 	assert.Contains(t, gateway.String(), "/healthz/health_"+resKey)
 	assert.Contains(t, gateway.String(), "/healthz/inboundready_"+resKey)
 	assert.NotContains(t, gateway.String(), "~")

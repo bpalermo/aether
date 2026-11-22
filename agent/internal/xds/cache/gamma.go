@@ -505,13 +505,13 @@ func (c *SnapshotCache) rebuildPodListenersLocked(reason string, shared []*http_
 				"reason", reason, "netns", netns, "pod", entry.cniPod.GetName(), "error", err)
 			continue
 		}
-		newOutbound, err := proxy.GenerateOutboundHTTPListener(entry.cniPod, proxy.SourceIdentityForPod(entry.cniPod, trustDomain), c.meshDomain, c.emitStatsPod, extensionFilters)
+		newOutbound, err := proxy.GenerateOutboundHTTPListener(entry.cniPod, proxy.SourceIdentityForPod(entry.cniPod, trustDomain), c.meshDomain, c.emitStatsPod, extensionFilters, c.connectionDrainTimeout())
 		if err != nil {
 			c.log.Warn("skipping outbound listener regeneration for pod",
 				"reason", reason, "netns", netns, "pod", entry.cniPod.GetName(), "error", err)
 			continue
 		}
-		newInbound, err := proxy.NewInboundListener(entry.cniPod, trustDomain, c.emitStatsPod, !c.spireEnabled, proxy.WithoutSourceMetadata(extensionFilters), c.inboundFilterForPod(entry.cniPod))
+		newInbound, err := proxy.NewInboundListener(entry.cniPod, trustDomain, c.emitStatsPod, !c.spireEnabled, proxy.WithoutSourceMetadata(extensionFilters), c.inboundFilterForPod(entry.cniPod), c.connectionDrainTimeout())
 		if err != nil {
 			c.log.Warn("skipping inbound listener regeneration for pod",
 				"reason", reason, "netns", netns, "pod", entry.cniPod.GetName(), "error", err)

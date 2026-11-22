@@ -126,8 +126,7 @@ new pin, which of them the new Envoy already contains.
 |---|---|---|
 | `47740-quic-hostname-check-explicit-san` | The QUIC client defers its hostname check to explicit SAN matchers (aether#957); behind `envoy.reloadable_features.quic_hostname_check_deferred_to_explicit_san_match`. | envoyproxy/envoy#47740, open |
 | `aether1050-hotrestart-nonblocking-forward` | The hot-restart main-thread deadlock (aether#1050): parent UDP/QUIC forwarding to the child no longer blocks the parent's main thread, and the child keeps servicing forwarded packets while it waits, with a bound, for the parent's replies. Counts what it forwards in `server.hot_restart_udp_forwarding_{datagrams,retries,dropped}`. A signal interrupting a send or a wait on the hot-restart domain socket (EINTR, which the socket timeouts make non-restartable) is retried instead of aborting the child on a `RELEASE_ASSERT`. | envoyproxy/envoy#47834, open (the patch is that pull request's diff against its merge base) |
-| `aether1054-http3-drain-idle-connections` | Idle HTTP/3 connections drain themselves inside the drain window (aether#1054), behind `envoy.reloadable_features.http3_drain_idle_connections`, beside upstream's own proactive drain (envoyproxy/envoy#47991), which arms nothing at the chart's 10s drain time. | not proposed |
-| `aether1126-forwarded-udp-worker-index` | A hot-restart child with fewer workers than its parent no longer indexes past its worker table when the parent forwards a UDP/QUIC datagram tagged with one of its extra workers: the index is mapped onto `index % concurrency` (aether#1126). | not reported |
+| `aether1126-forwarded-udp-worker-index` | A hot-restart child with fewer workers than its parent no longer indexes past its worker table when the parent forwards a UDP/QUIC datagram tagged with one of its extra workers: the index is mapped onto `index % concurrency` (aether#1126). | upstream Envoy PR 49523, open |
 | `aether1733-validate-quic-null-socket` | `envoy --mode validate` no longer segfaults on a bootstrap with a static QUIC listener: envoyproxy/envoy#45504 applies the listener's socket options to every worker socket in `initializeWorkerRouting()`, and validation mode creates no sockets (#1733). The proxy-supervisor's pre-restart check is `--mode validate`; today's chart bootstraps have no static listener, a future static QUIC listener would fail every hot restart. Tested by `//agent/test/envoy_validate` in the `proxy` workflow. | not reported (a bug in envoyproxy/envoy#45504) |
 
 No longer carried, because the pin contains them:
@@ -157,8 +156,18 @@ replaced the first half of the earlier aether1054 patch, and was closed upstream
 after an A/B soak showed no measurable benefit. The child now completes its
 drains, unpausing those listeners, at Terminate, as unpatched Envoy does. An 8 h
 soak of exactly this configuration (the 48319 guard off) on the reference cluster
-showed 0 misses near handoffs and 0 QUIC stateless resets. The aether1054 patch
-stays the HTTP/3 drain only; its old hot-restart half is not restored.
+showed 0 misses near handoffs and 0 QUIC stateless resets. Its old hot-restart
+half is not restored.
+
+Dropped in favour of upstream's own mechanism: the `aether1054-http3-drain-idle-connections`
+patch (idle HTTP/3 connections drained themselves inside the drain window,
+aether#1054). Upstream Envoy PR 47991, in the pin, drains idle connections of
+every protocol at a random point of `[drain_time*2/3, drain_time - drain_timeout]`,
+but arms nothing when that window is empty, which it was under the chart's 10s
+drain time with Envoy's 5s default HCM `drain_timeout`. The agent now sets a 2s
+`drain_timeout` on every node-proxy HCM (`--proxy-connection-drain-timeout`,
+chart `proxy.hotRestart.connectionDrainTimeout`), which opens `[6.67s, 8s]`; the
+chart refuses a drain time that is not more than three times it.
 
 ## Which Envoy is this? (`envoy_server_version`, and the image labels)
 

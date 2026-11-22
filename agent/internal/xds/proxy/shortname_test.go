@@ -40,12 +40,12 @@ func TestCallerNamespaceIsStoredOnTheHTTPChainsOfAPod(t *testing.T) {
 	pod := sourceTestPod()
 	id := SourceIdentityForPod(pod, testTrustDomain)
 
-	ns, ok := callerNamespaceOf(t, allFilterStateValues(t, buildDefaultOutboundHTTPFilterChain(pod, id, testTrustDomain, false, nil)))
+	ns, ok := callerNamespaceOf(t, allFilterStateValues(t, buildDefaultOutboundHTTPFilterChain(pod, id, testTrustDomain, false, nil, DefaultConnectionDrainTimeout)))
 	require.True(t, ok, "the loopback HTTP chain does not store the caller's namespace")
 	assert.Equal(t, pod.GetNamespace(), ns)
 
 	svc := CaptureTCPService{ClusterName: "tcp:svc-a." + testTrustDomain, ClusterIP: "10.96.1.10", LegacyTCPPort: 9000}
-	l, err := GenerateCaptureListener(pod, id, 18001, testTrustDomain, false, []CaptureTCPService{svc}, true, nil)
+	l, err := GenerateCaptureListener(pod, id, 18001, testTrustDomain, false, []CaptureTCPService{svc}, true, nil, DefaultConnectionDrainTimeout)
 	require.NoError(t, err)
 	httpChains, tcpChains := 0, 0
 	for _, fc := range l.GetFilterChains() {

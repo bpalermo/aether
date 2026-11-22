@@ -21,7 +21,7 @@ import (
 
 func TestGenerateCaptureListener(t *testing.T) {
 	pod := &cniv1.CNIPod{Name: "p1", Namespace: "default", NetworkNamespace: "/var/run/netns/p1"}
-	l, err := GenerateCaptureListener(pod, "spiffe://aether.internal/ns/default/sa/test", 15001, "aether.internal", false, nil, false, nil)
+	l, err := GenerateCaptureListener(pod, "spiffe://aether.internal/ns/default/sa/test", 15001, "aether.internal", false, nil, false, nil, DefaultConnectionDrainTimeout)
 	require.NoError(t, err)
 
 	assert.Equal(t, "capture_default_p1", l.GetName())
@@ -79,7 +79,7 @@ func TestGenerateCaptureListener(t *testing.T) {
 }
 
 func TestGenerateCaptureListener_RequiresNetns(t *testing.T) {
-	_, err := GenerateCaptureListener(&cniv1.CNIPod{Name: "p1"}, "spiffe://aether.internal/ns/default/sa/test", 15001, "aether.internal", false, nil, false, nil)
+	_, err := GenerateCaptureListener(&cniv1.CNIPod{Name: "p1"}, "spiffe://aether.internal/ns/default/sa/test", 15001, "aether.internal", false, nil, false, nil, DefaultConnectionDrainTimeout)
 	assert.Error(t, err)
 }
 
@@ -91,7 +91,7 @@ func TestGenerateCaptureListener_WithTCPServices(t *testing.T) {
 		{ClusterName: "tcp:svc-a.aether.internal", ClusterIP: "10.96.1.10", LegacyTCPPort: 9000},
 		{ClusterName: "tcp:svc-b.aether.internal", ClusterIP: "10.96.1.20", LegacyTCPPort: 9000},
 	}
-	l, err := GenerateCaptureListener(pod, "spiffe://aether.internal/ns/default/sa/test", 15001, "aether.internal", false, tcpSvcs, false, nil)
+	l, err := GenerateCaptureListener(pod, "spiffe://aether.internal/ns/default/sa/test", 15001, "aether.internal", false, tcpSvcs, false, nil, DefaultConnectionDrainTimeout)
 	require.NoError(t, err)
 
 	// Each service whose legacy target is raw TCP yields TWO chains
@@ -139,7 +139,7 @@ func TestGenerateCaptureListener_InvalidTCPService(t *testing.T) {
 		{ClusterName: "tcp:svc-b.aether.internal", ClusterIP: "not-an-ip", LegacyTCPPort: 9000, TCPPorts: []uint32{9100}},  // bad IP
 		{ClusterName: "tcp:svc-c.aether.internal", ClusterIP: "10.96.1.30", LegacyTCPPort: 9000, TCPPorts: []uint32{9100}}, // valid
 	}
-	l, err := GenerateCaptureListener(pod, "spiffe://aether.internal/ns/default/sa/test", 15001, "aether.internal", false, tcpSvcs, false, nil)
+	l, err := GenerateCaptureListener(pod, "spiffe://aether.internal/ns/default/sa/test", 15001, "aether.internal", false, tcpSvcs, false, nil, DefaultConnectionDrainTimeout)
 	require.NoError(t, err)
 
 	// Only the valid service produces chains: its per-port chain, its :18082
@@ -160,7 +160,7 @@ func TestGenerateCaptureListener_InvalidTCPService(t *testing.T) {
 // an extra named chain (DefaultFilterChain is separate from filter_chains).
 func TestGenerateCaptureListener_WithPassthrough(t *testing.T) {
 	pod := &cniv1.CNIPod{Name: "p1", NetworkNamespace: "/var/run/netns/p1"}
-	l, err := GenerateCaptureListener(pod, "spiffe://aether.internal/ns/default/sa/test", 15001, "aether.internal", false, nil, true, nil)
+	l, err := GenerateCaptureListener(pod, "spiffe://aether.internal/ns/default/sa/test", 15001, "aether.internal", false, nil, true, nil, DefaultConnectionDrainTimeout)
 	require.NoError(t, err)
 
 	// Named filter_chains: the one HTTP chain (no TCP services).
@@ -205,7 +205,7 @@ func TestGenerateCaptureListener_WithPassthroughAndTCPServices(t *testing.T) {
 	tcpSvcs := []CaptureTCPService{
 		{ClusterName: "tcp:svc-a.aether.internal", ClusterIP: "10.96.1.10", LegacyTCPPort: 9000},
 	}
-	l, err := GenerateCaptureListener(pod, "spiffe://aether.internal/ns/default/sa/test", 15001, "aether.internal", false, tcpSvcs, true, nil)
+	l, err := GenerateCaptureListener(pod, "spiffe://aether.internal/ns/default/sa/test", 15001, "aether.internal", false, tcpSvcs, true, nil, DefaultConnectionDrainTimeout)
 	require.NoError(t, err)
 
 	// Named chains: the service's :18082 spelling, its own port, and the
