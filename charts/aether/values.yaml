@@ -777,7 +777,9 @@ proxy:
     # render unless drainTime > 3 x connectionDrainTimeout, so Envoy's 5s
     # default is refused under a 10s drainTime (it is exactly the configuration
     # that drains no idle connection); the largest value it accepts there is
-    # 3333ms. A longer grace needs a longer drainTime (and parentShutdownTime).
+    # 3333ms. drainTime is checked as Envoy receives it, in whole seconds
+    # (6.5s is --drain-time-s 6). A longer grace needs a longer drainTime (and
+    # parentShutdownTime).
     connectionDrainTimeout: 2s
     # Also the supervisor's admin re-verify budget: the epoch-identity probe
     # re-confirms on a fresh connection every parentShutdownTime/3 (floor 2s), so a

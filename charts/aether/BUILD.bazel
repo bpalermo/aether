@@ -2154,6 +2154,37 @@ helm_template_fail_test(
     ],
 )
 
+# ...the check is on the drain time Envoy actually receives: the supervisor
+# passes --drain-time-s in whole seconds (truncated), so 6.5s is 6s to Envoy and
+# 3 x 2.1s = 6.3s leaves [4s, 3.9s], empty...
+helm_template_fail_test(
+    name = "aether_agent_connection_drain_timeout_truncated_drain_test",
+    chart = ":aether",
+    expected_message = "proxy.hotRestart.drainTime (6.5s) must be more than 3 x proxy.hotRestart.connectionDrainTimeout (2.1s): Envoy receives the drain time in whole seconds (--drain-time-s 6)",
+    opts = [
+        "--set",
+        "proxy.hotRestart.drainTime=6.5s",
+        "--set",
+        "proxy.hotRestart.connectionDrainTimeout=2.1s",
+    ],
+)
+
+# ...as with a sub-10s fractional drain time (1.5s is 1s to Envoy; 3 x 400ms
+# = 1.2s)...
+helm_template_fail_test(
+    name = "aether_agent_connection_drain_timeout_fractional_drain_test",
+    chart = ":aether",
+    expected_message = "proxy.hotRestart.drainTime (1.5s) must be more than 3 x proxy.hotRestart.connectionDrainTimeout (400ms): Envoy receives the drain time in whole seconds (--drain-time-s 1)",
+    opts = [
+        "--set",
+        "proxy.hotRestart.drainTime=1.5s",
+        "--set",
+        "proxy.hotRestart.connectionDrainTimeout=400ms",
+        "--set",
+        "proxy.terminationGracePeriodSeconds=17",
+    ],
+)
+
 # ...and a zero timeout (Envoy's default, unset) is refused outright.
 helm_template_fail_test(
     name = "aether_agent_connection_drain_timeout_zero_test",
@@ -2777,7 +2808,9 @@ helm_template_test(
         },
     )
     # A drain time shorter than 6s also needs a connectionDrainTimeout under a
-    # third of it (the proactive-drain window guard, aether.proxy.connectionDrainTimeout).
+    # third of the whole seconds Envoy receives (the proactive-drain window guard,
+    # aether.proxy.connectionDrainTimeout); 500ms reaches Envoy as 0 and is not
+    # checked.
     for name, drain, grace, extra in [
         ("boundary", "10s", 26, []),
         ("drain_30s_boundary", "30s", 46, []),
@@ -2797,7 +2830,8 @@ helm_template_test(
             17,
             [
                 "--set",
-                "proxy.hotRestart.connectionDrainTimeout=400ms",
+                # 1.5s reaches Envoy as --drain-time-s 1: under a third of 1s.
+                "proxy.hotRestart.connectionDrainTimeout=300ms",
             ],
         ),
         (
