@@ -139,7 +139,9 @@ func deployAetherSystem() env.Func {
 			}
 			return dep.Status.ReadyReplicas > 0, nil
 		}, wait.WithTimeout(3*time.Minute), wait.WithInterval(5*time.Second)); err != nil {
-			return ctx, fmt.Errorf("waiting for registrar: %w", err)
+			err = fmt.Errorf("waiting for registrar: %w", err)
+			dumpDiagnostics(cfg, err)
+			return ctx, err
 		}
 
 		// Deploy agent DaemonSet
@@ -156,7 +158,9 @@ func deployAetherSystem() env.Func {
 			return ds.Status.DesiredNumberScheduled > 0 &&
 				ds.Status.NumberReady == ds.Status.DesiredNumberScheduled, nil
 		}, wait.WithTimeout(5*time.Minute), wait.WithInterval(5*time.Second)); err != nil {
-			return ctx, fmt.Errorf("waiting for agent DaemonSet: %w", err)
+			err = fmt.Errorf("waiting for agent DaemonSet: %w", err)
+			dumpDiagnostics(cfg, err)
+			return ctx, err
 		}
 
 		return ctx, nil
@@ -201,6 +205,31 @@ func createRBAC(ctx context.Context, client klient.Client) error {
 				APIGroups: []string{""},
 				Resources: []string{"services"},
 				Verbs:     []string{"list", "get", "watch", "create", "update", "patch", "delete"},
+			},
+			{
+				// The agent's Service-range reconciler (proposal 044) watches
+				// ServiceCIDR wherever the API is served (Kubernetes >= 1.33,
+				// so every kind node this suite pins). Without the grant its
+				// informer never syncs and the agent's readyz fails the
+				// cache-sync check forever. Mirrors charts/aether agent-rbac.
+				APIGroups: []string{"networking.k8s.io"},
+				Resources: []string{"servicecidrs"},
+				Verbs:     []string{"list", "get", "watch"},
+			},
+			{
+				// The same reconciler's MCS half, watched only where the CRD is
+				// installed; granted unconditionally, as the chart does, so that
+				// installing the CRD cannot break the suite the same way.
+				APIGroups: []string{"multicluster.x-k8s.io"},
+				Resources: []string{"serviceimports"},
+				Verbs:     []string{"list", "get", "watch"},
+			},
+			{
+				// Named-targetPort resolution reads and watches EndpointSlices
+				// (chart grant since proposal 043).
+				APIGroups: []string{"discovery.k8s.io"},
+				Resources: []string{"endpointslices"},
+				Verbs:     []string{"list", "get", "watch"},
 			},
 		},
 	}
