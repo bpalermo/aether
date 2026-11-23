@@ -8,6 +8,18 @@
 # decouple the three.
 namespace: aether-test
 
+# Pod affinity for all three Deployments (uds-echo, uds-cr-echo, uds-client), as
+# given. Empty renders none. Use it to keep the validation fleet off nodes, e.g.
+# a node reserved for cluster infrastructure:
+#   affinity:
+#     nodeAffinity:
+#       requiredDuringSchedulingIgnoredDuringExecution:
+#         nodeSelectorTerms:
+#           - matchExpressions:
+#               - {key: kubernetes.io/hostname, operator: NotIn, values: [<node>]}
+# Changing it rolls all three Deployments.
+affinity: {}
+
 image:
   # Substituted at package time with the digest-pinned reference produced by
   # //e2e/udsecho:image_push.

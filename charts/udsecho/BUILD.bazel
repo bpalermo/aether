@@ -395,3 +395,32 @@ helm_template_fail_test(
         "echo.preStopSleepSeconds=-1",
     ],
 )
+
+# `affinity` reaches all three Deployments' pod specs as given, so an operator can
+# keep the validation fleet off a node (a cluster's infra node, say) without a fork.
+AFFINITY = "\\n      affinity:\\n        nodeAffinity:\\n          requiredDuringSchedulingIgnoredDuringExecution:\\n" + \
+           "            nodeSelectorTerms:\\n            - matchExpressions:\\n              - key: kubernetes.io/hostname\\n" + \
+           "                operator: NotIn\\n                values:\\n                - infra-0\\n"
+
+helm_template_match_test(
+    name = "udsecho_affinity_test",
+    chart = ":udsecho",
+    document_patterns = {
+        "Deployment/uds-echo": [AFFINITY],
+        "Deployment/uds-cr-echo": [AFFINITY],
+        "Deployment/uds-client": [AFFINITY],
+    },
+    opts = [
+        "--set-json",
+        "affinity={\"nodeAffinity\":{\"requiredDuringSchedulingIgnoredDuringExecution\":{\"nodeSelectorTerms\":[{\"matchExpressions\":[{\"key\":\"kubernetes.io/hostname\",\"operator\":\"NotIn\",\"values\":[\"infra-0\"]}]}]}}}",
+    ],
+)
+
+# ...and by default none: an unset value renders no `affinity:` key, so the
+# pod templates (and therefore the pods) do not change for anyone who sets nothing.
+helm_template_absent_test(
+    name = "udsecho_affinity_default_test",
+    absent = ["affinity:"],
+    chart = ":udsecho",
+    control = "kind: Deployment",
+)

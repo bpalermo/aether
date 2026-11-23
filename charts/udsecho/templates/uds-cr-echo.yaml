@@ -29,6 +29,10 @@ spec:
         endpoint.aether.io/port: "8080"
     spec:
       serviceAccountName: uds-cr-echo
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
       # Soft hostname spread — same rationale as uds-echo (#629 hot spot).
       topologySpreadConstraints:
         - maxSkew: 1
