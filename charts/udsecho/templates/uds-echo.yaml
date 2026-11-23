@@ -33,6 +33,10 @@ spec:
         endpoint.aether.io/uds-socket: {{ .Values.socket | quote }}
     spec:
       serviceAccountName: uds-echo
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
       # Soft hostname spread: the whole UDS fleet landed on one node, feeding
       # the #629 density hot spot. Soft so single-node kind e2e still schedules.
       topologySpreadConstraints:

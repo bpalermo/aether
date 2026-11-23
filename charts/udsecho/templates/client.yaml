@@ -38,6 +38,10 @@ spec:
         config.aether.io/upstreams: "uds-echo{{ if .Values.policyPath.enabled }},uds-cr-echo{{ end }}"
     spec:
       serviceAccountName: uds-client
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
       containers:
         - name: curl
           image: {{ .Values.client.image }}
